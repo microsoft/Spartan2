@@ -1,14 +1,15 @@
-# Project
+# Spartan2: High-speed zero-knowledge SNARKs.
 
-> This repo has been populated by an initial template to help get you started. Please
-> make sure to update the content to build a great experience for community-building.
+Spartan is a high-speed zkSNARK, where a zkSNARK is type cryptographic proof system that enables a prover to prove a mathematical statement to a verifier with a short proof and succinct verification, and without revealing anything beyond the validity of the statement. Spartan provides a linear-time polynomial IOP that when combined with a polynomial commitment scheme provides a succinct interactive argument. It is made non-interactive using the Fiat-Shamir transform.
 
-As the maintainer of this project, please make a few updates:
+Compared to an earlier implementation of Spartan, the goal of this project is to provide an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellperson. We currently support R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The proofs are *not* zero-knowledge (we plan to add it in the near future). The first version of this code is derived from Nova's open-source code.
 
-- Improving this README.MD file to provide a great experience
-- Updating SUPPORT.MD with content about this project's support experience
-- Understanding the security reporting process in SECURITY.MD
-- Remove this section from the README
+## References
+The following paper, which appeared at CRYPTO 2020, provides details of the Spartan proof system:
+
+[Spartan: Efficient and general-purpose zkSNARKs without trusted setup](https://eprint.iacr.org/2019/550) \
+Srinath Setty \
+CRYPTO 2020
 
 ## Contributing
 
