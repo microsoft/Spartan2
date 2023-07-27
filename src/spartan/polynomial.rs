@@ -101,7 +101,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       .map(|i| {
         (0..L_size)
           .map(|j| L[j] * self.Z[j * R_size + i])
-          .fold(Scalar::zero(), |x, y| x + y)
+          .fold(Scalar::ZERO, |x, y| x + y)
       })
       .collect()
   }
