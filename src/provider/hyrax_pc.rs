@@ -171,7 +171,6 @@ mod tests {
   use ff::Field;
   type G = pasta_curves::pallas::Point;
   use crate::traits::TranscriptEngineTrait;
-  use rand::rngs::OsRng;
 
   fn inner_product<T>(a: &[T], b: &[T]) -> T
   where
@@ -254,34 +253,19 @@ mod tests {
     let prover_gens = HyraxPC::new(num_vars, b"poly_test");
     let poly_comm = prover_gens.commit(&poly);
 
-    let mut prover_transcript = G::TE::new(b"example");
+    let mut prover_transcript = <pasta_curves::Ep as Group>::TE::new(b"example");
 
-    let blind_eval = <G as Group>::Scalar::random(&mut OsRng);
-
-    let (ipa_proof, _ipa_witness, comm_eval): (InnerProductArgument<G>, InnerProductWitness<G>, _) =
-      prover_gens
-        .prove_eval(
-          &poly,
-          &poly_comm,
-          &r,
-          &eval,
-          &blind_eval,
-          &mut prover_transcript,
-        )
-        .unwrap();
+    let (ipa_proof, _ipa_witness): (InnerProductArgument<G>, InnerProductWitness<G>) = prover_gens
+      .prove_eval(&poly, &poly_comm, &r, &eval, &mut prover_transcript)
+      .unwrap();
 
     // Verifier actions
 
     let verifier_gens = HyraxPC::new(num_vars, b"poly_test");
-    let mut verifier_transcript = G::TE::new(b"example");
+    let mut verifier_transcript = <pasta_curves::Ep as Group>::TE::new(b"example");
 
-    let res = verifier_gens.verify_eval(
-      &r,
-      &poly_comm,
-      &comm_eval,
-      &ipa_proof,
-      &mut verifier_transcript,
-    );
+    let res =
+      verifier_gens.verify_eval(&r, &poly_comm, &eval, &ipa_proof, &mut verifier_transcript);
     assert!(res.is_ok());
   }
 }
