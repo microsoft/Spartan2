@@ -13,7 +13,6 @@ use crate::{
   },
   Commitment, CommitmentKey,CompressedCommitment
 };
-use ff::Field;
 use rayon::prelude::*;
 
 /// Structure that holds Poly Commits
@@ -193,6 +192,7 @@ where
 
 #[cfg(test)]
 mod tests {
+  use ff::Field;
   use super::*;
   type G = pasta_curves::pallas::Point;
   use crate::traits::TranscriptEngineTrait;
