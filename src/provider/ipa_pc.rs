@@ -119,7 +119,7 @@ pub struct InnerProductInstance<G: Group> {
 }
 
 impl<G: Group> InnerProductInstance<G> {
-  fn new(comm_a_vec: &Commitment<G>, b_vec: &[G::Scalar], c: &G::Scalar) -> Self {
+  pub fn new(comm_a_vec: &Commitment<G>, b_vec: &[G::Scalar], c: &G::Scalar) -> Self {
     InnerProductInstance {
       comm_a_vec: *comm_a_vec,
       b_vec: b_vec.to_vec(),
@@ -144,7 +144,7 @@ struct InnerProductWitness<G: Group> {
 }
 
 impl<G: Group> InnerProductWitness<G> {
-  fn new(a_vec: &[G::Scalar]) -> Self {
+  pub fn new(a_vec: &[G::Scalar]) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
     }
