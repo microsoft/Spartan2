@@ -3,15 +3,13 @@
 use crate::{
   errors::SpartanError,
   provider::ipa_pc::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
-  provider::pedersen::{CommitmentKeyExtTrait,CompressedCommitment},
+  provider::pedersen::CommitmentKeyExtTrait,
   spartan::polynomial::{EqPolynomial, MultilinearPolynomial},
   traits::{
-    commitment::{
-      CommitmentEngineTrait, CommitmentTrait
-    },
+    commitment::{CommitmentEngineTrait, CommitmentTrait},
     Group, TranscriptEngineTrait, TranscriptReprTrait,
   },
-  CommitmentKey
+  CommitmentKey, CompressedCommitment,
 };
 use rayon::prelude::*;
 
@@ -24,7 +22,7 @@ pub struct PolyCommit<G: Group> {
 
 /// Hyrax PC generators and functions to commit and prove evaluation
 pub struct HyraxPC<G: Group> {
-  gens_v: CommitmentKey<G>,  // generator for vectors
+  gens_v: CommitmentKey<G>, // generator for vectors
   gens_s: CommitmentKey<G>, // generator for scalars (eval)
 }
 
@@ -42,7 +40,6 @@ impl<G: Group> TranscriptReprTrait<G> for PolyCommit<G> {
   }
 }
 
-
 impl<G: Group> HyraxPC<G>
 where
   G: Group,
@@ -56,34 +53,21 @@ where
     HyraxPC { gens_v, gens_s }
   }
 
-  fn commit_inner(
-    &self,
-    poly: &MultilinearPolynomial<G::Scalar>,
-    L_size: usize,
-  ) -> PolyCommit<G> {
+  fn commit_inner(&self, poly: &MultilinearPolynomial<G::Scalar>, L_size: usize) -> PolyCommit<G> {
     let R_size = poly.len() / L_size;
 
     assert_eq!(L_size * R_size, poly.len());
 
     let comm = (0..L_size)
       .into_par_iter()
-      .map(|i| {
-        G::CE::commit(
-          &self.gens_v,
-          &poly.get_Z()[R_size * i..R_size * (i + 1)],
-        )
-        .compress()
-      })
+      .map(|i| G::CE::commit(&self.gens_v, &poly.get_Z()[R_size * i..R_size * (i + 1)]).compress())
       .collect();
 
     PolyCommit { comm }
   }
 
   /// Commits to a multilinear polynomial and returns commitment and blind
-  pub fn commit(
-    &self,
-    poly: &MultilinearPolynomial<G::Scalar>,
-  ) -> PolyCommit<G> {
+  pub fn commit(&self, poly: &MultilinearPolynomial<G::Scalar>) -> PolyCommit<G> {
     let n = poly.len();
     let ell = poly.get_num_vars();
     assert_eq!(n, (2usize).pow(ell as u32));
@@ -101,16 +85,10 @@ where
     &self,
     poly: &MultilinearPolynomial<G::Scalar>, // defined as vector Z
     poly_com: &PolyCommit<G>,
-    r: &[G::Scalar],      // point at which the polynomial is evaluated
-    Zr: &G::Scalar,       // evaluation of poly(r)
+    r: &[G::Scalar], // point at which the polynomial is evaluated
+    Zr: &G::Scalar,  // evaluation of poly(r)
     transcript: &mut G::TE,
-  ) -> Result<
-    (
-      InnerProductArgument<G>,
-      InnerProductWitness<G>,
-    ),
-    SpartanError,
-  > {
+  ) -> Result<(InnerProductArgument<G>, InnerProductWitness<G>), SpartanError> {
     transcript.absorb(b"poly_com", poly_com);
 
     // assert vectors are of the right size
@@ -138,7 +116,7 @@ where
     // R = a_vec
 
     // Commit to LZ and Zr
-    let com_LZ = G::CE::commit(&self.gens_v, &LZ); 
+    let com_LZ = G::CE::commit(&self.gens_v, &LZ);
     //let com_Zr = G::CE::commit(&self.gens_s, &[*Zr]);
 
     // a dot product argument (IPA) of size R_size
@@ -160,7 +138,7 @@ where
     &self,
     r: &[G::Scalar], // point at which the polynomial was evaluated
     poly_com: &PolyCommit<G>,
-    Zr: &G::Scalar, 
+    Zr: &G::Scalar,
     ipa: &InnerProductArgument<G>,
     transcript: &mut G::TE,
   ) -> Result<(), SpartanError> {
@@ -171,8 +149,7 @@ where
     let (L, R) = eq.compute_factored_evals();
 
     // compute a weighted sum of commitments and L
-    let gens: CommitmentKey<G> = 
-      CommitmentKey::<G>::reinterpret_commitments_as_ck(&poly_com.comm)?;
+    let gens: CommitmentKey<G> = CommitmentKey::<G>::reinterpret_commitments_as_ck(&poly_com.comm)?;
 
     let com_LZ = G::CE::commit(&gens, &L); // computes MSM of commitment and L
 
@@ -190,8 +167,8 @@ where
 
 #[cfg(test)]
 mod tests {
-  use ff::Field;
   use super::*;
+  use ff::Field;
   type G = pasta_curves::pallas::Point;
   use crate::traits::TranscriptEngineTrait;
   use rand::rngs::OsRng;

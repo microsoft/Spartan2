@@ -119,6 +119,7 @@ pub struct InnerProductInstance<G: Group> {
 }
 
 impl<G: Group> InnerProductInstance<G> {
+  /// Creates a new inner product instance
   pub fn new(comm_a_vec: &Commitment<G>, b_vec: &[G::Scalar], c: &G::Scalar) -> Self {
     InnerProductInstance {
       comm_a_vec: *comm_a_vec,
@@ -145,6 +146,7 @@ pub struct InnerProductWitness<G: Group> {
 }
 
 impl<G: Group> InnerProductWitness<G> {
+  /// Creates a new inner product witness
   pub fn new(a_vec: &[G::Scalar]) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
@@ -170,6 +172,7 @@ where
     b"IPA"
   }
 
+  /// Proves an inner product relationship
   pub fn prove(
     ck: &CommitmentKey<G>,
     ck_c: &CommitmentKey<G>,
@@ -282,6 +285,7 @@ where
     })
   }
 
+  /// Verifies an inner product relationship
   pub fn verify(
     &self,
     ck: &CommitmentKey<G>,
