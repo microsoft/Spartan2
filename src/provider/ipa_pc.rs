@@ -139,7 +139,8 @@ impl<G: Group> TranscriptReprTrait<G> for InnerProductInstance<G> {
   }
 }
 
-struct InnerProductWitness<G: Group> {
+/// An inner product witness consists the vector `a`.
+pub struct InnerProductWitness<G: Group> {
   a_vec: Vec<G::Scalar>,
 }
 
