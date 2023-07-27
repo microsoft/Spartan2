@@ -43,10 +43,6 @@ impl<G: Group> CommitmentTrait<G> for Commitment<G> {
     }
   }
 
-  fn to_coordinates(&self) -> (G::Base, G::Base, bool) {
-    self.comm.to_coordinates()
-  }
-
   fn decompress(c: &Self::CompressedCommitment) -> Result<Self, SpartanError> {
     let comm = c.comm.decompress();
     if comm.is_none() {
