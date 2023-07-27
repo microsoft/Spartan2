@@ -7,23 +7,218 @@ use crate::{
   spartan::polynomial::{EqPolynomial, MultilinearPolynomial},
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
+    evaluation::EvaluationEngineTrait,
     Group, TranscriptEngineTrait, TranscriptReprTrait,
   },
   CommitmentKey, CompressedCommitment,
 };
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
+
+
+/// Provides an implementation of the hyrax key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxProverKey<G: Group> {
+  ck_s: CommitmentKey<G>,
+}
+
+/// Provides an implementation of the hyrax key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxVerifierKey<G: Group> {
+  ck_v: CommitmentKey<G>,
+  ck_s: CommitmentKey<G>,
+}
+
+
+
+/// Provides an implementation of a polynomial evaluation argument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxEvaluationArgument<G: Group> {
+  ipa: InnerProductArgument<G>,
+}
+
+
+/// Provides an implementation of a polynomial evaluation engine using Hyrax PC
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxEvaluationEngine<G: Group> {
+  _p: PhantomData<G>,
+}
+
+
+impl<G> EvaluationEngineTrait<G> for HyraxEvaluationEngine<G>
+where
+  G: Group,
+  CommitmentKey<G>: CommitmentKeyExtTrait<G, CE = G::CE>,
+{
+  type CE = G::CE;
+  type ProverKey = HyraxProverKey<G>;
+  type VerifierKey = HyraxVerifierKey<G>;
+  type EvaluationArgument = HyraxEvaluationArgument<G>;
+
+  fn setup(
+    ck: &<Self::CE as CommitmentEngineTrait<G>>::CommitmentKey,
+  ) -> (Self::ProverKey, Self::VerifierKey) {
+    let pk = HyraxProverKey::<G> {
+      ck_s: G::CE::setup(b"hyrax", 1),
+    };
+
+    let vk = HyraxVerifierKey::<G> {
+      ck_v: ck.clone(),
+      ck_s: G::CE::setup(b"hyrax", 1),
+    };
+
+    (pk, vk)
+  }
+
+  fn prove(
+    ck: &CommitmentKey<G>,
+    pk: &Self::ProverKey,
+    transcript: &mut G::TE,
+    comm: &PolyCommit<G>,
+    poly: &[G::Scalar],
+    point: &[G::Scalar],
+    eval: &G::Scalar,
+  ) -> Result<Self::EvaluationArgument, SpartanError> {
+    
+    transcript.absorb(b"poly_com", comm);
+   
+    let poly_m = MultilinearPolynomial::<G>::new(poly);
+ 
+    // assert vectors are of the right size
+    assert_eq!(poly_m.get_num_vars(), point.len());
+
+    let (left_num_vars, right_num_vars) = EqPolynomial::<G::Scalar>::compute_factored_lens(point.len());
+    let L_size = (2usize).pow(left_num_vars as u32);
+    let R_size = (2usize).pow(right_num_vars as u32);
+
+    // compute the L and R vectors (these depend only on the public challenge point so they are public)
+    let eq = EqPolynomial::new(point.to_vec());
+    let (L, R) = eq.compute_factored_evals();
+    assert_eq!(L.len(), L_size);
+    assert_eq!(R.len(), R_size);
+
+    // compute the vector underneath L*Z
+    // compute vector-matrix product between L and Z viewed as a matrix
+    let LZ = poly.bound(&L);
+
+    // Commit to LZ 
+    let com_LZ = G::CE::commit(ck, &LZ);
+
+    // a dot product argument (IPA) of size R_size
+    let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, eval);
+    let ipa_witness = InnerProductWitness::<G>::new(&LZ);
+    let ipa = InnerProductArgument::<G>::prove(
+      ck,
+      &pk.ck_s,
+      &ipa_instance,
+      &ipa_witness,
+      transcript,
+    )?;
+
+    Ok(HyraxEvaluationArgument { ipa })
+  }
+
+  fn verify(
+    vk: &Self::VerifierKey,
+    transcript: &mut G::TE,
+    comm: &PolyCommit<G>, 
+    point: &[G::Scalar],
+    eval: &G::Scalar,
+    arg: &Self::EvaluationArgument,
+  ) -> Result<(), SpartanError> {
+
+    transcript.absorb(b"poly_com", comm);
+
+    // compute L and R
+    let eq = EqPolynomial::new(point.to_vec());
+    let (L, R) = eq.compute_factored_evals();
+
+    // compute a weighted sum of commitments and L
+    let gens: CommitmentKey<G> = CommitmentKey::<G>::reinterpret_commitments_as_ck(&comm.comm)?;
+
+    let com_LZ = G::CE::commit(&gens, &L); // computes MSM of commitment and L
+
+    let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, eval);
+
+    arg.ipa.verify(
+      &vk.ck_v,
+      &vk.ck_s,
+      L.len(),
+      &ipa_instance,
+      transcript,
+    )
+  }
+}
 
 /// Structure that holds Poly Commits
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct PolyCommit<G: Group> {
   /// Commitment
   pub comm: Vec<CompressedCommitment<G>>,
 }
 
-/// Hyrax PC generators and functions to commit and prove evaluation
-pub struct HyraxPC<G: Group> {
-  gens_v: CommitmentKey<G>, // generator for vectors
-  gens_s: CommitmentKey<G>, // generator for scalars (eval)
+
+impl<G: Group> CommitmentTrait<G> for PolyCommit<G> {
+  type CompressedCommitment = PolyCommit<G>;
+
+  fn compress(&self) -> Self::CompressedCommitment {
+    self
+  }
+  
+  fn to_coordinates(&self) -> (G::Base, G::Base, bool) {
+    unimplemented!()
+  }
+
+
+  fn decompress(c: &Self::CompressedCommitment) -> Result<Self, SpartanError> {
+    Ok(c)
+  }
+}
+
+/// Provides a commitment engine
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HyraxCommitmentEngine<G: Group> {
+  _p: PhantomData<G>,
+}
+
+impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
+  type CommitmentKey = CommitmentKey<G>;
+  type Commitment = PolyCommit<G>;
+
+  /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
+  fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
+    let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(n);
+    let gens_v = G::CE::setup(label, (2usize).pow(right as u32));
+    Self::CommitmentKey { 
+      ck: gens_v,
+      _p: Default::default(),
+    }
+  }
+
+  fn commit(ck: &Self::CommitmentKey, v: &[G::Scalar]) -> Self::Commitment {
+    let poly = MultilinearPolynomial::new(v);
+    let n = poly.len();
+    let ell = poly.get_num_vars();
+    assert_eq!(n, (2usize).pow(ell as u32));
+
+    let (left_num_vars, right_num_vars) = EqPolynomial::<G::Scalar>::compute_factored_lens(ell);
+    let L_size = (2usize).pow(left_num_vars as u32);
+    let R_size = (2usize).pow(right_num_vars as u32);
+    assert_eq!(L_size * R_size, n);
+
+    let comm = (0..L_size)
+      .into_par_iter()
+      .map(|i| G::CE::commit(ck, &poly.get_Z()[R_size * i..R_size * (i + 1)]).compress())
+      .collect();
+
+    PolyCommit { comm }
+  }
 }
 
 impl<G: Group> TranscriptReprTrait<G> for PolyCommit<G> {
@@ -37,131 +232,6 @@ impl<G: Group> TranscriptReprTrait<G> for PolyCommit<G> {
 
     v.append(&mut b"poly_commitment_end".to_vec());
     v
-  }
-}
-
-impl<G: Group> HyraxPC<G>
-where
-  G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G, CE = G::CE>,
-{
-  /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  pub fn new(num_vars: usize, label: &'static [u8]) -> Self {
-    let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(num_vars);
-    let gens_v = G::CE::setup(label, (2usize).pow(right as u32));
-    let gens_s = G::CE::setup(b"gens_s", 1);
-    HyraxPC { gens_v, gens_s }
-  }
-
-  fn commit_inner(&self, poly: &MultilinearPolynomial<G::Scalar>, L_size: usize) -> PolyCommit<G> {
-    let R_size = poly.len() / L_size;
-
-    assert_eq!(L_size * R_size, poly.len());
-
-    let comm = (0..L_size)
-      .into_par_iter()
-      .map(|i| G::CE::commit(&self.gens_v, &poly.get_Z()[R_size * i..R_size * (i + 1)]).compress())
-      .collect();
-
-    PolyCommit { comm }
-  }
-
-  /// Commits to a multilinear polynomial and returns commitment and blind
-  pub fn commit(&self, poly: &MultilinearPolynomial<G::Scalar>) -> PolyCommit<G> {
-    let n = poly.len();
-    let ell = poly.get_num_vars();
-    assert_eq!(n, (2usize).pow(ell as u32));
-
-    let (left_num_vars, right_num_vars) = EqPolynomial::<G::Scalar>::compute_factored_lens(ell);
-    let L_size = (2usize).pow(left_num_vars as u32);
-    let R_size = (2usize).pow(right_num_vars as u32);
-    assert_eq!(L_size * R_size, n);
-
-    self.commit_inner(poly, L_size)
-  }
-
-  /// Proves the evaluation of polynomial at a random point r
-  pub fn prove_eval(
-    &self,
-    poly: &MultilinearPolynomial<G::Scalar>, // defined as vector Z
-    poly_com: &PolyCommit<G>,
-    r: &[G::Scalar], // point at which the polynomial is evaluated
-    Zr: &G::Scalar,  // evaluation of poly(r)
-    transcript: &mut G::TE,
-  ) -> Result<(InnerProductArgument<G>, InnerProductWitness<G>), SpartanError> {
-    transcript.absorb(b"poly_com", poly_com);
-
-    // assert vectors are of the right size
-    assert_eq!(poly.get_num_vars(), r.len());
-
-    let (left_num_vars, right_num_vars) = EqPolynomial::<G::Scalar>::compute_factored_lens(r.len());
-    let L_size = (2usize).pow(left_num_vars as u32);
-    let R_size = (2usize).pow(right_num_vars as u32);
-
-    // compute the L and R vectors (these depend only on the public challenge r so they are public)
-    let eq = EqPolynomial::new(r.to_vec());
-    let (L, R) = eq.compute_factored_evals();
-    assert_eq!(L.len(), L_size);
-    assert_eq!(R.len(), R_size);
-
-    // compute the vector underneath L*Z
-    // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = poly.bound(&L);
-
-    // Translation between this stuff and IPA
-    // LZ = x_vec
-    // LZ_blind = r_x
-    // Zr = y
-    // blind_Zr = r_y
-    // R = a_vec
-
-    // Commit to LZ and Zr
-    let com_LZ = G::CE::commit(&self.gens_v, &LZ);
-    //let com_Zr = G::CE::commit(&self.gens_s, &[*Zr]);
-
-    // a dot product argument (IPA) of size R_size
-    let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, Zr);
-    let ipa_witness = InnerProductWitness::<G>::new(&LZ);
-    let ipa = InnerProductArgument::<G>::prove(
-      &self.gens_v,
-      &self.gens_s,
-      &ipa_instance,
-      &ipa_witness,
-      transcript,
-    )?;
-
-    Ok((ipa, ipa_witness))
-  }
-
-  /// Verifies the proof showing the evaluation of a committed polynomial at a random point
-  pub fn verify_eval(
-    &self,
-    r: &[G::Scalar], // point at which the polynomial was evaluated
-    poly_com: &PolyCommit<G>,
-    Zr: &G::Scalar,
-    ipa: &InnerProductArgument<G>,
-    transcript: &mut G::TE,
-  ) -> Result<(), SpartanError> {
-    transcript.absorb(b"poly_com", poly_com);
-
-    // compute L and R
-    let eq = EqPolynomial::new(r.to_vec());
-    let (L, R) = eq.compute_factored_evals();
-
-    // compute a weighted sum of commitments and L
-    let gens: CommitmentKey<G> = CommitmentKey::<G>::reinterpret_commitments_as_ck(&poly_com.comm)?;
-
-    let com_LZ = G::CE::commit(&gens, &L); // computes MSM of commitment and L
-
-    let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, Zr);
-
-    ipa.verify(
-      &self.gens_v,
-      &self.gens_s,
-      L.len(),
-      &ipa_instance,
-      transcript,
-    )
   }
 }
 
