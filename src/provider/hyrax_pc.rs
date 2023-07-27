@@ -3,7 +3,7 @@
 use crate::{
   errors::SpartanError,
   provider::ipa_pc::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
-  provider::pedersen::CommitmentKeyExtTrait,
+  provider::pedersen::{CommitmentKeyExtTrait,CompressedCommitment},
   spartan::polynomial::{EqPolynomial, MultilinearPolynomial},
   traits::{
     commitment::{
@@ -11,7 +11,7 @@ use crate::{
     },
     Group, TranscriptEngineTrait, TranscriptReprTrait,
   },
-  Commitment, CommitmentKey,CompressedCommitment
+  CommitmentKey
 };
 use rayon::prelude::*;
 
@@ -34,7 +34,7 @@ impl<G: Group> TranscriptReprTrait<G> for PolyCommit<G> {
     v.append(&mut b"poly_commitment_begin".to_vec());
 
     for c in &self.comm {
-      v.append(&mut c.to_transcrypt_bytes());
+      v.append(&mut c.to_transcript_bytes());
     }
 
     v.append(&mut b"poly_commitment_end".to_vec());
@@ -111,8 +111,7 @@ where
     ),
     SpartanError,
   > {
-    transcript.absorb(b"protocol-name", b"polynomial evaluation proof");
-    transcript.absorb(b"poly_com", &poly_com);
+    transcript.absorb(b"poly_com", poly_com);
 
     // assert vectors are of the right size
     assert_eq!(poly.get_num_vars(), r.len());
@@ -165,8 +164,7 @@ where
     ipa: &InnerProductArgument<G>,
     transcript: &mut G::TE,
   ) -> Result<(), SpartanError> {
-    transcript.append_message(b"protocol-name", b"polynomial evaluation proof");
-    poly_com.append_to_transcript(b"poly_com", transcript);
+    transcript.absorb(b"poly_com", poly_com);
 
     // compute L and R
     let eq = EqPolynomial::new(r.to_vec());
