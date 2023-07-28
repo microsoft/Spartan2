@@ -87,10 +87,6 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     self.Z.len()
   }
 
-  pub fn is_empty(&self) -> bool {
-    self.Z.len() == 0
-  }
-
   pub fn bound(&self, L: &[Scalar]) -> Vec<Scalar> {
     let (left_num_vars, right_num_vars) =
       EqPolynomial::<Scalar>::compute_factored_lens(self.num_vars);

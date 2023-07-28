@@ -84,7 +84,11 @@ impl<G: Group> PolyEvalInstance<G> {
         .map(|u| {
           let mut x = vec![G::Scalar::ZERO; ell - u.x.len()];
           x.extend(u.x.clone());
-          PolyEvalInstance { c: u.c, x, e: u.e }
+          PolyEvalInstance {
+            c: u.c.clone(),
+            x,
+            e: u.e,
+          }
         })
         .collect()
     } else {
@@ -107,7 +111,7 @@ impl<G: Group> PolyEvalInstance<G> {
     let c = c_vec
       .iter()
       .zip(powers_of_s.iter())
-      .map(|(c, p)| *c * *p)
+      .map(|(c, p)| c.clone() * *p)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
 
     PolyEvalInstance {
