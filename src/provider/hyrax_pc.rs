@@ -5,7 +5,8 @@ use crate::{
   provider::ipa_pc::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
   provider::pedersen::{
     Commitment as PedersenCommitment, CommitmentEngine as PedersenCommitmentEngine,
-    CommitmentKey as PedersenCommitmentKey, CommitmentKeyExtTrait,
+    CommitmentEngineExtTrait, CommitmentKey as PedersenCommitmentKey,
+    CompressedCommitment as PedersenCompressedCommitment,
   },
   spartan::polynomial::{EqPolynomial, MultilinearPolynomial},
   traits::{
@@ -20,87 +21,113 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-/// Structure that holds Poly Commits
+/// A type that holds commitment generators for Hyrax commitments
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxCommitmentKey<G: Group> {
+  ck: PedersenCommitmentKey<G>,
+  _p: PhantomData<G>,
+}
+
+/// Structure that holds commitments
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct PolyCommit<G: Group> {
-  /// Commitment
+pub struct HyraxCommitment<G: Group> {
   comm: Vec<PedersenCommitment<G>>,
   is_default: bool,
 }
 
-impl<G: Group> Default for PolyCommit<G> {
+/// Structure that holds compressed commitments
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxCompressedCommitment<G: Group> {
+  comm: Vec<PedersenCompressedCommitment<G>>,
+  is_default: bool,
+}
+
+impl<G: Group> Default for HyraxCommitment<G> {
   fn default() -> Self {
-    PolyCommit {
+    HyraxCommitment {
       comm: vec![],
       is_default: true,
     }
   }
 }
 
-impl<G: Group> CommitmentTrait<G> for PolyCommit<G> {
-  type CompressedCommitment = PolyCommit<G>;
+impl<G: Group> CommitmentTrait<G> for HyraxCommitment<G> {
+  type CompressedCommitment = HyraxCompressedCommitment<G>;
 
   fn compress(&self) -> Self::CompressedCommitment {
-    *self
+    HyraxCompressedCommitment {
+      comm: self.comm.iter().map(|c| c.compress()).collect::<Vec<_>>(),
+      is_default: self.is_default,
+    }
   }
 
   fn decompress(c: &Self::CompressedCommitment) -> Result<Self, SpartanError> {
-    Ok(*c)
+    let comm = c
+      .comm
+      .iter()
+      .map(|c| <PedersenCommitment<G> as CommitmentTrait<G>>::decompress(c))
+      .collect::<Result<Vec<_>, _>>()?;
+    Ok(HyraxCommitment {
+      comm,
+      is_default: c.is_default,
+    })
   }
 }
 
-impl<G: Group> MulAssign<G::Scalar> for PolyCommit<G> {
+impl<G: Group> MulAssign<G::Scalar> for HyraxCommitment<G> {
   fn mul_assign(&mut self, scalar: G::Scalar) {
-    let result = (self as &PolyCommit<G>)
+    let result = (self as &HyraxCommitment<G>)
       .comm
       .iter()
       .map(|c| c * &scalar)
       .collect();
-    *self = PolyCommit {
+    *self = HyraxCommitment {
       comm: result,
       is_default: self.is_default,
     };
   }
 }
 
-impl<'a, 'b, G: Group> Mul<&'b G::Scalar> for &'a PolyCommit<G> {
-  type Output = PolyCommit<G>;
-  fn mul(self, scalar: &'b G::Scalar) -> PolyCommit<G> {
+impl<'a, 'b, G: Group> Mul<&'b G::Scalar> for &'a HyraxCommitment<G> {
+  type Output = HyraxCommitment<G>;
+  fn mul(self, scalar: &'b G::Scalar) -> HyraxCommitment<G> {
     let result = self.comm.iter().map(|c| c * &scalar).collect();
-    PolyCommit {
+    HyraxCommitment {
       comm: result,
       is_default: self.is_default,
     }
   }
 }
 
-impl<G: Group> Mul<G::Scalar> for PolyCommit<G> {
-  type Output = PolyCommit<G>;
+impl<G: Group> Mul<G::Scalar> for HyraxCommitment<G> {
+  type Output = HyraxCommitment<G>;
 
-  fn mul(self, scalar: G::Scalar) -> PolyCommit<G> {
+  fn mul(self, scalar: G::Scalar) -> HyraxCommitment<G> {
     let result = self.comm.iter().map(|c| c * &scalar).collect();
-    PolyCommit {
+    HyraxCommitment {
       comm: result,
       is_default: self.is_default,
     }
   }
 }
 
-impl<'b, G: Group> AddAssign<&'b PolyCommit<G>> for PolyCommit<G> {
-  fn add_assign(&mut self, other: &'b PolyCommit<G>) {
+impl<'b, G: Group> AddAssign<&'b HyraxCommitment<G>> for HyraxCommitment<G> {
+  fn add_assign(&mut self, other: &'b HyraxCommitment<G>) {
     if self.is_default {
       *self = other.clone();
     } else if other.is_default {
       return;
     } else {
-      let result = (self as &PolyCommit<G>)
+      let result = (self as &HyraxCommitment<G>)
         .comm
         .iter()
         .zip(other.comm.iter())
         .map(|(a, b)| a + b)
         .collect();
-      *self = PolyCommit {
+      *self = HyraxCommitment {
         comm: result,
         is_default: self.is_default,
       };
@@ -108,9 +135,9 @@ impl<'b, G: Group> AddAssign<&'b PolyCommit<G>> for PolyCommit<G> {
   }
 }
 
-impl<'a, 'b, G: Group> Add<&'b PolyCommit<G>> for &'a PolyCommit<G> {
-  type Output = PolyCommit<G>;
-  fn add(self, other: &'b PolyCommit<G>) -> PolyCommit<G> {
+impl<'a, 'b, G: Group> Add<&'b HyraxCommitment<G>> for &'a HyraxCommitment<G> {
+  type Output = HyraxCommitment<G>;
+  fn add(self, other: &'b HyraxCommitment<G>) -> HyraxCommitment<G> {
     if self.is_default {
       return other.clone();
     } else if other.is_default {
@@ -122,7 +149,7 @@ impl<'a, 'b, G: Group> Add<&'b PolyCommit<G>> for &'a PolyCommit<G> {
         .zip(other.comm.iter())
         .map(|(a, b)| a + b)
         .collect();
-      PolyCommit {
+      HyraxCommitment {
         comm: result,
         is_default: self.is_default,
       }
@@ -165,8 +192,8 @@ macro_rules! define_add_assign_variants {
   };
 }
 
-define_add_assign_variants!(G = Group, LHS = PolyCommit<G>, RHS = PolyCommit<G>);
-define_add_variants!(G = Group, LHS = PolyCommit<G>, RHS = PolyCommit<G>, Output = PolyCommit<G>);
+define_add_assign_variants!(G = Group, LHS = HyraxCommitment<G>, RHS = HyraxCommitment<G>);
+define_add_variants!(G = Group, LHS = HyraxCommitment<G>, RHS = HyraxCommitment<G>, Output = HyraxCommitment<G>);
 
 /// Provides a commitment engine
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,13 +202,17 @@ pub struct HyraxCommitmentEngine<G: Group> {
 }
 
 impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
-  type CommitmentKey = PedersenCommitmentKey<G>;
-  type Commitment = PolyCommit<G>;
+  type CommitmentKey = HyraxCommitmentKey<G>;
+  type Commitment = HyraxCommitment<G>;
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
     let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(n);
-    PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32))
+    let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
+    HyraxCommitmentKey {
+      ck,
+      _p: Default::default(),
+    }
   }
 
   fn commit(ck: &Self::CommitmentKey, v: &[G::Scalar]) -> Self::Commitment {
@@ -198,17 +229,33 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
     let comm = (0..L_size)
       .collect::<Vec<usize>>()
       .into_par_iter()
-      .map(|i| PedersenCommitmentEngine::commit(ck, &poly.get_Z()[R_size * i..R_size * (i + 1)]))
+      .map(|i| {
+        PedersenCommitmentEngine::commit(&ck.ck, &poly.get_Z()[R_size * i..R_size * (i + 1)])
+      })
       .collect();
 
-    PolyCommit {
+    HyraxCommitment {
       comm,
       is_default: false,
     }
   }
 }
 
-impl<G: Group> TranscriptReprTrait<G> for PolyCommit<G> {
+impl<G: Group> TranscriptReprTrait<G> for HyraxCommitment<G> {
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.append(&mut b"poly_commitment_begin".to_vec());
+
+    for c in &self.comm {
+      v.append(&mut c.to_transcript_bytes());
+    }
+
+    v.append(&mut b"poly_commitment_end".to_vec());
+    v
+  }
+}
+
+impl<G: Group> TranscriptReprTrait<G> for HyraxCompressedCommitment<G> {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     let mut v = Vec::new();
     v.append(&mut b"poly_commitment_begin".to_vec());
@@ -253,8 +300,7 @@ pub struct HyraxEvaluationEngine<G: Group> {
 
 impl<G> EvaluationEngineTrait<G> for HyraxEvaluationEngine<G>
 where
-  G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G, CE = G::CE>,
+  G: Group<CE = HyraxCommitmentEngine<G>>,
 {
   type CE = G::CE;
   type ProverKey = HyraxProverKey<G>;
@@ -308,13 +354,18 @@ where
     let LZ = poly_m.bound(&L);
 
     // Commit to LZ
-    let com_LZ = G::CE::commit(ck, &LZ);
+    let com_LZ = PedersenCommitmentEngine::commit(&ck.ck, &LZ);
 
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, eval);
     let ipa_witness = InnerProductWitness::<G>::new(&LZ);
-    let ipa =
-      InnerProductArgument::<G>::prove(ck, &pk.ck_s, &ipa_instance, &ipa_witness, transcript)?;
+    let ipa = InnerProductArgument::<G>::prove(
+      &ck.ck,
+      &pk.ck_s.ck,
+      &ipa_instance,
+      &ipa_witness,
+      transcript,
+    )?;
 
     Ok(HyraxEvaluationArgument { ipa })
   }
@@ -334,16 +385,15 @@ where
     let (L, R) = eq.compute_factored_evals();
 
     // compute a weighted sum of commitments and L
-    let gens: PedersenCommitmentKey<G> =
-      PedersenCommitmentKey::<G>::reinterpret_commitments_as_ck(&comm.comm)?;
+    let ck = PedersenCommitmentEngine::reinterpret_commitments_as_ck(&comm.comm);
 
-    let com_LZ = PedersenCommitmentEngine::commit(&gens, &L); // computes MSM of commitment and L
+    let com_LZ = PedersenCommitmentEngine::commit(&ck, &L); // computes MSM of commitment and L
 
     let ipa_instance = InnerProductInstance::<G>::new(&com_LZ, &R, eval);
 
     arg
       .ipa
-      .verify(&vk.ck_v, &vk.ck_s, L.len(), &ipa_instance, transcript)
+      .verify(&vk.ck_v.ck, &vk.ck_s.ck, L.len(), &ipa_instance, transcript)
   }
 }
 

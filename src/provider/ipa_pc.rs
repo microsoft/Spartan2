@@ -2,14 +2,23 @@
 #![allow(clippy::too_many_arguments)]
 use crate::{
   errors::SpartanError,
+<<<<<<< HEAD
   provider::pedersen::CommitmentKeyExtTrait,
   spartan::polys::eq::EqPolynomial,
+=======
+  provider::pedersen::{
+    Commitment as PedersenCommitment, CommitmentEngine as PedersenCommitmentEngine,
+    CommitmentEngineExtTrait, CommitmentKey as PedersenCommitmentKey,
+    CompressedCommitment as PedersenCompressedCommitment,
+  },
+  spartan::polynomial::EqPolynomial,
+>>>>>>> checkpoint
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
     evaluation::EvaluationEngineTrait,
     Group, TranscriptEngineTrait, TranscriptReprTrait,
   },
-  Commitment, CommitmentKey, CompressedCommitment, CE,
+  Commitment, CommitmentKey,
 };
 use core::iter;
 use ff::Field;
@@ -113,14 +122,14 @@ where
 /// An inner product instance consists of a commitment to a vector `a` and another vector `b`
 /// and the claim that c = <a, b>.
 pub struct InnerProductInstance<G: Group> {
-  comm_a_vec: Commitment<G>,
+  comm_a_vec: PedersenCommitment<G>,
   b_vec: Vec<G::Scalar>,
   c: G::Scalar,
 }
 
 impl<G: Group> InnerProductInstance<G> {
   /// Creates a new inner product instance
-  pub fn new(comm_a_vec: &Commitment<G>, b_vec: &[G::Scalar], c: &G::Scalar) -> Self {
+  pub fn new(comm_a_vec: &PedersenCommitment<G>, b_vec: &[G::Scalar], c: &G::Scalar) -> Self {
     InnerProductInstance {
       comm_a_vec: *comm_a_vec,
       b_vec: b_vec.to_vec(),
@@ -158,31 +167,36 @@ impl<G: Group> InnerProductWitness<G> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct InnerProductArgument<G: Group> {
-  L_vec: Vec<CompressedCommitment<G>>,
-  R_vec: Vec<CompressedCommitment<G>>,
+  L_vec: Vec<PedersenCompressedCommitment<G>>,
+  R_vec: Vec<PedersenCompressedCommitment<G>>,
   a_hat: G::Scalar,
 }
 
+<<<<<<< HEAD
 impl<G> InnerProductArgument<G>
 where
   G: Group,
   CommitmentKey<G>: CommitmentKeyExtTrait<G>,
 {
   const fn protocol_name() -> &'static [u8] {
+=======
+impl<G: Group> InnerProductArgument<G> {
+  fn protocol_name() -> &'static [u8] {
+>>>>>>> checkpoint
     b"IPA"
   }
 
   /// Proves an inner product relationship
   pub fn prove(
-    ck: &CommitmentKey<G>,
-    ck_c: &CommitmentKey<G>,
+    ck: &PedersenCommitmentKey<G>,
+    ck_c: &PedersenCommitmentKey<G>,
     U: &InnerProductInstance<G>,
     W: &InnerProductWitness<G>,
     transcript: &mut G::TE,
   ) -> Result<Self, SpartanError> {
     transcript.dom_sep(Self::protocol_name());
 
-    let (ck, _) = ck.split_at(U.b_vec.len());
+    let (ck, _) = PedersenCommitmentEngine::<G>::split_at(ck, U.b_vec.len());
 
     if U.b_vec.len() != W.a_vec.len() {
       return Err(SpartanError::InvalidInputLength);
@@ -193,31 +207,31 @@ where
 
     // sample a random base for commiting to the inner product
     let r = transcript.squeeze(b"r")?;
-    let ck_c = ck_c.scale(&r);
+    let ck_c = PedersenCommitmentEngine::<G>::scale(ck_c, &r);
 
     // a closure that executes a step of the recursive inner product argument
     let prove_inner = |a_vec: &[G::Scalar],
                        b_vec: &[G::Scalar],
-                       ck: &CommitmentKey<G>,
+                       ck: &PedersenCommitmentKey<G>,
                        transcript: &mut G::TE|
      -> Result<
       (
-        CompressedCommitment<G>,
-        CompressedCommitment<G>,
+        PedersenCompressedCommitment<G>,
+        PedersenCompressedCommitment<G>,
         Vec<G::Scalar>,
         Vec<G::Scalar>,
-        CommitmentKey<G>,
+        PedersenCommitmentKey<G>,
       ),
       SpartanError,
     > {
       let n = a_vec.len();
-      let (ck_L, ck_R) = ck.split_at(n / 2);
+      let (ck_L, ck_R) = PedersenCommitmentEngine::split_at(ck, n / 2);
 
       let c_L = inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]);
       let c_R = inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]);
 
-      let L = CE::<G>::commit(
-        &ck_R.combine(&ck_c),
+      let L = PedersenCommitmentEngine::commit(
+        &PedersenCommitmentEngine::combine(&ck_R, &ck_c),
         &a_vec[0..n / 2]
           .iter()
           .chain(iter::once(&c_L))
@@ -225,8 +239,8 @@ where
           .collect::<Vec<G::Scalar>>(),
       )
       .compress();
-      let R = CE::<G>::commit(
-        &ck_L.combine(&ck_c),
+      let R = PedersenCommitmentEngine::commit(
+        &PedersenCommitmentEngine::combine(&ck_L, &ck_c),
         &a_vec[n / 2..n]
           .iter()
           .chain(iter::once(&c_R))
@@ -254,14 +268,14 @@ where
         .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
         .collect::<Vec<G::Scalar>>();
 
-      let ck_folded = ck.fold(&r_inverse, &r);
+      let ck_folded = PedersenCommitmentEngine::fold(&ck, &r_inverse, &r);
 
       Ok((L, R, a_vec_folded, b_vec_folded, ck_folded))
     };
 
     // two vectors to hold the logarithmic number of group elements
-    let mut L_vec: Vec<CompressedCommitment<G>> = Vec::new();
-    let mut R_vec: Vec<CompressedCommitment<G>> = Vec::new();
+    let mut L_vec: Vec<PedersenCompressedCommitment<G>> = Vec::new();
+    let mut R_vec: Vec<PedersenCompressedCommitment<G>> = Vec::new();
 
     // we create mutable copies of vectors and generators
     let mut a_vec = W.a_vec.to_vec();
@@ -288,13 +302,13 @@ where
   /// Verifies an inner product relationship
   pub fn verify(
     &self,
-    ck: &CommitmentKey<G>,
-    ck_c: &CommitmentKey<G>,
+    ck: &PedersenCommitmentKey<G>,
+    ck_c: &PedersenCommitmentKey<G>,
     n: usize,
     U: &InnerProductInstance<G>,
     transcript: &mut G::TE,
   ) -> Result<(), SpartanError> {
-    let (ck, _) = ck.split_at(U.b_vec.len());
+    let (ck, _) = PedersenCommitmentEngine::split_at(&ck, U.b_vec.len());
 
     transcript.dom_sep(Self::protocol_name());
     if U.b_vec.len() != n
@@ -310,9 +324,9 @@ where
 
     // sample a random base for commiting to the inner product
     let r = transcript.squeeze(b"r")?;
-    let ck_c = ck_c.scale(&r);
+    let ck_c = PedersenCommitmentEngine::scale(&ck_c, &r);
 
-    let P = U.comm_a_vec + CE::<G>::commit(&ck_c, &[U.c]);
+    let P = U.comm_a_vec + PedersenCommitmentEngine::<G>::commit(&ck_c, &[U.c]);
 
     let batch_invert = |v: &[G::Scalar]| -> Result<Vec<G::Scalar>, SpartanError> {
       let mut products = vec![G::Scalar::ZERO; v.len()];
@@ -379,21 +393,32 @@ where
     };
 
     let ck_hat = {
-      let c = CE::<G>::commit(&ck, &s).compress();
-      CommitmentKey::<G>::reinterpret_commitments_as_ck(&[c])?
+      let c = PedersenCommitmentEngine::<G>::commit(&ck, &s);
+      PedersenCommitmentEngine::<G>::reinterpret_commitments_as_ck(&[c])
     };
 
     let b_hat = inner_product(&U.b_vec, &s);
 
     let P_hat = {
       let ck_folded = {
-        let ck_L = CommitmentKey::<G>::reinterpret_commitments_as_ck(&self.L_vec)?;
-        let ck_R = CommitmentKey::<G>::reinterpret_commitments_as_ck(&self.R_vec)?;
-        let ck_P = CommitmentKey::<G>::reinterpret_commitments_as_ck(&[P.compress()])?;
-        ck_L.combine(&ck_R).combine(&ck_P)
+        let L_vec_decomp = self
+          .L_vec
+          .iter()
+          .map(|L| PedersenCommitment::<G>::decompress(&L))
+          .collect::<Result<Vec<_>, _>>()?;
+        let R_vec_decomp = self
+          .R_vec
+          .iter()
+          .map(|R| PedersenCommitment::<G>::decompress(&R))
+          .collect::<Result<Vec<_>, _>>()?;
+
+        let ck_L = PedersenCommitmentEngine::<G>::reinterpret_commitments_as_ck(&L_vec_decomp);
+        let ck_R = PedersenCommitmentEngine::<G>::reinterpret_commitments_as_ck(&R_vec_decomp);
+        let ck_P = PedersenCommitmentEngine::<G>::reinterpret_commitments_as_ck(&[P]);
+        PedersenCommitmentEngine::combine(&PedersenCommitmentEngine::combine(&ck_L, &ck_R), &ck_P)
       };
 
-      CE::<G>::commit(
+      PedersenCommitmentEngine::<G>::commit(
         &ck_folded,
         &r_square
           .iter()
@@ -404,7 +429,12 @@ where
       )
     };
 
-    if P_hat == CE::<G>::commit(&ck_hat.combine(&ck_c), &[self.a_hat, self.a_hat * b_hat]) {
+    if P_hat
+      == PedersenCommitmentEngine::<G>::commit(
+        &PedersenCommitmentEngine::combine(&ck_hat, &ck_c),
+        &[self.a_hat, self.a_hat * b_hat],
+      )
+    {
       Ok(())
     } else {
       Err(SpartanError::InvalidIPA)

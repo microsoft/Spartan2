@@ -40,6 +40,7 @@ impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Out
 /// This trait defines the behavior of the commitment
 pub trait CommitmentTrait<G: Group>:
   Clone
+  + Copy
   + Debug
   + Default
   + PartialEq
