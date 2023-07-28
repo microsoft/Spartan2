@@ -20,6 +20,10 @@ use crate::{
   Commitment, CommitmentKey,
 };
 use core::ops::{Add, AddAssign, Mul, MulAssign};
+use itertools::{
+  EitherOrBoth::{Both, Left, Right},
+  Itertools,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -127,8 +131,12 @@ impl<'b, G: Group> AddAssign<&'b HyraxCommitment<G>> for HyraxCommitment<G> {
       let result = (self as &HyraxCommitment<G>)
         .comm
         .iter()
-        .zip(other.comm.iter())
-        .map(|(a, b)| a + b)
+        .zip_longest(other.comm.iter())
+        .map(|x| match x {
+          Both(a, b) => a + b,
+          Left(a) => a.clone(),
+          Right(b) => b.clone(),
+        })
         .collect();
       *self = HyraxCommitment {
         comm: result,
@@ -149,8 +157,12 @@ impl<'a, 'b, G: Group> Add<&'b HyraxCommitment<G>> for &'a HyraxCommitment<G> {
       let result = self
         .comm
         .iter()
-        .zip(other.comm.iter())
-        .map(|(a, b)| a + b)
+        .zip_longest(other.comm.iter())
+        .map(|x| match x {
+          Both(a, b) => a + b,
+          Left(a) => a.clone(),
+          Right(b) => b.clone(),
+        })
         .collect();
       HyraxCommitment {
         comm: result,
