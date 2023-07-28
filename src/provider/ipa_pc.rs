@@ -268,7 +268,7 @@ impl<G: Group> InnerProductArgument<G> {
         .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
         .collect::<Vec<G::Scalar>>();
 
-      let ck_folded = PedersenCommitmentEngine::fold(&ck, &r_inverse, &r);
+      let ck_folded = PedersenCommitmentEngine::fold(ck, &r_inverse, &r);
 
       Ok((L, R, a_vec_folded, b_vec_folded, ck_folded))
     };
@@ -308,7 +308,7 @@ impl<G: Group> InnerProductArgument<G> {
     U: &InnerProductInstance<G>,
     transcript: &mut G::TE,
   ) -> Result<(), SpartanError> {
-    let (ck, _) = PedersenCommitmentEngine::split_at(&ck, U.b_vec.len());
+    let (ck, _) = PedersenCommitmentEngine::split_at(ck, U.b_vec.len());
 
     transcript.dom_sep(Self::protocol_name());
     if U.b_vec.len() != n
@@ -324,7 +324,7 @@ impl<G: Group> InnerProductArgument<G> {
 
     // sample a random base for commiting to the inner product
     let r = transcript.squeeze(b"r")?;
-    let ck_c = PedersenCommitmentEngine::scale(&ck_c, &r);
+    let ck_c = PedersenCommitmentEngine::scale(ck_c, &r);
 
     let P = U.comm_a_vec + PedersenCommitmentEngine::<G>::commit(&ck_c, &[U.c]);
 
@@ -404,12 +404,12 @@ impl<G: Group> InnerProductArgument<G> {
         let L_vec_decomp = self
           .L_vec
           .iter()
-          .map(|L| PedersenCommitment::<G>::decompress(&L))
+          .map(|L| PedersenCommitment::<G>::decompress(L))
           .collect::<Result<Vec<_>, _>>()?;
         let R_vec_decomp = self
           .R_vec
           .iter()
-          .map(|R| PedersenCommitment::<G>::decompress(&R))
+          .map(|R| PedersenCommitment::<G>::decompress(R))
           .collect::<Result<Vec<_>, _>>()?;
 
         let ck_L = PedersenCommitmentEngine::<G>::reinterpret_commitments_as_ck(&L_vec_decomp);

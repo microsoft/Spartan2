@@ -101,7 +101,7 @@ impl<G: Group> MulAssign<G::Scalar> for HyraxCommitment<G> {
 impl<'a, 'b, G: Group> Mul<&'b G::Scalar> for &'a HyraxCommitment<G> {
   type Output = HyraxCommitment<G>;
   fn mul(self, scalar: &'b G::Scalar) -> HyraxCommitment<G> {
-    let result = self.comm.iter().map(|c| c * &scalar).collect();
+    let result = self.comm.iter().map(|c| c * scalar).collect();
     HyraxCommitment {
       comm: result,
       is_default: self.is_default,
@@ -134,8 +134,8 @@ impl<'b, G: Group> AddAssign<&'b HyraxCommitment<G>> for HyraxCommitment<G> {
         .zip_longest(other.comm.iter())
         .map(|x| match x {
           Both(a, b) => a + b,
-          Left(a) => a.clone(),
-          Right(b) => b.clone(),
+          Left(a) => *a,
+          Right(b) => *b,
         })
         .collect();
       *self = HyraxCommitment {
@@ -150,9 +150,9 @@ impl<'a, 'b, G: Group> Add<&'b HyraxCommitment<G>> for &'a HyraxCommitment<G> {
   type Output = HyraxCommitment<G>;
   fn add(self, other: &'b HyraxCommitment<G>) -> HyraxCommitment<G> {
     if self.is_default {
-      return other.clone();
+      other.clone()
     } else if other.is_default {
-      return self.clone();
+      self.clone()
     } else {
       let result = self
         .comm
@@ -160,8 +160,8 @@ impl<'a, 'b, G: Group> Add<&'b HyraxCommitment<G>> for &'a HyraxCommitment<G> {
         .zip_longest(other.comm.iter())
         .map(|x| match x {
           Both(a, b) => a + b,
-          Left(a) => a.clone(),
-          Right(b) => b.clone(),
+          Left(a) => *a,
+          Right(b) => *b,
         })
         .collect();
       HyraxCommitment {
@@ -222,7 +222,7 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
-    let num_vars = n.next_power_of_two().log_2() as usize;
+    let num_vars = n.next_power_of_two().log_2();
     let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(num_vars);
     let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
     HyraxCommitmentKey {

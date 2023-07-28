@@ -1274,7 +1274,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     w_u_vec.push((
       PolyEvalWitness { p: poly_output },
       PolyEvalInstance {
-        c: comm_output.clone(),
+        c: comm_output,
         x: rand_ext[1..].to_vec(),
         e: eval_output2,
       },
