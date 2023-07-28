@@ -1,6 +1,6 @@
 //! This module implements the Spartan traits for `pallas::Point`, `pallas::Scalar`, `vesta::Point`, `vesta::Scalar`.
 use crate::{
-  provider::{cpu_best_multiexp, keccak::Keccak256Transcript, pedersen::CommitmentEngine},
+  provider::{cpu_best_multiexp, hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
   traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
@@ -58,7 +58,7 @@ macro_rules! impl_traits {
       type CompressedGroupElement = $name_compressed;
       type PreprocessedGroupElement = $name::Affine;
       type TE = Keccak256Transcript<Self>;
-      type CE = CommitmentEngine<Self>;
+      type CE = HyraxCommitmentEngine<Self>;
 
       #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
       fn vartime_multiscalar_mul(

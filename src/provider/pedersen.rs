@@ -176,6 +176,10 @@ impl<G: Group> CommitmentEngineTrait<G> for CommitmentEngine<G> {
   }
 
   fn commit(ck: &Self::CommitmentKey, v: &[G::Scalar]) -> Self::Commitment {
+    if ck.ck.len() < v.len() {
+      println!("commitment key length: {}", ck.ck.len());
+      println!("v length: {}", v.len());
+    }
     assert!(ck.ck.len() >= v.len());
     Commitment {
       comm: G::vartime_multiscalar_mul(v, &ck.ck[..v.len()]),

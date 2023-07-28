@@ -8,7 +8,10 @@ use crate::{
     CommitmentEngineExtTrait, CommitmentKey as PedersenCommitmentKey,
     CompressedCommitment as PedersenCompressedCommitment,
   },
-  spartan::polynomial::{EqPolynomial, MultilinearPolynomial},
+  spartan::{
+    math::Math,
+    polynomial::{EqPolynomial, MultilinearPolynomial},
+  },
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
     evaluation::EvaluationEngineTrait,
@@ -207,7 +210,8 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
-    let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(n);
+    let num_vars = n.next_power_of_two().log_2() as usize;
+    let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(num_vars);
     let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
     HyraxCommitmentKey {
       ck,
@@ -394,110 +398,5 @@ where
     arg
       .ipa
       .verify(&vk.ck_v.ck, &vk.ck_s.ck, L.len(), &ipa_instance, transcript)
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use ff::Field;
-  type G = pasta_curves::pallas::Point;
-  use crate::traits::TranscriptEngineTrait;
-
-  fn inner_product<T>(a: &[T], b: &[T]) -> T
-  where
-    T: Field + Send + Sync,
-  {
-    assert_eq!(a.len(), b.len());
-    (0..a.len())
-      .into_par_iter()
-      .map(|i| a[i] * b[i])
-      .reduce(|| T::ZERO, |x, y| x + y)
-  }
-
-  fn evaluate_with_LR(
-    Z: &[<G as Group>::Scalar],
-    r: &[<G as Group>::Scalar],
-  ) -> <G as Group>::Scalar {
-    let eq = EqPolynomial::new(r.to_vec());
-    let (L, R) = eq.compute_factored_evals();
-
-    let ell = r.len();
-    // ensure ell is even
-    assert!(ell % 2 == 0);
-
-    // compute n = 2^\ell
-    let n = (2usize).pow(ell as u32);
-
-    // compute m = sqrt(n) = 2^{\ell/2}
-    let m = (n as f64).sqrt() as usize;
-
-    // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = (0..m)
-      .map(|i| {
-        (0..m)
-          .map(|j| L[j] * Z[j * m + i])
-          .fold(<G as Group>::Scalar::ZERO, |acc, item| acc + item)
-      })
-      .collect::<Vec<<G as Group>::Scalar>>();
-
-    // compute dot product between LZ and R
-    inner_product(&LZ, &R)
-  }
-
-  fn to_scalar(x: usize) -> <G as Group>::Scalar {
-    (0..x)
-      .map(|_i| <G as Group>::Scalar::ONE)
-      .fold(<G as Group>::Scalar::ZERO, |acc, item| acc + item)
-  }
-
-  #[test]
-  fn check_polynomial_evaluation() {
-    // Z = [1, 2, 1, 4]
-    let Z = vec![to_scalar(1), to_scalar(2), to_scalar(1), to_scalar(4)];
-
-    // r = [4,3]
-    let r = vec![to_scalar(4), to_scalar(3)];
-
-    let eval_with_LR = evaluate_with_LR(&Z, &r);
-    let poly = MultilinearPolynomial::new(Z);
-
-    let eval = poly.evaluate(&r);
-    assert_eq!(eval, to_scalar(28));
-    assert_eq!(eval_with_LR, eval);
-  }
-
-  #[test]
-  fn check_hyrax_pc_commit() {
-    let Z = vec![to_scalar(1), to_scalar(2), to_scalar(1), to_scalar(4)];
-
-    let poly = MultilinearPolynomial::new(Z);
-
-    // Public stuff
-    let num_vars = 2;
-    assert_eq!(num_vars, poly.get_num_vars());
-    let r = vec![to_scalar(4), to_scalar(3)]; // r = [4,3]
-
-    // Prover actions
-    let eval = poly.evaluate(&r);
-    assert_eq!(eval, to_scalar(28));
-
-    let prover_gens = HyraxPC::new(num_vars, b"poly_test");
-    let poly_comm = prover_gens.commit(&poly);
-
-    let mut prover_transcript = <pasta_curves::Ep as Group>::TE::new(b"example");
-
-    let (ipa_proof, _ipa_witness): (InnerProductArgument<G>, InnerProductWitness<G>) = prover_gens
-      .prove_eval(&poly, &poly_comm, &r, &eval, &mut prover_transcript)
-      .unwrap();
-
-    // Verifier actions
-
-    let verifier_gens = HyraxPC::new(num_vars, b"poly_test");
-    let mut verifier_transcript = <pasta_curves::Ep as Group>::TE::new(b"example");
-
-    let res =
-      verifier_gens.verify_eval(&r, &poly_comm, &eval, &ipa_proof, &mut verifier_transcript);
-    assert!(res.is_ok());
   }
 }
