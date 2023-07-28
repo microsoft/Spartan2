@@ -66,8 +66,7 @@ impl<G: Group> R1CS<G> {
     let S = S.pad(); // pad the shape before computing the commitment key
     let num_cons = S.num_cons;
     let num_vars = S.num_vars;
-    let total_nz = S.A.len() + S.B.len() + S.C.len();
-    G::CE::setup(b"ck", max(max(num_cons, num_vars), total_nz))
+    G::CE::setup(b"ck", max(num_cons, num_vars))
   }
 }
 
