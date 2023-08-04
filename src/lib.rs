@@ -110,7 +110,7 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
     );
 
     // prove the instance using Spartan
-    let snark = S::prove(&pk.ck, &pk.pk, &u_relaxed, &w_relaxed)?;
+    let snark = S::prove(&pk.ck, &pk.pk, &pk.S, &u_relaxed, &w_relaxed)?;
 
     Ok(SNARK {
       comm_W: u.comm_W,

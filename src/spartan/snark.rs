@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 #[serde(bound = "")]
 pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
   pk_ee: EE::ProverKey,
-  S: R1CSShape<G>,
   vk_digest: G::Scalar, // digest of the verifier's key
 }
 
@@ -70,7 +69,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let (pk_ee, vk_ee) = EE::setup(ck);
 
-    let S = S.pad();
+    let S = &S.pad();
 
     let vk = {
       let mut vk = VerifierKey {
@@ -84,7 +83,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
 
     let pk = ProverKey {
       pk_ee,
-      S,
       vk_digest: vk.digest,
     };
 
@@ -95,16 +93,17 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
   fn prove(
     ck: &CommitmentKey<G>,
     pk: &Self::ProverKey,
+    S: &R1CSShape<G>,
     U: &RelaxedR1CSInstance<G>,
     W: &RelaxedR1CSWitness<G>,
   ) -> Result<Self, SpartanError> {
-    let W = W.pad(&pk.S); // pad the witness
+    let W = W.pad(S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // sanity check that R1CSShape has certain size characteristics
-    assert_eq!(pk.S.num_cons.next_power_of_two(), pk.S.num_cons);
-    assert_eq!(pk.S.num_vars.next_power_of_two(), pk.S.num_vars);
-    assert!(pk.S.num_io < pk.S.num_vars);
+    assert_eq!(S.num_cons.next_power_of_two(), S.num_cons);
+    assert_eq!(S.num_vars.next_power_of_two(), S.num_vars);
+    assert!(S.num_io < S.num_vars);
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
@@ -114,8 +113,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     let mut z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
 
     let (num_rounds_x, num_rounds_y) = (
-      (pk.S.num_cons as f64).log2() as usize,
-      ((pk.S.num_vars as f64).log2() as usize + 1),
+      (S.num_cons as f64).log2() as usize,
+      ((S.num_vars as f64).log2() as usize + 1),
     );
 
     // outer sum-check
@@ -125,8 +124,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
 
     let mut poly_tau = MultilinearPolynomial::new(EqPolynomial::new(tau).evals());
     let (mut poly_Az, mut poly_Bz, poly_Cz, mut poly_uCz_E) = {
-      let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
-      let poly_uCz_E = (0..pk.S.num_cons)
+      let (poly_Az, poly_Bz, poly_Cz) = S.multiply_vec(&z)?;
+      let poly_uCz_E = (0..S.num_cons)
         .map(|i| U.u * poly_Cz[i] + W.E[i])
         .collect::<Vec<G::Scalar>>();
       (
@@ -207,7 +206,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
           (A_evals, B_evals, C_evals)
         };
 
-      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(S, &evals_rx);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
@@ -218,7 +217,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     };
 
     let poly_z = {
-      z.resize(pk.S.num_vars * 2, G::Scalar::ZERO);
+      z.resize(S.num_vars * 2, G::Scalar::ZERO);
       z
     };
 
