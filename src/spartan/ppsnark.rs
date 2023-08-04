@@ -729,7 +729,6 @@ impl<G: Group> SumcheckEngine<G> for InnerSumcheckInstance<G> {
 #[serde(bound = "")]
 pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
   pk_ee: EE::ProverKey,
-  S: R1CSShape<G>,
   S_repr: R1CSShapeSparkRepr<G>,
   S_comm: R1CSShapeSparkCommitment<G>,
   vk_digest: G::Scalar, // digest of verifier's key
@@ -944,7 +943,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
 
     let pk = ProverKey {
       pk_ee,
-      S,
       S_repr,
       S_comm,
       vk_digest: vk.digest,
@@ -957,19 +955,20 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
   fn prove(
     ck: &CommitmentKey<G>,
     pk: &Self::ProverKey,
+    S: &R1CSShape<G>,
     U: &RelaxedR1CSInstance<G>,
     W: &RelaxedR1CSWitness<G>,
   ) -> Result<Self, SpartanError> {
-    let W = W.pad(&pk.S); // pad the witness
+    let W = W.pad(S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // a list of polynomial evaluation claims that will be batched
     let mut w_u_vec = Vec::new();
 
     // sanity check that R1CSShape has certain size characteristics
-    assert_eq!(pk.S.num_cons.next_power_of_two(), pk.S.num_cons);
-    assert_eq!(pk.S.num_vars.next_power_of_two(), pk.S.num_vars);
-    assert!(pk.S.num_io < pk.S.num_vars);
+    assert_eq!(S.num_cons.next_power_of_two(), S.num_cons);
+    assert_eq!(S.num_vars.next_power_of_two(), S.num_vars);
+    assert!(S.num_io < S.num_vars);
 
     // append the verifier key (which includes commitment to R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
@@ -979,7 +978,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     let z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
 
     // compute Az, Bz, Cz
-    let (mut Az, mut Bz, mut Cz) = pk.S.multiply_vec(&z)?;
+    let (mut Az, mut Bz, mut Cz) = S.multiply_vec(&z)?;
 
     // commit to Az, Bz, Cz
     let (comm_Az, (comm_Bz, comm_Cz)) = rayon::join(
@@ -1017,7 +1016,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     // (2) send commitments to the following two oracles
     // E_row(i) = eq(tau, row(i)) for all i
     // E_col(i) = z(col(i)) for all i
-    let (mem_row, mem_col, E_row, E_col) = pk.S_repr.evaluation_oracles(&pk.S, &tau, &z);
+    let (mem_row, mem_col, E_row, E_col) = pk.S_repr.evaluation_oracles(S, &tau, &z);
     let (comm_E_row, comm_E_col) =
       rayon::join(|| G::CE::commit(ck, &E_row), || G::CE::commit(ck, &E_col));
 
@@ -1331,7 +1330,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     // we need to prove that eval_z = z(r_prod) = (1-r_prod[0]) * W.w(r_prod[1..]) + r_prod[0] * U.x(r_prod[1..]).
     // r_prod was padded, so we now remove the padding
     let r_prod_unpad = {
-      let l = pk.S_repr.N.log_2() - (2 * pk.S.num_vars).log_2();
+      let l = pk.S_repr.N.log_2() - (2 * S.num_vars).log_2();
       r_prod[l..].to_vec()
     };
 
