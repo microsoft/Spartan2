@@ -97,7 +97,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     U: &RelaxedR1CSInstance<G>,
     W: &RelaxedR1CSWitness<G>,
   ) -> Result<Self, SpartanError> {
-    let W = W.pad(&S); // pad the witness
+    let W = W.pad(S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // sanity check that R1CSShape has certain size characteristics
