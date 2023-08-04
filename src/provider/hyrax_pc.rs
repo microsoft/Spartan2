@@ -362,6 +362,7 @@ where
     // compute the L and R vectors (these depend only on the public challenge point so they are public)
     let eq = EqPolynomial::new(point.to_vec());
     let (L, R) = eq.compute_factored_evals();
+
     assert_eq!(L.len(), L_size);
     assert_eq!(R.len(), R_size);
 
@@ -409,6 +410,6 @@ where
 
     arg
       .ipa
-      .verify(&vk.ck_v.ck, &vk.ck_s.ck, L.len(), &ipa_instance, transcript)
+      .verify(&vk.ck_v.ck, &vk.ck_s.ck, R.len(), &ipa_instance, transcript)
   }
 }

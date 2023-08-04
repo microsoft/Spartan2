@@ -339,7 +339,7 @@ impl<G: Group> InnerProductArgument<G> {
 
       // we can compute an inversion only if acc is non-zero
       if acc == G::Scalar::ZERO {
-        return Err(SpartanError::InvalidInputLength);
+        return Err(SpartanError::InternalError);
       }
 
       // compute the inverse once for all entries

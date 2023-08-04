@@ -111,14 +111,17 @@ impl<G: Group> R1CSShape<G> {
       return Err(SpartanError::InvalidIndex);
     }
 
-    Ok(R1CSShape {
+    let shape = R1CSShape {
       num_cons,
       num_vars,
       num_io,
       A: A.to_owned(),
       B: B.to_owned(),
       C: C.to_owned(),
-    })
+    };
+
+    // pad the shape
+    Ok(shape.pad())
   }
 
   // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
@@ -353,11 +356,19 @@ impl<G: Group> R1CSShape<G> {
 impl<G: Group> R1CSWitness<G> {
   /// A method to create a witness object using a vector of scalars
   pub fn new(S: &R1CSShape<G>, W: &[G::Scalar]) -> Result<R1CSWitness<G>, SpartanError> {
-    if S.num_vars != W.len() {
-      Err(SpartanError::InvalidWitnessLength)
-    } else {
-      Ok(R1CSWitness { W: W.to_owned() })
-    }
+    let w = R1CSWitness { W: W.to_owned() };
+    Ok(w.pad(S))
+  }
+
+  /// Pads the provided witness to the correct length
+  pub fn pad(&self, S: &R1CSShape<G>) -> R1CSWitness<G> {
+    let W = {
+      let mut W = self.W.clone();
+      W.extend(vec![G::Scalar::ZERO; S.num_vars - W.len()]);
+      W
+    };
+
+    Self { W }
   }
 
   /// Commits to the witness using the supplied generators

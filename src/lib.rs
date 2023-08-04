@@ -128,6 +128,7 @@ mod tests {
       let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
         Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + F::from(5u64))
       })?;
+      let z = AllocatedNum::alloc(cs.namespace(|| "z"), || Ok(F::from(1u64)))?;
 
       cs.enforce(
         || "y = x^3 + x + 5",
@@ -142,6 +143,13 @@ mod tests {
         },
         |lc| lc + CS::one(),
         |lc| lc + y.get_variable(),
+      );
+
+      cs.enforce(
+        || "z = 1",
+        |lc| lc + z.get_variable(),
+        |lc| lc + CS::one() - z.get_variable(),
+        |lc| lc,
       );
 
       let _ = y.inputize(cs.namespace(|| "output"));
