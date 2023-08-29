@@ -51,6 +51,10 @@ cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
 
+[[bench]]
+name = "sha256"
+harness = false
+
 [features]
 default = []
 # Compiles in portable mode, w/o ISA extensions => binary can be executed on all systems.
