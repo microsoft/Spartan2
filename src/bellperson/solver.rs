@@ -3,12 +3,11 @@
 use crate::traits::Group;
 use ff::{Field, PrimeField};
 
-use bellperson::{
-  multiexp::DensityTracker, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
-};
+use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use ec_gpu_gen::multiexp_cpu::DensityTracker;
 
 /// A `ConstraintSystem` which calculates witness values for a concrete instance of an R1CS circuit.
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub struct SatisfyingAssignment<G: Group>
 where
   G::Scalar: PrimeField,
@@ -148,18 +147,18 @@ where
     true
   }
 
-  fn extend(&mut self, other: Self) {
-    self.a_aux_density.extend(other.a_aux_density, false);
-    self.b_input_density.extend(other.b_input_density, true);
-    self.b_aux_density.extend(other.b_aux_density, false);
+  fn extend(&mut self, other: &Self) {
+    self.a_aux_density.extend(&other.a_aux_density, false);
+    self.b_input_density.extend(&other.b_input_density, true);
+    self.b_aux_density.extend(&other.b_aux_density, false);
 
-    self.a.extend(other.a);
-    self.b.extend(other.b);
-    self.c.extend(other.c);
+    self.a.extend(other.a.clone());
+    self.b.extend(other.b.clone());
+    self.c.extend(other.c.clone());
 
     self.input_assignment
             // Skip first input, which must have been a temporarily allocated one variable.
             .extend(&other.input_assignment[1..]);
-    self.aux_assignment.extend(other.aux_assignment);
+    self.aux_assignment.extend(other.aux_assignment.clone());
   }
 }
