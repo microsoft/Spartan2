@@ -26,7 +26,7 @@ use crate::bellperson::{
   shape_cs::ShapeCS,
   solver::SatisfyingAssignment,
 };
-use ::bellperson::{Circuit, ConstraintSystem};
+use bellpepper_core::{Circuit, ConstraintSystem};
 use core::marker::PhantomData;
 use errors::SpartanError;
 use ff::Field;
@@ -99,6 +99,7 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
   pub fn prove(pk: &ProverKey<G, S>, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
     let _ = circuit.synthesize(&mut cs);
+
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;
@@ -168,7 +169,7 @@ fn compute_digest<G: Group, T: Serialize>(o: &T) -> G::Scalar {
 mod tests {
   use super::*;
   use crate::provider::bn256_grumpkin::bn256;
-  use ::bellperson::{gadgets::num::AllocatedNum, ConstraintSystem, SynthesisError};
+  use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
   use core::marker::PhantomData;
   use ff::PrimeField;
 

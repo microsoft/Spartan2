@@ -9,7 +9,7 @@ use crate::{
   traits::Group,
   CommitmentKey,
 };
-use bellperson::{Index, LinearCombination};
+use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
