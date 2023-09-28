@@ -9,7 +9,7 @@ pub mod solver;
 #[cfg(test)]
 mod tests {
   use crate::{
-    bellperson::{
+    bellpepper::{
       r1cs::{SpartanShape, SpartanWitness},
       shape_cs::ShapeCS,
       solver::SatisfyingAssignment,

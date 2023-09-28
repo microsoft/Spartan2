@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 // private modules
-mod bellperson;
+mod bellpepper;
 mod r1cs;
 
 // public modules
@@ -21,7 +21,7 @@ pub mod provider;
 pub mod spartan;
 pub mod traits;
 
-use crate::bellperson::{
+use crate::bellpepper::{
   r1cs::{SpartanShape, SpartanWitness},
   shape_cs::ShapeCS,
   solver::SatisfyingAssignment,
