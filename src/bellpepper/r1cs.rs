@@ -2,7 +2,7 @@
 
 #![allow(non_snake_case)]
 
-use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment};
+use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS};
 use crate::{
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, R1CS},
@@ -93,6 +93,7 @@ macro_rules! impl_spartan_shape {
 }
 
 impl_spartan_shape!(ShapeCS);
+impl_spartan_shape!(TestShapeCS);
 
 fn add_constraint<S: PrimeField>(
   X: &mut (
