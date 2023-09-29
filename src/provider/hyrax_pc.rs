@@ -33,7 +33,6 @@ use std::marker::PhantomData;
 #[serde(bound = "")]
 pub struct HyraxCommitmentKey<G: Group> {
   ck: PedersenCommitmentKey<G>,
-  _p: PhantomData<G>,
 }
 
 /// Structure that holds commitments
@@ -227,7 +226,6 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
     let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
     HyraxCommitmentKey {
       ck,
-      _p: Default::default(),
     }
   }
 
