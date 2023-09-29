@@ -11,7 +11,6 @@ pub mod keccak;
 pub mod pasta;
 pub mod pedersen;
 pub mod secp_secq;
-pub mod hyrax_pc;
 
 use ff::PrimeField;
 use pasta_curves::{self, arithmetic::CurveAffine, group::Group as AnotherGroup};
@@ -161,7 +160,7 @@ macro_rules! impl_traits {
       type CompressedGroupElement = $name_compressed;
       type PreprocessedGroupElement = $name::Affine;
       type TE = Keccak256Transcript<Self>;
-      type CE = CommitmentEngine<Self>;
+      type CE = HyraxCommitmentEngine<Self>;
 
       fn vartime_multiscalar_mul(
         scalars: &[Self::Scalar],

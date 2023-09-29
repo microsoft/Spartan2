@@ -187,8 +187,8 @@ impl<G: Group> CommitmentEngineTrait<G> for CommitmentEngine<G> {
   }
 }
 
-/// A trait listing properties of a commitment key that can be managed in a divide-and-conquer fashion
-pub trait CommitmentKeyExtTrait<G: Group> {
+/// Additional extensions on the commitment engine
+pub trait CommitmentEngineExtTrait<G: Group>: CommitmentEngineTrait<G> {
   /// Splits the commitment key into two pieces at a specified point
   fn split_at(ck: &Self::CommitmentKey, n: usize) -> (Self::CommitmentKey, Self::CommitmentKey);
 
@@ -199,26 +199,6 @@ pub trait CommitmentKeyExtTrait<G: Group> {
   fn fold(ck: &Self::CommitmentKey, w1: &G::Scalar, w2: &G::Scalar) -> Self::CommitmentKey;
 
   /// Scales the commitment key using the provided scalar
-<<<<<<< HEAD
-  fn scale(&self, r: &G::Scalar) -> Self;
-
-  /// Reinterprets commitments as commitment keys
-  fn reinterpret_commitments_as_ck(
-    c: &[<<<G as Group>::CE as CommitmentEngineTrait<G>>::Commitment as CommitmentTrait<G>>::CompressedCommitment],
-  ) -> Result<Self, SpartanError>
-  where
-    Self: Sized;
-}
-
-impl<G: Group<CE = CommitmentEngine<G>>> CommitmentKeyExtTrait<G> for CommitmentKey<G> {
-  fn split_at(&self, n: usize) -> (CommitmentKey<G>, CommitmentKey<G>) {
-    (
-      CommitmentKey {
-        ck: self.ck[0..n].to_vec(),
-      },
-      CommitmentKey {
-        ck: self.ck[n..].to_vec(),
-=======
   fn scale(ck: &Self::CommitmentKey, r: &G::Scalar) -> Self::CommitmentKey;
 
   /// Reinterprets the commitments as a commitment key
@@ -230,12 +210,9 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
     (
       CommitmentKey {
         ck: ck.ck[0..n].to_vec(),
-        _p: Default::default(),
       },
       CommitmentKey {
         ck: ck.ck[n..].to_vec(),
-        _p: Default::default(),
->>>>>>> checkpoint
       },
     )
   }
@@ -246,14 +223,7 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
       c.extend(other.ck.clone());
       c
     };
-<<<<<<< HEAD
-    CommitmentKey { ck }
-=======
-    Self::CommitmentKey {
-      ck,
-      _p: Default::default(),
-    }
->>>>>>> checkpoint
+    Self::CommitmentKey { ck }
   }
 
   fn fold(ck: &Self::CommitmentKey, w1: &G::Scalar, w2: &G::Scalar) -> Self::CommitmentKey {
@@ -268,14 +238,7 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
       })
       .collect();
 
-<<<<<<< HEAD
-    CommitmentKey { ck }
-=======
-    Self::CommitmentKey {
-      ck,
-      _p: Default::default(),
-    }
->>>>>>> checkpoint
+    Self::CommitmentKey { ck }
   }
 
   fn scale(ck: &Self::CommitmentKey, r: &G::Scalar) -> Self::CommitmentKey {
@@ -286,33 +249,12 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
       .map(|g| G::vartime_multiscalar_mul(&[*r], &[g]).preprocessed())
       .collect();
 
-<<<<<<< HEAD
-    CommitmentKey { ck: ck_scaled }
-  }
-
-  /// reinterprets a vector of commitments as a set of generators
-  fn reinterpret_commitments_as_ck(c: &[CompressedCommitment<G>]) -> Result<Self, SpartanError> {
-    let d = (0..c.len())
-      .into_par_iter()
-      .map(|i| Commitment::<G>::decompress(&c[i]))
-      .collect::<Result<Vec<Commitment<G>>, SpartanError>>()?;
-    let ck = (0..d.len())
-      .into_par_iter()
-      .map(|i| d[i].comm.preprocessed())
-      .collect();
-    Ok(CommitmentKey { ck })
-=======
-    Self::CommitmentKey {
-      ck: ck_scaled,
-      _p: Default::default(),
-    }
+    Self::CommitmentKey { ck: ck_scaled }
   }
 
   fn reinterpret_commitments_as_ck(commitments: &[Self::Commitment]) -> Self::CommitmentKey {
     Self::CommitmentKey {
       ck: commitments.iter().map(|c| c.comm.preprocessed()).collect(),
-      _p: Default::default(),
     }
->>>>>>> checkpoint
   }
 }

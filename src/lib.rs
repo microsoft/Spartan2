@@ -174,7 +174,7 @@ mod tests {
     //test_snark_with::<G2, S2pp>();
 
     type G3 = secp256k1::Point;
-    type EE3 = crate::provider::ipa_pc::EvaluationEngine<G3>;
+    type EE3 = crate::provider::hyrax_pc::HyraxEvaluationEngine<G3>;
     type S3 = crate::spartan::snark::RelaxedR1CSSNARK<G3, EE3>;
     //type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
     test_snark_with::<G3, S3>();

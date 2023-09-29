@@ -117,14 +117,35 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     }
     new_poly
   }
+
+  /// Returns the evaluations of the polynomial.
+  pub fn get_Z(&self) -> &[Scalar] {
+    &self.Z
+  }
+
+  /// Bounds the polynomial's top variables using the given scalars.
+  pub fn bound(&self, L: &[Scalar]) -> Vec<Scalar> {
+    let (left_num_vars, right_num_vars) =
+      EqPolynomial::<Scalar>::compute_factored_lens(self.num_vars);
+    let L_size = (2_usize).pow(left_num_vars as u32);
+    let R_size = (2_usize).pow(right_num_vars as u32);
+
+    (0..R_size)
+      .map(|i| {
+        (0..L_size)
+          .map(|j| L[j] * self.Z[j * R_size + i])
+          .fold(Scalar::ZERO, |x, y| x + y)
+      })
+      .collect()
+  }
 }
 
 impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
   type Output = Scalar;
 
   #[inline(always)]
-  fn index(&self, _index: usize) -> &Scalar {
-    &(self.Z[_index])
+  fn index(&self, index: usize) -> &Scalar {
+    &(self.Z[index])
   }
 }
 

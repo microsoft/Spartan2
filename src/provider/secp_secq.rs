@@ -1,7 +1,7 @@
 //! This module implements the Spartan traits for secp::Point, secp::Scalar, secq::Point, secq::Scalar.
 use crate::{
   impl_traits,
-  provider::{cpu_best_multiexp, keccak::Keccak256Transcript, pedersen::CommitmentEngine},
+  provider::{cpu_best_multiexp, hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
   traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};

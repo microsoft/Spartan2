@@ -2,17 +2,12 @@
 #![allow(clippy::too_many_arguments)]
 use crate::{
   errors::SpartanError,
-<<<<<<< HEAD
-  provider::pedersen::CommitmentKeyExtTrait,
-  spartan::polys::eq::EqPolynomial,
-=======
   provider::pedersen::{
     Commitment as PedersenCommitment, CommitmentEngine as PedersenCommitmentEngine,
     CommitmentEngineExtTrait, CommitmentKey as PedersenCommitmentKey,
     CompressedCommitment as PedersenCompressedCommitment,
   },
-  spartan::polynomial::EqPolynomial,
->>>>>>> checkpoint
+  spartan::polys::eq::EqPolynomial,
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
     evaluation::EvaluationEngineTrait,
@@ -49,9 +44,9 @@ pub struct EvaluationEngine<G: Group> {
 
 impl<G> EvaluationEngineTrait<G> for EvaluationEngine<G>
 where
-  G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G>,
+  G: Group<CE = PedersenCommitmentEngine<G>>,
 {
+  type CE = G::CE;
   type ProverKey = ProverKey<G>;
   type VerifierKey = VerifierKey<G>;
   type EvaluationArgument = InnerProductArgument<G>;
@@ -172,17 +167,8 @@ pub struct InnerProductArgument<G: Group> {
   a_hat: G::Scalar,
 }
 
-<<<<<<< HEAD
-impl<G> InnerProductArgument<G>
-where
-  G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G>,
-{
-  const fn protocol_name() -> &'static [u8] {
-=======
 impl<G: Group> InnerProductArgument<G> {
-  fn protocol_name() -> &'static [u8] {
->>>>>>> checkpoint
+  const fn protocol_name() -> &'static [u8] {
     b"IPA"
   }
 

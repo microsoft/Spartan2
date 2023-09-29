@@ -10,7 +10,7 @@ use crate::{
   },
   spartan::{
     math::Math,
-    polynomial::{EqPolynomial, MultilinearPolynomial},
+    polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   },
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
@@ -224,9 +224,7 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
     let num_vars = n.next_power_of_two().log_2();
     let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(num_vars);
     let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
-    HyraxCommitmentKey {
-      ck,
-    }
+    HyraxCommitmentKey { ck }
   }
 
   fn commit(ck: &Self::CommitmentKey, v: &[G::Scalar]) -> Self::Commitment {
@@ -322,7 +320,7 @@ where
   type EvaluationArgument = HyraxEvaluationArgument<G>;
 
   fn setup(
-    ck: &<Self::CE as CommitmentEngineTrait<G>>::CommitmentKey,
+    ck: &<<G as Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey,
   ) -> (Self::ProverKey, Self::VerifierKey) {
     let pk = HyraxProverKey::<G> {
       ck_s: G::CE::setup(b"hyrax", 1),
