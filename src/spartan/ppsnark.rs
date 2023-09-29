@@ -1,16 +1,20 @@
-//! This module implements RelaxedR1CSSNARK traits using a spark-based approach to prove evaluations of
+//! This module implements `RelaxedR1CSSNARK` traits using a spark-based approach to prove evaluations of
 //! sparse multilinear polynomials involved in Spartan's sum-check protocol, thereby providing a preprocessing SNARK
 //! The verifier in this preprocessing SNARK maintains a commitment to R1CS matrices. This is beneficial when using a
 //! polynomial commitment scheme in which the verifier's costs is succinct.
 use crate::{
-  compute_digest,
+  digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
   spartan::{
     math::Math,
-    polynomial::{EqPolynomial, MultilinearPolynomial},
+    polys::{
+      eq::EqPolynomial,
+      multilinear::MultilinearPolynomial,
+      univariate::{CompressedUniPoly, UniPoly},
+    },
     powers,
-    sumcheck::{CompressedUniPoly, SumcheckProof, UniPoly},
+    sumcheck::SumcheckProof,
     PolyEvalInstance, PolyEvalWitness, SparsePolynomial,
   },
   traits::{
@@ -23,7 +27,8 @@ use crate::{
 };
 use core::{cmp::max, marker::PhantomData};
 use ff::{Field, PrimeField};
-use itertools::concat;
+use once_cell::sync::OnceCell;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -41,19 +46,25 @@ impl<Scalar: PrimeField> IdentityPolynomial<Scalar> {
   pub fn new(ell: usize) -> Self {
     IdentityPolynomial {
       ell,
-      _p: Default::default(),
+      _p: PhantomData,
     }
   }
 
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     assert_eq!(self.ell, r.len());
+    let mut power_of_two = 1_u64;
     (0..self.ell)
-      .map(|i| Scalar::from(2_usize.pow((self.ell - i - 1) as u32) as u64) * r[i])
+      .rev()
+      .map(|i| {
+        let result = Scalar::from(power_of_two) * r[i];
+        power_of_two *= 2;
+        result
+      })
       .fold(Scalar::ZERO, |acc, item| acc + item)
   }
 }
 
-/// A type that holds R1CSShape in a form amenable to memory checking
+/// A type that holds `R1CSShape` in a form amenable to memory checking
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSShapeSparkRepr<G: Group> {
@@ -112,58 +123,41 @@ impl<G: Group> TranscriptReprTrait<G> for R1CSShapeSparkCommitment<G> {
 }
 
 impl<G: Group> R1CSShapeSparkRepr<G> {
-  /// represents R1CSShape in a Spark-friendly format amenable to memory checking
+  /// represents `R1CSShape` in a Spark-friendly format amenable to memory checking
   pub fn new(S: &R1CSShape<G>) -> R1CSShapeSparkRepr<G> {
     let N = {
       let total_nz = S.A.len() + S.B.len() + S.C.len();
       max(total_nz, max(2 * S.num_vars, S.num_cons)).next_power_of_two()
     };
 
-    let row = {
-      let mut r = S
-        .A
-        .iter()
-        .chain(S.B.iter())
-        .chain(S.C.iter())
-        .map(|(r, _, _)| *r)
-        .collect::<Vec<usize>>();
-      r.resize(N, 0usize);
-      r
-    };
+    let (mut row, mut col) = (vec![0usize; N], vec![0usize; N]);
 
-    let col = {
-      let mut c = S
-        .A
-        .iter()
-        .chain(S.B.iter())
-        .chain(S.C.iter())
-        .map(|(_, c, _)| *c)
-        .collect::<Vec<usize>>();
-      c.resize(N, 0usize);
-      c
-    };
+    for (i, (r, c, _)) in S.A.iter().chain(S.B.iter()).chain(S.C.iter()).enumerate() {
+      row[i] = *r;
+      col[i] = *c;
+    }
 
     let val_A = {
-      let mut val = S.A.iter().map(|(_, _, v)| *v).collect::<Vec<G::Scalar>>();
-      val.resize(N, G::Scalar::ZERO);
+      let mut val = vec![G::Scalar::ZERO; N];
+      for (i, (_, _, v)) in S.A.iter().enumerate() {
+        val[i] = *v;
+      }
       val
     };
 
     let val_B = {
-      // prepend zeros
-      let mut val = vec![G::Scalar::ZERO; S.A.len()];
-      val.extend(S.B.iter().map(|(_, _, v)| *v).collect::<Vec<G::Scalar>>());
-      // append zeros
-      val.resize(N, G::Scalar::ZERO);
+      let mut val = vec![G::Scalar::ZERO; N];
+      for (i, (_, _, v)) in S.B.iter().enumerate() {
+        val[S.A.len() + i] = *v;
+      }
       val
     };
 
     let val_C = {
-      // prepend zeros
-      let mut val = vec![G::Scalar::ZERO; S.A.len() + S.B.len()];
-      val.extend(S.C.iter().map(|(_, _, v)| *v).collect::<Vec<G::Scalar>>());
-      // append zeros
-      val.resize(N, G::Scalar::ZERO);
+      let mut val = vec![G::Scalar::ZERO; N];
+      for (i, (_, _, v)) in S.C.iter().enumerate() {
+        val[S.A.len() + S.B.len() + i] = *v;
+      }
       val
     };
 
@@ -265,29 +259,30 @@ impl<G: Group> R1CSShapeSparkRepr<G> {
 
     let mem_row = EqPolynomial::new(r_x_padded).evals();
     let mem_col = {
-      let mut z = z.to_vec();
-      z.resize(self.N, G::Scalar::ZERO);
-      z
+      let mut val = vec![G::Scalar::ZERO; self.N];
+      for (i, v) in z.iter().enumerate() {
+        val[i] = *v;
+      }
+      val
     };
 
-    let mut E_row = S
-      .A
-      .iter()
-      .chain(S.B.iter())
-      .chain(S.C.iter())
-      .map(|(r, _, _)| mem_row[*r])
-      .collect::<Vec<G::Scalar>>();
+    let (E_row, E_col) = {
+      let mut E_row = vec![mem_row[0]; self.N]; // we place mem_row[0] since resized row is appended with 0s
+      let mut E_col = vec![mem_col[0]; self.N];
 
-    let mut E_col = S
-      .A
-      .iter()
-      .chain(S.B.iter())
-      .chain(S.C.iter())
-      .map(|(_, c, _)| mem_col[*c])
-      .collect::<Vec<G::Scalar>>();
-
-    E_row.resize(self.N, mem_row[0]); // we place mem_row[0] since resized row is appended with 0s
-    E_col.resize(self.N, mem_col[0]);
+      for (i, (val_r, val_c)) in S
+        .A
+        .iter()
+        .chain(S.B.iter())
+        .chain(S.C.iter())
+        .map(|(r, c, _)| (mem_row[*r], mem_col[*c]))
+        .enumerate()
+      {
+        E_row[i] = val_r;
+        E_col[i] = val_c;
+      }
+      (E_row, E_col)
+    };
 
     (mem_row, mem_col, E_row, E_col)
   }
@@ -411,12 +406,10 @@ impl<G: Group> ProductSumcheckInstance<G> {
 
     let poly_A = MultilinearPolynomial::new(EqPolynomial::new(rand_eq).evals());
     let poly_B_vec = left_vec
-      .clone()
       .into_par_iter()
       .map(MultilinearPolynomial::new)
       .collect::<Vec<_>>();
     let poly_C_vec = right_vec
-      .clone()
       .into_par_iter()
       .map(MultilinearPolynomial::new)
       .collect::<Vec<_>>();
@@ -477,43 +470,10 @@ impl<G: Group> SumcheckEngine<G> for ProductSumcheckInstance<G> {
       .zip(self.poly_C_vec.iter())
       .zip(self.poly_D_vec.iter())
       .map(|((poly_B, poly_C), poly_D)| {
-        let len = poly_B.len() / 2;
         // Make an iterator returning the contributions to the evaluations
-        let (eval_point_0, eval_point_2, eval_point_3) = (0..len)
-          .into_par_iter()
-          .map(|i| {
-            // eval 0: bound_func is A(low)
-            let eval_point_0 = comb_func(&poly_A[i], &poly_B[i], &poly_C[i], &poly_D[i]);
+        let (eval_point_0, eval_point_2, eval_point_3) =
+          SumcheckProof::<G>::compute_eval_points_cubic(poly_A, poly_B, poly_C, poly_D, &comb_func);
 
-            // eval 2: bound_func is -A(low) + 2*A(high)
-            let poly_A_bound_point = poly_A[len + i] + poly_A[len + i] - poly_A[i];
-            let poly_B_bound_point = poly_B[len + i] + poly_B[len + i] - poly_B[i];
-            let poly_C_bound_point = poly_C[len + i] + poly_C[len + i] - poly_C[i];
-            let poly_D_bound_point = poly_D[len + i] + poly_D[len + i] - poly_D[i];
-            let eval_point_2 = comb_func(
-              &poly_A_bound_point,
-              &poly_B_bound_point,
-              &poly_C_bound_point,
-              &poly_D_bound_point,
-            );
-
-            // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-            let poly_A_bound_point = poly_A_bound_point + poly_A[len + i] - poly_A[i];
-            let poly_B_bound_point = poly_B_bound_point + poly_B[len + i] - poly_B[i];
-            let poly_C_bound_point = poly_C_bound_point + poly_C[len + i] - poly_C[i];
-            let poly_D_bound_point = poly_D_bound_point + poly_D[len + i] - poly_D[i];
-            let eval_point_3 = comb_func(
-              &poly_A_bound_point,
-              &poly_B_bound_point,
-              &poly_C_bound_point,
-              &poly_D_bound_point,
-            );
-            (eval_point_0, eval_point_2, eval_point_3)
-          })
-          .reduce(
-            || (G::Scalar::ZERO, G::Scalar::ZERO, G::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
-          );
         vec![eval_point_0, eval_point_2, eval_point_3]
       })
       .collect::<Vec<Vec<G::Scalar>>>()
@@ -584,44 +544,10 @@ impl<G: Group> SumcheckEngine<G> for OuterSumcheckInstance<G> {
        poly_C_comp: &G::Scalar,
        poly_D_comp: &G::Scalar|
        -> G::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-    let len = poly_A.len() / 2;
 
     // Make an iterator returning the contributions to the evaluations
-    let (eval_point_0, eval_point_2, eval_point_3) = (0..len)
-      .into_par_iter()
-      .map(|i| {
-        // eval 0: bound_func is A(low)
-        let eval_point_0 = comb_func(&poly_A[i], &poly_B[i], &poly_C[i], &poly_D[i]);
-
-        // eval 2: bound_func is -A(low) + 2*A(high)
-        let poly_A_bound_point = poly_A[len + i] + poly_A[len + i] - poly_A[i];
-        let poly_B_bound_point = poly_B[len + i] + poly_B[len + i] - poly_B[i];
-        let poly_C_bound_point = poly_C[len + i] + poly_C[len + i] - poly_C[i];
-        let poly_D_bound_point = poly_D[len + i] + poly_D[len + i] - poly_D[i];
-        let eval_point_2 = comb_func(
-          &poly_A_bound_point,
-          &poly_B_bound_point,
-          &poly_C_bound_point,
-          &poly_D_bound_point,
-        );
-
-        // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-        let poly_A_bound_point = poly_A_bound_point + poly_A[len + i] - poly_A[i];
-        let poly_B_bound_point = poly_B_bound_point + poly_B[len + i] - poly_B[i];
-        let poly_C_bound_point = poly_C_bound_point + poly_C[len + i] - poly_C[i];
-        let poly_D_bound_point = poly_D_bound_point + poly_D[len + i] - poly_D[i];
-        let eval_point_3 = comb_func(
-          &poly_A_bound_point,
-          &poly_B_bound_point,
-          &poly_C_bound_point,
-          &poly_D_bound_point,
-        );
-        (eval_point_0, eval_point_2, eval_point_3)
-      })
-      .reduce(
-        || (G::Scalar::ZERO, G::Scalar::ZERO, G::Scalar::ZERO),
-        |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
-      );
+    let (eval_point_0, eval_point_2, eval_point_3) =
+      SumcheckProof::<G>::compute_eval_points_cubic(poly_A, poly_B, poly_C, poly_D, &comb_func);
 
     vec![vec![eval_point_0, eval_point_2, eval_point_3]]
   }
@@ -673,6 +599,8 @@ impl<G: Group> SumcheckEngine<G> for InnerSumcheckInstance<G> {
      -> G::Scalar { *poly_A_comp * *poly_B_comp * *poly_C_comp };
     let len = poly_A.len() / 2;
 
+    // TODO: make this call a function in sumcheck.rs by writing an n-ary variant of crate::spartan::sumcheck::SumcheckProof::<G>::compute_eval_points_cubic
+    // once #[feature(array_methods)] stabilizes (this n-ary variant would need array::each_ref)
     // Make an iterator returning the contributions to the evaluations
     let (eval_point_0, eval_point_2, eval_point_3) = (0..len)
       .into_par_iter()
@@ -727,8 +655,9 @@ impl<G: Group> SumcheckEngine<G> for InnerSumcheckInstance<G> {
 /// A type that represents the prover's key
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
   pk_ee: EE::ProverKey,
+  S: R1CSShape<G>,
   S_repr: R1CSShapeSparkRepr<G>,
   S_comm: R1CSShapeSparkCommitment<G>,
   vk_digest: G::Scalar, // digest of verifier's key
@@ -737,20 +666,23 @@ pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
 /// A type that represents the verifier's key
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct VerifierKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct VerifierKey<G: Group, EE: EvaluationEngineTrait<G>> {
   num_cons: usize,
   num_vars: usize,
   vk_ee: EE::VerifierKey,
   S_comm: R1CSShapeSparkCommitment<G>,
-  digest: G::Scalar,
+  #[serde(skip, default = "OnceCell::new")]
+  digest: OnceCell<G::Scalar>,
 }
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> SimpleDigestible for VerifierKey<G, EE> {}
 
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
   // commitment to oracles
   comm_Az: CompressedCommitment<G>,
   comm_Bz: CompressedCommitment<G>,
@@ -803,7 +735,7 @@ pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> 
   eval_arg: EE::EvaluationArgument,
 }
 
-impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARK<G, EE> {
+impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARK<G, EE> {
   fn prove_inner<T1, T2, T3>(
     mem: &mut T1,
     outer: &mut T2,
@@ -861,7 +793,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARK<G, EE>
 
     let mut e = claim;
     let mut r: Vec<G::Scalar> = Vec::new();
-    let mut cubic_polys: Vec<CompressedUniPoly<G>> = Vec::new();
+    let mut cubic_polys: Vec<CompressedUniPoly<G::Scalar>> = Vec::new();
     let num_rounds = mem.size().log_2();
     for _i in 0..num_rounds {
       let mut evals: Vec<Vec<G::Scalar>> = Vec::new();
@@ -911,9 +843,36 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARK<G, EE>
   }
 }
 
-impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G>
-  for RelaxedR1CSSNARK<G, EE>
-{
+impl<G: Group, EE: EvaluationEngineTrait<G>> VerifierKey<G, EE> {
+  fn new(
+    num_cons: usize,
+    num_vars: usize,
+    S_comm: R1CSShapeSparkCommitment<G>,
+    vk_ee: EE::VerifierKey,
+  ) -> Self {
+    VerifierKey {
+      num_cons,
+      num_vars,
+      S_comm,
+      vk_ee,
+      digest: Default::default(),
+    }
+  }
+
+  /// Returns the digest of the verifier's key
+  pub fn digest(&self) -> G::Scalar {
+    self
+      .digest
+      .get_or_try_init(|| {
+        let dc = DigestComputer::new(self);
+        dc.digest()
+      })
+      .cloned()
+      .expect("Failure to retrieve digest!")
+  }
+}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for RelaxedR1CSSNARK<G, EE> {
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
 
@@ -929,56 +888,44 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     let S_repr = R1CSShapeSparkRepr::new(&S);
     let S_comm = S_repr.commit(ck);
 
-    let vk = {
-      let mut vk = VerifierKey {
-        num_cons: S.num_cons,
-        num_vars: S.num_vars,
-        S_comm: S_comm.clone(),
-        vk_ee,
-        digest: G::Scalar::ZERO,
-      };
-      vk.digest = compute_digest::<G, VerifierKey<G, EE>>(&vk);
-      vk
-    };
+    let vk = VerifierKey::new(S.num_cons, S.num_vars, S_comm.clone(), vk_ee);
 
     let pk = ProverKey {
       pk_ee,
+      S,
       S_repr,
       S_comm,
-      vk_digest: vk.digest,
+      vk_digest: vk.digest(),
     };
 
     Ok((pk, vk))
   }
 
-  /// produces a succinct proof of satisfiability of a RelaxedR1CS instance
+  /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
   fn prove(
     ck: &CommitmentKey<G>,
     pk: &Self::ProverKey,
-    S: &R1CSShape<G>,
     U: &RelaxedR1CSInstance<G>,
     W: &RelaxedR1CSWitness<G>,
   ) -> Result<Self, SpartanError> {
-    let W = W.pad(S); // pad the witness
+    let W = W.pad(&pk.S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // a list of polynomial evaluation claims that will be batched
     let mut w_u_vec = Vec::new();
 
     // sanity check that R1CSShape has certain size characteristics
-    assert_eq!(S.num_cons.next_power_of_two(), S.num_cons);
-    assert_eq!(S.num_vars.next_power_of_two(), S.num_vars);
-    assert!(S.num_io < S.num_vars);
+    pk.S.check_regular_shape();
 
     // append the verifier key (which includes commitment to R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
     transcript.absorb(b"U", U);
 
     // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
-    let z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
+    let z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
 
     // compute Az, Bz, Cz
-    let (mut Az, mut Bz, mut Cz) = S.multiply_vec(&z)?;
+    let (mut Az, mut Bz, mut Cz) = pk.S.multiply_vec(&z)?;
 
     // commit to Az, Bz, Cz
     let (comm_Az, (comm_Bz, comm_Cz)) = rayon::join(
@@ -1000,8 +947,13 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
       Bz.resize(pk.S_repr.N, G::Scalar::ZERO);
       Cz.resize(pk.S_repr.N, G::Scalar::ZERO);
 
-      let mut E = W.E.clone();
-      E.resize(pk.S_repr.N, G::Scalar::ZERO);
+      let E = {
+        let mut val = vec![G::Scalar::ZERO; pk.S_repr.N];
+        for (i, w_e) in W.E.iter().enumerate() {
+          val[i] = *w_e;
+        }
+        val
+      };
 
       (Az, Bz, Cz, E)
     };
@@ -1016,7 +968,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     // (2) send commitments to the following two oracles
     // E_row(i) = eq(tau, row(i)) for all i
     // E_col(i) = z(col(i)) for all i
-    let (mem_row, mem_col, E_row, E_col) = pk.S_repr.evaluation_oracles(S, &tau, &z);
+    let (mem_row, mem_col, E_row, E_col) = pk.S_repr.evaluation_oracles(&pk.S, &tau, &z);
     let (comm_E_row, comm_E_col) =
       rayon::join(|| G::CE::commit(ck, &E_row), || G::CE::commit(ck, &E_col));
 
@@ -1330,7 +1282,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     // we need to prove that eval_z = z(r_prod) = (1-r_prod[0]) * W.w(r_prod[1..]) + r_prod[0] * U.x(r_prod[1..]).
     // r_prod was padded, so we now remove the padding
     let r_prod_unpad = {
-      let l = pk.S_repr.N.log_2() - (2 * S.num_vars).log_2();
+      let l = pk.S_repr.N.log_2() - (2 * pk.S.num_vars).log_2();
       r_prod[l..].to_vec()
     };
 
@@ -1559,13 +1511,13 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     })
   }
 
-  /// verifies a proof of satisfiability of a RelaxedR1CS instance
+  /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey, U: &RelaxedR1CSInstance<G>) -> Result<(), SpartanError> {
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
     let mut u_vec: Vec<PolyEvalInstance<G>> = Vec::new();
 
     // append the verifier key (including commitment to R1CS matrices) and the RelaxedR1CSInstance to the transcript
-    transcript.absorb(b"vk", &vk.digest);
+    transcript.absorb(b"vk", &vk.digest());
     transcript.absorb(b"U", U);
 
     let comm_Az = Commitment::<G>::decompress(&self.comm_Az)?;
@@ -1860,7 +1812,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
             .map(|i| (i + 1, U.X[i]))
             .collect::<Vec<(usize, G::Scalar)>>(),
         );
-        SparsePolynomial::new((vk.num_vars as f64).log2() as usize, poly_X)
+        SparsePolynomial::new(usize::try_from(vk.num_vars.ilog2()).unwrap(), poly_X)
           .evaluate(&r_prod_unpad[1..])
       };
       let eval_Z =
@@ -1878,7 +1830,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     // finish the final step of the sum-check
     let (claim_init_expected_row, claim_audit_expected_row) = {
       let addr = IdentityPolynomial::new(r_prod.len()).evaluate(&r_prod);
-      let val = EqPolynomial::new(tau.to_vec()).evaluate(&r_prod);
+      let val = EqPolynomial::new(tau).evaluate(&r_prod);
       (
         hash_func(&addr, &val, &G::Scalar::ZERO),
         hash_func(&addr, &val, &self.eval_row_audit_ts),
