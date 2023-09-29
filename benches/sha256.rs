@@ -138,8 +138,8 @@ fn bench_snark(c: &mut Criterion) {
       SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::setup(circuit.clone()).unwrap();
 
     group.bench_function("Prove", |b| {
-      let _res = b.iter(|| {
-        SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::prove(
+      b.iter(|| {
+        let _ = SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::prove(
           black_box(&pk),
           black_box(circuit.clone()),
         );
