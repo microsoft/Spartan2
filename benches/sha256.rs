@@ -2,17 +2,17 @@
 //! This code invokes a hand-written SHA-256 gadget from bellman/bellperson.
 //! It also uses code from bellman/bellperson to compare circuit-generated digest with sha2 crate's output
 #![allow(non_snake_case)]
-use bellperson::gadgets::{sha256::sha256, Assignment};
-use bellperson::{gadgets::{
+use bellpepper::gadgets::{sha256::sha256, Assignment};
+use bellpepper_core::{
   boolean::{AllocatedBit, Boolean},
-  num::{AllocatedNum, Num}},
-  Circuit,ConstraintSystem, SynthesisError,
+  num::{AllocatedNum, Num},
+  Circuit, ConstraintSystem, SynthesisError,
 };
 use core::time::Duration;
 use criterion::*;
 use ff::{PrimeField, PrimeFieldBits};
-use spartan2::{traits::Group,SNARK};
 use sha2::{Digest, Sha256};
+use spartan2::{traits::Group, SNARK};
 use std::marker::PhantomData;
 
 type G = pasta_curves::pallas::Point;
@@ -35,10 +35,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 }
 
 impl<Scalar: PrimeField> Circuit<Scalar> for Sha256Circuit<Scalar> {
-  fn synthesize<CS: ConstraintSystem<Scalar>>(
-    self, 
-    cs: &mut CS,
-  ) -> Result<(), SynthesisError> {
+  fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
     let bit_values: Vec<_> = self
       .preimage
       .clone()
@@ -141,7 +138,7 @@ fn bench_snark(c: &mut Criterion) {
       SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::setup(circuit.clone()).unwrap();
 
     group.bench_function("Prove", |b| {
-      let res = b.iter(|| {
+      let _res = b.iter(|| {
         SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::prove(
           black_box(&pk),
           black_box(circuit.clone()),

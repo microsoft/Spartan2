@@ -11,8 +11,9 @@ license-file = "LICENSE"
 keywords = ["zkSNARKs", "cryptography", "proofs"]
 
 [dependencies]
-bellpepper-core = "0.2.1"
 ff = { version = "0.13.0", features = ["derive"] }
+bellpepper-core = { version="0.2.0", default-features = false }
+bellpepper = { version="0.2.0", default-features = false }
 digest = "0.10"
 sha3 = "0.10"
 rayon = "1.7"
