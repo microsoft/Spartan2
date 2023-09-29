@@ -3,7 +3,7 @@
 use crate::{
   errors::SpartanError,
   provider::pedersen::CommitmentKeyExtTrait,
-  spartan::polynomial::EqPolynomial,
+  spartan::polys::eq::EqPolynomial,
   traits::{
     commitment::{CommitmentEngineTrait, CommitmentTrait},
     evaluation::EvaluationEngineTrait,
@@ -32,13 +32,6 @@ pub struct VerifierKey<G: Group> {
   ck_s: CommitmentKey<G>,
 }
 
-/// Provides an implementation of a polynomial evaluation argument
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct EvaluationArgument<G: Group> {
-  ipa: InnerProductArgument<G>,
-}
-
 /// Provides an implementation of a polynomial evaluation engine using IPA
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvaluationEngine<G: Group> {
@@ -48,23 +41,21 @@ pub struct EvaluationEngine<G: Group> {
 impl<G> EvaluationEngineTrait<G> for EvaluationEngine<G>
 where
   G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G, CE = G::CE>,
+  CommitmentKey<G>: CommitmentKeyExtTrait<G>,
 {
-  type CE = G::CE;
   type ProverKey = ProverKey<G>;
   type VerifierKey = VerifierKey<G>;
-  type EvaluationArgument = EvaluationArgument<G>;
+  type EvaluationArgument = InnerProductArgument<G>;
 
   fn setup(
-    ck: &<Self::CE as CommitmentEngineTrait<G>>::CommitmentKey,
+    ck: &<<G as Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey,
   ) -> (Self::ProverKey, Self::VerifierKey) {
-    let pk = ProverKey {
-      ck_s: G::CE::setup(b"ipa", 1),
-    };
+    let ck_c = G::CE::setup(b"ipa", 1);
 
+    let pk = ProverKey { ck_s: ck_c.clone() };
     let vk = VerifierKey {
       ck_v: ck.clone(),
-      ck_s: G::CE::setup(b"ipa", 1),
+      ck_s: ck_c,
     };
 
     (pk, vk)
@@ -82,9 +73,7 @@ where
     let u = InnerProductInstance::new(comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
     let w = InnerProductWitness::new(poly);
 
-    Ok(EvaluationArgument {
-      ipa: InnerProductArgument::prove(ck, &pk.ck_s, &u, &w, transcript)?,
-    })
+    InnerProductArgument::prove(ck, &pk.ck_s, &u, &w, transcript)
   }
 
   /// A method to verify purported evaluations of a batch of polynomials
@@ -98,7 +87,7 @@ where
   ) -> Result<(), SpartanError> {
     let u = InnerProductInstance::new(comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
 
-    arg.ipa.verify(
+    arg.verify(
       &vk.ck_v,
       &vk.ck_s,
       (2_usize).pow(point.len() as u32),
@@ -165,19 +154,18 @@ impl<G: Group> InnerProductWitness<G> {
 /// An inner product argument
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-struct InnerProductArgument<G: Group> {
+pub struct InnerProductArgument<G: Group> {
   L_vec: Vec<CompressedCommitment<G>>,
   R_vec: Vec<CompressedCommitment<G>>,
   a_hat: G::Scalar,
-  _p: PhantomData<G>,
 }
 
 impl<G> InnerProductArgument<G>
 where
   G: Group,
-  CommitmentKey<G>: CommitmentKeyExtTrait<G, CE = G::CE>,
+  CommitmentKey<G>: CommitmentKeyExtTrait<G>,
 {
-  fn protocol_name() -> &'static [u8] {
+  const fn protocol_name() -> &'static [u8] {
     b"IPA"
   }
 
@@ -275,7 +263,7 @@ where
     let mut a_vec = W.a_vec.to_vec();
     let mut b_vec = U.b_vec.to_vec();
     let mut ck = ck;
-    for _i in 0..(U.b_vec.len() as f64).log2() as usize {
+    for _i in 0..usize::try_from(U.b_vec.len().ilog2()).unwrap() {
       let (L, R, a_vec_folded, b_vec_folded, ck_folded) =
         prove_inner(&a_vec, &b_vec, &ck, transcript)?;
       L_vec.push(L);
@@ -290,7 +278,6 @@ where
       L_vec,
       R_vec,
       a_hat: a_vec[0],
-      _p: Default::default(),
     })
   }
 
@@ -374,7 +361,7 @@ where
       let mut s = vec![G::Scalar::ZERO; n];
       s[0] = {
         let mut v = G::Scalar::ONE;
-        for r_inverse_i in &r_inverse {
+        for r_inverse_i in r_inverse {
           v *= r_inverse_i;
         }
         v

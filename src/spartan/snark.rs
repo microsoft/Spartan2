@@ -1,15 +1,15 @@
-//! This module implements RelaxedR1CSSNARKTrait using Spartan that is generic
+//! This module implements `RelaxedR1CSSNARKTrait` using Spartan that is generic
 //! over the polynomial commitment and evaluation argument (i.e., a PCS)
 //! This version of Spartan does not use preprocessing so the verifier keeps the entire
 //! description of R1CS matrices. This is essentially optimal for the verifier when using
 //! an IPA-based polynomial commitment scheme.
 
 use crate::{
-  compute_digest,
+  digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
   spartan::{
-    polynomial::{EqPolynomial, MultilinearPolynomial, SparsePolynomial},
+    polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial},
     powers,
     sumcheck::SumcheckProof,
     PolyEvalInstance, PolyEvalWitness,
@@ -20,25 +20,52 @@ use crate::{
   Commitment, CommitmentKey,
 };
 use ff::Field;
-use itertools::concat;
+use once_cell::sync::OnceCell;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
   pk_ee: EE::ProverKey,
+  S: R1CSShape<G>,
   vk_digest: G::Scalar, // digest of the verifier's key
 }
 
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct VerifierKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct VerifierKey<G: Group, EE: EvaluationEngineTrait<G>> {
   vk_ee: EE::VerifierKey,
   S: R1CSShape<G>,
-  digest: G::Scalar,
+  #[serde(skip, default = "OnceCell::new")]
+  digest: OnceCell<G::Scalar>,
+}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> SimpleDigestible for VerifierKey<G, EE> {}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> VerifierKey<G, EE> {
+  fn new(shape: R1CSShape<G>, vk_ee: EE::VerifierKey) -> Self {
+    VerifierKey {
+      vk_ee,
+      S: shape,
+      digest: OnceCell::new(),
+    }
+  }
+
+  /// Returns the digest of the verifier's key.
+  pub fn digest(&self) -> G::Scalar {
+    self
+      .digest
+      .get_or_try_init(|| {
+        let dc = DigestComputer::<G::Scalar, _>::new(self);
+        dc.digest()
+      })
+      .cloned()
+      .expect("Failure to retrieve digest!")
+  }
 }
 
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
@@ -46,7 +73,7 @@ pub struct VerifierKey<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> {
+pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
   sc_proof_outer: SumcheckProof<G>,
   claims_outer: (G::Scalar, G::Scalar, G::Scalar),
   eval_E: G::Scalar,
@@ -57,9 +84,7 @@ pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> 
   eval_arg: EE::EvaluationArgument,
 }
 
-impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G>
-  for RelaxedR1CSSNARK<G, EE>
-{
+impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for RelaxedR1CSSNARK<G, EE> {
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
 
@@ -69,52 +94,42 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let (pk_ee, vk_ee) = EE::setup(ck);
 
-    let S = &S.pad();
+    let S = S.pad();
 
-    let vk = {
-      let mut vk = VerifierKey {
-        vk_ee,
-        S: S.clone(),
-        digest: G::Scalar::ZERO,
-      };
-      vk.digest = compute_digest::<G, VerifierKey<G, EE>>(&vk);
-      vk
-    };
+    let vk: VerifierKey<G, EE> = VerifierKey::new(S.clone(), vk_ee);
 
     let pk = ProverKey {
       pk_ee,
-      vk_digest: vk.digest,
+      S,
+      vk_digest: vk.digest(),
     };
 
     Ok((pk, vk))
   }
 
-  /// produces a succinct proof of satisfiability of a RelaxedR1CS instance
+  /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
   fn prove(
     ck: &CommitmentKey<G>,
     pk: &Self::ProverKey,
-    S: &R1CSShape<G>,
     U: &RelaxedR1CSInstance<G>,
     W: &RelaxedR1CSWitness<G>,
   ) -> Result<Self, SpartanError> {
-    let W = W.pad(S); // pad the witness
+    let W = W.pad(&pk.S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // sanity check that R1CSShape has certain size characteristics
-    assert_eq!(S.num_cons.next_power_of_two(), S.num_cons);
-    assert_eq!(S.num_vars.next_power_of_two(), S.num_vars);
-    assert!(S.num_io < S.num_vars);
+    pk.S.check_regular_shape();
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
     transcript.absorb(b"U", U);
 
     // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
-    let mut z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
+    let mut z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
 
     let (num_rounds_x, num_rounds_y) = (
-      (S.num_cons as f64).log2() as usize,
-      ((S.num_vars as f64).log2() as usize + 1),
+      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(pk.S.num_vars.ilog2()).unwrap() + 1),
     );
 
     // outer sum-check
@@ -124,8 +139,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
 
     let mut poly_tau = MultilinearPolynomial::new(EqPolynomial::new(tau).evals());
     let (mut poly_Az, mut poly_Bz, poly_Cz, mut poly_uCz_E) = {
-      let (poly_Az, poly_Bz, poly_Cz) = S.multiply_vec(&z)?;
-      let poly_uCz_E = (0..S.num_cons)
+      let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
+      let poly_uCz_E = (0..pk.S.num_cons)
         .map(|i| U.u * poly_Cz[i] + W.E[i])
         .collect::<Vec<G::Scalar>>();
       (
@@ -206,7 +221,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
           (A_evals, B_evals, C_evals)
         };
 
-      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(S, &evals_rx);
+      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
@@ -217,7 +232,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     };
 
     let poly_z = {
-      z.resize(S.num_vars * 2, G::Scalar::ZERO);
+      z.resize(pk.S.num_vars * 2, G::Scalar::ZERO);
       z
     };
 
@@ -342,17 +357,17 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
     })
   }
 
-  /// verifies a proof of satisfiability of a RelaxedR1CS instance
+  /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey, U: &RelaxedR1CSInstance<G>) -> Result<(), SpartanError> {
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
-    transcript.absorb(b"vk", &vk.digest);
+    transcript.absorb(b"vk", &vk.digest());
     transcript.absorb(b"U", U);
 
     let (num_rounds_x, num_rounds_y) = (
-      (vk.S.num_cons as f64).log2() as usize,
-      ((vk.S.num_vars as f64).log2() as usize + 1),
+      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1),
     );
 
     // outer sum-check
@@ -406,7 +421,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
             .map(|i| (i + 1, U.X[i]))
             .collect::<Vec<(usize, G::Scalar)>>(),
         );
-        SparsePolynomial::new((vk.S.num_vars as f64).log2() as usize, poly_X).evaluate(&r_y[1..])
+        SparsePolynomial::new(usize::try_from(vk.S.num_vars.ilog2()).unwrap(), poly_X)
+          .evaluate(&r_y[1..])
       };
       (G::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
     };
@@ -419,13 +435,12 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
       let evaluate_with_table =
         |M: &[(usize, usize, G::Scalar)], T_x: &[G::Scalar], T_y: &[G::Scalar]| -> G::Scalar {
           (0..M.len())
-            .collect::<Vec<usize>>()
-            .par_iter()
-            .map(|&i| {
+            .into_par_iter()
+            .map(|i| {
               let (row, col, val) = M[i];
               T_x[row] * T_y[col] * val
             })
-            .reduce(|| G::Scalar::ZERO, |acc, x| acc + x)
+            .sum()
         };
 
       let (T_x, T_y) = rayon::join(
@@ -434,9 +449,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G, CE = G::CE>> RelaxedR1CSSNARKTrait<G
       );
 
       (0..M_vec.len())
-        .collect::<Vec<usize>>()
-        .par_iter()
-        .map(|&i| evaluate_with_table(M_vec[i], &T_x, &T_y))
+        .into_par_iter()
+        .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
         .collect()
     };
 

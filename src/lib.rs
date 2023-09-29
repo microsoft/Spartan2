@@ -13,6 +13,8 @@
 
 // private modules
 mod bellpepper;
+mod constants;
+mod digest;
 mod r1cs;
 
 // public modules
@@ -29,10 +31,8 @@ use crate::bellpepper::{
 use bellpepper_core::{Circuit, ConstraintSystem};
 use core::marker::PhantomData;
 use errors::SpartanError;
-use ff::Field;
 use r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness};
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 use traits::{
   commitment::{CommitmentEngineTrait, CommitmentTrait},
   snark::RelaxedR1CSSNARKTrait,
@@ -111,7 +111,7 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
     );
 
     // prove the instance using Spartan
-    let snark = S::prove(&pk.ck, &pk.pk, &pk.S, &u_relaxed, &w_relaxed)?;
+    let snark = S::prove(&pk.ck, &pk.pk, &u_relaxed, &w_relaxed)?;
 
     Ok(SNARK {
       comm_W: u.comm_W,
@@ -138,37 +138,10 @@ type Commitment<G> = <<G as Group>::CE as CommitmentEngineTrait<G>>::Commitment;
 type CompressedCommitment<G> = <<<G as Group>::CE as CommitmentEngineTrait<G>>::Commitment as CommitmentTrait<G>>::CompressedCommitment;
 type CE<G> = <G as Group>::CE;
 
-fn compute_digest<G: Group, T: Serialize>(o: &T) -> G::Scalar {
-  // obtain a vector of bytes representing public parameters
-  let bytes = bincode::serialize(o).unwrap();
-  // convert pp_bytes into a short digest
-  let mut hasher = Sha3_256::new();
-  hasher.update(&bytes);
-  let digest = hasher.finalize();
-
-  // truncate the digest to NUM_HASH_BITS bits
-  let bv = (0..250).map(|i| {
-    let (byte_pos, bit_pos) = (i / 8, i % 8);
-    let bit = (digest[byte_pos] >> bit_pos) & 1;
-    bit == 1
-  });
-
-  // turn the bit vector into a scalar
-  let mut digest = G::Scalar::ZERO;
-  let mut coeff = G::Scalar::ONE;
-  for bit in bv {
-    if bit {
-      digest += coeff;
-    }
-    coeff += coeff;
-  }
-  digest
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::provider::bn256_grumpkin::bn256;
+  use crate::provider::{bn256_grumpkin::bn256, secp_secq::secp256k1};
   use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
   use core::marker::PhantomData;
   use ff::PrimeField;
@@ -227,6 +200,13 @@ mod tests {
     type S2pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G2, EE2>;
     test_snark_with::<G2, S2>();
     test_snark_with::<G2, S2pp>();
+
+    type G3 = secp256k1::Point;
+    type EE3 = crate::provider::ipa_pc::EvaluationEngine<G3>;
+    type S3 = crate::spartan::snark::RelaxedR1CSSNARK<G3, EE3>;
+    type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
+    test_snark_with::<G3, S3>();
+    test_snark_with::<G3, S3pp>();
   }
 
   fn test_snark_with<G: Group, S: RelaxedR1CSSNARKTrait<G>>() {
