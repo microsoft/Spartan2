@@ -2,14 +2,14 @@
 
 #![allow(non_snake_case)]
 
-use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment};
+use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS};
 use crate::{
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, R1CS},
   traits::Group,
   CommitmentKey,
 };
-use bellperson::{Index, LinearCombination};
+use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
@@ -48,45 +48,52 @@ where
   }
 }
 
-impl<G: Group> SpartanShape<G> for ShapeCS<G>
-where
-  G::Scalar: PrimeField,
-{
-  fn r1cs_shape(&self) -> (R1CSShape<G>, CommitmentKey<G>) {
-    let mut A: Vec<(usize, usize, G::Scalar)> = Vec::new();
-    let mut B: Vec<(usize, usize, G::Scalar)> = Vec::new();
-    let mut C: Vec<(usize, usize, G::Scalar)> = Vec::new();
+macro_rules! impl_spartan_shape {
+  ( $name:ident) => {
+    impl<G: Group> SpartanShape<G> for $name<G>
+    where
+      G::Scalar: PrimeField,
+    {
+      fn r1cs_shape(&self) -> (R1CSShape<G>, CommitmentKey<G>) {
+        let mut A: Vec<(usize, usize, G::Scalar)> = Vec::new();
+        let mut B: Vec<(usize, usize, G::Scalar)> = Vec::new();
+        let mut C: Vec<(usize, usize, G::Scalar)> = Vec::new();
 
-    let mut num_cons_added = 0;
-    let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
+        let mut num_cons_added = 0;
+        let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
 
-    let num_inputs = self.num_inputs();
-    let num_constraints = self.num_constraints();
-    let num_vars = self.num_aux();
+        let num_inputs = self.num_inputs();
+        let num_constraints = self.num_constraints();
+        let num_vars = self.num_aux();
 
-    for constraint in self.constraints.iter() {
-      add_constraint(
-        &mut X,
-        num_vars,
-        &constraint.0,
-        &constraint.1,
-        &constraint.2,
-      );
+        for constraint in self.constraints.iter() {
+          add_constraint(
+            &mut X,
+            num_vars,
+            &constraint.0,
+            &constraint.1,
+            &constraint.2,
+          );
+        }
+
+        assert_eq!(num_cons_added, num_constraints);
+
+        let S: R1CSShape<G> = {
+          // Don't count One as an input for shape's purposes.
+          let res = R1CSShape::new(num_constraints, num_vars, num_inputs - 1, &A, &B, &C);
+          res.unwrap()
+        };
+
+        let ck = R1CS::<G>::commitment_key(&S);
+
+        (S, ck)
+      }
     }
-
-    assert_eq!(num_cons_added, num_constraints);
-
-    let S: R1CSShape<G> = {
-      // Don't count One as an input for shape's purposes.
-      let res = R1CSShape::new(num_constraints, num_vars, num_inputs - 1, &A, &B, &C);
-      res.unwrap()
-    };
-
-    let ck = R1CS::<G>::commitment_key(&S);
-
-    (S, ck)
-  }
+  };
 }
+
+impl_spartan_shape!(ShapeCS);
+impl_spartan_shape!(TestShapeCS);
 
 fn add_constraint<S: PrimeField>(
   X: &mut (

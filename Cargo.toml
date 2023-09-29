@@ -11,7 +11,7 @@ license-file = "LICENSE"
 keywords = ["zkSNARKs", "cryptography", "proofs"]
 
 [dependencies]
-bellperson = { version = "0.25", default-features = false }
+bellpepper-core = "0.2.1"
 ff = { version = "0.13.0", features = ["derive"] }
 digest = "0.10"
 sha3 = "0.10"
@@ -21,7 +21,6 @@ rand_chacha = "0.3"
 itertools = "0.11"
 subtle = "2.5"
 pasta_curves = { version = "0.5", features = ["repr-c", "serde"] }
-neptune = { version = "10.0.0", default-features = false }
 generic-array = "0.14"
 num-bigint = { version = "0.4", features = ["serde", "rand"] }
 num-traits = "0.2"
@@ -54,6 +53,4 @@ proptest = "1.2.0"
 default = []
 # Compiles in portable mode, w/o ISA extensions => binary can be executed on all systems.
 portable = ["pasta-msm/portable"]
-cuda = ["neptune/cuda", "neptune/pasta", "neptune/arity24"]
-opencl = ["neptune/opencl", "neptune/pasta", "neptune/arity24"]
 flamegraph = ["pprof/flamegraph", "pprof/criterion"]
