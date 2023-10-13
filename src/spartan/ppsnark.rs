@@ -3,6 +3,11 @@
 //! The verifier in this preprocessing SNARK maintains a commitment to R1CS matrices. This is beneficial when using a
 //! polynomial commitment scheme in which the verifier's costs is succinct.
 use crate::{
+  bellpepper::{
+    r1cs::{SpartanShape, SpartanWitness},
+    shape_cs::ShapeCS,
+    solver::SatisfyingAssignment,
+  },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
@@ -25,10 +30,10 @@ use crate::{
   },
   Commitment, CommitmentKey, CompressedCommitment,
 };
+use bellpepper_core::{Circuit, ConstraintSystem};
 use core::{cmp::max, marker::PhantomData};
 use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
-
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -656,6 +661,7 @@ impl<G: Group> SumcheckEngine<G> for InnerSumcheckInstance<G> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
+  ck: CommitmentKey<G>,
   pk_ee: EE::ProverKey,
   S: R1CSShape<G>,
   S_repr: R1CSShapeSparkRepr<G>,
@@ -683,6 +689,9 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> SimpleDigestible for VerifierKey<G,
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
+  // commitment to witness
+  comm_W: CompressedCommitment<G>,
+
   // commitment to oracles
   comm_Az: CompressedCommitment<G>,
   comm_Bz: CompressedCommitment<G>,
@@ -876,21 +885,22 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
 
-  fn setup(
-    ck: &CommitmentKey<G>,
-    S: &R1CSShape<G>,
+  fn setup<C: Circuit<G::Scalar>>(
+    circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let (pk_ee, vk_ee) = EE::setup(ck);
+    let mut cs: ShapeCS<G> = ShapeCS::new();
+    let _ = circuit.synthesize(&mut cs);
+    let (S, ck) = cs.r1cs_shape();
 
-    // pad the R1CS matrices
-    let S = S.pad();
+    let (pk_ee, vk_ee) = EE::setup(&ck);
 
     let S_repr = R1CSShapeSparkRepr::new(&S);
-    let S_comm = S_repr.commit(ck);
+    let S_comm = S_repr.commit(&ck);
 
     let vk = VerifierKey::new(S.num_cons, S.num_vars, S_comm.clone(), vk_ee);
 
     let pk = ProverKey {
+      ck,
       pk_ee,
       S,
       S_repr,
@@ -902,12 +912,20 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   }
 
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
-  fn prove(
-    ck: &CommitmentKey<G>,
-    pk: &Self::ProverKey,
-    U: &RelaxedR1CSInstance<G>,
-    W: &RelaxedR1CSWitness<G>,
-  ) -> Result<Self, SpartanError> {
+  fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
+    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
+    let _ = circuit.synthesize(&mut cs);
+
+    let (u, w) = cs
+      .r1cs_instance_and_witness(&pk.S, &pk.ck)
+      .map_err(|_e| SpartanError::UnSat)?;
+
+    // convert the instance and witness to relaxed form
+    let (U, W) = (
+      RelaxedR1CSInstance::from_r1cs_instance_unchecked(&u.comm_W, &u.X),
+      RelaxedR1CSWitness::from_r1cs_witness(&pk.S, &w),
+    );
+
     let W = W.pad(&pk.S); // pad the witness
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
 
@@ -919,7 +937,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     // append the verifier key (which includes commitment to R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"U", U);
+    transcript.absorb(b"U", &U);
 
     // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
     let z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
@@ -929,8 +947,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     // commit to Az, Bz, Cz
     let (comm_Az, (comm_Bz, comm_Cz)) = rayon::join(
-      || G::CE::commit(ck, &Az),
-      || rayon::join(|| G::CE::commit(ck, &Bz), || G::CE::commit(ck, &Cz)),
+      || G::CE::commit(&pk.ck, &Az),
+      || rayon::join(|| G::CE::commit(&pk.ck, &Bz), || G::CE::commit(&pk.ck, &Cz)),
     );
 
     transcript.absorb(b"c", &[comm_Az, comm_Bz, comm_Cz].as_slice());
@@ -969,8 +987,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     // E_row(i) = eq(tau, row(i)) for all i
     // E_col(i) = z(col(i)) for all i
     let (mem_row, mem_col, E_row, E_col) = pk.S_repr.evaluation_oracles(&pk.S, &tau, &z);
-    let (comm_E_row, comm_E_col) =
-      rayon::join(|| G::CE::commit(ck, &E_row), || G::CE::commit(ck, &E_col));
+    let (comm_E_row, comm_E_col) = rayon::join(
+      || G::CE::commit(&pk.ck, &E_row),
+      || G::CE::commit(&pk.ck, &E_col),
+    );
 
     // absorb the claimed evaluations into the transcript
     transcript.absorb(
@@ -1090,7 +1110,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .collect::<Vec<G::Scalar>>();
 
     let mut mem_sc_inst = ProductSumcheckInstance::new(
-      ck,
+      &pk.ck,
       vec![
         init_row, read_row, write_row, audit_row, init_col, read_col, write_col, audit_col,
       ],
@@ -1450,7 +1470,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .sum();
 
     let eval_arg = EE::prove(
-      ck,
+      &pk.ck,
       &pk.pk_ee,
       &mut transcript,
       &comm_joint,
@@ -1460,6 +1480,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     )?;
 
     Ok(RelaxedR1CSSNARK {
+      comm_W: U.comm_W.compress(),
       comm_Az: comm_Az.compress(),
       comm_Bz: comm_Bz.compress(),
       comm_Cz: comm_Cz.compress(),
@@ -1512,13 +1533,17 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
-  fn verify(&self, vk: &Self::VerifierKey, U: &RelaxedR1CSInstance<G>) -> Result<(), SpartanError> {
+  fn verify(&self, vk: &Self::VerifierKey, io: &[G::Scalar]) -> Result<(), SpartanError> {
+    // construct an instance using the provided commitment to the witness and IO
+    let comm_W = Commitment::<G>::decompress(&self.comm_W)?;
+    let U = RelaxedR1CSInstance::from_r1cs_instance_unchecked(&comm_W, io);
+
     let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
     let mut u_vec: Vec<PolyEvalInstance<G>> = Vec::new();
 
     // append the verifier key (including commitment to R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest());
-    transcript.absorb(b"U", U);
+    transcript.absorb(b"U", &U);
 
     let comm_Az = Commitment::<G>::decompress(&self.comm_Az)?;
     let comm_Bz = Commitment::<G>::decompress(&self.comm_Bz)?;
