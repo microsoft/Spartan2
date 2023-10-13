@@ -13,6 +13,7 @@
 
 // private modules
 mod bellpepper;
+mod circom;
 mod constants;
 mod digest;
 mod r1cs;
