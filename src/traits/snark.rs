@@ -1,11 +1,6 @@
 //! This module defines a collection of traits that define the behavior of a zkSNARK for RelaxedR1CS
-use crate::{
-  errors::SpartanError,
-  r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
-  traits::Group,
-  CommitmentKey,
-};
-
+use crate::{errors::SpartanError, traits::Group};
+use bellpepper_core::Circuit;
 use serde::{Deserialize, Serialize};
 
 /// A trait that defines the behavior of a zkSNARK
@@ -19,19 +14,13 @@ pub trait RelaxedR1CSSNARKTrait<G: Group>:
   type VerifierKey: Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Produces the keys for the prover and the verifier
-  fn setup(
-    ck: &CommitmentKey<G>,
-    S: &R1CSShape<G>,
+  fn setup<C: Circuit<G::Scalar>>(
+    circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError>;
 
   /// Produces a new SNARK for a relaxed R1CS
-  fn prove(
-    ck: &CommitmentKey<G>,
-    pk: &Self::ProverKey,
-    U: &RelaxedR1CSInstance<G>,
-    W: &RelaxedR1CSWitness<G>,
-  ) -> Result<Self, SpartanError>;
+  fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError>;
 
   /// Verifies a SNARK for a relaxed R1CS
-  fn verify(&self, vk: &Self::VerifierKey, U: &RelaxedR1CSInstance<G>) -> Result<(), SpartanError>;
+  fn verify(&self, vk: &Self::VerifierKey, io: &[G::Scalar]) -> Result<(), SpartanError>;
 }
