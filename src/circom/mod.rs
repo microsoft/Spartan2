@@ -62,9 +62,27 @@ pub fn generate_proof<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
   SNARK::prove(&pk, circuit.clone())
 }
 
+#[allow(dead_code)]
+pub fn create_snark<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
+  r1cs_path: PathBuf,
+  wtns_path: PathBuf,
+  input: Vec<(String, Vec<<G as Group>::Scalar>)>,
+) -> (
+  ProverKey<G, S>,
+  VerifierKey<G, S>,
+  Result<SNARK<G, S, SpartanCircuit<<G as traits::Group>::Scalar>>, SpartanError>,
+) {
+  let mut circuit = SpartanCircuit::new(r1cs_path);
+  let (pk, vk) =
+    SNARK::<G, S, SpartanCircuit<<G as Group>::Scalar>>::setup(circuit.clone()).unwrap();
+  circuit.compute_witness(input, wtns_path);
+  let proof = SNARK::prove(&pk, circuit.clone());
+  (pk, vk, proof)
+}
+
 #[cfg(test)]
 mod test {
-  use super::{generate_proof, setup, SpartanCircuit};
+  use super::{create_snark, generate_proof, setup, SpartanCircuit};
   use crate::{provider::bn256_grumpkin::bn256, traits::Group};
   use std::env::current_dir;
 
@@ -77,15 +95,12 @@ mod test {
     let root = current_dir().unwrap().join("examples/cube");
     let r1cs_path = root.join("cube.r1cs");
     let wtns_path = root.join("cube.wasm");
-    let mut circuit = SpartanCircuit::new(r1cs_path);
-
-    let (pk, vk) = setup(circuit.clone());
 
     let arg_x = ("x".into(), vec![<G as Group>::Scalar::from(2)]);
     let arg_y = ("y".into(), vec![<G as Group>::Scalar::from(8)]);
     let input = vec![arg_x, arg_y];
 
-    let res = generate_proof::<G, S>(pk, &mut circuit, input, wtns_path);
+    let (_, vk, res) = create_snark::<G, S>(r1cs_path, wtns_path, input);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
