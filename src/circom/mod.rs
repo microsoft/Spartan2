@@ -38,19 +38,14 @@ impl<F: PrimeField> SpartanCircuit<F> {
 
 impl<F: PrimeField> Circuit<F> for SpartanCircuit<F> {
   fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-    let _ = circom_scotia::synthesize(
-      cs, //.namespace(|| "spartan_snark"),
-      self.r1cs.clone(),
-      self.witness,
-    )
-    .unwrap();
+    let _ = circom_scotia::synthesize(cs, self.r1cs.clone(), self.witness).unwrap();
 
     Ok(())
   }
 }
 
 #[allow(dead_code)]
-pub fn generate_keys<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
+pub fn setup<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
   circuit: SpartanCircuit<<G as Group>::Scalar>,
 ) -> (ProverKey<G, S>, VerifierKey<G, S>) {
   SNARK::<G, S, SpartanCircuit<<G as Group>::Scalar>>::setup(circuit).unwrap()
@@ -59,14 +54,17 @@ pub fn generate_keys<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
 #[allow(dead_code)]
 pub fn generate_proof<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
   pk: ProverKey<G, S>,
-  circuit: SpartanCircuit<<G as Group>::Scalar>,
+  circuit: &mut SpartanCircuit<<G as Group>::Scalar>,
+  input: Vec<(String, Vec<<G as Group>::Scalar>)>,
+  wtns_path: PathBuf,
 ) -> Result<SNARK<G, S, SpartanCircuit<<G as traits::Group>::Scalar>>, SpartanError> {
-  SNARK::prove(&pk, circuit)
+  circuit.compute_witness(input, wtns_path);
+  SNARK::prove(&pk, circuit.clone())
 }
 
 #[cfg(test)]
 mod test {
-  use super::{generate_keys, generate_proof, SpartanCircuit};
+  use super::{generate_proof, setup, SpartanCircuit};
   use crate::{provider::bn256_grumpkin::bn256, traits::Group};
   use std::env::current_dir;
 
@@ -81,15 +79,13 @@ mod test {
     let wtns_path = root.join("cube.wasm");
     let mut circuit = SpartanCircuit::new(r1cs_path);
 
-    let (pk, vk) = generate_keys(circuit.clone());
+    let (pk, vk) = setup(circuit.clone());
 
     let arg_x = ("x".into(), vec![<G as Group>::Scalar::from(2)]);
     let arg_y = ("y".into(), vec![<G as Group>::Scalar::from(8)]);
     let input = vec![arg_x, arg_y];
 
-    circuit.compute_witness(input, wtns_path);
-
-    let res = generate_proof::<G, S>(pk, circuit);
+    let res = generate_proof::<G, S>(pk, &mut circuit, input, wtns_path);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
@@ -107,16 +103,14 @@ mod test {
     let wtns_path = root.join("cube.wasm");
     let mut circuit = SpartanCircuit::new(r1cs_path);
 
-    let (pk, vk) = generate_keys(circuit.clone());
+    let (pk, vk) = setup(circuit.clone());
 
     // setting y to 9 shouldn't satisfy
     let arg_x = ("x".into(), vec![<G as Group>::Scalar::from(2)]);
     let arg_y = ("y".into(), vec![<G as Group>::Scalar::from(9)]);
     let input = vec![arg_x, arg_y];
 
-    circuit.compute_witness(input, wtns_path);
-
-    let res = generate_proof::<G, S>(pk, circuit);
+    let res = generate_proof::<G, S>(pk, &mut circuit, input, wtns_path);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
