@@ -63,6 +63,7 @@ pub struct RelaxedR1CSInstance<G: Group> {
 impl<G: Group> R1CS<G> {
   /// Samples public parameters for the specified number of constraints and variables in an R1CS
   pub fn commitment_key(S: &R1CSShape<G>) -> CommitmentKey<G> {
+    let S = S.pad(); // pad the shape before computing the commitment key
     let num_cons = S.num_cons;
     let num_vars = S.num_vars;
     let total_nz = S.A.len() + S.B.len() + S.C.len();

@@ -24,15 +24,9 @@ pub mod provider;
 pub mod spartan;
 pub mod traits;
 
-use crate::bellpepper::{
-  r1cs::{SpartanShape, SpartanWitness},
-  shape_cs::ShapeCS,
-  solver::SatisfyingAssignment,
-};
-use bellpepper_core::{Circuit, ConstraintSystem};
+use bellpepper_core::Circuit;
 use core::marker::PhantomData;
 use errors::SpartanError;
-use r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness};
 use serde::{Deserialize, Serialize};
 use traits::{
   commitment::{CommitmentEngineTrait, CommitmentTrait},
@@ -48,8 +42,6 @@ where
   G: Group,
   S: RelaxedR1CSSNARKTrait<G>,
 {
-  S: R1CSShape<G>,
-  ck: CommitmentKey<G>,
   pk: S::ProverKey,
 }
 
@@ -76,61 +68,34 @@ where
   S: RelaxedR1CSSNARKTrait<G>,
   C: Circuit<G::Scalar>,
 {
-  comm_W: Commitment<G>, // commitment to the witness
-  io: Vec<G::Scalar>,    // public IO
-  snark: S,              // snark proving the witness is satisfying
-  _p: PhantomData<C>,
+  snark: S, // snark proving the witness is satisfying
+  _p: PhantomData<G>,
+  _p2: PhantomData<C>,
 }
 
 impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
-    let mut cs: ShapeCS<G> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
-    let (shape, ck) = cs.r1cs_shape();
-
-    let (pk, vk) = S::setup(&ck, &shape)?;
-    let pk = ProverKey { S: shape, ck, pk };
-    let vk = VerifierKey { vk };
-
-    Ok((pk, vk))
+    let (pk, vk) = S::setup(circuit)?;
+    Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 
   /// Produces a proof of satisfiability of the provided circuit
   pub fn prove(pk: &ProverKey<G, S>, circuit: C) -> Result<Self, SpartanError> {
-    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
-    let _ = circuit.synthesize(&mut cs);
-
-    let (u, w) = cs
-      .r1cs_instance_and_witness(&pk.S, &pk.ck)
-      .map_err(|_e| SpartanError::UnSat)?;
-
-    // convert the instance and witness to relaxed form
-    let (u_relaxed, w_relaxed) = (
-      RelaxedR1CSInstance::from_r1cs_instance_unchecked(&u.comm_W, &u.X),
-      RelaxedR1CSWitness::from_r1cs_witness(&pk.S, &w),
-    );
-
     // prove the instance using Spartan
-    let snark = S::prove(&pk.ck, &pk.pk, &u_relaxed, &w_relaxed)?;
+    let snark = S::prove(&pk.pk, circuit)?;
 
     Ok(SNARK {
-      comm_W: u.comm_W,
-      io: u.X,
       snark,
       _p: Default::default(),
+      _p2: Default::default(),
     })
   }
 
   /// Verifies a proof of satisfiability
-  pub fn verify(&self, vk: &VerifierKey<G, S>) -> Result<Vec<G::Scalar>, SpartanError> {
-    // construct an instance using the provided commitment to the witness and IO
-    let u_relaxed = RelaxedR1CSInstance::from_r1cs_instance_unchecked(&self.comm_W, &self.io);
-
+  pub fn verify(&self, vk: &VerifierKey<G, S>, io: &[G::Scalar]) -> Result<(), SpartanError> {
     // verify the snark using the constructed instance
-    self.snark.verify(&vk.vk, &u_relaxed)?;
-
-    Ok(self.io.clone())
+    self.snark.verify(&vk.vk, io)
   }
 }
 
@@ -223,12 +188,7 @@ mod tests {
     let snark = res.unwrap();
 
     // verify the SNARK
-    let res = snark.verify(&vk);
+    let res = snark.verify(&vk, &[<G as Group>::Scalar::from(15u64)]);
     assert!(res.is_ok());
-
-    let io = res.unwrap();
-
-    // sanity: check the claimed output with a direct computation of the same
-    assert_eq!(io, vec![<G as Group>::Scalar::from(15u64)]);
   }
 }
