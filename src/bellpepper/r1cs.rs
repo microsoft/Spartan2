@@ -41,7 +41,6 @@ where
     let X = &self.input_assignment[1..];
 
     let comm_W = W.commit(ck);
-
     let instance = R1CSInstance::<G>::new(shape, &comm_W, X)?;
 
     Ok((instance, W))

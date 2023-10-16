@@ -40,7 +40,6 @@ impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Out
 /// This trait defines the behavior of the commitment
 pub trait CommitmentTrait<G: Group>:
   Clone
-  + Copy
   + Debug
   + Default
   + PartialEq
@@ -67,9 +66,6 @@ pub trait CommitmentTrait<G: Group>:
 
   /// Compresses self into a compressed commitment
   fn compress(&self) -> Self::CompressedCommitment;
-
-  /// Returns the coordinate representation of the commitment
-  fn to_coordinates(&self) -> (G::Base, G::Base, bool);
 
   /// Decompresses a compressed commitment into a commitment
   fn decompress(c: &Self::CompressedCommitment) -> Result<Self, SpartanError>;

@@ -50,4 +50,7 @@ pub enum SpartanError {
   /// returned when the consistency with public IO and assignment used fails
   #[error("IncorrectWitness")]
   IncorrectWitness,
+  /// returned when the library encounters an internal error
+  #[error("InternalError")]
+  InternalError,
 }

@@ -5,6 +5,7 @@
 //! `EvaluationEngine` with an IPA-based polynomial evaluation argument
 
 pub mod bn256_grumpkin;
+pub mod hyrax_pc;
 pub mod ipa_pc;
 pub mod keccak;
 pub mod pasta;
@@ -159,7 +160,7 @@ macro_rules! impl_traits {
       type CompressedGroupElement = $name_compressed;
       type PreprocessedGroupElement = $name::Affine;
       type TE = Keccak256Transcript<Self>;
-      type CE = CommitmentEngine<Self>;
+      type CE = HyraxCommitmentEngine<Self>;
 
       fn vartime_multiscalar_mul(
         scalars: &[Self::Scalar],
