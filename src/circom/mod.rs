@@ -85,13 +85,15 @@ mod test {
     let arg_y = ("y".into(), vec![<G as Group>::Scalar::from(8)]);
     let input = vec![arg_x, arg_y];
 
+    let io: Vec<<G as Group>::Scalar> = input.iter().flat_map(|v| v.1.iter().cloned()).collect();
+
     let (pk, vk) = setup::<G, S>(r1cs_path.clone());
 
     let res = prove::<G, S>(pk, r1cs_path, wtns_path, input);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
-    assert!(snark.verify(&vk).is_ok());
+    assert!(snark.verify(&vk, &io).is_ok());
   }
 
   #[test]
@@ -111,11 +113,13 @@ mod test {
     let arg_y = ("y".into(), vec![<G as Group>::Scalar::from(9)]);
     let input = vec![arg_x, arg_y];
 
+    let io: Vec<<G as Group>::Scalar> = input.iter().flat_map(|v| v.1.iter().cloned()).collect();
+
     let res = prove::<G, S>(pk, r1cs_path, wtns_path, input);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
     // check that it fails
-    assert!(snark.verify(&vk).is_err());
+    assert!(snark.verify(&vk, &io).is_err());
   }
 }
