@@ -1,10 +1,11 @@
 //! This module implements the Spartan traits for `pallas::Point`, `pallas::Scalar`, `vesta::Point`, `vesta::Scalar`.
 use crate::{
-  provider::{cpu_best_multiexp, hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
+  provider::{hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
   traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
 use ff::{FromUniformBytes, PrimeField};
+use halo2curves::msm::best_multiexp;
 use num_bigint::BigInt;
 use num_traits::Num;
 use pasta_curves::{
@@ -68,7 +69,7 @@ macro_rules! impl_traits {
         if scalars.len() >= 128 {
           pasta_msm::$name(bases, scalars)
         } else {
-          cpu_best_multiexp(scalars, bases)
+          best_multiexp(scalars, bases)
         }
       }
 
@@ -77,7 +78,7 @@ macro_rules! impl_traits {
         scalars: &[Self::Scalar],
         bases: &[Self::PreprocessedGroupElement],
       ) -> Self {
-        cpu_best_multiexp(scalars, bases)
+        best_multiexp(scalars, bases)
       }
 
       fn preprocessed(&self) -> Self::PreprocessedGroupElement {

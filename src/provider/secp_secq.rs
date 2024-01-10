@@ -1,12 +1,13 @@
 //! This module implements the Spartan traits for secp::Point, secp::Scalar, secq::Point, secq::Scalar.
 use crate::{
   impl_traits,
-  provider::{cpu_best_multiexp, hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
+  provider::{hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
   traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
 use ff::{FromUniformBytes, PrimeField};
 use group::{cofactor::CofactorCurveAffine, Curve, Group as AnotherGroup, GroupEncoding};
+use halo2curves::msm::best_multiexp;
 use halo2curves::secp256k1::{Secp256k1, Secp256k1Affine, Secp256k1Compressed};
 use halo2curves::secq256k1::{Secq256k1, Secq256k1Affine, Secq256k1Compressed};
 use num_bigint::BigInt;
