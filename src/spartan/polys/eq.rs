@@ -65,6 +65,22 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
 
     evals
   }
+
+  /// Computes the lengths of the left and right halves of the `EqPolynomial`'s vector `r`.
+  pub fn compute_factored_lens(ell: usize) -> (usize, usize) {
+    (ell / 2, ell - ell / 2)
+  }
+
+  /// Computes the left and right halves of the `EqPolynomial`.
+  pub fn compute_factored_evals(&self) -> (Vec<Scalar>, Vec<Scalar>) {
+    let ell = self.r.len();
+    let (left_num_vars, _right_num_vars) = EqPolynomial::<Scalar>::compute_factored_lens(ell);
+
+    let L = EqPolynomial::new(self.r[..left_num_vars].to_vec()).evals();
+    let R = EqPolynomial::new(self.r[left_num_vars..ell].to_vec()).evals();
+
+    (L, R)
+  }
 }
 
 #[cfg(test)]

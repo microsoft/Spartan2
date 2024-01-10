@@ -66,8 +66,7 @@ impl<G: Group> R1CS<G> {
     let S = S.pad(); // pad the shape before computing the commitment key
     let num_cons = S.num_cons;
     let num_vars = S.num_vars;
-    let total_nz = S.A.len() + S.B.len() + S.C.len();
-    G::CE::setup(b"ck", max(max(num_cons, num_vars), total_nz))
+    G::CE::setup(b"ck", max(num_cons, num_vars))
   }
 }
 
@@ -112,14 +111,17 @@ impl<G: Group> R1CSShape<G> {
       return Err(SpartanError::InvalidIndex);
     }
 
-    Ok(R1CSShape {
+    let shape = R1CSShape {
       num_cons,
       num_vars,
       num_io,
       A: A.to_owned(),
       B: B.to_owned(),
       C: C.to_owned(),
-    })
+    };
+
+    // pad the shape
+    Ok(shape.pad())
   }
 
   // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
@@ -354,11 +356,19 @@ impl<G: Group> R1CSShape<G> {
 impl<G: Group> R1CSWitness<G> {
   /// A method to create a witness object using a vector of scalars
   pub fn new(S: &R1CSShape<G>, W: &[G::Scalar]) -> Result<R1CSWitness<G>, SpartanError> {
-    if S.num_vars != W.len() {
-      Err(SpartanError::InvalidWitnessLength)
-    } else {
-      Ok(R1CSWitness { W: W.to_owned() })
-    }
+    let w = R1CSWitness { W: W.to_owned() };
+    Ok(w.pad(S))
+  }
+
+  /// Pads the provided witness to the correct length
+  pub fn pad(&self, S: &R1CSShape<G>) -> R1CSWitness<G> {
+    let W = {
+      let mut W = self.W.clone();
+      W.extend(vec![G::Scalar::ZERO; S.num_vars - W.len()]);
+      W
+    };
+
+    Self { W }
   }
 
   /// Commits to the witness using the supplied generators
@@ -378,7 +388,7 @@ impl<G: Group> R1CSInstance<G> {
       Err(SpartanError::InvalidInputLength)
     } else {
       Ok(R1CSInstance {
-        comm_W: *comm_W,
+        comm_W: comm_W.clone(),
         X: X.to_owned(),
       })
     }
@@ -471,7 +481,7 @@ impl<G: Group> RelaxedR1CSInstance<G> {
     instance: &R1CSInstance<G>,
   ) -> RelaxedR1CSInstance<G> {
     let mut r_instance = RelaxedR1CSInstance::default(ck, S);
-    r_instance.comm_W = instance.comm_W;
+    r_instance.comm_W = instance.comm_W.clone();
     r_instance.u = G::Scalar::ONE;
     r_instance.X = instance.X.clone();
     r_instance
@@ -483,7 +493,7 @@ impl<G: Group> RelaxedR1CSInstance<G> {
     X: &[G::Scalar],
   ) -> RelaxedR1CSInstance<G> {
     RelaxedR1CSInstance {
-      comm_W: *comm_W,
+      comm_W: comm_W.clone(),
       comm_E: Commitment::<G>::default(),
       u: G::Scalar::ONE,
       X: X.to_vec(),
@@ -507,8 +517,8 @@ impl<G: Group> RelaxedR1CSInstance<G> {
       .zip(X2)
       .map(|(a, b)| *a + *r * *b)
       .collect::<Vec<G::Scalar>>();
-    let comm_W = *comm_W_1 + *comm_W_2 * *r;
-    let comm_E = *comm_E_1 + *comm_T * *r;
+    let comm_W = comm_W_1.clone() + comm_W_2.clone() * *r;
+    let comm_E = comm_E_1.clone() + comm_T.clone() * *r;
     let u = *u1 + *r;
 
     Ok(RelaxedR1CSInstance {
