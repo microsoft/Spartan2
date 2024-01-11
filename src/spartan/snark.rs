@@ -6,7 +6,7 @@
 
 use crate::{
   bellpepper::{
-    r1cs::{SpartanShape, SpartanWitness},
+    r1cs::{SpartanWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
@@ -92,6 +92,28 @@ pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
   eval_arg: EE::EvaluationArgument,
 }
 
+// impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARK<G, EE> {
+//   fn setup_uniform<C: Circuit<G::Scalar>>(
+//     circuit: C,
+//   ) -> Result<(ProverKey<G, EE>, VerifierKey<G, EE>), SpartanError> {
+//     let mut cs: ShapeCS<G> = ShapeCS::new();
+//     let _ = circuit.synthesize(&mut cs);
+//     let (S, ck) = cs.r1cs_shape_uniform(185);
+
+//     let (pk_ee, vk_ee) = EE::setup(&ck);
+
+//     let vk: VerifierKey<G, EE> = VerifierKey::new(S.clone(), vk_ee);
+//     let pk = ProverKey {
+//       ck,
+//       pk_ee,
+//       S,
+//       vk_digest: vk.digest(),
+//     };
+
+//     Ok((pk, vk))
+//   }
+// }
+
 impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for RelaxedR1CSSNARK<G, EE> {
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
@@ -101,17 +123,26 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
-    let (S, ck) = cs.r1cs_shape();
+    let (S, ck) = cs.r1cs_shape_uniform(33975);
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
+    let span = tracing::span!(tracing::Level::INFO, "setup vk ");
+    let _guard = span.enter();
     let vk: VerifierKey<G, EE> = VerifierKey::new(S.clone(), vk_ee);
+    drop(_guard); 
+    drop(span); 
+
+    let span = tracing::span!(tracing::Level::INFO, "setup pk");
+    let _guard = span.enter();
     let pk = ProverKey {
       ck,
       pk_ee,
       S,
       vk_digest: vk.digest(),
     };
+    drop(_guard); 
+    drop(span); 
 
     Ok((pk, vk))
   }

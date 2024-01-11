@@ -223,7 +223,11 @@ impl<G: Group> CommitmentEngineTrait<G> for HyraxCommitmentEngine<G> {
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
     let num_vars = n.next_power_of_two().log_2();
     let (_left, right) = EqPolynomial::<G::Scalar>::compute_factored_lens(num_vars);
+    let span = tracing::span!(tracing::Level::INFO, "sampling generators");
+    let _guard = span.enter();
     let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
+    drop(_guard); 
+    drop(span); 
     HyraxCommitmentKey { ck }
   }
 
@@ -322,14 +326,22 @@ where
   fn setup(
     ck: &<<G as Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey,
   ) -> (Self::ProverKey, Self::VerifierKey) {
+    let span = tracing::span!(tracing::Level::INFO, "hyrax PK");
+    let _guard = span.enter();
     let pk = HyraxProverKey::<G> {
       ck_s: G::CE::setup(b"hyrax", 1),
     };
+    drop(_guard); 
+    drop(span); 
 
+    let span = tracing::span!(tracing::Level::INFO, "hyrax VK");
+    let _guard = span.enter();
     let vk = HyraxVerifierKey::<G> {
       ck_v: ck.clone(),
       ck_s: G::CE::setup(b"hyrax", 1),
     };
+    drop(_guard); 
+    drop(span); 
 
     (pk, vk)
   }

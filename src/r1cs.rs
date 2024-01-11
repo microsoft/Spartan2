@@ -72,6 +72,7 @@ impl<G: Group> R1CS<G> {
 
 impl<G: Group> R1CSShape<G> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
+  #[tracing::instrument(skip_all, name = "R1CSShape::new")]
   pub fn new(
     num_cons: usize,
     num_vars: usize,
