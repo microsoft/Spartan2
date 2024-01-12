@@ -373,6 +373,7 @@ impl<G: Group> R1CSWitness<G> {
   }
 
   /// Commits to the witness using the supplied generators
+  #[tracing::instrument(skip_all, name = "R1CSWitness::commit")]
   pub fn commit(&self, ck: &CommitmentKey<G>) -> Commitment<G> {
     CE::<G>::commit(ck, &self.W)
   }
