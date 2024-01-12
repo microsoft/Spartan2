@@ -112,10 +112,6 @@ impl<G: Group> ShapeCS<G> {
     let num_constraints_total = num_constraints_per_step * N;
     let num_aux_total = num_aux_per_step * N;
 
-    println!("num inputs: {}", num_inputs);
-    println!("num constraints per step: {}", num_constraints_per_step);
-    println!("num aux per step: {}", num_aux_per_step);
-
     let span = tracing::span!(tracing::Level::INFO, "r1cs matrix creation");
     let _guard = span.enter();
     for constraint in self.constraints.iter() {
@@ -228,15 +224,31 @@ fn add_constraint_uniform<S: PrimeField>(
     }
   };
 
-  for (index, coeff) in a_lc.iter() {
-    add_constraint_component(index.0, coeff, A);
-  }
-  for (index, coeff) in b_lc.iter() {
-    add_constraint_component(index.0, coeff, B)
-  }
-  for (index, coeff) in c_lc.iter() {
-    add_constraint_component(index.0, coeff, C)
-  }
+  // for (index, coeff) in a_lc.iter() {
+  //   add_constraint_component(index.0, coeff, A);
+  // }
+  // for (index, coeff) in b_lc.iter() {
+  //   add_constraint_component(index.0, coeff, B)
+  // }
+  // for (index, coeff) in c_lc.iter() {
+  //   add_constraint_component(index.0, coeff, C)
+  // }
+
+  rayon::join(|| {
+    a_lc.iter().for_each(|(index, coeff)| {
+        add_constraint_component(index.0, coeff, A);
+    });
+  }, || {
+    rayon::join(|| {
+        b_lc.iter().for_each(|(index, coeff)| {
+            add_constraint_component(index.0, coeff, B);
+        });
+    }, || {
+        c_lc.iter().for_each(|(index, coeff)| {
+            add_constraint_component(index.0, coeff, C);
+        });
+    });
+  });
 
   **nn += num_steps;
 }
