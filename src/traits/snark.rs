@@ -18,6 +18,12 @@ pub trait RelaxedR1CSSNARKTrait<G: Group>:
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError>;
 
+  /// Produces the keys for the prover and the verifier
+  fn setup_uniform<C: Circuit<G::Scalar>>(
+    circuit: C,
+    num_steps: usize,
+  ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError>;
+
   /// Produces a new SNARK for a relaxed R1CS
   fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError>;
 
