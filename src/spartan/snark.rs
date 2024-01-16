@@ -148,6 +148,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   }
 
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
+  #[tracing::instrument(skip_all, name = "Spartan2::R1CSSnark::prove")]
   fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
     let _ = circuit.synthesize(&mut cs);
@@ -269,7 +270,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
           (A_evals, B_evals, C_evals)
         };
 
+      let span = tracing::span!(tracing::Level::TRACE, "compute_eval_table_sparse");
+      let _enter = span.enter();
       let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+      drop(_enter);
+      drop(span);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
@@ -298,7 +303,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     // add additional claims about W and E polynomials to the list from CC
     let mut w_u_vec = Vec::new();
+    let span = tracing::span!(tracing::Level::TRACE, "MultilinearPolynomial::evaluate_with");
+    let _enter = span.enter();
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
+    drop(_enter);
+    drop(span);
     w_u_vec.push((
       PolyEvalWitness { p: W.W.clone() },
       PolyEvalInstance {
@@ -341,6 +350,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .map(|(u, p)| u.e * p)
       .sum();
 
+    let span = tracing::span!(tracing::Level::TRACE, "poly_construction");
+    let _enter = span.enter();
     let mut polys_left: Vec<MultilinearPolynomial<G::Scalar>> = w_vec_padded
       .iter()
       .map(|w| MultilinearPolynomial::new(w.p.clone()))
@@ -349,6 +360,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .iter()
       .map(|u| MultilinearPolynomial::new(EqPolynomial::new(u.x.clone()).evals()))
       .collect();
+    drop(_enter);
+    drop(span);
 
     let num_rounds_z = u_vec_padded[0].x.len();
     let comb_func = |poly_A_comp: &G::Scalar, poly_B_comp: &G::Scalar| -> G::Scalar {
@@ -371,6 +384,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     // we now combine evaluation claims at the same point rz into one
     let gamma = transcript.squeeze(b"g")?;
     let powers_of_gamma: Vec<G::Scalar> = powers::<G>(&gamma, num_claims);
+    let span = tracing::span!(tracing::Level::TRACE, "combine_evals");
+    let _enter = span.enter();
     let comm_joint = u_vec_padded
       .iter()
       .zip(powers_of_gamma.iter())
@@ -382,6 +397,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .zip(powers_of_gamma.iter())
       .map(|(e, g_i)| *e * *g_i)
       .sum();
+    drop(_enter);
+    drop(span);
 
     let eval_arg = EE::prove(
       &pk.ck,

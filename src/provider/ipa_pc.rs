@@ -173,6 +173,7 @@ impl<G: Group> InnerProductArgument<G> {
   }
 
   /// Proves an inner product relationship
+  #[tracing::instrument(skip_all, name = "InnerProductArgument::prove")]
   pub fn prove(
     ck: &PedersenCommitmentKey<G>,
     ck_c: &PedersenCommitmentKey<G>,
