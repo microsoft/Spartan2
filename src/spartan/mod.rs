@@ -15,6 +15,8 @@ use crate::{traits::Group, Commitment};
 use ff::Field;
 use polys::multilinear::SparsePolynomial;
 
+use rayon::prelude::*;
+
 fn powers<G: Group>(s: &G::Scalar, n: usize) -> Vec<G::Scalar> {
   assert!(n >= 1);
   let mut powers = Vec::new();
@@ -46,14 +48,21 @@ impl<G: Group> PolyEvalWitness<G> {
     }
   }
 
+  #[tracing::instrument(skip_all, name = "PolyEvalWitness::weighted_sum")]
   fn weighted_sum(W: &[PolyEvalWitness<G>], s: &[G::Scalar]) -> PolyEvalWitness<G> {
     assert_eq!(W.len(), s.len());
-    let mut p = vec![G::Scalar::ZERO; W[0].p.len()];
-    for i in 0..W.len() {
-      for j in 0..W[i].p.len() {
-        p[j] += W[i].p[j] * s[i]
-      }
-    }
+    let p = W.par_iter()
+      .zip(s.par_iter())
+      .map(|(w, s_i)| {
+        w.p.iter().map(|w_p_j| *w_p_j * s_i).collect::<Vec<G::Scalar>>()
+      })
+      .reduce_with(|mut acc, item| {
+        for (j, item_j) in item.iter().enumerate() {
+          acc[j] += *item_j;
+        }
+        acc
+      })
+      .unwrap();
     PolyEvalWitness { p }
   }
 
