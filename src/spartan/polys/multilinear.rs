@@ -67,6 +67,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Bounds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::bound_poly_var_top")]
   pub fn bound_poly_var_top(&mut self, r: &Scalar) {
     let n = self.len() / 2;
 
@@ -87,6 +88,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Returns Z(r) in O(n) time.
   ///
   /// The point must have a value for each variable.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::evaluate")]
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
     assert_eq!(r.len(), self.get_num_vars());

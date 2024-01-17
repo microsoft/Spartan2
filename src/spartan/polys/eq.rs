@@ -32,6 +32,7 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
   /// It expects `rx` to have the same length as the internal vector `r`.
   ///
   /// Panics if `rx` and `r` have different lengths.
+  #[tracing::instrument(skip_all, "EqPolynomial::evaluate")]
   pub fn evaluate(&self, rx: &[Scalar]) -> Scalar {
     assert_eq!(self.r.len(), rx.len());
     (0..rx.len())
@@ -42,6 +43,7 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
   /// Evaluates the `EqPolynomial` at all the `2^|r|` points in its domain.
   ///
   /// Returns a vector of Scalars, each corresponding to the polynomial evaluation at a specific point.
+  #[tracing::instrument(skip_all, "EqPolynomial::evals")]
   pub fn evals(&self) -> Vec<Scalar> {
     let ell = self.r.len();
     let mut evals: Vec<Scalar> = vec![Scalar::ZERO; (2_usize).pow(ell as u32)];
