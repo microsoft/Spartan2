@@ -75,6 +75,45 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> VerifierKey<G, EE> {
   }
 }
 
+/// A uniform version of the verifier's key
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct UniformVerifierKey<G: Group, EE: EvaluationEngineTrait<G>> {
+  vk_ee: EE::VerifierKey,
+  S: R1CSShape<G>, // The full shape
+  S_single: R1CSShape<G>, // A single step's shape
+  num_steps: usize, // Number of steps
+  #[serde(skip, default = "OnceCell::new")]
+  digest: OnceCell<G::Scalar>,
+}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> SimpleDigestible for UniformVerifierKey<G, EE> {}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> UniformVerifierKey<G, EE> {
+  fn new(shape: R1CSShape<G>, vk_ee: EE::VerifierKey, shape_single: R1CSShape<G>, num_steps: usize) -> Self {
+    UniformVerifierKey {
+      vk_ee,
+      S: shape,
+      S_single: shape_single,
+      num_steps: num_steps,
+      digest: OnceCell::new(),
+    }
+  }
+
+  /// Returns the digest of the verifier's key.
+  pub fn digest(&self) -> G::Scalar {
+    self
+      .digest
+      .get_or_try_init(|| {
+        let vk = VerifierKey::<G, EE>::new(self.S_single.clone(), self.vk_ee.clone()); 
+        let dc = DigestComputer::<G::Scalar, _>::new(&vk);
+        dc.digest()
+      })
+      .cloned()
+      .expect("Failure to retrieve digest!")
+  }
+}
+
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
@@ -94,21 +133,20 @@ pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
 
 impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for RelaxedR1CSSNARK<G, EE> {
   type ProverKey = ProverKey<G, EE>;
-  type VerifierKey = VerifierKey<G, EE>;
+  type VerifierKey = UniformVerifierKey<G, EE>;
 
   fn setup<C: Circuit<G::Scalar>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
-    // let (S, ck) = cs.r1cs_shape_uniform(33975);
     let (S, ck) = cs.r1cs_shape();
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
     let span = tracing::span!(tracing::Level::INFO, "setup vk ");
     let _guard = span.enter();
-    let vk: VerifierKey<G, EE> = VerifierKey::new(S.clone(), vk_ee);
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S.clone(), 1);
     drop(_guard); 
     drop(span); 
 
@@ -126,17 +164,19 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     Ok((pk, vk))
   }
 
+  #[tracing::instrument(skip_all, name = "SNARK::setup_uniform")]
   fn setup_uniform<C: Circuit<G::Scalar>>(
     circuit: C,
     num_steps: usize, 
-  ) -> Result<(ProverKey<G, EE>, VerifierKey<G, EE>), SpartanError> {
+  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
-    let (S, ck) = cs.r1cs_shape_uniform(num_steps);
+    let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
-    let vk: VerifierKey<G, EE> = VerifierKey::new(S.clone(), vk_ee);
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
+
     let pk = ProverKey {
       ck,
       pk_ee,
@@ -148,6 +188,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   }
 
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
+  #[tracing::instrument(skip_all, name = "SNARK::prove")]
   fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
     let _ = circuit.synthesize(&mut cs);
@@ -407,6 +448,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
+  #[tracing::instrument(skip_all, name = "SNARK::verify")]
   fn verify(&self, vk: &Self::VerifierKey, io: &[G::Scalar]) -> Result<(), SpartanError> {
     // construct an instance using the provided commitment to the witness and IO
     let comm_W = Commitment::<G>::decompress(&self.comm_W)?;
