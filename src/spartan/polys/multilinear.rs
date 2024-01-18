@@ -126,6 +126,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   }
 
   /// Bounds the polynomial's top variables using the given scalars.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::bound")]
   pub fn bound(&self, L: &[Scalar]) -> Vec<Scalar> {
     let (left_num_vars, right_num_vars) =
       EqPolynomial::<Scalar>::compute_factored_lens(self.num_vars);
