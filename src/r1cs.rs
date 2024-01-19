@@ -147,16 +147,82 @@ impl<G: Group> R1CSShape<G> {
     // This does not perform any validation of entries in M (e.g., if entries in `M` reference indexes outside the range of `z`)
     // This is safe since we know that `M` is valid
     let sparse_matrix_vec_product =
-      |M: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
-        (0..M.len())
-          .map(|i| {
-            let (row, col, val) = M[i];
-            (row, val * z[col])
-          })
-          .fold(vec![G::Scalar::ZERO; num_rows], |mut Mz, (r, v)| {
-            Mz[r] += v;
-            Mz
-          })
+      |M: &Vec<(usize, usize, G::Scalar)>, _num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
+        // let span = tracing::span!(tracing::Level::TRACE, "multiplication");
+        // let _enter = span.enter();
+        // let result: Vec<std::sync::Mutex<G::Scalar>> = (0.._num_rows).map(|_| std::sync::Mutex::new(G::Scalar::ZERO)).collect();
+        // M.par_iter().for_each(|(row, col, val)| {
+        //   *result[*row].lock().unwrap() += *val * z[*col];
+        // });
+
+        // let span_a = tracing::span!(tracing::Level::TRACE, "mutex_unwrap");
+        // let _enter_a = span.enter();
+        // let result: Vec<G::Scalar> = result.into_iter().map(|x| *x.lock().unwrap()).collect();
+        // println!("result len: {}", result.len());
+        // drop(_enter_a);
+        // drop(span_a);
+
+        // Attempt personal chunking strat!
+        let span = tracing::span!(tracing::Level::TRACE, "chunkers");
+        let _enter = span.enter();
+        let num_threads = rayon::current_num_threads();
+        let thread_chunk_size = M.len() / num_threads;
+        let row_chunk_size = (_num_rows as f64 / num_threads as f64).ceil() as usize;
+
+        let mut chunks: Vec<std::sync::Mutex<Vec<G::Scalar>>> = Vec::with_capacity(num_threads);
+        let mut remaining_rows = _num_rows;
+        (0..num_threads).for_each(|i| {
+          if i == num_threads - 1 { // the final chunk may be smaller
+            let inner = std::sync::Mutex::new(vec![G::Scalar::ZERO; remaining_rows]);
+            chunks.push(inner);
+          } else {
+            let inner = std::sync::Mutex::new(vec![G::Scalar::ZERO; row_chunk_size]);
+            chunks.push(inner);
+            remaining_rows -= row_chunk_size;
+          }
+        });
+
+        let get_chunk = |row_index: usize| -> usize { row_index / row_chunk_size };
+        let get_index = |row_index: usize| -> usize { row_index % row_chunk_size };
+
+        M.par_chunks(thread_chunk_size).for_each(|sub_matrix: &[(usize, usize, G::Scalar)]| {
+          let (init_row, init_col, init_val) = sub_matrix[0];
+          let mut prev_chunk = get_chunk(init_row);
+          let curr_row_index = get_index(init_row);
+          let mut curr_chunk = chunks[prev_chunk].lock().unwrap();
+
+          curr_chunk[curr_row_index] += init_val * z[init_col];
+
+          let span_a = tracing::span!(tracing::Level::TRACE, "inner_chunk");
+          let _enter_b = span_a.enter();
+          for (row, col, val) in sub_matrix.iter().skip(1) {
+            let chunk_index = get_chunk(*row);
+            if prev_chunk != chunk_index { // only unlock the mutex again if required
+              curr_chunk = chunks[get_chunk(*row)].lock().unwrap();
+              prev_chunk = chunk_index;
+            }
+
+            curr_chunk[get_index(*row)] += *val * z[*col];
+          }
+        });
+        // Can we just unwrap this thing!!
+        let span_a = tracing::span!(tracing::Level::TRACE, "mutex_unwrap");
+        let _enter_a = span_a.enter();
+        let flat_chunks: Vec<G::Scalar> = chunks.into_iter().map(|chunk| chunk.into_inner().unwrap()).flatten().collect();
+        println!("result len: {}", flat_chunks.len());
+        drop(_enter_a);
+        drop(span_a);
+
+        // Next: 
+        // - Chunks which keep the mutex open
+        // - Attempt multiplication speedups.
+
+
+
+        drop(_enter);
+        drop(span);
+
+        flat_chunks
       };
 
     let (Az, (Bz, Cz)) = rayon::join(
@@ -408,6 +474,7 @@ impl<G: Group> RelaxedR1CSWitness<G> {
   }
 
   /// Initializes a new RelaxedR1CSWitness from an R1CSWitness
+  #[tracing::instrument(skip_all, name = "RelaxedR1CSWitness::from_r1cs_witness")]
   pub fn from_r1cs_witness(S: &R1CSShape<G>, witness: &R1CSWitness<G>) -> RelaxedR1CSWitness<G> {
     RelaxedR1CSWitness {
       W: witness.W.clone(),
@@ -491,6 +558,7 @@ impl<G: Group> RelaxedR1CSInstance<G> {
   }
 
   /// Initializes a new RelaxedR1CSInstance from an R1CSInstance
+  #[tracing::instrument(skip_all, name = "RelaxedR1CSInstance::from_r1cs_instance_unchecked")]
   pub fn from_r1cs_instance_unchecked(
     comm_W: &Commitment<G>,
     X: &[G::Scalar],
