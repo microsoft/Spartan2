@@ -4,6 +4,8 @@
 //! description of R1CS matrices. This is essentially optimal for the verifier when using
 //! an IPA-based polynomial commitment scheme.
 
+use std::{sync::{RwLock}, collections::HashMap};
+
 use crate::{
   bellpepper::{
     r1cs::{SpartanShape, SpartanWitness},
@@ -230,6 +232,13 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
+    let mut new_A: Vec<(usize, usize, G::Scalar)> = pk.S.A.clone();
+    new_A.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut new_B: Vec<(usize, usize, G::Scalar)> = pk.S.B.clone();
+    new_B.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut new_C: Vec<(usize, usize, G::Scalar)> = pk.S.C.clone();
+    new_C.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
     let span = tracing::span!(tracing::Level::TRACE, "poly_ABC");
     let _enter = span.enter();
     let poly_ABC = {
@@ -258,10 +267,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
             vec![G::Scalar::ZERO; 2 * S.num_vars]
           );
           rayon::join(
-            || inner(&S.A, &mut A_evals),
+            || inner(&new_A, &mut A_evals),
             || rayon::join(
-              || inner(&S.B, &mut B_evals),
-              || inner(&S.C, &mut C_evals),
+              || inner(&new_B, &mut B_evals),
+              || inner(&new_C, &mut C_evals),
             ),
           );
 
@@ -270,6 +279,68 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
       let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
 
+      assert_eq!(evals_A.len(), evals_B.len());
+      assert_eq!(evals_A.len(), evals_C.len());
+
+      let span_e = tracing::span!(tracing::Level::TRACE, "eval_combo_old");
+      let _enter_e = span_e.enter();
+      let r_sq = r * r;
+      let thing = (0..evals_A.len())
+        .into_par_iter()
+        .map(|i| {
+          evals_A[i] + evals_B[i] * r + evals_C[i] * r_sq
+        })
+        .collect::<Vec<G::Scalar>>();
+      drop(_enter_e);
+      drop(span_e);
+
+      thing
+    };
+    drop(_enter);
+    drop(span);
+
+
+
+    let span = tracing::span!(tracing::Level::TRACE, "poly_ABC_2");
+    let _enter = span.enter();
+    let _poly_ABC = {
+      // compute the initial evaluation table for R(\tau, x)
+      let evals_rx = EqPolynomial::new(r_x.clone()).evals();
+
+      // Bounds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
+      let compute_eval_table_sparse_par = |matrix: &Vec<(usize, usize, G::Scalar)>, rx: &[G::Scalar], num_cols: usize| -> Vec<G::Scalar> {
+          let span_constructing_rwlock = tracing::span!(tracing::Level::TRACE, "constructing_rwlock");
+          let _enter_constructing_rwlock = span_constructing_rwlock.enter();
+          let cols: Vec<RwLock<G::Scalar>> = (0..num_cols).map(|_| RwLock::new(G::Scalar::ZERO)).collect();
+          drop(_enter_constructing_rwlock);
+          drop(span_constructing_rwlock);
+          
+          matrix.par_iter().for_each(|(row, col, val)| {
+            let mut col = cols[*col].write().unwrap();
+            if val.eq(&G::Scalar::ONE) {
+              *col += rx[*row];
+            } else {
+              let m = rx[*row] * val;
+              *col += m;
+            }
+          });
+
+          let span_unrwlock = tracing::span!(tracing::Level::TRACE, "unrwlocking");
+          let _enter_unrwlock = span_unrwlock.enter();
+          let cols: Vec<G::Scalar> = cols.into_iter().map(|col| *col.try_read().unwrap()).collect();
+          drop(_enter_unrwlock);
+          drop(span_unrwlock);
+          cols
+        };
+
+      let num_cols = pk.S.num_vars * 2;
+      let (evals_A, (evals_B, evals_C)) = rayon::join(
+        || compute_eval_table_sparse_par(&new_A, &evals_rx, num_cols),
+        || rayon::join(
+          || compute_eval_table_sparse_par(&new_B, &evals_rx, num_cols),
+          || compute_eval_table_sparse_par(&new_C, &evals_rx, num_cols)
+        )
+      );
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
 
