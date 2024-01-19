@@ -245,6 +245,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
             let _enter = span.enter();
             let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
             let poly_uCz_E = (0..pk.S.num_cons)
+                .into_par_iter()
                 .map(|i| U.u * poly_Cz[i] + W.E[i])
                 .collect::<Vec<G::Scalar>>();
             (

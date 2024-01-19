@@ -148,24 +148,13 @@ impl<G: Group> R1CSShape<G> {
     // This is safe since we know that `M` is valid
     let sparse_matrix_vec_product =
       |M: &Vec<(usize, usize, G::Scalar)>, _num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
-        // let span = tracing::span!(tracing::Level::TRACE, "multiplication");
-        // let _enter = span.enter();
-        // let result: Vec<std::sync::Mutex<G::Scalar>> = (0.._num_rows).map(|_| std::sync::Mutex::new(G::Scalar::ZERO)).collect();
-        // M.par_iter().for_each(|(row, col, val)| {
-        //   *result[*row].lock().unwrap() += *val * z[*col];
-        // });
 
-        // let span_a = tracing::span!(tracing::Level::TRACE, "mutex_unwrap");
-        // let _enter_a = span.enter();
-        // let result: Vec<G::Scalar> = result.into_iter().map(|x| *x.lock().unwrap()).collect();
-        // println!("result len: {}", result.len());
-        // drop(_enter_a);
-        // drop(span_a);
+        // Parallelism strategy below splits the (row, column, value) tuples into num_threads different chunks.
+        // It is assumed that the tuples are (row, column) ordered. We exploit this fact to create a mutex over
+        // each of the chunks and assume that only one of the threads will be writing to each chunk at a time
+        // due to ordering.
 
-        // Attempt personal chunking strat!
-        let span = tracing::span!(tracing::Level::TRACE, "chunkers");
-        let _enter = span.enter();
-        let num_threads = rayon::current_num_threads();
+        let num_threads = rayon::current_num_threads() * 4; // Enable work stealing incase of thread work imbalance
         let thread_chunk_size = M.len() / num_threads;
         let row_chunk_size = (_num_rows as f64 / num_threads as f64).ceil() as usize;
 
@@ -185,6 +174,8 @@ impl<G: Group> R1CSShape<G> {
         let get_chunk = |row_index: usize| -> usize { row_index / row_chunk_size };
         let get_index = |row_index: usize| -> usize { row_index % row_chunk_size };
 
+        let span = tracing::span!(tracing::Level::TRACE, "all_chunks_multiplication");
+        let _enter = span.enter();
         M.par_chunks(thread_chunk_size).for_each(|sub_matrix: &[(usize, usize, G::Scalar)]| {
           let (init_row, init_col, init_val) = sub_matrix[0];
           let mut prev_chunk = get_chunk(init_row);
@@ -193,7 +184,7 @@ impl<G: Group> R1CSShape<G> {
 
           curr_chunk[curr_row_index] += init_val * z[init_col];
 
-          let span_a = tracing::span!(tracing::Level::TRACE, "inner_chunk");
+          let span_a = tracing::span!(tracing::Level::TRACE, "chunk_multiplication");
           let _enter_b = span_a.enter();
           for (row, col, val) in sub_matrix.iter().skip(1) {
             let chunk_index = get_chunk(*row);
@@ -202,25 +193,34 @@ impl<G: Group> R1CSShape<G> {
               prev_chunk = chunk_index;
             }
 
-            curr_chunk[get_index(*row)] += *val * z[*col];
+            if z[*col].is_zero_vartime() { 
+              continue; 
+            }
+
+            let m = if z[*col].eq(&G::Scalar::ONE) {
+              *val
+            } else if val.eq(&G::Scalar::ONE) {
+              z[*col]
+            } else {
+              *val * z[*col]
+            };
+            curr_chunk[get_index(*row)] += m;
           }
         });
-        // Can we just unwrap this thing!!
-        let span_a = tracing::span!(tracing::Level::TRACE, "mutex_unwrap");
+        drop(_enter);
+        drop(span);
+
+        let span_a = tracing::span!(tracing::Level::TRACE, "chunks_mutex_unwrap");
         let _enter_a = span_a.enter();
-        let flat_chunks: Vec<G::Scalar> = chunks.into_iter().map(|chunk| chunk.into_inner().unwrap()).flatten().collect();
-        println!("result len: {}", flat_chunks.len());
+        // TODO(sragss): Mutex unwrap takes about 30% of the time due to clone, likely unnecessary.
+        let mut flat_chunks: Vec<G::Scalar> = Vec::with_capacity(_num_rows);
+        for chunk in chunks {
+          let inner_vec = chunk.into_inner().unwrap();
+          flat_chunks.extend(inner_vec);
+        }
         drop(_enter_a);
         drop(span_a);
 
-        // Next: 
-        // - Chunks which keep the mutex open
-        // - Attempt multiplication speedups.
-
-
-
-        drop(_enter);
-        drop(span);
 
         flat_chunks
       };
