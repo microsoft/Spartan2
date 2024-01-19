@@ -134,6 +134,7 @@ impl<G: Group> R1CSShape<G> {
     assert!(self.num_io < self.num_vars);
   }
 
+  #[tracing::instrument(skip_all, name = "R1CSShape::multiply_vec")]
   pub fn multiply_vec(
     &self,
     z: &[G::Scalar],
