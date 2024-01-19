@@ -223,7 +223,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         transcript.absorb(b"U", &U);
 
         // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
+        let span = tracing::span!(tracing::Level::TRACE, "concatenation");
+        let _enter = span.enter();
         let mut z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
+        drop(_enter);
+        drop(span);
 
         let (num_rounds_x, num_rounds_y) = (
             usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
