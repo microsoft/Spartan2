@@ -232,29 +232,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
-    use std::collections::HashMap;
-
-    let count_values = |matrix: &Vec<(usize, usize, G::Scalar)>| {
-        let mut val_count = HashMap::new();
-        for (_row, _col, val) in matrix {
-            let inner = bincode::serialize(val).unwrap();
-            *val_count.entry(inner).or_insert(0) += 1;
-        }
-
-        let mut val_count_vec: Vec<(&Vec<u8>, &i32)> = val_count.iter().collect();
-        val_count_vec.sort_by(|a, b| b.1.cmp(a.1));
-        for (val, count) in val_count_vec {
-            let deserialized_val: G::Scalar = bincode::deserialize(val).unwrap();
-            println!("Value: {:?}, Count: {} sq: {:?}", deserialized_val, count, deserialized_val * deserialized_val);
-        }
-    };
-
-    println!("A: ==================== {}", pk.S.A.len());
-    count_values(&pk.S.A);
-    println!("\n\nB: ==================== {}", pk.S.B.len());
-    count_values(&pk.S.B);
-    println!("\n\nC: ==================== {}", pk.S.C.len());
-    count_values(&pk.S.C);
 
     // SAMS NEW TURBO VERSION
     let compute_eval_table_sparse_par = |matrix: &Vec<(usize, usize, G::Scalar)>, rx: &[G::Scalar], col_len: usize| -> Vec<Mutex<G::Scalar>> {
