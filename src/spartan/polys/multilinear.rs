@@ -134,6 +134,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     let R_size = (2_usize).pow(right_num_vars as u32);
 
     (0..R_size)
+      .into_par_iter()
       .map(|i| {
         (0..L_size)
           .map(|j| L[j] * self.Z[j * R_size + i])
