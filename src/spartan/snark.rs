@@ -26,7 +26,7 @@ use crate::{
   Commitment, CommitmentKey, CompressedCommitment,
 };
 use bellpepper_core::{Circuit, ConstraintSystem};
-use ff::Field;
+use ff::{Field,};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -230,6 +230,82 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
+    use std::collections::HashMap;
+
+    let count_values = |matrix: &Vec<(usize, usize, G::Scalar)>| {
+        let mut val_count = HashMap::new();
+        for (_row, _col, val) in matrix {
+            let inner = bincode::serialize(val).unwrap();
+            *val_count.entry(inner).or_insert(0) += 1;
+        }
+
+        let mut val_count_vec: Vec<(&Vec<u8>, &i32)> = val_count.iter().collect();
+        val_count_vec.sort_by(|a, b| b.1.cmp(a.1));
+        for (val, count) in val_count_vec {
+            let deserialized_val: G::Scalar = bincode::deserialize(val).unwrap();
+            println!("Value: {:?}, Count: {} sq: {:?}", deserialized_val, count, deserialized_val * deserialized_val);
+        }
+    };
+
+    println!("A: ==================== {}", pk.S.A.len());
+    count_values(&pk.S.A);
+    println!("\n\nB: ==================== {}", pk.S.B.len());
+    count_values(&pk.S.B);
+    println!("\n\nC: ==================== {}", pk.S.C.len());
+    count_values(&pk.S.C);
+
+        // SAMS NEW TURBO VERSION
+        // let evals_rx = EqPolynomial::new(r_x.clone()).evals();
+        let compute_eval_table_sparse_par = |matrix: &Vec<(usize, usize, G::Scalar)>, rx: &[G::Scalar]| -> HashMap<usize, G::Scalar> {
+          let num_threads = rayon::current_num_threads();
+          let chunk_size = matrix.len() / num_threads;
+          let span = tracing::span!(tracing::Level::TRACE, "primary_mul");
+          let _enter = span.enter();
+          let maps: Vec<HashMap<usize, G::Scalar>> = matrix.par_chunks(chunk_size).map(|sub_matrix: &[(usize, usize, G::Scalar)]| {
+            // col => sum
+            let mut partial_col_sums: HashMap<usize, G::Scalar> = HashMap::new();
+    
+            let span_i = tracing::span!(tracing::Level::TRACE, "summing");
+            let _enter_i = span.enter();
+            for (row, col, val) in sub_matrix {
+              if val.eq(&G::Scalar::ONE) {
+                *partial_col_sums.entry(*col).or_insert(G::Scalar::ZERO) += rx[*row];
+              } else {
+                let m = rx[*row] * val;
+                *partial_col_sums.entry(*col).or_insert(G::Scalar::ZERO) += m;
+              }
+            }
+            drop(_enter_i);
+            drop(span_i);
+            partial_col_sums
+          }).collect();
+          drop(_enter);
+          drop(span);
+
+          // let reduced = col_sums.iter().reduce(|| HashMap::new(), |mut a: HashMap<usize, G::Scalar>, b: HashMap<usize, G::Scalar>| {
+            // for (key, value) in b {
+              // *a.entry(key).or_insert(G::Scalar::ZERO) += value;
+            // }
+            // a
+          // });
+
+          // BEST REDUCED VERSION
+          let span = tracing::span!(tracing::Level::TRACE, "reducing");
+          let _enter = span.enter();
+          let combined_length: usize = maps.iter().map(|map| map.len()).sum();
+          let mut col_sums = HashMap::with_capacity(combined_length);
+          maps.into_iter().for_each(|map| {
+            for (key, value) in map {
+              *col_sums.entry(key).or_insert(G::Scalar::ZERO) += value;
+            }
+          });
+          col_sums
+
+        };
+
+    // let mut unique_res = HashMap::new();
+    let span = tracing::span!(tracing::Level::TRACE, "poly_ABC");
+    let _enter = span.enter();
     let poly_ABC = {
       // compute the initial evaluation table for R(\tau, x)
       let evals_rx = EqPolynomial::new(r_x.clone()).evals();
@@ -241,48 +317,128 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
           let inner = |M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
             for (row, col, val) in M {
-              M_evals[*col] += rx[*row] * val;
+              if val.eq(&G::Scalar::ONE) {
+                M_evals[*col] += rx[*row];
+              } else {
+                let m = rx[*row] * val;
+                M_evals[*col] += m;
+              }
+              // let m = rx[*row] * val;
+              // let key = bincode::serialize(&m).unwrap();
+              // *unique_res.entry(key).or_insert(0) += 1;
+              // println!("(r,c) ({row}, {col}) – M: {m:?}");
+              // M_evals[*col] += m;
             }
           };
 
-          let (A_evals, (B_evals, C_evals)) = rayon::join(
-            || {
-              let mut A_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-              inner(&S.A, &mut A_evals);
-              A_evals
-            },
-            || {
-              rayon::join(
-                || {
-                  let mut B_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-                  inner(&S.B, &mut B_evals);
-                  B_evals
-                },
-                || {
-                  let mut C_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-                  inner(&S.C, &mut C_evals);
-                  C_evals
-                },
-              )
-            },
+          let (mut A_evals, mut B_evals, mut C_evals) = (
+            vec![G::Scalar::ZERO; 2 * S.num_vars],
+            vec![G::Scalar::ZERO; 2 * S.num_vars],
+            vec![G::Scalar::ZERO; 2 * S.num_vars]
           );
+          inner(&S.A, &mut A_evals);
+          inner(&S.B, &mut B_evals);
+          inner(&S.C, &mut C_evals);
+
+          // let (A_evals, (B_evals, C_evals)) = rayon::join(
+          //   || {
+          //     let mut A_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
+          //     inner(&S.A, &mut A_evals);
+          //     A_evals
+          //   },
+          //   || {
+          //     rayon::join(
+          //       || {
+          //         let mut B_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
+          //         inner(&S.B, &mut B_evals);
+          //         B_evals
+          //       },
+          //       || {
+          //         let mut C_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
+          //         inner(&S.C, &mut C_evals);
+          //         C_evals
+          //       },
+          //     )
+          //   },
+          // );
 
           (A_evals, B_evals, C_evals)
         };
 
-      let span = tracing::span!(tracing::Level::TRACE, "compute_eval_table_sparse");
+      let span = tracing::span!(tracing::Level::TRACE, "og_version");
       let _enter = span.enter();
       let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
       drop(_enter);
       drop(span);
 
+      let span = tracing::span!(tracing::Level::TRACE, "sams_turbo_version");
+      let _enter = span.enter();
+      let (Ap, (Bp, Cp)) = rayon::join(
+        || compute_eval_table_sparse_par(&pk.S.A, &evals_rx),
+        || rayon::join(
+          || compute_eval_table_sparse_par(&pk.S.B, &evals_rx),
+          || compute_eval_table_sparse_par(&pk.S.C, &evals_rx),
+        ),
+      );
+
+      let span_o = tracing::span!(tracing::Level::TRACE, "sam_turbo_evals");
+      let _enter_o = span_o.enter();
+      
+      let r_sq = r * r;
+      let mut evals = vec![G::Scalar::ZERO; 2 * pk.S.num_vars];
+      evals.par_iter_mut().enumerate().for_each(|(index, item)| {
+        if Ap.contains_key(&index) {
+          *item += Ap[&index];
+        } 
+        if Bp.contains_key(&index) {
+          *item += Bp[&index] * r;
+        }
+        if Cp.contains_key(&index) {
+          *item += Cp[&index] * r_sq;
+        }
+      });
+      
+      drop(_enter_o);
+      drop(span_o);
+
+      // let (Ap, _Bp, _Cp) = (
+      //   compute_eval_table_sparse_par(&pk.S.A, &evals_rx),
+      //   compute_eval_table_sparse_par(&pk.S.B, &evals_rx),
+      //   compute_eval_table_sparse_par(&pk.S.C, &evals_rx)
+      // );
+      drop(_enter);
+      drop(span);
+      // for (key, value) in Ap {
+      //   assert_eq!(evals_A[key], value);
+      // }
+
+
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
-      (0..evals_A.len())
+
+
+      let span = tracing::span!(tracing::Level::TRACE, "eval_combo");
+      let _enter = span.enter();
+      let thing = (0..evals_A.len())
         .into_par_iter()
         .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-        .collect::<Vec<G::Scalar>>()
+        .collect::<Vec<G::Scalar>>();
+      drop(_enter);
+      drop(span);
+      assert_eq!(thing, evals);
+
+      thing
     };
+    drop(_enter);
+    drop(span);
+    println!("Eval thing lens: {}", 2 * pk.S.num_vars);
+    // for (key, value) in &unique_res {
+    //   let deser: G::Scalar = bincode::deserialize(key).unwrap();
+    //   println!("{:?}: {}", deser, value);
+    // }
+
+
+
 
     let poly_z = {
       z.resize(pk.S.num_vars * 2, G::Scalar::ZERO);
