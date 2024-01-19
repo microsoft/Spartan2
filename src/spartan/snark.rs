@@ -270,6 +270,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
+    let span = tracing::span!(tracing::Level::TRACE, "poly_ABC");
+    let _enter = span.enter();
     let poly_ABC = {
       // compute the initial evaluation table for R(\tau, x)
       let evals_rx = EqPolynomial::new(r_x.clone()).evals();
@@ -281,48 +283,52 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
           let inner = |M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
             for (row, col, val) in M {
-              M_evals[*col] += rx[*row] * val;
+              if val.eq(&G::Scalar::ONE) {
+                M_evals[*col] += rx[*row];
+              } else {
+                let m = rx[*row] * val;
+                M_evals[*col] += m;
+              }
             }
           };
 
-          let (A_evals, (B_evals, C_evals)) = rayon::join(
-            || {
-              let mut A_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-              inner(&S.A, &mut A_evals);
-              A_evals
-            },
-            || {
-              rayon::join(
-                || {
-                  let mut B_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-                  inner(&S.B, &mut B_evals);
-                  B_evals
-                },
-                || {
-                  let mut C_evals: Vec<G::Scalar> = vec![G::Scalar::ZERO; 2 * S.num_vars];
-                  inner(&S.C, &mut C_evals);
-                  C_evals
-                },
-              )
-            },
+          let (mut A_evals, mut B_evals, mut C_evals) = (
+            vec![G::Scalar::ZERO; 2 * S.num_vars],
+            vec![G::Scalar::ZERO; 2 * S.num_vars],
+            vec![G::Scalar::ZERO; 2 * S.num_vars]
+          );
+          rayon::join(
+            || inner(&pk.S.A, &mut A_evals),
+            || rayon::join(
+              || inner(&pk.S.B, &mut B_evals),
+              || inner(&pk.S.C, &mut C_evals),
+            ),
           );
 
           (A_evals, B_evals, C_evals)
         };
 
-      let span = tracing::span!(tracing::Level::TRACE, "compute_eval_table_sparse");
-      let _enter = span.enter();
       let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
-      drop(_enter);
-      drop(span);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
-      (0..evals_A.len())
+
+      let span_e = tracing::span!(tracing::Level::TRACE, "eval_combo_old");
+      let _enter_e = span_e.enter();
+      let r_sq = r * r;
+      let thing = (0..evals_A.len())
         .into_par_iter()
-        .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-        .collect::<Vec<G::Scalar>>()
+        .map(|i| {
+          evals_A[i] + evals_B[i] * r + evals_C[i] * r_sq
+        })
+        .collect::<Vec<G::Scalar>>();
+      drop(_enter_e);
+      drop(span_e);
+
+      thing
     };
+    drop(_enter);
+    drop(span);
 
     let poly_z = {
       z.resize(pk.S.num_vars * 2, G::Scalar::ZERO);
