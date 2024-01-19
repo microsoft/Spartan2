@@ -3,11 +3,6 @@ fn main() {
         Sha256Circuit::new(vec![0u8; 1 << 12]),
     ];
 
-    // let (chrome_trace_file, guard) = tracing_chrome::ChromeLayerBuilder::new().build();
-    // let subscriber = tracing_subscriber::registry()
-    //     .with(tracing_subscriber::fmt::layer())
-    //     .with(chrome_trace_file);
-    // tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let (chrome_layer, _guard) = ChromeLayerBuilder::new().build();
     tracing_subscriber::registry().with(chrome_layer).init();
 
