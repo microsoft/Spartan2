@@ -323,6 +323,7 @@ where
   type VerifierKey = HyraxVerifierKey<G>;
   type EvaluationArgument = HyraxEvaluationArgument<G>;
 
+  #[tracing::instrument(skip_all, name = "HyraxEE::setup")]
   fn setup(
     ck: &<<G as Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey,
   ) -> (Self::ProverKey, Self::VerifierKey) {

@@ -96,7 +96,9 @@ impl_spartan_shape!(TestShapeCS);
 
 impl<G: Group> ShapeCS<G> {
   /// r1cs_shape but with extrpolates from one step of a uniform computation 
-  pub fn r1cs_shape_uniform(&self, N: usize) -> (R1CSShape<G>, CommitmentKey<G>) {
+  pub fn r1cs_shape_uniform(&self, N: usize) -> (R1CSShape<G>, R1CSShape<G>, CommitmentKey<G>) {
+    let S_single = self.r1cs_shape().0;
+
     let mut A: Vec<(usize, usize, G::Scalar)> = Vec::new();
     let mut B: Vec<(usize, usize, G::Scalar)> = Vec::new();
     let mut C: Vec<(usize, usize, G::Scalar)> = Vec::new();
@@ -138,9 +140,10 @@ impl<G: Group> ShapeCS<G> {
       res.unwrap()
     };
 
+
     let ck = R1CS::<G>::commitment_key(&S);
 
-    (S, ck) 
+    (S, S_single, ck) 
   }
 }
 
