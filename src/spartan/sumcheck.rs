@@ -64,6 +64,7 @@ impl<G: Group> SumcheckProof<G> {
   }
 
   #[inline]
+  #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::compute_eval_points_quadratic")]
   pub(in crate::spartan) fn compute_eval_points_quadratic<F>(
     poly_A: &MultilinearPolynomial<G::Scalar>,
     poly_B: &MultilinearPolynomial<G::Scalar>,
@@ -91,6 +92,7 @@ impl<G: Group> SumcheckProof<G> {
       )
   }
 
+  #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_quad")]
   pub fn prove_quad<F>(
     claim: &G::Scalar,
     num_rounds: usize,
@@ -139,6 +141,7 @@ impl<G: Group> SumcheckProof<G> {
     ))
   }
 
+  #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_quad_batch")]
   pub fn prove_quad_batch<F>(
     claim: &G::Scalar,
     num_rounds: usize,
@@ -195,6 +198,7 @@ impl<G: Group> SumcheckProof<G> {
   }
 
   #[inline]
+  #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::compute_eval_points_cubic")]
   pub(in crate::spartan) fn compute_eval_points_cubic<F>(
     poly_A: &MultilinearPolynomial<G::Scalar>,
     poly_B: &MultilinearPolynomial<G::Scalar>,
@@ -243,6 +247,7 @@ impl<G: Group> SumcheckProof<G> {
       )
   }
 
+  #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_cubic_with_additive_term")]
   pub fn prove_cubic_with_additive_term<F>(
     claim: &G::Scalar,
     num_rounds: usize,

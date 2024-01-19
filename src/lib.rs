@@ -1,7 +1,7 @@
 //! This library implements Spartan, a high-speed SNARK.
 #![deny(
   warnings,
-  unused,
+//  unused,
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,
@@ -76,6 +76,12 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
+    Ok((ProverKey { pk }, VerifierKey { vk }))
+  }
+
+  /// Produces prover and verifier keys for the direct SNARK
+  pub fn setup_uniform(circuit: C, n: usize) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
+    let (pk, vk) = S::setup_uniform(circuit, n)?;
     Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 
