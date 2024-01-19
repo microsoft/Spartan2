@@ -4,8 +4,6 @@
 //! description of R1CS matrices. This is essentially optimal for the verifier when using
 //! an IPA-based polynomial commitment scheme.
 
-use std::sync::Mutex;
-
 use crate::{
   bellpepper::{
     r1cs::{SpartanShape, SpartanWitness},
@@ -28,7 +26,7 @@ use crate::{
   Commitment, CommitmentKey, CompressedCommitment,
 };
 use bellpepper_core::{Circuit, ConstraintSystem};
-use ff::{Field,};
+use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -232,22 +230,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
-
-    // SAMS NEW TURBO VERSION
-    let compute_eval_table_sparse_par = |matrix: &Vec<(usize, usize, G::Scalar)>, rx: &[G::Scalar], col_len: usize| -> Vec<Mutex<G::Scalar>> {
-      let col_sums: Vec<Mutex<G::Scalar>> = (0..col_len).map(|_| Mutex::new(G::Scalar::ZERO)).collect();
-      matrix.par_iter().for_each(|(row, col, val)| {
-          if val.eq(&G::Scalar::ONE) {
-            *col_sums[*col].lock().unwrap() += rx[*row];
-          } else {
-            let m = rx[*row] * val;
-            *col_sums[*col].lock().unwrap() += m;
-          }
-      });
-
-      col_sums
-    };
-
     let span = tracing::span!(tracing::Level::TRACE, "poly_ABC");
     let _enter = span.enter();
     let poly_ABC = {
@@ -286,47 +268,15 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
           (A_evals, B_evals, C_evals)
         };
 
-      let span = tracing::span!(tracing::Level::TRACE, "og_version");
-      let _enter = span.enter();
       let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
-      drop(_enter);
-      drop(span);
-
-      let span = tracing::span!(tracing::Level::TRACE, "sams_turbo_version");
-      let _enter = span.enter();
-      let col_len = 2 * pk.S.num_vars;
-      let (Ap, (Bp, Cp)) = rayon::join(
-        || compute_eval_table_sparse_par(&pk.S.A, &evals_rx, col_len),
-        || rayon::join(
-          || compute_eval_table_sparse_par(&pk.S.B, &evals_rx, col_len),
-          || compute_eval_table_sparse_par(&pk.S.C, &evals_rx, col_len),
-        ),
-      );
-      drop(_enter);
-      drop(span);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
 
-      let span_e = tracing::span!(tracing::Level::TRACE, "eval_combo");
-      let _enter_e = span_e.enter();
-      let r_sq = r * r;
-      let thing = (0..evals_A.len())
-        .into_par_iter()
-        .map(|i| {
-          let ap = *Ap[i].lock().unwrap();
-          let bp = *Bp[i].lock().unwrap();
-          let cp = *Cp[i].lock().unwrap();
-          ap + r * bp + r_sq * cp
-        })
-        .collect::<Vec<G::Scalar>>();
-      drop(_enter_e);
-      drop(span_e);
-
       let span_e = tracing::span!(tracing::Level::TRACE, "eval_combo_old");
       let _enter_e = span_e.enter();
       let r_sq = r * r;
-      let _thing = (0..evals_A.len())
+      let thing = (0..evals_A.len())
         .into_par_iter()
         .map(|i| {
           evals_A[i] + evals_B[i] * r + evals_C[i] * r_sq
@@ -334,15 +284,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         .collect::<Vec<G::Scalar>>();
       drop(_enter_e);
       drop(span_e);
-      assert_eq!(thing, _thing);
 
       thing
     };
     drop(_enter);
     drop(span);
-
-
-
 
     let poly_z = {
       z.resize(pk.S.num_vars * 2, G::Scalar::ZERO);
