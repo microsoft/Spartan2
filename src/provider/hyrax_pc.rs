@@ -347,6 +347,7 @@ where
     (pk, vk)
   }
 
+  #[tracing::instrument(skip_all, name = "HyraxEvaluationEngine::prove")]
   fn prove(
     ck: &CommitmentKey<G>,
     pk: &Self::ProverKey,

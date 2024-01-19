@@ -175,6 +175,7 @@ impl<G: Group> CommitmentEngineTrait<G> for CommitmentEngine<G> {
     }
   }
 
+  #[tracing::instrument(skip_all, name = "Pedersen::commit")]
   fn commit(ck: &Self::CommitmentKey, v: &[G::Scalar]) -> Self::Commitment {
     if ck.ck.len() < v.len() {
       println!("commitment key length: {}", ck.ck.len());
