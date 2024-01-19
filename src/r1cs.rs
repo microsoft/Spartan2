@@ -147,7 +147,7 @@ impl<G: Group> R1CSShape<G> {
     // This does not perform any validation of entries in M (e.g., if entries in `M` reference indexes outside the range of `z`)
     // This is safe since we know that `M` is valid
     let sparse_matrix_vec_product =
-      |M: &Vec<(usize, usize, G::Scalar)>, _num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
+      |M: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
 
         // Parallelism strategy below splits the (row, column, value) tuples into num_threads different chunks.
         // It is assumed that the tuples are (row, column) ordered. We exploit this fact to create a mutex over
@@ -156,10 +156,10 @@ impl<G: Group> R1CSShape<G> {
 
         let num_threads = rayon::current_num_threads() * 4; // Enable work stealing incase of thread work imbalance
         let thread_chunk_size = M.len() / num_threads;
-        let row_chunk_size = (_num_rows as f64 / num_threads as f64).ceil() as usize;
+        let row_chunk_size = (num_rows as f64 / num_threads as f64).ceil() as usize;
 
         let mut chunks: Vec<std::sync::Mutex<Vec<G::Scalar>>> = Vec::with_capacity(num_threads);
-        let mut remaining_rows = _num_rows;
+        let mut remaining_rows = num_rows;
         (0..num_threads).for_each(|i| {
           if i == num_threads - 1 { // the final chunk may be smaller
             let inner = std::sync::Mutex::new(vec![G::Scalar::ZERO; remaining_rows]);
@@ -213,7 +213,7 @@ impl<G: Group> R1CSShape<G> {
         let span_a = tracing::span!(tracing::Level::TRACE, "chunks_mutex_unwrap");
         let _enter_a = span_a.enter();
         // TODO(sragss): Mutex unwrap takes about 30% of the time due to clone, likely unnecessary.
-        let mut flat_chunks: Vec<G::Scalar> = Vec::with_capacity(_num_rows);
+        let mut flat_chunks: Vec<G::Scalar> = Vec::with_capacity(num_rows);
         for chunk in chunks {
           let inner_vec = chunk.into_inner().unwrap();
           flat_chunks.extend(inner_vec);
