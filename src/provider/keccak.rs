@@ -85,6 +85,7 @@ impl<G: Group> TranscriptEngineTrait<G> for Keccak256Transcript<G> {
     Ok(G::Scalar::from_uniform(&output))
   }
 
+  #[tracing::instrument(skip_all, name = "Keccak256Transcript::absorb")]
   fn absorb<T: TranscriptReprTrait<G>>(&mut self, label: &'static [u8], o: &T) {
     self.transcript.update(label);
     self.transcript.update(&o.to_transcript_bytes());

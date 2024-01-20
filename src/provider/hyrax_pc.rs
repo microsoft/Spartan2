@@ -323,7 +323,7 @@ where
   type VerifierKey = HyraxVerifierKey<G>;
   type EvaluationArgument = HyraxEvaluationArgument<G>;
 
-  #[tracing::instrument(skip_all, name = "HyraxEE::setup")]
+  #[tracing::instrument(skip_all, name = "HyraxEvaluationEngine::setup")]
   fn setup(
     ck: &<<G as Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey,
   ) -> (Self::ProverKey, Self::VerifierKey) {
@@ -359,7 +359,11 @@ where
   ) -> Result<Self::EvaluationArgument, SpartanError> {
     transcript.absorb(b"poly_com", comm);
 
+    let span = tracing::span!(tracing::Level::INFO, "poly_m_construct");
+    let _guard = span.enter();
     let poly_m = MultilinearPolynomial::<G::Scalar>::new(poly.to_vec());
+    drop(_guard); 
+    drop(span); 
 
     // assert vectors are of the right size
     assert_eq!(poly_m.get_num_vars(), point.len());
