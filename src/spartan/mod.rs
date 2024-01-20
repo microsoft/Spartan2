@@ -36,7 +36,7 @@ impl<G: Group> PolyEvalWitness<G> {
   fn pad(W: &[PolyEvalWitness<G>]) -> Vec<PolyEvalWitness<G>> {
     // determine the maximum size
     if let Some(n) = W.iter().map(|w| w.p.len()).max() {
-      W.iter()
+      W.par_iter()
         .map(|w| {
           let mut p = vec![G::Scalar::ZERO; n];
           p[..w.p.len()].copy_from_slice(&w.p);
