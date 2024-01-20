@@ -218,6 +218,7 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
     )
   }
 
+  #[tracing::instrument(skip_all, name="CommitmentEngine::combine")]
   fn combine(ck: &Self::CommitmentKey, other: &Self::CommitmentKey) -> Self::CommitmentKey {
     let ck = {
       let mut c = ck.ck.clone();
@@ -227,6 +228,7 @@ impl<G: Group> CommitmentEngineExtTrait<G> for CommitmentEngine<G> {
     Self::CommitmentKey { ck }
   }
 
+  #[tracing::instrument(skip_all, name="CommitmentEngine::fold")]
   fn fold(ck: &Self::CommitmentKey, w1: &G::Scalar, w2: &G::Scalar) -> Self::CommitmentKey {
     let w = vec![*w1, *w2];
     let (L, R) = Self::split_at(ck, ck.ck.len() / 2);
