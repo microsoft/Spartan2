@@ -25,7 +25,8 @@ fn run_circuit(circuit: Sha256Circuit<<G as Group>::Scalar>) {
     let (pk, _vk) =
         SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::setup(circuit.clone()).unwrap();
 
-    let _ = SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::prove(&pk, circuit.clone());
+    let result = SNARK::<G, S, Sha256Circuit<<G as Group>::Scalar>>::prove(&pk, circuit.clone()).expect("should prove");
+    result.verify(&_vk, &vec![]).expect("should verify");
 
     let duration = start.elapsed();
     println!("Time elapsed is: {:?}", duration);
