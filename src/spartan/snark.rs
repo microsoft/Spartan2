@@ -382,8 +382,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
         drop(_enter);
         drop(span);
+
+
+        let (WW, WE) = (W.W, W.E);
         w_u_vec.push((
-            PolyEvalWitness { p: W.W.clone() },
+            PolyEvalWitness { p: WW },
             PolyEvalInstance {
                 c: U.comm_W.clone(),
                 x: r_y[1..].to_vec(),
@@ -392,7 +395,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         ));
 
         w_u_vec.push((
-            PolyEvalWitness { p: W.E },
+            PolyEvalWitness { p: WE },
             PolyEvalInstance {
                 c: U.comm_E.clone(),
                 x: r_x,
@@ -409,12 +412,18 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         // to the batched polynomial.
         assert!(w_u_vec.len() >= 2);
 
+        let span = tracing::span!(tracing::Level::TRACE, "padding");
+        let _enter = span.enter();
         let (w_vec, u_vec): (Vec<PolyEvalWitness<G>>, Vec<PolyEvalInstance<G>>) =
             w_u_vec.into_iter().unzip();
         let w_vec_padded = PolyEvalWitness::pad(&w_vec); // pad the polynomials to be of the same size
         let u_vec_padded = PolyEvalInstance::pad(&u_vec); // pad the evaluation points
+        drop(_enter);
+        drop(span);
 
         // generate a challenge
+        let span = tracing::span!(tracing::Level::TRACE, "rho_challenge_gen");
+        let _enter = span.enter();
         let rho = transcript.squeeze(b"r")?;
         let num_claims = w_vec_padded.len();
         let powers_of_rho = powers::<G>(&rho, num_claims);
@@ -424,6 +433,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
                 .zip(powers_of_rho.iter())
                 .map(|(u, p)| u.e * p)
                 .sum();
+        drop(_enter);
+        drop(span);
 
         let span = tracing::span!(tracing::Level::TRACE, "poly_construction");
         let _enter = span.enter();
