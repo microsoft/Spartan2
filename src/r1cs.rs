@@ -178,19 +178,22 @@ impl<G: Group> R1CSShape<G> {
         let _enter = span.enter();
         M.par_chunks(thread_chunk_size).for_each(|sub_matrix: &[(usize, usize, G::Scalar)]| {
           let (init_row, init_col, init_val) = sub_matrix[0];
-          let mut prev_chunk = get_chunk(init_row);
+          let mut prev_chunk_index = get_chunk(init_row);
           let curr_row_index = get_index(init_row);
-          let mut curr_chunk = chunks[prev_chunk].lock().unwrap();
+          let mut curr_chunk = chunks[prev_chunk_index].lock().unwrap();
 
           curr_chunk[curr_row_index] += init_val * z[init_col];
 
           let span_a = tracing::span!(tracing::Level::TRACE, "chunk_multiplication");
           let _enter_b = span_a.enter();
           for (row, col, val) in sub_matrix.iter().skip(1) {
-            let chunk_index = get_chunk(*row);
-            if prev_chunk != chunk_index { // only unlock the mutex again if required
-              curr_chunk = chunks[get_chunk(*row)].lock().unwrap();
-              prev_chunk = chunk_index;
+            let curr_chunk_index = get_chunk(*row);
+            if prev_chunk_index != curr_chunk_index { // only unlock the mutex again if required
+              drop(curr_chunk); // drop the curr_chunk before waiting for the next to avoid race condition
+              let new_chunk = chunks[curr_chunk_index].lock().unwrap();
+              curr_chunk = new_chunk;
+
+              prev_chunk_index = curr_chunk_index;
             }
 
             if z[*col].is_zero_vartime() { 
@@ -216,7 +219,7 @@ impl<G: Group> R1CSShape<G> {
         let mut flat_chunks: Vec<G::Scalar> = Vec::with_capacity(num_rows);
         for chunk in chunks {
           let inner_vec = chunk.into_inner().unwrap();
-          flat_chunks.extend(inner_vec);
+          flat_chunks.extend(inner_vec.iter());
         }
         drop(_enter_a);
         drop(span_a);
