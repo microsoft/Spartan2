@@ -111,6 +111,15 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       .sum()
   }
 
+  /// Evaluates polynomial given lagrange basis
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::evaluate_with_chi")]
+  pub fn evaluate_with_chi(&self, chis: &[Scalar]) -> Scalar {
+    (0..chis.len())
+      .into_par_iter()
+      .map(|i| chis[i] * self.Z[i])
+      .sum()
+  }
+
   /// Multiplies the polynomial by a scalar.
   pub fn scalar_mul(&self, scalar: &Scalar) -> Self {
     let mut new_poly = self.clone();
