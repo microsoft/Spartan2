@@ -366,7 +366,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
     let comm_W = Commitment::<G>::decompress(&self.comm_W)?;
     let u = R1CSInstance::new(&vk.S, &comm_W, io)?;
 
-    let mut transcript = G::TE::new(b"RelaxedR1CSSNARK");
+    let mut transcript = G::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest());
