@@ -275,10 +275,13 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
                 &mut transcript,
             )?;
 
+        // compute the initial evaluation table for R(\tau, x)
+        let evals_rx = EqPolynomial::new(r_x.clone()).evals();
+
         // claims from the end of sum-check
         let (claim_Az, claim_Bz): (G::Scalar, G::Scalar) = (claims_outer[1], claims_outer[2]);
-        let claim_Cz = poly_Cz.evaluate(&r_x);
-        let eval_E = MultilinearPolynomial::new(W.E.clone()).evaluate(&r_x);
+        let claim_Cz = poly_Cz.evaluate_with_chi(&evals_rx);                               // evaluate at r_x
+        let eval_E = MultilinearPolynomial::new(W.E.clone()).evaluate_with_chi(&evals_rx); // evaluate at r_x
         transcript.absorb(
             b"claims_outer",
             &[claim_Az, claim_Bz, claim_Cz, eval_E].as_slice(),
@@ -292,9 +295,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         let _enter = span.enter();
         let poly_ABC =
             {
-                // compute the initial evaluation table for R(\tau, x)
-                let evals_rx = EqPolynomial::new(r_x.clone()).evals();
-
                 // Bounds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
                 let compute_eval_table_sparse = |S: &R1CSShape<G>,
                                                  rx: &[G::Scalar]|
