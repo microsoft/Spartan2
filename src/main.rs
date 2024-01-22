@@ -47,7 +47,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 type G = pasta_curves::pallas::Point;
 type EE = spartan2::provider::hyrax_pc::HyraxEvaluationEngine<G>;
-type S = spartan2::spartan::snark::RelaxedR1CSSNARK<G, EE>;
+// type S = spartan2::spartan::snark::RelaxedR1CSSNARK<G, EE>;
+type S = spartan2::spartan::upsnark::R1CSSNARK<G, EE>;
 
 #[derive(Clone, Debug)]
 struct Sha256Circuit<Scalar: PrimeField> {
