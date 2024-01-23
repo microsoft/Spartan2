@@ -22,7 +22,8 @@ use crate::{
     // PolyEvalInstance, PolyEvalWitness,
   },
   traits::{
-    commitment::CommitmentTrait, evaluation::EvaluationEngineTrait, snark::{RelaxedR1CSSNARKTrait, }, // PrecommittedSNARKTrait},
+    commitment::CommitmentTrait, evaluation::EvaluationEngineTrait, snark::RelaxedR1CSSNARKTrait, 
+    upsnark::{UniformSNARKTrait, PrecommittedSNARKTrait}, 
     Group, TranscriptEngineTrait,
   },
   Commitment, CommitmentKey, CompressedCommitment,
@@ -144,29 +145,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
     let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S.clone(), 1);
-
-    let pk = ProverKey {
-      ck,
-      pk_ee,
-      S,
-      vk_digest: vk.digest(),
-    };
-
-    Ok((pk, vk))
-  }
-
-  #[tracing::instrument(skip_all, name = "SNARK::setup_uniform")]
-  fn setup_uniform<C: Circuit<G::Scalar>>(
-    circuit: C,
-    num_steps: usize, 
-  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
-    let mut cs: ShapeCS<G> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
-    let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
-
-    let (pk_ee, vk_ee) = EE::setup(&ck);
-
-    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
 
     let pk = ProverKey {
       ck,
@@ -478,5 +456,58 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
     )?;
 
     Ok(())
+  }
+}
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> UniformSNARKTrait<G> for R1CSSNARK<G, EE> {
+  #[tracing::instrument(skip_all, name = "SNARK::setup_uniform")]
+  fn setup_uniform<C: Circuit<G::Scalar>>(
+    circuit: C,
+    num_steps: usize, 
+  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
+    let mut cs: ShapeCS<G> = ShapeCS::new();
+    let _ = circuit.synthesize(&mut cs);
+    // let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
+    let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
+
+    let (pk_ee, vk_ee) = EE::setup(&ck);
+
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
+
+    let pk = ProverKey {
+      ck,
+      pk_ee,
+      S,
+      vk_digest: vk.digest(),
+    };
+
+    Ok((pk, vk))
+  }
+}
+
+
+impl<G: Group, EE: EvaluationEngineTrait<G>> PrecommittedSNARKTrait<G> for R1CSSNARK<G, EE> {
+  #[tracing::instrument(skip_all, name = "SNARK::setup_uniform")]
+  fn setup_precommitted<C: Circuit<G::Scalar>>(
+    circuit: C,
+    num_steps: usize, 
+  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
+    let mut cs: ShapeCS<G> = ShapeCS::new();
+    let _ = circuit.synthesize(&mut cs);
+    // let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
+    let (S, S_single, ck) = cs.r1cs_shape_uniform_segwit(num_steps);
+
+    let (pk_ee, vk_ee) = EE::setup(&ck);
+
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
+
+    let pk = ProverKey {
+      ck,
+      pk_ee,
+      S,
+      vk_digest: vk.digest(),
+    };
+
+    Ok((pk, vk))
   }
 }

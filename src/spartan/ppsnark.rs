@@ -911,13 +911,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     Ok((pk, vk))
   }
 
-  fn setup_uniform<C: Circuit<<G as Group>::Scalar>>(
-      circuit: C,
-      _num_steps: usize,
-    ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-      Self::setup(circuit)
-  }
-
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
   fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
