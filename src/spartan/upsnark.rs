@@ -222,8 +222,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
 
     // claims from the end of sum-check
     let (claim_Az, claim_Bz): (G::Scalar, G::Scalar) = (claims_outer[1], claims_outer[2]);
-    // Arasu: 
-    // let claim_Cz = poly_Cz.evaluate(&r_x);
     let claim_Cz = claims_outer[3];
     transcript.absorb(
       b"claims_outer",
