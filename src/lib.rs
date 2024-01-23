@@ -175,20 +175,20 @@ mod tests {
   fn test_snark_hyrax_pc() {
     type G = pasta_curves::pallas::Point;
     type EE = crate::provider::hyrax_pc::HyraxEvaluationEngine<G>;
-    type S = crate::spartan::relaxed_snark::RelaxedR1CSSNARK<G, EE>;
+    type S = crate::spartan::snark::RelaxedR1CSSNARK<G, EE>;
     //type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
     test_snark_with::<G, S>();
     //test_snark_with::<G, Spp>();
 
     type G2 = bn256::Point;
     type EE2 = crate::provider::hyrax_pc::HyraxEvaluationEngine<G2>;
-    type S2 = crate::spartan::relaxed_snark::RelaxedR1CSSNARK<G2, EE2>;
+    type S2 = crate::spartan::snark::RelaxedR1CSSNARK<G2, EE2>;
     test_snark_with::<G2, S2>();
     //test_snark_with::<G2, S2pp>();
 
     type G3 = secp256k1::Point;
     type EE3 = crate::provider::hyrax_pc::HyraxEvaluationEngine<G3>;
-    type S3 = crate::spartan::relaxed_snark::RelaxedR1CSSNARK<G3, EE3>;
+    type S3 = crate::spartan::snark::RelaxedR1CSSNARK<G3, EE3>;
     //type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
     test_snark_with::<G3, S3>();
     //test_snark_with::<G3, S3pp>();

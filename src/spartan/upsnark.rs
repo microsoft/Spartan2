@@ -492,8 +492,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> PrecommittedSNARKTrait<G> for R1CSS
   ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
-    // let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
-    let (S, S_single, ck) = cs.r1cs_shape_uniform_segwit(num_steps);
+    let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps); // TODO(arasuarun): replace with precommitted version
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
