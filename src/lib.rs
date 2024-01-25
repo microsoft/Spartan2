@@ -29,7 +29,8 @@ use errors::SpartanError;
 use serde::{Deserialize, Serialize};
 use traits::{
   commitment::{CommitmentEngineTrait, CommitmentTrait},
-  snark::RelaxedR1CSSNARKTrait,
+  snark::RelaxedR1CSSNARKTrait, 
+  upsnark::{UniformSNARKTrait, PrecommittedSNARKTrait}, 
   Group,
 };
 
@@ -72,7 +73,7 @@ where
   _p2: PhantomData<C>,
 }
 
-impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
+impl<G: Group, S: RelaxedR1CSSNARKTrait<G> + UniformSNARKTrait<G> + PrecommittedSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
@@ -82,6 +83,12 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup_uniform(circuit: C, n: usize) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
     let (pk, vk) = S::setup_uniform(circuit, n)?;
+    Ok((ProverKey { pk }, VerifierKey { vk }))
+  }
+
+  /// Produces prover and verifier keys for the direct SNARK
+  pub fn setup_precommitted(circuit: C, n: usize) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
+    let (pk, vk) = S::setup_precommitted(circuit, n)?;
     Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 

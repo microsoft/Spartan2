@@ -221,7 +221,7 @@ fn add_constraint_uniform<S: PrimeField>(
       }
       Index::Aux(idx) => {
         for step in 0..num_steps {
-          V.push((n + step, idx + num_aux_per_step * step, one * coeff)); 
+          V.push((n + step, idx + num_aux_per_step * step, one * coeff));
         }
       }
     }

@@ -169,30 +169,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         Ok((pk, vk))
     }
 
-    #[tracing::instrument(skip_all, name = "SNARK::setup_uniform")]
-    fn setup_uniform<C: Circuit<G::Scalar>>(
-        circuit: C,
-        num_steps: usize,
-    ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
-        let mut cs: ShapeCS<G> = ShapeCS::new();
-        let _ = circuit.synthesize(&mut cs);
-        let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
-
-        let (pk_ee, vk_ee) = EE::setup(&ck);
-
-        let vk: UniformVerifierKey<G, EE> =
-            UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
-
-        let pk = ProverKey {
-            ck,
-            pk_ee,
-            S,
-            vk_digest: vk.digest(),
-        };
-
-        Ok((pk, vk))
-    }
-
     /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
     #[tracing::instrument(skip_all, name = "Spartan2::R1CSSnark::prove")]
     fn prove<C: Circuit<G::Scalar>>(

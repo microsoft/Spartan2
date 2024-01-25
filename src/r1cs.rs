@@ -32,7 +32,7 @@ pub struct R1CSShape<G: Group> {
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSWitness<G: Group> {
-  W: Vec<G::Scalar>,
+  pub(crate) W: Vec<G::Scalar>,
 }
 
 /// A type that holds an R1CS instance
@@ -464,6 +464,16 @@ impl<G: Group> R1CSInstance<G> {
         X: X.to_owned(),
       })
     }
+  }
+}
+
+impl<G: Group> TranscriptReprTrait<G> for R1CSInstance<G> {
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    [
+      self.comm_W.to_transcript_bytes(),
+      self.X.as_slice().to_transcript_bytes(),
+    ]
+    .concat()
   }
 }
 
