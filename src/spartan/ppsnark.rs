@@ -112,15 +112,15 @@ pub struct R1CSShapeSparkCommitment<G: Group> {
 impl<G: Group> TranscriptReprTrait<G> for R1CSShapeSparkCommitment<G> {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     [
-      self.comm_row,
-      self.comm_col,
-      self.comm_val_A,
-      self.comm_val_B,
-      self.comm_val_C,
-      self.comm_row_read_ts,
-      self.comm_row_audit_ts,
-      self.comm_col_read_ts,
-      self.comm_col_audit_ts,
+      self.comm_row.clone(),
+      self.comm_col.clone(),
+      self.comm_val_A.clone(),
+      self.comm_val_B.clone(),
+      self.comm_val_C.clone(),
+      self.comm_row_read_ts.clone(),
+      self.comm_row_audit_ts.clone(),
+      self.comm_col_read_ts.clone(),
+      self.comm_col_audit_ts.clone(),
     ]
     .as_slice()
     .to_transcript_bytes()
@@ -232,15 +232,15 @@ impl<G: Group> R1CSShapeSparkRepr<G> {
 
     R1CSShapeSparkCommitment {
       N: self.row.len(),
-      comm_row: comm_vec[0],
-      comm_col: comm_vec[1],
-      comm_val_A: comm_vec[2],
-      comm_val_B: comm_vec[3],
-      comm_val_C: comm_vec[4],
-      comm_row_read_ts: comm_vec[5],
-      comm_row_audit_ts: comm_vec[6],
-      comm_col_read_ts: comm_vec[7],
-      comm_col_audit_ts: comm_vec[8],
+      comm_row: comm_vec[0].clone(),
+      comm_col: comm_vec[1].clone(),
+      comm_val_A: comm_vec[2].clone(),
+      comm_val_B: comm_vec[3].clone(),
+      comm_val_C: comm_vec[4].clone(),
+      comm_row_read_ts: comm_vec[5].clone(),
+      comm_row_audit_ts: comm_vec[6].clone(),
+      comm_col_read_ts: comm_vec[7].clone(),
+      comm_col_audit_ts: comm_vec[8].clone(),
     }
   }
 
@@ -951,7 +951,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       || rayon::join(|| G::CE::commit(&pk.ck, &Bz), || G::CE::commit(&pk.ck, &Cz)),
     );
 
-    transcript.absorb(b"c", &[comm_Az, comm_Bz, comm_Cz].as_slice());
+    transcript.absorb(
+      b"c",
+      &[comm_Az.clone(), comm_Bz.clone(), comm_Cz.clone()].as_slice(),
+    );
 
     // number of rounds of the satisfiability sum-check
     let num_rounds_sat = pk.S_repr.N.log_2();
@@ -998,13 +1001,16 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       &[eval_Az_at_tau, eval_Bz_at_tau, eval_Cz_at_tau].as_slice(),
     );
     // absorb commitments to E_row and E_col in the transcript
-    transcript.absorb(b"e", &vec![comm_E_row, comm_E_col].as_slice());
+    transcript.absorb(
+      b"e",
+      &vec![comm_E_row.clone(), comm_E_col.clone()].as_slice(),
+    );
 
     // add claims about Az, Bz, and Cz to be checked later
     // since all the three polynomials are opened at tau,
     // we can combine them into a single polynomial opened at tau
     let eval_vec = vec![eval_Az_at_tau, eval_Bz_at_tau, eval_Cz_at_tau];
-    let comm_vec = vec![comm_Az, comm_Bz, comm_Cz];
+    let comm_vec = vec![comm_Az.clone(), comm_Bz.clone(), comm_Cz.clone()];
     let poly_vec = vec![&Az, &Bz, &Cz];
     transcript.absorb(b"e", &eval_vec.as_slice()); // c_vec is already in the transcript
     let c = transcript.squeeze(b"c")?;
@@ -1213,7 +1219,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .comm_output_vec
       .iter()
       .zip(powers_of_rho.iter())
-      .map(|(c, r_i)| *c * *r_i)
+      .map(|(c, r_i)| c.clone() * *r_i)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
 
     let weighted_sum = |W: &[Vec<G::Scalar>], s: &[G::Scalar]| -> Vec<G::Scalar> {
@@ -1241,7 +1247,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         p: poly_output.clone(),
       },
       PolyEvalInstance {
-        c: comm_output,
+        c: comm_output.clone(),
         x: r_sat.clone(),
         e: eval_output,
       },
@@ -1258,7 +1264,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         p: poly_output.clone(),
       },
       PolyEvalInstance {
-        c: comm_output,
+        c: comm_output.clone(),
         x,
         e: product,
       },
@@ -1337,14 +1343,14 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       eval_col_audit_ts,
     ];
     let comm_vec = [
-      pk.S_comm.comm_row,
-      pk.S_comm.comm_row_read_ts,
-      comm_E_row,
-      pk.S_comm.comm_row_audit_ts,
-      pk.S_comm.comm_col,
-      pk.S_comm.comm_col_read_ts,
-      comm_E_col,
-      pk.S_comm.comm_col_audit_ts,
+      pk.S_comm.comm_row.clone(),
+      pk.S_comm.comm_row_read_ts.clone(),
+      comm_E_row.clone(),
+      pk.S_comm.comm_row_audit_ts.clone(),
+      pk.S_comm.comm_col.clone(),
+      pk.S_comm.comm_col_read_ts.clone(),
+      comm_E_col.clone(),
+      pk.S_comm.comm_col_audit_ts.clone(),
     ];
     let poly_vec = [
       &pk.S_repr.row,
@@ -1365,7 +1371,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     w_u_vec.push((
       PolyEvalWitness { p: W.W },
       PolyEvalInstance {
-        c: U.comm_W,
+        c: U.comm_W.clone(),
         x: r_prod_unpad[1..].to_vec(),
         e: eval_W,
       },
@@ -1376,15 +1382,15 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       eval_Az, eval_Bz, eval_Cz, eval_E, eval_E_row, eval_E_col, eval_val_A, eval_val_B, eval_val_C,
     ];
     let comm_vec = [
-      comm_Az,
-      comm_Bz,
-      comm_Cz,
-      U.comm_E,
-      comm_E_row,
-      comm_E_col,
-      pk.S_comm.comm_val_A,
-      pk.S_comm.comm_val_B,
-      pk.S_comm.comm_val_C,
+      comm_Az.clone(),
+      comm_Bz.clone(),
+      comm_Cz.clone(),
+      U.comm_E.clone(),
+      comm_E_row.clone(),
+      comm_E_col.clone(),
+      pk.S_comm.comm_val_A.clone(),
+      pk.S_comm.comm_val_B.clone(),
+      pk.S_comm.comm_val_C.clone(),
     ];
     let poly_vec = [
       &Az,
@@ -1460,7 +1466,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let comm_joint = u_vec_padded
       .iter()
       .zip(powers_of_gamma.iter())
-      .map(|(u, g_i)| u.c * *g_i)
+      .map(|(u, g_i)| u.c.clone() * *g_i)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
     let poly_joint = PolyEvalWitness::weighted_sum(&w_vec_padded, &powers_of_gamma);
     let eval_joint = claims_batch_left
@@ -1551,7 +1557,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let comm_E_row = Commitment::<G>::decompress(&self.comm_E_row)?;
     let comm_E_col = Commitment::<G>::decompress(&self.comm_E_col)?;
 
-    transcript.absorb(b"c", &[comm_Az, comm_Bz, comm_Cz].as_slice());
+    transcript.absorb(
+      b"c",
+      &[comm_Az.clone(), comm_Bz.clone(), comm_Cz.clone()].as_slice(),
+    );
 
     let num_rounds_sat = vk.S_comm.N.log_2();
     let tau = (0..num_rounds_sat)
@@ -1568,7 +1577,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .as_slice(),
     );
 
-    transcript.absorb(b"e", &vec![comm_E_row, comm_E_col].as_slice());
+    transcript.absorb(
+      b"e",
+      &vec![comm_E_row.clone(), comm_E_col.clone()].as_slice(),
+    );
 
     // add claims about Az, Bz, and Cz to be checked later
     // since all the three polynomials are opened at tau,
@@ -1578,7 +1590,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       self.eval_Bz_at_tau,
       self.eval_Cz_at_tau,
     ];
-    let comm_vec = vec![comm_Az, comm_Bz, comm_Cz];
+    let comm_vec = vec![comm_Az.clone(), comm_Bz.clone(), comm_Cz.clone()];
     transcript.absorb(b"e", &eval_vec.as_slice()); // c_vec is already in the transcript
     let c = transcript.squeeze(b"c")?;
     let u = PolyEvalInstance::batch(&comm_vec, &tau, &eval_vec, &c);
@@ -1729,7 +1741,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let comm_output = comm_output_vec
       .iter()
       .zip(powers_of_rho.iter())
-      .map(|(c, r_i)| *c * *r_i)
+      .map(|(c, r_i)| c.clone() * *r_i)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
 
     let eval_output2 = self
@@ -1741,7 +1753,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     // eval_output = output(r_sat)
     u_vec.push(PolyEvalInstance {
-      c: comm_output,
+      c: comm_output.clone(),
       x: r_sat.clone(),
       e: eval_output,
     });
@@ -1753,7 +1765,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       x
     };
     u_vec.push(PolyEvalInstance {
-      c: comm_output,
+      c: comm_output.clone(),
       x,
       e: product,
     });
@@ -1795,14 +1807,14 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       self.eval_col_audit_ts,
     ];
     let comm_vec = [
-      vk.S_comm.comm_row,
-      vk.S_comm.comm_row_read_ts,
-      comm_E_row,
-      vk.S_comm.comm_row_audit_ts,
-      vk.S_comm.comm_col,
-      vk.S_comm.comm_col_read_ts,
-      comm_E_col,
-      vk.S_comm.comm_col_audit_ts,
+      vk.S_comm.comm_row.clone(),
+      vk.S_comm.comm_row_read_ts.clone(),
+      comm_E_row.clone(),
+      vk.S_comm.comm_row_audit_ts.clone(),
+      vk.S_comm.comm_col.clone(),
+      vk.S_comm.comm_col_read_ts.clone(),
+      comm_E_col.clone(),
+      vk.S_comm.comm_col_audit_ts.clone(),
     ];
     let u = PolyEvalInstance::batch(&comm_vec, &r_prod, &eval_vec, &c);
 
@@ -1847,7 +1859,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     };
 
     u_vec.push(PolyEvalInstance {
-      c: U.comm_W,
+      c: U.comm_W.clone(),
       x: r_prod_unpad[1..].to_vec(),
       e: self.eval_W,
     });
@@ -1936,12 +1948,12 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       comm_Az,
       comm_Bz,
       comm_Cz,
-      U.comm_E,
+      U.comm_E.clone(),
       comm_E_row,
       comm_E_col,
-      vk.S_comm.comm_val_A,
-      vk.S_comm.comm_val_B,
-      vk.S_comm.comm_val_C,
+      vk.S_comm.comm_val_A.clone(),
+      vk.S_comm.comm_val_B.clone(),
+      vk.S_comm.comm_val_C.clone(),
     ];
     transcript.absorb(b"e", &eval_vec.as_slice()); // c_vec is already in the transcript
     let c = transcript.squeeze(b"c")?;
@@ -1993,7 +2005,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let comm_joint = u_vec_padded
       .iter()
       .zip(powers_of_gamma.iter())
-      .map(|(u, g_i)| u.c * *g_i)
+      .map(|(u, g_i)| u.c.clone() * *g_i)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
     let eval_joint = self
       .evals_batch_arr

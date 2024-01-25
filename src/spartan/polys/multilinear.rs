@@ -67,6 +67,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Bounds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::bound_poly_var_top")]
   pub fn bound_poly_var_top(&mut self, r: &Scalar) {
     let n = self.len() / 2;
 
@@ -87,6 +88,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Returns Z(r) in O(n) time.
   ///
   /// The point must have a value for each variable.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::evaluate")]
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
     assert_eq!(r.len(), self.get_num_vars());
@@ -109,6 +111,15 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       .sum()
   }
 
+  /// Evaluates polynomial given lagrange basis
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::evaluate_with_chi")]
+  pub fn evaluate_with_chi(&self, chis: &[Scalar]) -> Scalar {
+    (0..chis.len())
+      .into_par_iter()
+      .map(|i| chis[i] * self.Z[i])
+      .sum()
+  }
+
   /// Multiplies the polynomial by a scalar.
   pub fn scalar_mul(&self, scalar: &Scalar) -> Self {
     let mut new_poly = self.clone();
@@ -117,14 +128,37 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     }
     new_poly
   }
+
+  /// Returns the evaluations of the polynomial.
+  pub fn get_Z(&self) -> &[Scalar] {
+    &self.Z
+  }
+
+  /// Bounds the polynomial's top variables using the given scalars.
+  #[tracing::instrument(skip_all, name = "MultilinearPolynomial::bound")]
+  pub fn bound(&self, L: &[Scalar]) -> Vec<Scalar> {
+    let (left_num_vars, right_num_vars) =
+      EqPolynomial::<Scalar>::compute_factored_lens(self.num_vars);
+    let L_size = (2_usize).pow(left_num_vars as u32);
+    let R_size = (2_usize).pow(right_num_vars as u32);
+
+    (0..R_size)
+      .into_par_iter()
+      .map(|i| {
+        (0..L_size)
+          .map(|j| L[j] * self.Z[j * R_size + i])
+          .fold(Scalar::ZERO, |x, y| x + y)
+      })
+      .collect()
+  }
 }
 
 impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
   type Output = Scalar;
 
   #[inline(always)]
-  fn index(&self, _index: usize) -> &Scalar {
-    &(self.Z[_index])
+  fn index(&self, index: usize) -> &Scalar {
+    &(self.Z[index])
   }
 }
 

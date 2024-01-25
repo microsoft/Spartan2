@@ -24,3 +24,4 @@ pub trait RelaxedR1CSSNARKTrait<G: Group>:
   /// Verifies a SNARK for a relaxed R1CS
   fn verify(&self, vk: &Self::VerifierKey, io: &[G::Scalar]) -> Result<(), SpartanError>;
 }
+

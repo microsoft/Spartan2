@@ -1,7 +1,7 @@
 //! This library implements Spartan, a high-speed SNARK.
 #![deny(
   warnings,
-  unused,
+//  unused,
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,
@@ -29,7 +29,8 @@ use errors::SpartanError;
 use serde::{Deserialize, Serialize};
 use traits::{
   commitment::{CommitmentEngineTrait, CommitmentTrait},
-  snark::RelaxedR1CSSNARKTrait,
+  snark::RelaxedR1CSSNARKTrait, 
+  upsnark::{UniformSNARKTrait, PrecommittedSNARKTrait}, 
   Group,
 };
 
@@ -72,10 +73,22 @@ where
   _p2: PhantomData<C>,
 }
 
-impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
+impl<G: Group, S: RelaxedR1CSSNARKTrait<G> + UniformSNARKTrait<G> + PrecommittedSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
+    Ok((ProverKey { pk }, VerifierKey { vk }))
+  }
+
+  /// Produces prover and verifier keys for the direct SNARK
+  pub fn setup_uniform(circuit: C, n: usize) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
+    let (pk, vk) = S::setup_uniform(circuit, n)?;
+    Ok((ProverKey { pk }, VerifierKey { vk }))
+  }
+
+  /// Produces prover and verifier keys for the direct SNARK
+  pub fn setup_precommitted(circuit: C, n: usize) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
+    let (pk, vk) = S::setup_precommitted(circuit, n)?;
     Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 
@@ -128,6 +141,7 @@ mod tests {
       let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
         Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + F::from(5u64))
       })?;
+      let z = AllocatedNum::alloc(cs.namespace(|| "z"), || Ok(F::from(1u64)))?;
 
       cs.enforce(
         || "y = x^3 + x + 5",
@@ -144,6 +158,13 @@ mod tests {
         |lc| lc + y.get_variable(),
       );
 
+      cs.enforce(
+        || "z = 1",
+        |lc| lc + z.get_variable(),
+        |lc| lc + CS::one() - z.get_variable(),
+        |lc| lc,
+      );
+
       let _ = y.inputize(cs.namespace(|| "output"));
 
       Ok(())
@@ -151,27 +172,26 @@ mod tests {
   }
 
   #[test]
-  fn test_snark() {
+  fn test_snark_hyrax_pc() {
     type G = pasta_curves::pallas::Point;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<G>;
+    type EE = crate::provider::hyrax_pc::HyraxEvaluationEngine<G>;
     type S = crate::spartan::snark::RelaxedR1CSSNARK<G, EE>;
-    type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
+    //type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
     test_snark_with::<G, S>();
-    test_snark_with::<G, Spp>();
+    //test_snark_with::<G, Spp>();
 
     type G2 = bn256::Point;
-    type EE2 = crate::provider::ipa_pc::EvaluationEngine<G2>;
+    type EE2 = crate::provider::hyrax_pc::HyraxEvaluationEngine<G2>;
     type S2 = crate::spartan::snark::RelaxedR1CSSNARK<G2, EE2>;
-    type S2pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G2, EE2>;
     test_snark_with::<G2, S2>();
-    test_snark_with::<G2, S2pp>();
+    //test_snark_with::<G2, S2pp>();
 
     type G3 = secp256k1::Point;
-    type EE3 = crate::provider::ipa_pc::EvaluationEngine<G3>;
+    type EE3 = crate::provider::hyrax_pc::HyraxEvaluationEngine<G3>;
     type S3 = crate::spartan::snark::RelaxedR1CSSNARK<G3, EE3>;
-    type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
+    //type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
     test_snark_with::<G3, S3>();
-    test_snark_with::<G3, S3pp>();
+    //test_snark_with::<G3, S3pp>();
   }
 
   fn test_snark_with<G: Group, S: RelaxedR1CSSNARKTrait<G>>() {

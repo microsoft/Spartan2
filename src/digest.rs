@@ -67,6 +67,7 @@ impl<'a, F: PrimeField, T: Digestible> DigestComputer<'a, F, T> {
   }
 
   /// Compute the digest of a `Digestible` instance.
+#[tracing::instrument(skip_all, name = "DigestComputer::digest")]
   pub fn digest(&self) -> Result<F, io::Error> {
     let mut hasher = Self::hasher();
     self

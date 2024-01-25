@@ -9,11 +9,14 @@ pub(crate) mod math;
 pub mod polys;
 pub mod ppsnark;
 pub mod snark;
+pub mod upsnark;
 mod sumcheck;
 
 use crate::{traits::Group, Commitment};
 use ff::Field;
 use polys::multilinear::SparsePolynomial;
+
+use rayon::prelude::*;
 
 fn powers<G: Group>(s: &G::Scalar, n: usize) -> Vec<G::Scalar> {
   assert!(n >= 1);
@@ -34,7 +37,7 @@ impl<G: Group> PolyEvalWitness<G> {
   fn pad(W: &[PolyEvalWitness<G>]) -> Vec<PolyEvalWitness<G>> {
     // determine the maximum size
     if let Some(n) = W.iter().map(|w| w.p.len()).max() {
-      W.iter()
+      W.par_iter()
         .map(|w| {
           let mut p = vec![G::Scalar::ZERO; n];
           p[..w.p.len()].copy_from_slice(&w.p);
@@ -46,14 +49,21 @@ impl<G: Group> PolyEvalWitness<G> {
     }
   }
 
+  #[tracing::instrument(skip_all, name = "PolyEvalWitness::weighted_sum")]
   fn weighted_sum(W: &[PolyEvalWitness<G>], s: &[G::Scalar]) -> PolyEvalWitness<G> {
     assert_eq!(W.len(), s.len());
-    let mut p = vec![G::Scalar::ZERO; W[0].p.len()];
-    for i in 0..W.len() {
-      for j in 0..W[i].p.len() {
-        p[j] += W[i].p[j] * s[i]
-      }
-    }
+    let p = W.par_iter()
+      .zip(s.par_iter())
+      .map(|(w, s_i)| {
+        w.p.iter().map(|w_p_j| *w_p_j * s_i).collect::<Vec<G::Scalar>>()
+      })
+      .reduce_with(|mut acc, item| {
+        for (j, item_j) in item.iter().enumerate() {
+          acc[j] += *item_j;
+        }
+        acc
+      })
+      .unwrap();
     PolyEvalWitness { p }
   }
 
@@ -84,7 +94,11 @@ impl<G: Group> PolyEvalInstance<G> {
         .map(|u| {
           let mut x = vec![G::Scalar::ZERO; ell - u.x.len()];
           x.extend(u.x.clone());
-          PolyEvalInstance { c: u.c, x, e: u.e }
+          PolyEvalInstance {
+            c: u.c.clone(),
+            x,
+            e: u.e,
+          }
         })
         .collect()
     } else {
@@ -107,7 +121,7 @@ impl<G: Group> PolyEvalInstance<G> {
     let c = c_vec
       .iter()
       .zip(powers_of_s.iter())
-      .map(|(c, p)| *c * *p)
+      .map(|(c, p)| c.clone() * *p)
       .fold(Commitment::<G>::default(), |acc, item| acc + item);
 
     PolyEvalInstance {

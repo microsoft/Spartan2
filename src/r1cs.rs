@@ -32,7 +32,7 @@ pub struct R1CSShape<G: Group> {
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSWitness<G: Group> {
-  W: Vec<G::Scalar>,
+  pub(crate) W: Vec<G::Scalar>,
 }
 
 /// A type that holds an R1CS instance
@@ -66,13 +66,13 @@ impl<G: Group> R1CS<G> {
     let S = S.pad(); // pad the shape before computing the commitment key
     let num_cons = S.num_cons;
     let num_vars = S.num_vars;
-    let total_nz = S.A.len() + S.B.len() + S.C.len();
-    G::CE::setup(b"ck", max(max(num_cons, num_vars), total_nz))
+    G::CE::setup(b"ck", max(num_cons, num_vars))
   }
 }
 
 impl<G: Group> R1CSShape<G> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
+  #[tracing::instrument(skip_all, name = "R1CSShape::new")]
   pub fn new(
     num_cons: usize,
     num_vars: usize,
@@ -112,14 +112,17 @@ impl<G: Group> R1CSShape<G> {
       return Err(SpartanError::InvalidIndex);
     }
 
-    Ok(R1CSShape {
+    let shape = R1CSShape {
       num_cons,
       num_vars,
       num_io,
       A: A.to_owned(),
       B: B.to_owned(),
       C: C.to_owned(),
-    })
+    };
+
+    // pad the shape
+    Ok(shape.pad())
   }
 
   // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
@@ -131,6 +134,7 @@ impl<G: Group> R1CSShape<G> {
     assert!(self.num_io < self.num_vars);
   }
 
+  #[tracing::instrument(skip_all, name = "R1CSShape::multiply_vec")]
   pub fn multiply_vec(
     &self,
     z: &[G::Scalar],
@@ -144,15 +148,84 @@ impl<G: Group> R1CSShape<G> {
     // This is safe since we know that `M` is valid
     let sparse_matrix_vec_product =
       |M: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
-        (0..M.len())
-          .map(|i| {
-            let (row, col, val) = M[i];
-            (row, val * z[col])
-          })
-          .fold(vec![G::Scalar::ZERO; num_rows], |mut Mz, (r, v)| {
-            Mz[r] += v;
-            Mz
-          })
+
+        // Parallelism strategy below splits the (row, column, value) tuples into num_threads different chunks.
+        // It is assumed that the tuples are (row, column) ordered. We exploit this fact to create a mutex over
+        // each of the chunks and assume that only one of the threads will be writing to each chunk at a time
+        // due to ordering.
+
+        let num_threads = rayon::current_num_threads() * 4; // Enable work stealing incase of thread work imbalance
+        let thread_chunk_size = M.len() / num_threads;
+        let row_chunk_size = (num_rows as f64 / num_threads as f64).ceil() as usize;
+
+        let mut chunks: Vec<std::sync::Mutex<Vec<G::Scalar>>> = Vec::with_capacity(num_threads);
+        let mut remaining_rows = num_rows;
+        (0..num_threads).for_each(|i| {
+          if i == num_threads - 1 { // the final chunk may be smaller
+            let inner = std::sync::Mutex::new(vec![G::Scalar::ZERO; remaining_rows]);
+            chunks.push(inner);
+          } else {
+            let inner = std::sync::Mutex::new(vec![G::Scalar::ZERO; row_chunk_size]);
+            chunks.push(inner);
+            remaining_rows -= row_chunk_size;
+          }
+        });
+
+        let get_chunk = |row_index: usize| -> usize { row_index / row_chunk_size };
+        let get_index = |row_index: usize| -> usize { row_index % row_chunk_size };
+
+        let span = tracing::span!(tracing::Level::TRACE, "all_chunks_multiplication");
+        let _enter = span.enter();
+        M.par_chunks(thread_chunk_size).for_each(|sub_matrix: &[(usize, usize, G::Scalar)]| {
+          let (init_row, init_col, init_val) = sub_matrix[0];
+          let mut prev_chunk_index = get_chunk(init_row);
+          let curr_row_index = get_index(init_row);
+          let mut curr_chunk = chunks[prev_chunk_index].lock().unwrap();
+
+          curr_chunk[curr_row_index] += init_val * z[init_col];
+
+          let span_a = tracing::span!(tracing::Level::TRACE, "chunk_multiplication");
+          let _enter_b = span_a.enter();
+          for (row, col, val) in sub_matrix.iter().skip(1) {
+            let curr_chunk_index = get_chunk(*row);
+            if prev_chunk_index != curr_chunk_index { // only unlock the mutex again if required
+              drop(curr_chunk); // drop the curr_chunk before waiting for the next to avoid race condition
+              let new_chunk = chunks[curr_chunk_index].lock().unwrap();
+              curr_chunk = new_chunk;
+
+              prev_chunk_index = curr_chunk_index;
+            }
+
+            if z[*col].is_zero_vartime() { 
+              continue; 
+            }
+
+            let m = if z[*col].eq(&G::Scalar::ONE) {
+              *val
+            } else if val.eq(&G::Scalar::ONE) {
+              z[*col]
+            } else {
+              *val * z[*col]
+            };
+            curr_chunk[get_index(*row)] += m;
+          }
+        });
+        drop(_enter);
+        drop(span);
+
+        let span_a = tracing::span!(tracing::Level::TRACE, "chunks_mutex_unwrap");
+        let _enter_a = span_a.enter();
+        // TODO(sragss): Mutex unwrap takes about 30% of the time due to clone, likely unnecessary.
+        let mut flat_chunks: Vec<G::Scalar> = Vec::with_capacity(num_rows);
+        for chunk in chunks {
+          let inner_vec = chunk.into_inner().unwrap();
+          flat_chunks.extend(inner_vec.iter());
+        }
+        drop(_enter_a);
+        drop(span_a);
+
+
+        flat_chunks
       };
 
     let (Az, (Bz, Cz)) = rayon::join(
@@ -354,14 +427,23 @@ impl<G: Group> R1CSShape<G> {
 impl<G: Group> R1CSWitness<G> {
   /// A method to create a witness object using a vector of scalars
   pub fn new(S: &R1CSShape<G>, W: &[G::Scalar]) -> Result<R1CSWitness<G>, SpartanError> {
-    if S.num_vars != W.len() {
-      Err(SpartanError::InvalidWitnessLength)
-    } else {
-      Ok(R1CSWitness { W: W.to_owned() })
-    }
+    let w = R1CSWitness { W: W.to_owned() };
+    Ok(w.pad(S))
+  }
+
+  /// Pads the provided witness to the correct length
+  pub fn pad(&self, S: &R1CSShape<G>) -> R1CSWitness<G> {
+    let W = {
+      let mut W = self.W.clone();
+      W.extend(vec![G::Scalar::ZERO; S.num_vars - W.len()]);
+      W
+    };
+
+    Self { W }
   }
 
   /// Commits to the witness using the supplied generators
+  #[tracing::instrument(skip_all, name = "R1CSWitness::commit")]
   pub fn commit(&self, ck: &CommitmentKey<G>) -> Commitment<G> {
     CE::<G>::commit(ck, &self.W)
   }
@@ -378,10 +460,20 @@ impl<G: Group> R1CSInstance<G> {
       Err(SpartanError::InvalidInputLength)
     } else {
       Ok(R1CSInstance {
-        comm_W: *comm_W,
+        comm_W: comm_W.clone(),
         X: X.to_owned(),
       })
     }
+  }
+}
+
+impl<G: Group> TranscriptReprTrait<G> for R1CSInstance<G> {
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    [
+      self.comm_W.to_transcript_bytes(),
+      self.X.as_slice().to_transcript_bytes(),
+    ]
+    .concat()
   }
 }
 
@@ -395,6 +487,7 @@ impl<G: Group> RelaxedR1CSWitness<G> {
   }
 
   /// Initializes a new RelaxedR1CSWitness from an R1CSWitness
+  #[tracing::instrument(skip_all, name = "RelaxedR1CSWitness::from_r1cs_witness")]
   pub fn from_r1cs_witness(S: &R1CSShape<G>, witness: &R1CSWitness<G>) -> RelaxedR1CSWitness<G> {
     RelaxedR1CSWitness {
       W: witness.W.clone(),
@@ -471,19 +564,20 @@ impl<G: Group> RelaxedR1CSInstance<G> {
     instance: &R1CSInstance<G>,
   ) -> RelaxedR1CSInstance<G> {
     let mut r_instance = RelaxedR1CSInstance::default(ck, S);
-    r_instance.comm_W = instance.comm_W;
+    r_instance.comm_W = instance.comm_W.clone();
     r_instance.u = G::Scalar::ONE;
     r_instance.X = instance.X.clone();
     r_instance
   }
 
   /// Initializes a new RelaxedR1CSInstance from an R1CSInstance
+  #[tracing::instrument(skip_all, name = "RelaxedR1CSInstance::from_r1cs_instance_unchecked")]
   pub fn from_r1cs_instance_unchecked(
     comm_W: &Commitment<G>,
     X: &[G::Scalar],
   ) -> RelaxedR1CSInstance<G> {
     RelaxedR1CSInstance {
-      comm_W: *comm_W,
+      comm_W: comm_W.clone(),
       comm_E: Commitment::<G>::default(),
       u: G::Scalar::ONE,
       X: X.to_vec(),
@@ -507,8 +601,8 @@ impl<G: Group> RelaxedR1CSInstance<G> {
       .zip(X2)
       .map(|(a, b)| *a + *r * *b)
       .collect::<Vec<G::Scalar>>();
-    let comm_W = *comm_W_1 + *comm_W_2 * *r;
-    let comm_E = *comm_E_1 + *comm_T * *r;
+    let comm_W = comm_W_1.clone() + comm_W_2.clone() * *r;
+    let comm_E = comm_E_1.clone() + comm_T.clone() * *r;
     let u = *u1 + *r;
 
     Ok(RelaxedR1CSInstance {

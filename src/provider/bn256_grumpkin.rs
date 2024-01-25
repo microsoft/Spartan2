@@ -1,7 +1,7 @@
 //! This module implements the Spartan traits for `bn256::Point`, `bn256::Scalar`, `grumpkin::Point`, `grumpkin::Scalar`.
 use crate::{
   impl_traits,
-  provider::{cpu_best_multiexp, keccak::Keccak256Transcript, pedersen::CommitmentEngine},
+  provider::{hyrax_pc::HyraxCommitmentEngine, keccak::Keccak256Transcript},
   traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
@@ -21,6 +21,7 @@ use halo2curves::bn256::{
 use halo2curves::grumpkin::{
   G1Affine as GrumpkinAffine, G1Compressed as GrumpkinCompressed, G1 as GrumpkinPoint,
 };
+use halo2curves::msm::best_multiexp;
 
 /// Re-exports that give access to the standard aliases used in the code base, for bn256
 pub mod bn256 {
