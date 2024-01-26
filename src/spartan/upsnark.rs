@@ -157,18 +157,18 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
   }
 
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
-  #[tracing::instrument(skip_all, name = "Spartan2::R1CSSnark::prove")]
+  #[tracing::instrument(skip_all, name = "Spartan2::UPSnark::prove")]
   fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
     let _ = circuit.synthesize(&mut cs);
 
-    let span = tracing::span!(tracing::Level::INFO, "committing to W again");
-    let _guard = span.enter();
+    // Commits to witness (expensive)
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;
-    drop(_guard); 
-    drop(span); 
+
+    let non_commitment_span = tracing::span!(tracing::Level::INFO, "PostCommitProve");
+    let _guard = non_commitment_span.enter();
 
     let W = w.pad(&pk.S); // pad the witness
     let mut transcript = G::TE::new(b"R1CSSNARK");
