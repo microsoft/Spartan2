@@ -10,7 +10,7 @@ use crate::{
   CommitmentKey,
 };
 use bellpepper_core::{Index, LinearCombination};
-use ff::PrimeField;
+use ff::{Field, PrimeField};
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<G: Group> {
@@ -162,7 +162,7 @@ impl<G: Group> ShapeCS<G> {
     let num_constraints_per_step = self.num_constraints();
     let num_aux_per_step= self.num_aux(); // Arasu: this doesn't include the 1
 
-    let num_constraints_total = num_constraints_per_step * N;
+    let mut num_constraints_total = num_constraints_per_step * N;
     let num_aux_total = num_aux_per_step * N;
 
     let span = tracing::span!(tracing::Level::INFO, "r1cs matrix creation");
@@ -177,6 +177,19 @@ impl<G: Group> ShapeCS<G> {
         N,
       );
     }  
+
+    // add IO consistency constraints ensuring that the output of step i is the input for stpe i-1
+    // where the length of the outputs and inputs are num_inputs each 
+    let STATE_LEN = 2; 
+    for i in 0..STATE_LEN {
+      for step in 0..N {
+        A.push((num_constraints_total + step, num_aux_total, G::Scalar::ONE));
+        B.push((num_constraints_total + step, 1 + i * N + step, G::Scalar::ONE)); 
+        C.push((num_constraints_total + step, 1 + (STATE_LEN + i) * N + step, G::Scalar::ONE));
+      }
+      num_constraints_total += N; 
+    }
+
     drop(_guard);
     drop(span);
 
@@ -185,8 +198,9 @@ impl<G: Group> ShapeCS<G> {
     let S: R1CSShape<G> = {
       // Don't count One as an input for shape's purposes.
       // Arasu: num_vars is actually supposed to be num_aux (and not including 1)
-      // Witness format is [W || 1 || x]
-      let res = R1CSShape::new(num_constraints_total, num_aux_total, num_inputs - 1, &A, &B, &C);
+      // Witness format is [W || 1 || x] but as x is assumed to be empty and inputs are provided in aux instead. 
+      // So witness is [W || 1] 
+      let res = R1CSShape::new(num_constraints_total, num_aux_total, num_inputs-1, &A, &B, &C);
       res.unwrap()
     };
 
