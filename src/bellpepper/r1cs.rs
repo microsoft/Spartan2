@@ -162,7 +162,6 @@ impl<G: Group> ShapeCS<G> {
     let num_constraints_per_step = self.num_constraints();
     let num_aux_per_step= self.num_aux(); // Arasu: this doesn't include the 1
 
-    let mut num_constraints_total = num_constraints_per_step * N;
     let num_aux_total = num_aux_per_step * N;
 
     let span = tracing::span!(tracing::Level::INFO, "r1cs matrix creation");
@@ -178,16 +177,17 @@ impl<G: Group> ShapeCS<G> {
       );
     }  
 
-    // add IO consistency constraints ensuring that the output of step i is the input for stpe i-1
-    // where the length of the outputs and inputs are num_inputs each 
+    let mut num_constraints_total = num_constraints_per_step * N;
+    // Add IO consistency constraints 
+    // TODO(arasuarun): Hack. Make this a parameter instead. 
     let STATE_LEN = 2; 
     for i in 0..STATE_LEN {
-      for step in 0..N {
+      for step in 0..(N-1) {
         A.push((num_constraints_total + step, num_aux_total, G::Scalar::ONE));
-        B.push((num_constraints_total + step, 1 + i * N + step, G::Scalar::ONE)); 
-        C.push((num_constraints_total + step, 1 + (STATE_LEN + i) * N + step, G::Scalar::ONE));
+        B.push((num_constraints_total + step, i * N + step, G::Scalar::ONE)); // output of step i
+        C.push((num_constraints_total + step, (STATE_LEN + i) * N + step + 1, G::Scalar::ONE)); // input of step I+1
       }
-      num_constraints_total += N; 
+      num_constraints_total += N-1; 
     }
 
     drop(_guard);
@@ -339,7 +339,7 @@ fn add_constraint_uniform_variablewise<S: PrimeField>(
       }
       Index::Aux(idx) => {
         for step in 0..num_steps {
-          V.push((n + step, idx + step, one * coeff));
+          V.push((n + step, idx * num_steps + step, one * coeff));
         }
       }
     }
