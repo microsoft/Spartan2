@@ -78,6 +78,19 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> VerifierKey<G, EE> {
   }
 }
 
+/// A uniform version fo the prover's key
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct UniformProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
+  ck: CommitmentKey<G>,
+  pk_ee: EE::ProverKey,
+  S: R1CSShape<G>,
+  S_single: R1CSShape<G>, 
+  num_steps: usize, // Number of steps
+  vk_digest: G::Scalar, // digest of the verifier's key
+}
+
+
 /// A uniform version of the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -132,7 +145,7 @@ pub struct R1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
 }
 
 impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSNARK<G, EE> {
-  type ProverKey = ProverKey<G, EE>;
+  type ProverKey = UniformProverKey<G, EE>;
   type VerifierKey = UniformVerifierKey<G, EE>;
 
   fn setup<C: Circuit<G::Scalar>>(
@@ -146,10 +159,12 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
 
     let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S.clone(), 1);
 
-    let pk = ProverKey {
+    let pk = UniformProverKey {
       ck,
       pk_ee,
-      S,
+      S: S.clone(),
+      S_single: S,
+      num_steps: 0,
       vk_digest: vk.digest(),
     };
 
@@ -194,6 +209,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
       .collect::<Result<Vec<G::Scalar>, SpartanError>>()?;
 
     let mut poly_tau = MultilinearPolynomial::new(EqPolynomial::new(tau).evals());
+    // poly_Az is the polynomial extended from the vector Az 
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) = {
       let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
       (
@@ -221,6 +237,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
     )?;
 
     // claims from the end of sum-check
+    // claim_Az is the (scalar) value v_A = \sum_y A(r_x, y) * z(r_x) where r_x is the sumcheck randomness 
     let (claim_Az, claim_Bz): (G::Scalar, G::Scalar) = (claims_outer[1], claims_outer[2]);
     let claim_Cz = claims_outer[3];
     transcript.absorb(
@@ -234,43 +251,62 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
 
     let span = tracing::span!(tracing::Level::TRACE, "poly_ABC");
     let _enter = span.enter();
+    // this is the polynomial extended from the vector r_A * A(r_x, y) + r_B * B(r_x, y) + r_C * C(r_x, y) for all y
     let poly_ABC = {
-      // compute the initial evaluation table for R(\tau, x)
-      let evals_rx = EqPolynomial::new(r_x.clone()).evals();
+      let NUM_STEPS_BITS = pk.num_steps.trailing_zeros();
+      let (rx_con, rx_ts) = r_x.split_at(r_x.len() - NUM_STEPS_BITS as usize);
+      let eq_rx_con = EqPolynomial::new(rx_con.to_vec()).evals();
+      let eq_rx_ts = EqPolynomial::new(rx_ts.to_vec()).evals();
 
-      // Bounds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-      let compute_eval_table_sparse =
-        |S: &R1CSShape<G>, rx: &[G::Scalar]| -> (Vec<G::Scalar>, Vec<G::Scalar>, Vec<G::Scalar>) {
-          assert_eq!(rx.len(), S.num_cons);
+      // Bounds "row" variables of full (A, B, C) matrices 
+      // viewed as 2d multilinear polynomials
+      // built using the single_step (A, B, C) matrices 
+      let compute_eval_table_sparse_uniform =
+        |S_single: &R1CSShape<G>, N_STEPS: usize, eq_rx_con: &[G::Scalar], eq_rx_ts: &[G::Scalar]| -> (Vec<G::Scalar>, Vec<G::Scalar>, Vec<G::Scalar>) {
+          assert_eq!(eq_rx_con.len().ilog2() + eq_rx_ts.len().ilog2(), pk.S.num_cons.ilog2());
 
-          let inner = |M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
-            for (row, col, val) in M {
-              if val.eq(&G::Scalar::ONE) {
-                M_evals[*col] += rx[*row];
-              } else {
-                let m = rx[*row] * val;
-                M_evals[*col] += m;
-              }
+          let inner = |small_M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
+            // Evaluate \tilde smallM(r_x, y) for all y 
+            let mut small_M_evals = vec![G::Scalar::ZERO; pk.S_single.num_vars + 1];
+            for (row, col, val) in small_M.iter() {
+              small_M_evals[*col] += eq_rx_con[*row] * val;
             }
+
+            // Handles all entries but the last one with the constant 1 variable
+            M_evals.par_iter_mut().take(pk.S.num_vars).enumerate().for_each(|(col, m_eval)| {
+              *m_eval = eq_rx_ts[col % N_STEPS] * small_M_evals[col / N_STEPS];
+            });
+
+            // Handles the constant 1 variable 
+            small_M.iter()
+              .filter(|(_, col, _)| *col == pk.S_single.num_vars) 
+              .for_each(|(row, _, val)| {
+                  (0..N_STEPS).for_each(|t| {
+                      let col_t = pk.S.num_vars;
+                      M_evals[col_t] += eq_rx_con[*row] * eq_rx_ts[t] * val;
+                  });
+              });
           };
 
           let (mut A_evals, mut B_evals, mut C_evals) = (
-            vec![G::Scalar::ZERO; 2 * S.num_vars],
-            vec![G::Scalar::ZERO; 2 * S.num_vars],
-            vec![G::Scalar::ZERO; 2 * S.num_vars]
+            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS],
+            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS],
+            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS]
           );
           rayon::join(
-            || inner(&pk.S.A, &mut A_evals),
+            || inner(&S_single.A, &mut A_evals),
             || rayon::join(
-              || inner(&pk.S.B, &mut B_evals),
-              || inner(&pk.S.C, &mut C_evals),
+              || inner(&S_single.B, &mut B_evals),
+              || inner(&S_single.C, &mut C_evals),
             ),
           );
 
           (A_evals, B_evals, C_evals)
         };
 
-      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+      // evals_A is the vector of evaluations of A(r_x, y) for all y
+      // The summation of this should be claims_A right? 
+      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse_uniform(&pk.S_single, pk.num_steps, &eq_rx_con, &eq_rx_ts);
 
       assert_eq!(evals_A.len(), evals_B.len());
       assert_eq!(evals_A.len(), evals_C.len());
@@ -301,10 +337,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
       *poly_A_comp * *poly_B_comp
     };
     let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::prove_quad(
-      &claim_inner_joint,
+      &claim_inner_joint, // r_A * v_A + r_B * v_B + r_C * v_C
       num_rounds_y,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
+      &mut MultilinearPolynomial::new(poly_ABC), // r_A * A(r_x, y) + r_B * B(r_x, y) + r_C * C(r_x, y) for all y
+      &mut MultilinearPolynomial::new(poly_z), // z(y) for all y
       comb_func,
       &mut transcript,
     )?;
@@ -462,7 +498,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> UniformSNARKTrait<G> for R1CSSNARK<
   fn setup_uniform<C: Circuit<G::Scalar>>(
     circuit: C,
     num_steps: usize, 
-  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
+  ) -> Result<(UniformProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
     // let (S, S_single, ck) = cs.r1cs_shape_uniform(num_steps);
@@ -470,12 +506,14 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> UniformSNARKTrait<G> for R1CSSNARK<
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
-    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single.clone(), num_steps);
 
-    let pk = ProverKey {
+    let pk = UniformProverKey {
       ck,
       pk_ee,
       S,
+      S_single, 
+      num_steps, 
       vk_digest: vk.digest(),
     };
 
@@ -489,19 +527,21 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> PrecommittedSNARKTrait<G> for R1CSS
   fn setup_precommitted<C: Circuit<G::Scalar>>(
     circuit: C,
     num_steps: usize, 
-  ) -> Result<(ProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
+  ) -> Result<(UniformProverKey<G, EE>, UniformVerifierKey<G, EE>), SpartanError> {
     let mut cs: ShapeCS<G> = ShapeCS::new();
     let _ = circuit.synthesize(&mut cs);
     let (S, S_single, ck) = cs.r1cs_shape_uniform_variablewise(num_steps); // TODO(arasuarun): replace with precommitted version
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
-    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single, num_steps);
+    let vk: UniformVerifierKey<G, EE> = UniformVerifierKey::new(S.clone(), vk_ee, S_single.clone(), num_steps);
 
-    let pk = ProverKey {
+    let pk = UniformProverKey {
       ck,
       pk_ee,
-      S,
+      S: S.clone(),
+      S_single: S_single,
+      num_steps, 
       vk_digest: vk.digest(),
     };
 
