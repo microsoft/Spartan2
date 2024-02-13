@@ -10,7 +10,7 @@ use crate::{
   CommitmentKey,
 };
 use bellpepper_core::{Index, LinearCombination};
-use ff::{Field, PrimeField};
+use ff::PrimeField;
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<G: Group> {
@@ -177,18 +177,19 @@ impl<G: Group> ShapeCS<G> {
       );
     }  
 
-    let mut num_constraints_total = num_constraints_per_step * N;
-    // Add IO consistency constraints 
-    // TODO(arasuarun): Hack. Make this a parameter instead. 
-    let STATE_LEN = 2; 
-    for i in 0..STATE_LEN {
-      for step in 0..(N-1) {
-        A.push((num_constraints_total + step, num_aux_total, G::Scalar::ONE));
-        B.push((num_constraints_total + step, i * N + step, G::Scalar::ONE)); // output of step i
-        C.push((num_constraints_total + step, (STATE_LEN + i) * N + step + 1, G::Scalar::ONE)); // input of step I+1
-      }
-      num_constraints_total += N-1; 
-    }
+    let num_constraints_total = num_constraints_per_step * N;
+    // // Add IO consistency constraints 
+    // // TODO(arasuarun): Hack. Make this a parameter instead. 
+    // let STATE_LEN = 2; 
+    // use ff::Field; 
+    // for i in 0..STATE_LEN {
+    //   for step in 0..(N-1) {
+    //     A.push((num_constraints_total + step, num_aux_total, G::Scalar::ONE));
+    //     B.push((num_constraints_total + step, i * N + step, G::Scalar::ONE)); // output of step i
+    //     C.push((num_constraints_total + step, (STATE_LEN + i) * N + step + 1, G::Scalar::ONE)); // input of step I+1
+    //   }
+    //   num_constraints_total += N-1; 
+    // }
 
     drop(_guard);
     drop(span);
