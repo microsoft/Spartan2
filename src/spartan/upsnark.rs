@@ -266,24 +266,23 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
           assert_eq!(eq_rx_con.len().ilog2() + eq_rx_ts.len().ilog2(), pk.S.num_cons.ilog2());
 
           let inner = |small_M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
-            // Evaluate \tilde smallM(r_x, y) for all y 
+            // 1. Evaluate \tilde smallM(r_x, y) for all y 
             let mut small_M_evals = vec![G::Scalar::ZERO; pk.S_single.num_vars + 1];
             for (row, col, val) in small_M.iter() {
               small_M_evals[*col] += eq_rx_con[*row] * val;
             }
 
-            // Handles all entries but the last one with the constant 1 variable
+            // 2. Handles all entries but the last one with the constant 1 variable
             M_evals.par_iter_mut().take(pk.S.num_vars).enumerate().for_each(|(col, m_eval)| {
               *m_eval = eq_rx_ts[col % N_STEPS] * small_M_evals[col / N_STEPS];
             });
 
-            // Handles the constant 1 variable 
+            // 3. Handles the constant 1 variable 
             small_M.iter()
               .filter(|(_, col, _)| *col == pk.S_single.num_vars) 
               .for_each(|(row, _, val)| {
                   (0..N_STEPS).for_each(|t| {
-                      let col_t = pk.S.num_vars;
-                      M_evals[col_t] += eq_rx_con[*row] * eq_rx_ts[t] * val;
+                      M_evals[pk.S.num_vars] += eq_rx_con[*row] * eq_rx_ts[t] * val;
                   });
               });
           };
