@@ -20,6 +20,7 @@ pub trait PrecommittedSNARKTrait<G: Group>:
   Sized + Send + Sync + Serialize + for<'de> Deserialize<'de> + UniformSNARKTrait<G> 
 {
   /// Setup that takes in the generators used to pre-committed the witness 
+  /// TODO(arasuarun): currently just sets up the circuit with variable-wise uniformity
   fn setup_precommitted<C: Circuit<G::Scalar>>(
     circuit: C,
     num_steps: usize,
