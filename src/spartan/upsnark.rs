@@ -263,9 +263,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
       // built using the single_step (A, B, C) matrices 
       let compute_eval_table_sparse_uniform =
         |S_single: &R1CSShape<G>, N_STEPS: usize, eq_rx_con: &[G::Scalar], eq_rx_ts: &[G::Scalar]| -> (Vec<G::Scalar>, Vec<G::Scalar>, Vec<G::Scalar>) {
+          let span = tracing::span!(tracing::Level::TRACE, "compute_eval_table_sparse_uniform");
+          let _guard = span.enter();
           assert_eq!(eq_rx_con.len().ilog2() + eq_rx_ts.len().ilog2(), pk.S.num_cons.ilog2());
 
-          let inner = |small_M: &Vec<(usize, usize, G::Scalar)>, M_evals: &mut Vec<G::Scalar>| {
+          let inner = |small_M: &Vec<(usize, usize, G::Scalar)>| -> Vec<G::Scalar> {
             // 1. Evaluate \tilde smallM(r_x, y) for all y 
             let mut small_M_evals = vec![G::Scalar::ZERO; pk.S_single.num_vars + 1];
             for (row, col, val) in small_M.iter() {
@@ -273,32 +275,34 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
             }
 
             // 2. Handles all entries but the last one with the constant 1 variable
-            M_evals.par_iter_mut().take(pk.S.num_vars).enumerate().for_each(|(col, m_eval)| {
-              *m_eval = eq_rx_ts[col % N_STEPS] * small_M_evals[col / N_STEPS];
-            });
+            let span_m_evals = tracing::span!(tracing::Level::TRACE, "M_evals_computation");
+            let _enter_m_evals = span_m_evals.enter();
+            let mut M_evals: Vec<G::Scalar> = (0..pk.S.num_vars).into_par_iter().map(|col| {
+              eq_rx_ts[col % N_STEPS] * small_M_evals[col / N_STEPS]
+            }).collect();
+            let next_pow_2 = 2 * pk.S.num_vars;
+            M_evals.resize(next_pow_2, G::Scalar::ZERO);
+            drop(_enter_m_evals);
 
             // 3. Handles the constant 1 variable 
-            small_M.iter()
-              .filter(|(_, col, _)| *col == pk.S_single.num_vars) 
-              .for_each(|(row, _, val)| {
-                  (0..N_STEPS).for_each(|t| {
-                      M_evals[pk.S.num_vars] += eq_rx_con[*row] * eq_rx_ts[t] * val;
-                  });
-              });
+            let constant_sum: G::Scalar = small_M.iter()
+              .filter(|(_, col, _)| *col == pk.S_single.num_vars)   // expecting ~1
+              .map(|(row, _, val)| {
+                  let eq_sum = (0..N_STEPS).into_par_iter().map(|t| eq_rx_ts[t]).sum::<G::Scalar>();
+                  *val * eq_rx_con[*row] * eq_sum
+              }).sum();
+            M_evals[pk.S.num_vars] = constant_sum;
+
+            M_evals
           };
 
-          let (mut A_evals, mut B_evals, mut C_evals) = (
-            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS],
-            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS],
-            vec![G::Scalar::ZERO; 2 * S_single.num_vars * N_STEPS]
-          );
-          rayon::join(
-            || inner(&S_single.A, &mut A_evals),
+          let (A_evals, (B_evals, C_evals)) = rayon::join(
+            || inner(&S_single.A),
             || rayon::join(
-              || inner(&S_single.B, &mut B_evals),
-              || inner(&S_single.C, &mut C_evals),
+              || inner(&S_single.B),
+              || inner(&S_single.C),
             ),
-          );
+          ); 
 
           (A_evals, B_evals, C_evals)
         };
