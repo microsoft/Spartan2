@@ -291,10 +291,16 @@ impl<G: Group> SumcheckProof<G> {
       claim_per_round = poly.evaluate(&r_i);
 
       // bound all tables to the verifier's challenege
-      poly_A.bound_poly_var_top(&r_i);
-      poly_B.bound_poly_var_top(&r_i);
-      poly_C.bound_poly_var_top(&r_i);
-      poly_D.bound_poly_var_top(&r_i);
+      rayon::join(
+        || poly_A.bound_poly_var_top(&r_i),
+        || rayon::join(
+          || poly_B.bound_poly_var_top(&r_i),
+          || rayon::join(
+            || poly_C.bound_poly_var_top(&r_i),
+            || poly_D.bound_poly_var_top(&r_i),
+          ),
+        ),
+      );
     }
 
     Ok((
