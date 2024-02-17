@@ -241,6 +241,72 @@ impl<G: Group> R1CSShape<G> {
     Ok((Az, Bz, Cz))
   }
 
+  #[tracing::instrument(skip_all, name = "R1CSShape::multiply_vec_uniform")]
+  pub fn multiply_vec_uniform(
+    &self,
+    z: &[G::Scalar],
+    num_steps: usize,
+  ) -> Result<(Vec<G::Scalar>, Vec<G::Scalar>, Vec<G::Scalar>), SpartanError> {
+    if z.len() != (self.num_io + self.num_vars) * num_steps + 1 {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+    
+    // First, pre-process self to get a list pointers Vec<usize> 
+    // to the start of each row in the matrix
+    let get_row_pointers = |M: &Vec<(usize, usize, G::Scalar)>| -> Vec<usize> {
+      let mut indptr = vec![0; self.num_cons + 1];
+      for &(row, _, _) in M {
+          indptr[row + 1] += 1;
+      }
+      for i in 0..self.num_cons {
+          indptr[i + 1] += indptr[i];
+      }
+      indptr
+    };
+
+    let multiply_row_vec_uniform = |R: &[(usize, usize, G::Scalar)], z: &[G::Scalar], N: usize| -> Vec<G::Scalar> {
+      let mut result = vec![G::Scalar::ZERO; N];
+      for &(_, col, val) in R {
+        if col == self.num_vars {
+          for i in 0..N {
+              result[i] += val; // z[num_vars] is always 1 
+          }
+        } else {
+          for i in 0..N {
+              result[i] += val * z[col * N + i]; // Arasu: double-check the col * N formula
+          }
+        }
+      }
+      result
+    };
+
+    // computes a product between a sparse uniform matrix represented by `M` and a vector `z`
+    let sparse_matrix_vec_product_uniform =
+      |M: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
+        let row_pointers = get_row_pointers(M);
+        let result: Vec<G::Scalar> = (0..num_rows)
+          .into_par_iter()
+          .flat_map(|i| {
+              let row = &M[row_pointers[i]..row_pointers[i + 1]];
+              multiply_row_vec_uniform(row, z, num_steps)
+          })
+          .collect();
+        result 
+      };
+
+    let (Az, (Bz, Cz)) = rayon::join(
+      || sparse_matrix_vec_product_uniform(&self.A, self.num_cons, z),
+      || {
+        rayon::join(
+          || sparse_matrix_vec_product_uniform(&self.B, self.num_cons, z),
+          || sparse_matrix_vec_product_uniform(&self.C, self.num_cons, z),
+        )
+      },
+    );
+
+    Ok((Az, Bz, Cz))
+  }
+
   /// Checks if the Relaxed R1CS instance is satisfiable given a witness and its shape
   pub fn is_sat_relaxed(
     &self,

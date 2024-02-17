@@ -211,7 +211,8 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for R1CSSN
     let mut poly_tau = MultilinearPolynomial::new(EqPolynomial::new(tau).evals());
     // poly_Az is the polynomial extended from the vector Az 
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) = {
-      let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
+      // let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
+      let (poly_Az, poly_Bz, poly_Cz) = pk.S_single.multiply_vec_uniform(&z, pk.num_steps)?;
       (
         MultilinearPolynomial::new(poly_Az),
         MultilinearPolynomial::new(poly_Bz),
