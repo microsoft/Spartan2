@@ -9,11 +9,17 @@ use spartan2::spartan::polys::eq::EqPolynomial;
 fn benchmarks_evaluate_incremental(c: &mut Criterion) {
   let mut group = c.benchmark_group("evaluate_incremental");
   (1..=20).step_by(2).for_each(|i| {
-    group.bench_with_input(format!("2^{}", i), &i, |b, &i| {
-      let eq_polynomial =
-        EqPolynomial::new(vec![Fp::random(&mut rand::thread_rng()); 2usize.pow(i)]);
+    let random_point: Vec<Fp> = (0..2usize.pow(i))
+      .map(|_| Fp::random(&mut rand::thread_rng()))
+      .collect();
+    let random_polynomial = EqPolynomial::new(
+      (0..2usize.pow(i))
+        .map(|_| Fp::random(&mut rand::thread_rng()))
+        .collect(),
+    );
+    group.bench_with_input(format!("2^{}", i), &i, |b, &_i| {
       b.iter(|| {
-        eq_polynomial.evaluate(vec![Fp::random(&mut rand::thread_rng()); 2usize.pow(i)].as_slice())
+        random_polynomial.evaluate(random_point.as_slice());
       });
     });
   });
