@@ -213,6 +213,8 @@ fn main() {
   // Note that -Fq::one() is corresponds to q - 1 > bound
   assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_ok());
 
+  println!("Unsafe circuit OK");
+
   println!("Executing safe circuit...");
   // Typical example, ok
   assert!(verify_circuit_safe::<G, S>(Fq::from(17u64), Fq::from(9u64), 10).is_ok());
@@ -228,4 +230,6 @@ fn main() {
   // above).
   // Note that -Fq::one() is corresponds to q - 1 > bound
   assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_err());
+
+  println!("Safe circuit OK");
 }
