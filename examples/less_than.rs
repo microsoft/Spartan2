@@ -3,6 +3,7 @@ use bellpepper_core::{
   SynthesisError,
 };
 use ff::{PrimeField, PrimeFieldBits};
+use pasta_curves::Fq;
 use spartan2::{
   errors::SpartanError,
   traits::{snark::RelaxedR1CSSNARKTrait, Group},
@@ -49,21 +50,32 @@ fn num_to_bits_le_bounded<F: PrimeField + PrimeFieldBits, CS: ConstraintSystem<F
   Ok(bits_circuit)
 }
 
+fn get_msb_index<F: PrimeField + PrimeFieldBits>(n: F) -> u8 {
+  let bits = n.to_le_bits();
+  let mut msb_index = 0;
+  for (i, b) in bits.iter().enumerate() {
+    if *b {
+      msb_index = i as u8;
+    }
+  }
+  msb_index
+}
+
 // Range check: constrains input < `bound`. The bound must fit into
 // `num_bits` bits (this is asserted in the circuit constructor).
 // Important: it must be checked elsewhere that the input fits into
 // `num_bits` bits - this is NOT constrained by this circuit in order to
 // avoid duplications (hence "unsafe")
 #[derive(Clone, Debug)]
-struct LessThanCircuitUnsafe {
-  bound: u64, // Will be a constant in the constraits, not a variable
-  input: u64, // Will be an input/output variable
+struct LessThanCircuitUnsafe<F: PrimeField> {
+  bound: F, // Will be a constant in the constraits, not a variable
+  input: F, // Will be an input/output variable
   num_bits: u8,
 }
 
-impl LessThanCircuitUnsafe {
-  fn new(bound: u64, input: u64, num_bits: u8) -> Self {
-    assert!(bound < (1 << num_bits));
+impl<F: PrimeField + PrimeFieldBits> LessThanCircuitUnsafe<F> {
+  fn new(bound: F, input: F, num_bits: u8) -> Self {
+    assert!(get_msb_index(bound) < num_bits);
     Self {
       bound,
       input,
@@ -72,20 +84,20 @@ impl LessThanCircuitUnsafe {
   }
 }
 
-impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitUnsafe {
+impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitUnsafe<F> {
   fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
     assert!(F::NUM_BITS > self.num_bits as u32 + 1);
 
-    let input = AllocatedNum::alloc(cs.namespace(|| "input"), || Ok(F::from(self.input)))?;
+    let input = AllocatedNum::alloc(cs.namespace(|| "input"), || Ok(self.input))?;
 
     let shifted_diff = AllocatedNum::alloc(cs.namespace(|| "shifted_diff"), || {
-      Ok(F::from(self.input + (1 << self.num_bits) - self.bound))
+      Ok(self.input + F::from(1 << self.num_bits) - self.bound)
     })?;
 
     cs.enforce(
       || "shifted_diff_computation",
-      |lc| lc + input.get_variable() + (F::from((1 << self.num_bits) - self.bound), CS::one()),
-      |lc| lc + CS::one(),
+      |lc| lc + input.get_variable() + (F::from(1 << self.num_bits) - self.bound, CS::one()),
+      |lc: LinearCombination<F>| lc + CS::one(),
       |lc| lc + shifted_diff.get_variable(),
     );
 
@@ -103,15 +115,70 @@ impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitUnsafe {
   }
 }
 
-fn verify_circuit<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
-  bound: u64,
-  input: u64,
+#[derive(Clone, Debug)]
+struct LessThanCircuitSafe<F: PrimeField + PrimeFieldBits> {
+  bound: F,
+  input: F,
+  num_bits: u8,
+}
+
+impl<F: PrimeField + PrimeFieldBits> LessThanCircuitSafe<F> {
+  fn new(bound: F, input: F, num_bits: u8) -> Self {
+    assert!(get_msb_index(bound) < num_bits);
+    Self {
+      bound,
+      input,
+      num_bits,
+    }
+  }
+}
+
+impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitSafe<F> {
+  fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+    let input = AllocatedNum::alloc(cs.namespace(|| "input"), || Ok(self.input))?;
+
+    // Perform the input bit decomposition check
+    num_to_bits_le_bounded::<F, CS>(cs, input, self.num_bits)?;
+
+    // Entering a new namespace to prefix variables in the
+    // LessThanCircuitUnsafe, thus avoiding name clashes
+    cs.push_namespace(|| "less_than_safe");
+
+    LessThanCircuitUnsafe {
+      bound: self.bound,
+      input: self.input,
+      num_bits: self.num_bits,
+    }
+    .synthesize(cs)
+  }
+}
+
+fn verify_circuit_unsafe<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
+  bound: G::Scalar,
+  input: G::Scalar,
   num_bits: u8,
 ) -> Result<(), SpartanError> {
   let circuit = LessThanCircuitUnsafe::new(bound, input, num_bits);
 
   // produce keys
-  let (pk, vk) = SNARK::<G, S, LessThanCircuitUnsafe>::setup(circuit.clone()).unwrap();
+  let (pk, vk) = SNARK::<G, S, LessThanCircuitUnsafe<_>>::setup(circuit.clone()).unwrap();
+
+  // produce a SNARK
+  let snark = SNARK::prove(&pk, circuit).unwrap();
+
+  // verify the SNARK
+  snark.verify(&vk, &[])
+}
+
+fn verify_circuit_safe<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
+  bound: G::Scalar,
+  input: G::Scalar,
+  num_bits: u8,
+) -> Result<(), SpartanError> {
+  let circuit = LessThanCircuitSafe::new(bound, input, num_bits);
+
+  // produce keys
+  let (pk, vk) = SNARK::<G, S, LessThanCircuitSafe<_>>::setup(circuit.clone()).unwrap();
 
   // produce a SNARK
   let snark = SNARK::prove(&pk, circuit).unwrap();
@@ -125,14 +192,31 @@ fn main() {
   type EE = spartan2::provider::ipa_pc::EvaluationEngine<G>;
   type S = spartan2::spartan::snark::RelaxedR1CSSNARK<G, EE>;
 
-  // Typical exapmle, ok
-  assert!(verify_circuit::<G, S>(17, 9, 10).is_ok());
+  println!("Executing unsafe circuit...");
+  //Typical example, ok
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17u64), Fq::from(9u64), 10).is_ok());
   // Typical example, err
-  assert!(verify_circuit::<G, S>(17, 20, 10).is_err());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17u64), Fq::from(20u64), 10).is_err());
   // Edge case, err
-  assert!(verify_circuit::<G, S>(4, 4, 10).is_err());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(4u64), 10).is_err());
   // Edge case, ok
-  assert!(verify_circuit::<G, S>(4, 3, 10).is_ok());
-  // Minimum number of bits, ok
-  assert!(verify_circuit::<G, S>(4, 3, 3).is_ok());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
+  // Minimum number of bits for the bound, ok
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
+  // Insufficient number of bits for the input, ok
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_ok());
+
+  println!("Executing safe circuit...");
+  // Typical example, ok
+  assert!(verify_circuit_safe::<G, S>(Fq::from(17u64), Fq::from(9u64), 10).is_ok());
+  // Typical example, err
+  assert!(verify_circuit_safe::<G, S>(Fq::from(17u64), Fq::from(20u64), 10).is_err());
+  // Edge case, err
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(4u64), 10).is_err());
+  // Edge case, ok
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
+  // Minimum number of bits for the bound, ok
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
+  // Insufficient number of bits for the input, err
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_err());
 }
