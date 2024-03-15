@@ -142,8 +142,8 @@ impl<G: Group> SumcheckProof<G> {
   pub fn prove_quad_batch<F>(
     claim: &G::Scalar,
     num_rounds: usize,
-    poly_A_vec: &mut Vec<MultilinearPolynomial<G::Scalar>>,
-    poly_B_vec: &mut Vec<MultilinearPolynomial<G::Scalar>>,
+    poly_A_vec: &mut [MultilinearPolynomial<G::Scalar>],
+    poly_B_vec: &mut [MultilinearPolynomial<G::Scalar>],
     coeffs: &[G::Scalar],
     comb_func: F,
     transcript: &mut G::TE,
