@@ -1,6 +1,7 @@
 //! `EqPolynomial`: Represents multilinear extension of equality polynomials, evaluated based on binary input values.
 
 use ff::PrimeField;
+use rayon::iter::IntoParallelIterator;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 /// Represents the multilinear extension polynomial (MLE) of the equality polynomial $eq(x,e)$, denoted as $\tilde{eq}(x, e)$.
@@ -35,8 +36,9 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
   pub fn evaluate(&self, rx: &[Scalar]) -> Scalar {
     assert_eq!(self.r.len(), rx.len());
     (0..rx.len())
+      .into_par_iter()
       .map(|i| rx[i] * self.r[i] + (Scalar::ONE - rx[i]) * (Scalar::ONE - self.r[i]))
-      .fold(Scalar::ONE, |acc, item| acc * item)
+      .product()
   }
 
   /// Evaluates the `EqPolynomial` at all the `2^|r|` points in its domain.

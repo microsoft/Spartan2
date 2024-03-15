@@ -56,3 +56,7 @@ default = []
 # Compiles in portable mode, w/o ISA extensions => binary can be executed on all systems.
 portable = ["pasta-msm/portable"]
 flamegraph = ["pprof/flamegraph", "pprof/criterion"]
+
+[[bench]]
+name = "bench"
+harness = false
