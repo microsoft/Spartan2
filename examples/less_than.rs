@@ -51,14 +51,13 @@ fn num_to_bits_le_bounded<F: PrimeField + PrimeFieldBits, CS: ConstraintSystem<F
 }
 
 fn get_msb_index<F: PrimeField + PrimeFieldBits>(n: F) -> u8 {
-  let bits = n.to_le_bits();
-  let mut msb_index = 0;
-  for (i, b) in bits.iter().enumerate() {
-    if *b {
-      msb_index = i as u8;
-    }
-  }
-  msb_index
+  n.to_le_bits()
+    .into_iter()
+    .enumerate()
+    .rev()
+    .find(|(_, b)| *b)
+    .unwrap()
+    .0 as u8
 }
 
 // Range check: constrains input < `bound`. The bound must fit into
@@ -199,37 +198,37 @@ fn main() {
 
   println!("Executing unsafe circuit...");
   //Typical example, ok
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17u64), Fq::from(9u64), 10).is_ok());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17), Fq::from(9), 10).is_ok());
   // Typical example, err
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17u64), Fq::from(20u64), 10).is_err());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(17), Fq::from(20), 10).is_err());
   // Edge case, err
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(4u64), 10).is_err());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4), Fq::from(4), 10).is_err());
   // Edge case, ok
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4), Fq::from(3), 10).is_ok());
   // Minimum number of bits for the bound, ok
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4), Fq::from(3), 3).is_ok());
   // Insufficient number of bits for the input, but this is not detected by the
   // unsafety of the circuit (compare with the last example below)
   // Note that -Fq::one() is corresponds to q - 1 > bound
-  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_ok());
+  assert!(verify_circuit_unsafe::<G, S>(Fq::from(4), -Fq::one(), 3).is_ok());
 
   println!("Unsafe circuit OK");
 
   println!("Executing safe circuit...");
   // Typical example, ok
-  assert!(verify_circuit_safe::<G, S>(Fq::from(17u64), Fq::from(9u64), 10).is_ok());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(17), Fq::from(9), 10).is_ok());
   // Typical example, err
-  assert!(verify_circuit_safe::<G, S>(Fq::from(17u64), Fq::from(20u64), 10).is_err());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(17), Fq::from(20), 10).is_err());
   // Edge case, err
-  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(4u64), 10).is_err());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4), Fq::from(4), 10).is_err());
   // Edge case, ok
-  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4), Fq::from(3), 10).is_ok());
   // Minimum number of bits for the bound, ok
-  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4), Fq::from(3), 3).is_ok());
   // Insufficient number of bits for the input, err (compare with the last example
   // above).
   // Note that -Fq::one() is corresponds to q - 1 > bound
-  assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_err());
+  assert!(verify_circuit_safe::<G, S>(Fq::from(4), -Fq::one(), 3).is_err());
 
   println!("Safe circuit OK");
 }
