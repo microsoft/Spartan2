@@ -20,7 +20,7 @@ fn num_to_bits_le_bounded<F: PrimeField + PrimeFieldBits, CS: ConstraintSystem<F
       .to_le_bits()
       .into_iter()
       .take(num_bits as usize)
-      .map(|b| Some(b))
+      .map(Some)
       .collect::<Vec<Option<bool>>>(),
     None => vec![None; num_bits as usize],
   };
