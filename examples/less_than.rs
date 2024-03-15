@@ -63,9 +63,10 @@ fn get_msb_index<F: PrimeField + PrimeFieldBits>(n: F) -> u8 {
 
 // Range check: constrains input < `bound`. The bound must fit into
 // `num_bits` bits (this is asserted in the circuit constructor).
-// Important: it must be checked elsewhere that the input fits into
-// `num_bits` bits - this is NOT constrained by this circuit in order to
-// avoid duplications (hence "unsafe")
+// Important: it must be checked elsewhere (in an overarching circuit) that the
+// input fits into `num_bits` bits - this is NOT constrained by this circuit
+// in order to avoid duplications (hence "unsafe"). Cf. LessThanCircuitSafe for
+// a safe version.
 #[derive(Clone, Debug)]
 struct LessThanCircuitUnsafe<F: PrimeField> {
   bound: F, // Will be a constant in the constraits, not a variable
@@ -115,6 +116,10 @@ impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitUnsafe<F> {
   }
 }
 
+// Range check: constrains input < `bound`. The bound must fit into
+// `num_bits` bits (this is asserted in the circuit constructor).
+// Furthermore, the input must fit into `num_bits`, which is enforced at the
+// constraint level.
 #[derive(Clone, Debug)]
 struct LessThanCircuitSafe<F: PrimeField + PrimeFieldBits> {
   bound: F,
@@ -203,7 +208,9 @@ fn main() {
   assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
   // Minimum number of bits for the bound, ok
   assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
-  // Insufficient number of bits for the input, ok
+  // Insufficient number of bits for the input, but this is not detected by the
+  // unsafety of the circuit (compare with the last example below)
+  // Note that -Fq::one() is corresponds to q - 1 > bound
   assert!(verify_circuit_unsafe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_ok());
 
   println!("Executing safe circuit...");
@@ -217,6 +224,8 @@ fn main() {
   assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 10).is_ok());
   // Minimum number of bits for the bound, ok
   assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), Fq::from(3u64), 3).is_ok());
-  // Insufficient number of bits for the input, err
+  // Insufficient number of bits for the input, err (compare with the last example
+  // above).
+  // Note that -Fq::one() is corresponds to q - 1 > bound
   assert!(verify_circuit_safe::<G, S>(Fq::from(4u64), -Fq::one(), 3).is_err());
 }
