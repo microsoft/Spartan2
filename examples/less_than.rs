@@ -60,8 +60,9 @@ fn get_msb_index<F: PrimeField + PrimeFieldBits>(n: F) -> u8 {
     .0 as u8
 }
 
-// Range check: constrains input < `bound`. The bound must fit into
-// `num_bits` bits (this is asserted in the circuit constructor).
+// Constrains `input` < `bound`, where the LHS is a witness and the RHS is a
+// constant. The bound must fit into `num_bits` bits (this is asserted in the
+// circuit constructor).
 // Important: it must be checked elsewhere (in an overarching circuit) that the
 // input fits into `num_bits` bits - this is NOT constrained by this circuit
 // in order to avoid duplications (hence "unsafe"). Cf. LessThanCircuitSafe for
@@ -115,8 +116,9 @@ impl<F: PrimeField + PrimeFieldBits> Circuit<F> for LessThanCircuitUnsafe<F> {
   }
 }
 
-// Range check: constrains input < `bound`. The bound must fit into
-// `num_bits` bits (this is asserted in the circuit constructor).
+// Constrains `input` < `bound`, where the LHS is a witness and the RHS is a
+// constant. The bound must fit into `num_bits` bits (this is asserted in the
+// circuit constructor).
 // Furthermore, the input must fit into `num_bits`, which is enforced at the
 // constraint level.
 #[derive(Clone, Debug)]
