@@ -18,6 +18,7 @@ mod digest;
 mod r1cs;
 
 // public modules
+pub mod circom;
 pub mod errors;
 pub mod provider;
 pub mod spartan;
