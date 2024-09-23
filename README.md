@@ -36,3 +36,7 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 ## Examples
 
 Run `cargo run --example EXAMPLE_NAME` to run the corresponding example. Leave `EXAMPLE_NAME` empty for a list of available examples.
+
+## Benchmarks
+
+Run `cargo bench` to run all benchmarks. Run `cargo bench --benches BENCH_NAME` to run a specific benchmark.
