@@ -76,6 +76,7 @@ impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
+
     Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 
@@ -108,15 +109,12 @@ mod tests {
   use super::*;
   use crate::provider::{bn256_grumpkin::bn256, secp_secq::secp256k1};
   use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
-  use core::marker::PhantomData;
   use ff::PrimeField;
 
   #[derive(Clone, Debug, Default)]
-  struct CubicCircuit<F: PrimeField> {
-    _p: PhantomData<F>,
-  }
+  struct CubicCircuit {}
 
-  impl<F> Circuit<F> for CubicCircuit<F>
+  impl<F> Circuit<F> for CubicCircuit
   where
     F: PrimeField,
   {
@@ -178,8 +176,7 @@ mod tests {
     let circuit = CubicCircuit::default();
 
     // produce keys
-    let (pk, vk) =
-      SNARK::<G, S, CubicCircuit<<G as Group>::Scalar>>::setup(circuit.clone()).unwrap();
+    let (pk, vk) = SNARK::<G, S, CubicCircuit>::setup(circuit.clone()).unwrap();
 
     // produce a SNARK
     let res = SNARK::prove(&pk, circuit);

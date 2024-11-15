@@ -16,8 +16,8 @@ struct OrderedVariable(Variable);
 
 #[derive(Debug)]
 enum NamedObject {
-  Constraint(usize),
-  Var(Variable),
+  Constraint,
+  Var,
   Namespace,
 }
 
@@ -224,7 +224,7 @@ where
 {
   fn default() -> Self {
     let mut map = HashMap::new();
-    map.insert("ONE".into(), NamedObject::Var(TestShapeCS::<G>::one()));
+    map.insert("ONE".into(), NamedObject::Var);
     TestShapeCS {
       named_objects: map,
       current_namespace: vec![],
@@ -274,8 +274,7 @@ where
     LC: FnOnce(LinearCombination<G::Scalar>) -> LinearCombination<G::Scalar>,
   {
     let path = compute_path(&self.current_namespace, &annotation().into());
-    let index = self.constraints.len();
-    self.set_named_obj(path.clone(), NamedObject::Constraint(index));
+    self.set_named_obj(path.clone(), NamedObject::Constraint);
 
     let a = a(LinearCombination::zero());
     let b = b(LinearCombination::zero());
