@@ -87,7 +87,7 @@ impl<G: Group> TranscriptEngineTrait<G> for Keccak256Transcript<G> {
 
   fn absorb<T: TranscriptReprTrait<G>>(&mut self, label: &'static [u8], o: &T) {
     self.transcript.update(label);
-    self.transcript.update(&o.to_transcript_bytes());
+    self.transcript.update(o.to_transcript_bytes());
   }
 
   fn dom_sep(&mut self, bytes: &'static [u8]) {
