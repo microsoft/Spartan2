@@ -4,13 +4,17 @@ use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
-use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
-use serde::{Deserialize, Serialize};
+
+use ark_ff::PrimeField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 pub mod commitment;
 
 use commitment::CommitmentEngineTrait;
+
+/// TODO: Replaces ff::PrimeFieldBits
+// pub trait PrimeFieldBits: CanonicalSerialize + CanonicalDeserialize{};
 
 /// Represents an element of a group
 /// This is currently tailored for an elliptic curve group
@@ -26,39 +30,41 @@ pub trait Group:
   + ScalarMulOwned<<Self as Group>::Scalar>
   + Send
   + Sync
-  + Serialize
-  + for<'de> Deserialize<'de>
+  + CanonicalSerialize
+  + CanonicalDeserialize // + Serialize
+// + for<'de> Deserialize<'de>
 {
   /// A type representing an element of the base field of the group
   type Base: PrimeField
-    + PrimeFieldBits
-    + TranscriptReprTrait<Self>
-    + Serialize
-    + for<'de> Deserialize<'de>;
+    // + PrimeFieldBits
+    + TranscriptReprTrait<Self>;
 
   /// A type representing an element of the scalar field of the group
   type Scalar: PrimeField
-    + PrimeFieldBits
+    // + PrimeFieldBits
     + PrimeFieldExt
     + Send
     + Sync
     + TranscriptReprTrait<Self>
-    + Serialize
-    + for<'de> Deserialize<'de>;
+    + CanonicalSerialize
+    + CanonicalSerialize;
 
   /// A type representing the compressed version of the group element
-  type CompressedGroupElement: CompressedGroup<GroupElement = Self>
-    + Serialize
-    + for<'de> Deserialize<'de>;
+  type CompressedGroupElement: CompressedGroup<GroupElement = Self>;
 
   /// A type representing preprocessed group element
-  type PreprocessedGroupElement: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type PreprocessedGroupElement: Clone
+    + Debug
+    + Send
+    + Sync
+    + CanonicalSerialize
+    + CanonicalDeserialize;
 
   /// A type that provides a generic Fiat-Shamir transcript to be used when externalizing proofs
   type TE: TranscriptEngineTrait<Self>;
 
   /// A type that defines a commitment engine over scalars in the group
-  type CE: CommitmentEngineTrait<Self> + Serialize + for<'de> Deserialize<'de>;
+  type CE: CommitmentEngineTrait<Self>;
 
   /// A method to compute a multiexponentation
   fn vartime_multiscalar_mul(
@@ -98,12 +104,14 @@ pub trait CompressedGroup:
   + Send
   + Sync
   + TranscriptReprTrait<Self::GroupElement>
-  + Serialize
-  + for<'de> Deserialize<'de>
+  + CanonicalSerialize
+ + CanonicalDeserialize
+  // + Serialize
+  // + for<'de> Deserialize<'de>
   + 'static
 {
   /// A type that holds the decompressed version of the compressed group element
-  type GroupElement: Group + Serialize + for<'de> Deserialize<'de>;
+  type GroupElement: Group + CanonicalSerialize + CanonicalDeserialize; // Serialize + for<'de> Deserialize<'de>;
 
   /// Decompresses the compressed group element
   fn decompress(&self) -> Option<Self::GroupElement>;

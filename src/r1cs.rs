@@ -1,15 +1,18 @@
 //! This module defines R1CS related types and a folding scheme for Relaxed R1CS
 #![allow(clippy::type_complexity)]
+use crate::provider::ark_serde::Canonical;
 use crate::{
   errors::SpartanError,
   traits::{commitment::CommitmentEngineTrait, Group, TranscriptReprTrait},
   Commitment, CommitmentKey, CE,
 };
+use ark_ff::{AdditiveGroup, Field};
+use ark_relations::r1cs::ConstraintMatrices;
 use core::{cmp::max, marker::PhantomData};
-use ff::Field;
 use itertools::concat;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 /// Public parameters for a given R1CS
 #[derive(Clone, Serialize, Deserialize)]
@@ -19,44 +22,84 @@ pub struct R1CS<G: Group> {
 }
 
 /// A type that holds the shape of the R1CS matrices
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSShape<G: Group> {
   pub(crate) num_cons: usize,
   pub(crate) num_vars: usize,
   pub(crate) num_io: usize,
-  pub(crate) A: Vec<(usize, usize, G::Scalar)>,
+  #[serde_as(as = "Vec<(_, _, Canonical<G::Scalar>)>")]
+  pub(crate) A: Vec<(usize, usize, G::Scalar)>, // TODO: Consider turning this into a type
+  #[serde_as(as = "Vec<(_, _, Canonical<G::Scalar>)>")]
   pub(crate) B: Vec<(usize, usize, G::Scalar)>,
+  #[serde_as(as = "Vec<(_, _, Canonical<G::Scalar>)>")]
   pub(crate) C: Vec<(usize, usize, G::Scalar)>,
 }
 
+impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
+  fn from(r1cs_cm: &ConstraintMatrices<G::Scalar>) -> Self {
+    Self {
+      num_cons: r1cs_cm.num_constraints,
+      num_vars: r1cs_cm.num_instance_variables,
+      num_io: r1cs_cm.num_witness_variables, // TODO: Is this correct?
+      A: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
+      B: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
+      C: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
+    }
+  }
+}
+
+impl<G: Group> R1CSShape<G> {
+  /// Helper method to flatten and index a nested R1CS matrix with tuples
+  pub fn flatten_r1cs_cm(
+    nested_matrix: &[Vec<(G::Scalar, usize)>],
+  ) -> Vec<(usize, usize, G::Scalar)> {
+    nested_matrix
+      .iter()
+      .enumerate()
+      .flat_map(|(row, cols)| cols.iter().map(move |(value, col)| (row, *col, *value)))
+      .collect()
+  }
+}
+
 /// A type that holds a witness for a given R1CS instance
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSWitness<G: Group> {
+  #[serde_as(as = "Vec<Canonical<G::Scalar>>")]
   W: Vec<G::Scalar>,
 }
 
 /// A type that holds an R1CS instance
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSInstance<G: Group> {
   pub(crate) comm_W: Commitment<G>,
+  #[serde_as(as = "Vec<Canonical<G::Scalar>>")]
   pub(crate) X: Vec<G::Scalar>,
 }
 
 /// A type that holds a witness for a given Relaxed R1CS instance
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelaxedR1CSWitness<G: Group> {
+  #[serde_as(as = "Vec<Canonical<G::Scalar>>")]
   pub(crate) W: Vec<G::Scalar>,
+  #[serde_as(as = "Vec<Canonical<G::Scalar>>")]
   pub(crate) E: Vec<G::Scalar>,
 }
 
 /// A type that holds a Relaxed R1CS instance
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RelaxedR1CSInstance<G: Group> {
   pub(crate) comm_W: Commitment<G>,
   pub(crate) comm_E: Commitment<G>,
+  #[serde_as(as = "Vec<Canonical<G::Scalar>>")]
   pub(crate) X: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   pub(crate) u: G::Scalar,
 }
 
@@ -294,7 +337,7 @@ impl<G: Group> R1CSShape<G> {
   }
 
   /// Pads the R1CSShape so that the number of variables is a power of two
-  /// Renumbers variables to accomodate padded variables
+  /// Renumbers variables to accommodate padded variables
   pub fn pad(&self) -> Self {
     // equalize the number of variables and constraints
     let m = max(self.num_vars, self.num_cons).next_power_of_two();

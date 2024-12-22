@@ -1,5 +1,6 @@
 //! This module implements `EvaluationEngine` using an IPA-based polynomial commitment scheme
 #![allow(clippy::too_many_arguments)]
+use crate::provider::ark_serde::Canonical;
 use crate::{
   errors::SpartanError,
   provider::pedersen::CommitmentKeyExtTrait,
@@ -11,10 +12,11 @@ use crate::{
   },
   Commitment, CommitmentKey, CompressedCommitment, CE,
 };
+use ark_ff::{AdditiveGroup, Field};
 use core::iter;
-use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::marker::PhantomData;
 
 /// Provides an implementation of the prover key
@@ -152,11 +154,13 @@ impl<G: Group> InnerProductWitness<G> {
 }
 
 /// An inner product argument
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct InnerProductArgument<G: Group> {
   L_vec: Vec<CompressedCommitment<G>>,
   R_vec: Vec<CompressedCommitment<G>>,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   a_hat: G::Scalar,
 }
 
@@ -235,7 +239,7 @@ where
       transcript.absorb(b"R", &R);
 
       let r = transcript.squeeze(b"r")?;
-      let r_inverse = r.invert().unwrap();
+      let r_inverse = r.inverse().unwrap();
 
       // fold the left half and the right half
       let a_vec_folded = a_vec[0..n / 2]
@@ -324,7 +328,7 @@ where
       }
 
       // compute the inverse once for all entries
-      acc = acc.invert().unwrap();
+      acc = acc.inverse().unwrap();
 
       let mut inv = vec![G::Scalar::ZERO; v.len()];
       for i in 0..v.len() {

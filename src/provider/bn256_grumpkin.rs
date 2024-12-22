@@ -1,19 +1,8 @@
 //! This module implements the Spartan traits for `bn256::Point`, `bn256::Scalar`, `grumpkin::Point`, `grumpkin::Scalar`.
-use crate::{
-  impl_traits,
-  provider::{cpu_best_multiexp, keccak::Keccak256Transcript, pedersen::CommitmentEngine},
-  traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait},
-};
-use digest::{ExtendableOutput, Update};
-use ff::{FromUniformBytes, PrimeField};
-use group::{cofactor::CofactorCurveAffine, Curve, Group as AnotherGroup, GroupEncoding};
-use num_bigint::BigInt;
-use num_traits::Num;
+use crate::traits::{Group, TranscriptReprTrait};
 // Remove this when https://github.com/zcash/pasta_curves/issues/41 resolves
-use pasta_curves::arithmetic::{CurveAffine, CurveExt};
-use rayon::prelude::*;
-use sha3::Shake256;
-use std::io::Read;
+use crate::impl_traits;
+use group::ff::PrimeField;
 
 use halo2curves::bn256::{
   G1Affine as Bn256Affine, G1Compressed as Bn256Compressed, G1 as Bn256Point,
@@ -21,6 +10,15 @@ use halo2curves::bn256::{
 use halo2curves::grumpkin::{
   G1Affine as GrumpkinAffine, G1Compressed as GrumpkinCompressed, G1 as GrumpkinPoint,
 };
+use pasta_curves::arithmetic::{CurveAffine, CurveExt};
+use rayon::prelude::*;
+use sha3::Shake256;
+use std::io::Read;
+use ark_ec::CurveGroup;
+use crate::provider::keccak::Keccak256Transcript;
+use crate::provider::pedersen::CommitmentEngine;
+use crate::provider::AffineRepr;
+use crate::provider::VariableBaseMSM;
 
 /// Re-exports that give access to the standard aliases used in the code base, for bn256
 pub mod bn256 {
@@ -66,6 +64,8 @@ impl_traits!(
 
 #[cfg(test)]
 mod tests {
+  use digest::{ExtendableOutput, Update};
+  use group::Curve;
   use super::*;
   type G = bn256::Point;
 

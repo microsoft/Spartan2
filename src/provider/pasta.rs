@@ -180,6 +180,14 @@ macro_rules! impl_traits {
         Some($name_curve::from_bytes(&self.repr).unwrap())
       }
     }
+
+    impl zeroize::DefaultIsZeroes for $name_compressed {}
+
+    impl Default for $name_compressed {
+      fn default() -> Self {
+        Self { repr: [0u8; 32]}
+      }
+    }
   };
 }
 

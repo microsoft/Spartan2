@@ -1,11 +1,12 @@
 //! Main components:
 //! - UniPoly: an univariate dense polynomial in coefficient form (big endian),
 //! - CompressedUniPoly: a univariate dense polynomial, compressed (omitted linear term), in coefficient form (little endian),
-use ff::PrimeField;
+use crate::provider::ark_serde::Canonical;
+use crate::traits::{Group, TranscriptReprTrait};
+use ark_ff::PrimeField;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-
-use crate::traits::{Group, TranscriptReprTrait};
+use serde_with::serde_as;
 
 // ax^2 + bx + c stored as vec![c, b, a]
 // ax^3 + bx^2 + cx + d stored as vec![d, c, b, a]
@@ -16,8 +17,10 @@ pub struct UniPoly<Scalar: PrimeField> {
 
 // ax^2 + bx + c stored as vec![c, a]
 // ax^3 + bx^2 + cx + d stored as vec![d, c, a]
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompressedUniPoly<Scalar: PrimeField> {
+  #[serde_as(as = "Vec<Canonical<Scalar>>")]
   coeffs_except_linear_term: Vec<Scalar>,
 }
 
@@ -25,7 +28,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   pub fn from_evals(evals: &[Scalar]) -> Self {
     // we only support degree-2 or degree-3 univariate polynomials
     assert!(evals.len() == 3 || evals.len() == 4);
-    let two_inv = Scalar::from(2).invert().unwrap();
+    let two_inv = Scalar::from(2).inverse().unwrap();
     let coeffs = if evals.len() == 3 {
       // ax^2 + bx + c
       let c = evals[0];
@@ -34,7 +37,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
       vec![c, b, a]
     } else {
       // ax^3 + bx^2 + cx + d
-      let six_inv = Scalar::from(6).invert().unwrap();
+      let six_inv = Scalar::from(6).inverse().unwrap();
 
       let d = evals[0];
       let a = six_inv
@@ -114,8 +117,6 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 }
 #[cfg(test)]
 mod tests {
-  use crate::provider::{bn256_grumpkin, secp_secq::secp256k1};
-
   use super::*;
 
   fn test_from_evals_quad_with<F: PrimeField>() {
@@ -144,12 +145,13 @@ mod tests {
     assert_eq!(poly.evaluate(&F::from(3)), e3);
   }
 
-  #[test]
-  fn test_from_evals_quad() {
-    test_from_evals_quad_with::<pasta_curves::pallas::Scalar>();
-    test_from_evals_quad_with::<bn256_grumpkin::bn256::Scalar>();
-    test_from_evals_quad_with::<secp256k1::Scalar>();
-  }
+  // TODO: ark_ff::PrimeField is not implemented for these Scalars
+  // #[test]
+  // fn test_from_evals_quad() {
+  //   test_from_evals_quad_with::<pasta_curves::pallas::Scalar>();
+  //   test_from_evals_quad_with::<bn256_grumpkin::bn256::Scalar>();
+  //   test_from_evals_quad_with::<secp256k1::Scalar>();
+  // }
 
   fn test_from_evals_cubic_with<F: PrimeField>() {
     // polynomial is x^3 + 2x^2 + 3x + 1
@@ -179,10 +181,11 @@ mod tests {
     assert_eq!(poly.evaluate(&F::from(4)), e4);
   }
 
-  #[test]
-  fn test_from_evals_cubic() {
-    test_from_evals_cubic_with::<pasta_curves::pallas::Scalar>();
-    test_from_evals_cubic_with::<bn256_grumpkin::bn256::Scalar>();
-    test_from_evals_cubic_with::<secp256k1::Scalar>()
-  }
+  // TODO: ark_ff::PrimeField is not implemented for these Scalars
+  // #[test]
+  // fn test_from_evals_cubic() {
+  //   test_from_evals_cubic_with::<pasta_curves::pallas::Scalar>();
+  //   test_from_evals_cubic_with::<bn256_grumpkin::bn256::Scalar>();
+  //   test_from_evals_cubic_with::<secp256k1::Scalar>()
+  // }
 }

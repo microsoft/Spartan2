@@ -4,7 +4,7 @@
 
 use std::ops::{Add, Index};
 
-use ff::PrimeField;
+use ark_ff::PrimeField;
 use rayon::prelude::{
   IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
   IntoParallelRefMutIterator, ParallelIterator,
@@ -196,10 +196,11 @@ impl<Scalar: PrimeField> Add for MultilinearPolynomial<Scalar> {
 
 #[cfg(test)]
 mod tests {
-  use crate::provider::{self, bn256_grumpkin::bn256, secp_secq::secp256k1};
+  // use crate::provider::{self, bn256_grumpkin::bn256, secp_secq::secp256k1};
 
   use super::*;
-  use pasta_curves::Fp;
+  use ark_bls12_381::Fr;
+  use ark_ff::Fp;
 
   fn make_mlp<F: PrimeField>(len: usize, value: F) -> MultilinearPolynomial<F> {
     MultilinearPolynomial {
@@ -251,12 +252,12 @@ mod tests {
 
   #[test]
   fn test_multilinear_polynomial() {
-    test_multilinear_polynomial_with::<Fp>();
+    test_multilinear_polynomial_with::<Fr>();
   }
 
   #[test]
   fn test_sparse_polynomial() {
-    test_sparse_polynomial_with::<Fp>();
+    test_sparse_polynomial_with::<Fr>();
   }
 
   fn test_mlp_add_with<F: PrimeField>() {
@@ -278,23 +279,25 @@ mod tests {
 
   #[test]
   fn test_mlp_add() {
-    test_mlp_add_with::<Fp>();
-    test_mlp_add_with::<bn256::Scalar>();
-    test_mlp_add_with::<secp256k1::Scalar>();
+    // test_mlp_add_with::<Fp>();
+    // test_mlp_add_with::<bn256::Scalar>();
+    // test_mlp_add_with::<secp256k1::Scalar>();
+    test_mlp_add_with::<ark_bls12_381::Fr>();
   }
 
   #[test]
   fn test_mlp_scalar_mul() {
-    test_mlp_scalar_mul_with::<Fp>();
-    test_mlp_scalar_mul_with::<bn256::Scalar>();
-    test_mlp_scalar_mul_with::<secp256k1::Scalar>();
+    // test_mlp_scalar_mul_with::<Fp>();
+    // test_mlp_scalar_mul_with::<bn256::Scalar>();
+    // test_mlp_scalar_mul_with::<secp256k1::Scalar>();
+    test_mlp_scalar_mul_with::<ark_bls12_381::Fr>();
   }
 
   fn test_evaluation_with<F: PrimeField>() {
     let num_evals = 4;
     let mut evals: Vec<F> = Vec::with_capacity(num_evals);
     for _ in 0..num_evals {
-      evals.push(F::from_u128(8));
+      evals.push(F::from(8));
     }
     let dense_poly: MultilinearPolynomial<F> = MultilinearPolynomial::new(evals.clone());
 
@@ -314,8 +317,9 @@ mod tests {
 
   #[test]
   fn test_evaluation() {
-    test_evaluation_with::<Fp>();
-    test_evaluation_with::<provider::bn256_grumpkin::bn256::Scalar>();
-    test_evaluation_with::<provider::secp_secq::secp256k1::Scalar>();
+    // test_evaluation_with::<Fp>();
+    // test_evaluation_with::<provider::bn256_grumpkin::bn256::Scalar>();
+    // test_evaluation_with::<provider::secp_secq::secp256k1::Scalar>();
+    test_evaluation_with::<ark_bls12_381::Fr>();
   }
 }

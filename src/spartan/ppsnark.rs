@@ -2,14 +2,12 @@
 //! sparse multilinear polynomials involved in Spartan's sum-check protocol, thereby providing a preprocessing SNARK
 //! The verifier in this preprocessing SNARK maintains a commitment to R1CS matrices. This is beneficial when using a
 //! polynomial commitment scheme in which the verifier's costs is succinct.
+use crate::r1cs::R1CS;
 use crate::{
-  bellpepper::{
-    r1cs::{SpartanShape, SpartanWitness},
-    shape_cs::ShapeCS,
-    solver::SatisfyingAssignment,
-  },
+  bellpepper::r1cs::SpartanWitness,
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
+  provider::ark_serde::Canonical,
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
   spartan::{
     math::Math,
@@ -30,12 +28,13 @@ use crate::{
   },
   Commitment, CommitmentKey, CompressedCommitment,
 };
-use bellpepper_core::{Circuit, ConstraintSystem};
+use ark_ff::{AdditiveGroup, Field, PrimeField};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef};
 use core::{cmp::max, marker::PhantomData};
-use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 fn vec_to_arr<T, const N: usize>(v: Vec<T>) -> [T; N] {
   v.try_into()
@@ -70,22 +69,32 @@ impl<Scalar: PrimeField> IdentityPolynomial<Scalar> {
 }
 
 /// A type that holds `R1CSShape` in a form amenable to memory checking
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSShapeSparkRepr<G: Group> {
   N: usize, // size of the vectors
 
   // dense representation
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   row: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   col: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   val_A: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   val_B: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   val_C: Vec<G::Scalar>,
 
   // timestamp polynomials
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   row_read_ts: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   row_audit_ts: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   col_read_ts: Vec<G::Scalar>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   col_audit_ts: Vec<G::Scalar>,
 }
 
@@ -658,6 +667,7 @@ impl<G: Group> SumcheckEngine<G> for InnerSumcheckInstance<G> {
 }
 
 /// A type that represents the prover's key
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
@@ -666,6 +676,7 @@ pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
   S: R1CSShape<G>,
   S_repr: R1CSShapeSparkRepr<G>,
   S_comm: R1CSShapeSparkCommitment<G>,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   vk_digest: G::Scalar, // digest of verifier's key
 }
 
@@ -686,6 +697,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> SimpleDigestible for VerifierKey<G,
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
@@ -702,44 +714,72 @@ pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
   comm_E_col: CompressedCommitment<G>,
 
   // initial claims
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Az_at_tau: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Bz_at_tau: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Cz_at_tau: G::Scalar,
 
   comm_output_arr: [CompressedCommitment<G>; 8],
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   claims_product_arr: [G::Scalar; 8],
 
   // satisfiability sum-check
   sc_sat: SumcheckProof<G>,
 
   // claims from the end of the sum-check
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Az: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Bz: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_Cz: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E_row: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E_col: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_val_A: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_val_B: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_val_C: G::Scalar,
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   eval_left_arr: [G::Scalar; 8],
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   eval_right_arr: [G::Scalar; 8],
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   eval_output_arr: [G::Scalar; 8],
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   eval_input_arr: [G::Scalar; 8],
+  #[serde_as(as = "Canonical<[G::Scalar; 8]>")]
   eval_output2_arr: [G::Scalar; 8],
 
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_row: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_row_read_ts: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E_row_at_r_prod: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_row_audit_ts: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_col: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_col_read_ts: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E_col_at_r_prod: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_col_audit_ts: G::Scalar,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_W: G::Scalar,
 
   // batch openings of all multilinear polynomials
   sc_proof_batch: SumcheckProof<G>,
+  #[serde_as(as = "Canonical<[G::Scalar; 7]>")]
   evals_batch_arr: [G::Scalar; 7],
   eval_arg: EE::EvaluationArgument,
 }
@@ -885,37 +925,51 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
 
-  fn setup<C: Circuit<G::Scalar>>(
+  fn setup<C: ConstraintSynthesizer<G::Scalar>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let mut cs: ShapeCS<G> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
-    let (S, ck) = cs.r1cs_shape();
-
+    // Create an Arkworks-based constraint system and convert it to Spartan2 representation
+    let cs = ConstraintSystem::<G::Scalar>::new_ref();
+    circuit
+      .generate_constraints(cs.clone())
+      .expect("TODO: Handle error");
+    let r1cs_cm = cs
+      .to_matrices()
+      .expect("Failed to convert constraint system to R1CS");
+    let r1cs_shape = R1CSShape::from(&r1cs_cm);
+    let ck = R1CS::commitment_key(&r1cs_shape);
     let (pk_ee, vk_ee) = EE::setup(&ck);
+    let shape_repr = R1CSShapeSparkRepr::new(&r1cs_shape);
+    let shape_comm = shape_repr.commit(&ck);
 
-    let S_repr = R1CSShapeSparkRepr::new(&S);
-    let S_comm = S_repr.commit(&ck);
-
-    let vk = VerifierKey::new(S.num_cons, S.num_vars, S_comm.clone(), vk_ee);
-
+    let vk = VerifierKey::new(
+      r1cs_shape.num_cons,
+      r1cs_shape.num_vars,
+      shape_comm.clone(),
+      vk_ee,
+    );
     let pk = ProverKey {
       ck,
       pk_ee,
-      S,
-      S_repr,
-      S_comm,
+      S: r1cs_shape,
+      S_repr: shape_repr,
+      S_comm: shape_comm,
       vk_digest: vk.digest(),
     };
 
     Ok((pk, vk))
   }
 
-  /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
-  fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
-    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
-    let _ = circuit.synthesize(&mut cs);
-
+  /// Produces a succinct proof of satisfiability of a `RelaxedR1CS` instance.
+  fn prove<C: ConstraintSynthesizer<G::Scalar>>(
+    pk: &Self::ProverKey,
+    circuit: C,
+  ) -> Result<Self, SpartanError> {
+    let cs = ConstraintSystem::<G::Scalar>::new();
+    let cs_ref = ConstraintSystemRef::new(cs.clone());
+    circuit
+      .generate_constraints(cs_ref)
+      .expect("TODO: Handle error");
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;
