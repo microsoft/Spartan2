@@ -8,6 +8,7 @@ use crate::{
   traits::Group,
   CommitmentKey,
 };
+use ark_ff::PrimeField;
 use ark_relations::r1cs::ConstraintSystem;
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
@@ -20,17 +21,9 @@ pub trait SpartanWitness<G: Group> {
   ) -> Result<(R1CSInstance<G>, R1CSWitness<G>), SpartanError>;
 }
 
-// TODO: Currently not used, move some helper methods here? Or remove it?
-/// `SpartanShape` provides methods for acquiring `R1CSShape` and `CommitmentKey` from implementers.
-pub trait SpartanShape<G: Group> {
-  /// Return an appropriate `R1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape(&self) -> (R1CSShape<G>, CommitmentKey<G>);
-}
-
 impl<G: Group> SpartanWitness<G> for ConstraintSystem<G::Scalar>
-// TODO: Not sure I need that
-// where
-//   G::Scalar: PrimeField,
+where
+  G::Scalar: PrimeField,
 {
   fn r1cs_instance_and_witness(
     &self,

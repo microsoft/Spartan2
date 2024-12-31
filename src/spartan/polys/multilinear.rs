@@ -200,7 +200,6 @@ mod tests {
 
   use super::*;
   use ark_bls12_381::Fr;
-  use ark_ff::Fp;
 
   fn make_mlp<F: PrimeField>(len: usize, value: F) -> MultilinearPolynomial<F> {
     MultilinearPolynomial {

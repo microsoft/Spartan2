@@ -145,13 +145,13 @@ mod tests {
     assert_eq!(poly.evaluate(&F::from(3)), e3);
   }
 
-  // TODO: ark_ff::PrimeField is not implemented for these Scalars
-  // #[test]
-  // fn test_from_evals_quad() {
-  //   test_from_evals_quad_with::<pasta_curves::pallas::Scalar>();
-  //   test_from_evals_quad_with::<bn256_grumpkin::bn256::Scalar>();
-  //   test_from_evals_quad_with::<secp256k1::Scalar>();
-  // }
+  #[test]
+  fn test_from_evals_quad() {
+    // test_from_evals_quad_with::<pasta_curves::pallas::Scalar>();
+    // test_from_evals_quad_with::<bn256_grumpkin::bn256::Scalar>();
+    // test_from_evals_quad_with::<secp256k1::Scalar>();
+    test_from_evals_quad_with::<ark_bls12_381::Fq>();
+  }
 
   fn test_from_evals_cubic_with<F: PrimeField>() {
     // polynomial is x^3 + 2x^2 + 3x + 1
@@ -181,11 +181,11 @@ mod tests {
     assert_eq!(poly.evaluate(&F::from(4)), e4);
   }
 
-  // TODO: ark_ff::PrimeField is not implemented for these Scalars
-  // #[test]
-  // fn test_from_evals_cubic() {
-  //   test_from_evals_cubic_with::<pasta_curves::pallas::Scalar>();
-  //   test_from_evals_cubic_with::<bn256_grumpkin::bn256::Scalar>();
-  //   test_from_evals_cubic_with::<secp256k1::Scalar>()
-  // }
+  #[test]
+  fn test_from_evals_cubic() {
+    // test_from_evals_cubic_with::<pasta_curves::pallas::Scalar>();
+    // test_from_evals_cubic_with::<bn256_grumpkin::bn256::Scalar>();
+    // test_from_evals_cubic_with::<secp256k1::Scalar>();
+    test_from_evals_cubic_with::<ark_bls12_381::Fq>();
+  }
 }

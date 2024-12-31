@@ -128,8 +128,6 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
-    // TODO: Generating a R1CS shape, commitment key, etc. from ark-relations R1CS seems to be
-    //  a common operation. Consider bundling it into a utility (like the old r1cs_shape method).
     let S = R1CSShape::from(&r1cs_cm);
     let ck = R1CS::commitment_key(&S);
 

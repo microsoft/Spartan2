@@ -12,7 +12,6 @@ use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM};
 use ark_ff::field_hashers::DefaultFieldHasher;
 use ark_ff::{AdditiveGroup, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use derive_more::Into;
 use num_bigint::BigInt;
 use num_traits::{Num, Zero};
 use serde::ser::SerializeStruct;

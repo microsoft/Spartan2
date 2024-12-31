@@ -7,6 +7,7 @@ use ark_relations::r1cs::{
   ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, Namespace, SynthesisError,
   Variable,
 };
+use ark_relations::{lc, ns};
 use num_traits::One;
 use spartan2::{
   errors::SpartanError,
@@ -31,16 +32,17 @@ fn num_to_bits_le_bounded<F: PrimeField>(
   // Add one witness per input bit in little-endian bit order
   let bits_circuit = opt_bits.into_iter()
     .enumerate()
-    // Boolean enforces the value to be 0 or 1 at the constraint level
-    .map(|(i, b)| {
+    // AllocatedBool enforces the value to be 0 or 1 at the constraint level
+    .map(|(_i, b)| {
       // TODO: Why do I need namespaces here?
-      let namespaced_cs = Namespace::from(cs.clone());
+      // TODO: Namespace can't use string ids, only const ids
+      // let namespaced_cs = Namespace::from(cs.clone());
       // TODO: Is it a "new_input" or a different type of a variable?
-        AllocatedBool::<F>::new_input(namespaced_cs, || b.ok_or(SynthesisError::AssignmentMissing))
+        AllocatedBool::<F>::new_input(cs.clone(), || b.ok_or(SynthesisError::AssignmentMissing))
     })
     .collect::<Result<Vec<AllocatedBool<F>>, SynthesisError>>()?;
 
-  let mut weighted_sum_lc = LinearCombination::zero();
+  let mut weighted_sum_lc = lc!();
   let mut pow2 = F::ONE;
 
   for bit in bits_circuit.iter() {
@@ -52,9 +54,8 @@ fn num_to_bits_le_bounded<F: PrimeField>(
   let constraint_lc = weighted_sum_lc - n.variable;
 
   // Enforce constraint_lc == 0
-  let one_lc = LinearCombination::from((One::one(), Variable::One));
-  cs.enforce_constraint(constraint_lc, one_lc, LinearCombination::zero())
-    .expect("Failed to enforce the linear combination constraint");
+  let one_lc = lc!() + Variable::One;
+  cs.enforce_constraint(constraint_lc, one_lc, lc!())?;
 
   Ok(bits_circuit)
 }
@@ -66,7 +67,7 @@ fn get_msb_index<F: PrimeField>(n: F) -> u8 {
     .enumerate()
     .rev()
     .find(|(_, b)| *b)
-    .unwrap()
+    .expect("Index not found")
     .0 as u8
 }
 
@@ -99,13 +100,10 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitUnsafe<F> {
   fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
     assert!(F::MODULUS_BIT_SIZE > self.num_bits as u32 + 1);
 
-    // TODO: It is possible to create Namespace with an numerical id, tracing::Id.
-    //  Would that be useful?
-    // TODO: Use ns!() macro instead
-    let input_ns = Namespace::from(cs.clone());
+    let input_ns = ns!(cs.clone(), "input");
     let input = AllocatedFp::<F>::new_input(input_ns, || Ok(self.input))?;
 
-    let shifted_ns = Namespace::from(cs.clone());
+    let shifted_ns = ns!(cs.clone(), "shifted_diff");
     // TODO: Is this an input or a variable?
     let shifted_diff = AllocatedFp::<F>::new_input(shifted_ns, || {
       Ok(self.input + F::from(1 << self.num_bits) - self.bound)
@@ -113,13 +111,13 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitUnsafe<F> {
 
     let shifted_diff_lc = LinearCombination::from(input.variable)
       + LinearCombination::from((F::from(1 << self.num_bits) - self.bound, Variable::One))
-      - shifted_diff.variable;
+      - LinearCombination::from(shifted_diff.variable);
 
     // Enforce the linear combination (shifted_diff_lc == 0)
     cs.enforce_constraint(
       shifted_diff_lc,
       LinearCombination::from((F::ONE, Variable::One)),
-      LinearCombination::zero(),
+      lc!(),
     )?;
 
     let shifted_diff_bits =
@@ -127,13 +125,12 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitUnsafe<F> {
 
     // Check that the last (i.e. most significant) bit is 0
     let msb_var = shifted_diff_bits[self.num_bits as usize].variable();
-    let zero_lc = LinearCombination::zero();
 
     // Enforce the constraint that the most significant bit is 0
     cs.enforce_constraint(
       LinearCombination::from((F::ONE, msb_var)),
       LinearCombination::from((F::ONE, Variable::One)),
-      zero_lc,
+      lc!(),
     )?;
 
     Ok(())

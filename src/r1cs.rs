@@ -40,7 +40,8 @@ impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
   fn from(r1cs_cm: &ConstraintMatrices<G::Scalar>) -> Self {
     Self {
       // TODO: Is this mapping correct?
-      // TODO: Revisit implementation of SpartanShape
+      // TODO: These values are expected to be power of two.
+      //  Remove `next_power_of_two()` to reproduce errors
       num_cons: r1cs_cm.num_constraints.next_power_of_two(),
       num_vars: r1cs_cm.num_witness_variables.next_power_of_two(),
       num_io: r1cs_cm.num_instance_variables - 1, // TODO: Always has one variable by default in ark-relations?

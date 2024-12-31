@@ -103,7 +103,6 @@ mod tests {
     traits::{Group, PrimeFieldExt, TranscriptEngineTrait, TranscriptReprTrait},
   };
   use ark_serialize::CanonicalSerialize;
-  use bincode::Options;
   use rand::Rng;
   use sha3::{Digest, Keccak256};
 

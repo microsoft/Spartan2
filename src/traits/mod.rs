@@ -13,9 +13,6 @@ pub mod commitment;
 
 use commitment::CommitmentEngineTrait;
 
-/// TODO: Replaces ff::PrimeFieldBits
-// pub trait PrimeFieldBits: CanonicalSerialize + CanonicalDeserialize{};
-
 /// Represents an element of a group
 /// This is currently tailored for an elliptic curve group
 pub trait Group:
@@ -31,17 +28,13 @@ pub trait Group:
   + Send
   + Sync
   + CanonicalSerialize
-  + CanonicalDeserialize // + Serialize
-// + for<'de> Deserialize<'de>
+  + CanonicalDeserialize
 {
   /// A type representing an element of the base field of the group
-  type Base: PrimeField
-    // + PrimeFieldBits
-    + TranscriptReprTrait<Self>;
+  type Base: PrimeField + TranscriptReprTrait<Self>;
 
   /// A type representing an element of the scalar field of the group
   type Scalar: PrimeField
-    // + PrimeFieldBits
     + PrimeFieldExt
     + Send
     + Sync
@@ -105,13 +98,11 @@ pub trait CompressedGroup:
   + Sync
   + TranscriptReprTrait<Self::GroupElement>
   + CanonicalSerialize
- + CanonicalDeserialize
-  // + Serialize
-  // + for<'de> Deserialize<'de>
+  + CanonicalDeserialize
   + 'static
 {
   /// A type that holds the decompressed version of the compressed group element
-  type GroupElement: Group + CanonicalSerialize + CanonicalDeserialize; // Serialize + for<'de> Deserialize<'de>;
+  type GroupElement: Group + CanonicalSerialize + CanonicalDeserialize;
 
   /// Decompresses the compressed group element
   fn decompress(&self) -> Option<Self::GroupElement>;

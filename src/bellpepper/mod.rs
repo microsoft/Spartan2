@@ -3,9 +3,9 @@
 //! [Bellperson]: https://github.com/filecoin-project/bellperson
 
 pub mod r1cs;
-// pub mod solver;
 
-// In Arkworks, shape of R1CS is derived from ark_relations::r1cs::ConstraintSystem
+// Superseded by ark-relations
+// pub mod solver;
 // pub mod shape_cs;
 // pub mod test_shape_cs;
 
@@ -16,7 +16,7 @@ mod tests {
   use crate::r1cs::{R1CSShape, R1CS};
   use ark_ff::Field;
   use ark_relations::lc;
-  use ark_relations::r1cs::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
+  use ark_relations::r1cs::{ConstraintSystem, SynthesisError, Variable};
 
   fn synthesize_alloc_bit<F: Field>(cs: &mut ConstraintSystem<F>) -> Result<(), SynthesisError> {
     // Allocate 'a' as a public input

@@ -157,10 +157,10 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    type G = ark_bls12_381::G1Projective;
-    type EE = provider::ipa_pc::EvaluationEngine<G>;
-    type S = spartan::snark::RelaxedR1CSSNARK<G, EE>;
-    type Spp = spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
+    // type G = ark_bls12_381::G1Projective;
+    // type EE = provider::ipa_pc::EvaluationEngine<G>;
+    // type S = spartan::snark::RelaxedR1CSSNARK<G, EE>;
+    // type Spp = spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
     // test_snark_with::<G, S>(); // TODO
     // test_snark_with::<G, Spp>(); // TODO
 
