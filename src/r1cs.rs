@@ -39,9 +39,11 @@ pub struct R1CSShape<G: Group> {
 impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
   fn from(r1cs_cm: &ConstraintMatrices<G::Scalar>) -> Self {
     Self {
-      num_cons: r1cs_cm.num_constraints,
-      num_vars: r1cs_cm.num_instance_variables,
-      num_io: r1cs_cm.num_witness_variables, // TODO: Is this correct?
+      // TODO: Is this mapping correct?
+      // TODO: Revisit implementation of SpartanShape
+      num_cons: r1cs_cm.num_constraints.next_power_of_two(),
+      num_vars: r1cs_cm.num_witness_variables.next_power_of_two(),
+      num_io: r1cs_cm.num_instance_variables - 1, // TODO: Always has one variable by default in ark-relations?
       A: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
       B: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
       C: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
@@ -411,7 +413,7 @@ impl<G: Group> R1CSWitness<G> {
 }
 
 impl<G: Group> R1CSInstance<G> {
-  /// A method to create an instance object using consitituent elements
+  /// A method to create an instance object using constituent elements
   pub fn new(
     S: &R1CSShape<G>,
     comm_W: &Commitment<G>,

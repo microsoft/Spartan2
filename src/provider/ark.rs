@@ -10,7 +10,7 @@ use ark_ec::{
 };
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM};
 use ark_ff::field_hashers::DefaultFieldHasher;
-use ark_ff::PrimeField;
+use ark_ff::{AdditiveGroup, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derive_more::Into;
 use num_bigint::BigInt;
@@ -155,7 +155,7 @@ impl Group for G1Projective {
   }
 
   fn zero() -> Self {
-    todo!()
+    G1Projective::ZERO
   }
   fn get_generator() -> Self {
     G1Projective::generator()

@@ -15,28 +15,21 @@ mod tests {
 
   use crate::r1cs::{R1CSShape, R1CS};
   use ark_ff::Field;
+  use ark_relations::lc;
   use ark_relations::r1cs::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 
   fn synthesize_alloc_bit<F: Field>(cs: &mut ConstraintSystem<F>) -> Result<(), SynthesisError> {
     // Allocate 'a' as a public input
-    let a_var = cs.new_input_variable(|| Ok(F::ONE))?;
+    let a_var = cs.new_witness_variable(|| Ok(F::ONE))?;
 
-    // Enforce: a * (1 - a) = 0 (this ensures that this is an 0 or 1)
-    cs.enforce_constraint(
-      LinearCombination::from(a_var),                 // Left: a
-      LinearCombination::from(Variable::One) - a_var, // Right: 1 - a
-      LinearCombination::zero(),                      // Output: 0
-    )?;
+    // Enforce: a * (1 - a) = 0 (this ensures that 'a' is an 0 or 1)
+    cs.enforce_constraint(lc!() + a_var, lc!() + Variable::One - a_var, lc!())?;
 
     // Allocate 'b' as a public input
-    let b_var = cs.new_input_variable(|| Ok(F::ONE))?;
+    let b_var = cs.new_witness_variable(|| Ok(F::ONE))?;
 
-    // Enforce: b * (1 - b) = 0 (this ensures that b is 0 or 1)
-    cs.enforce_constraint(
-      LinearCombination::from(b_var),                 // Left: b
-      LinearCombination::from(Variable::One) - b_var, // Right: 1 - b
-      LinearCombination::zero(),                      // Output: 0
-    )?;
+    // Enforce: b * (1 - b) = 0 (this ensures that 'b' is 0 or 1)
+    cs.enforce_constraint(lc!() + b_var, lc!() + Variable::One - b_var, lc!())?;
 
     Ok(())
   }
@@ -48,9 +41,7 @@ mod tests {
     // First create the shape
     let mut cs: ConstraintSystem<G::Scalar> = ConstraintSystem::new();
     let _ = synthesize_alloc_bit(&mut cs);
-    let r1cs_cm = cs
-      .to_matrices()
-      .expect("Failed to convert constraint system to R1CS");
+    let r1cs_cm = cs.to_matrices().expect("Failed to convert to R1CS");
     let shape: R1CSShape<G> = R1CSShape::from(&r1cs_cm);
     let ck = R1CS::commitment_key(&shape);
 

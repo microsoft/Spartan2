@@ -194,10 +194,10 @@ fn verify_circuit_unsafe<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
   let circuit = LessThanCircuitUnsafe::new(bound, input, num_bits);
 
   // produce keys
-  let (pk, vk) = SNARK::<G, S, LessThanCircuitUnsafe<_>>::setup(circuit.clone()).unwrap();
+  let (pk, vk) = SNARK::<G, S, LessThanCircuitUnsafe<_>>::setup(circuit.clone())?;
 
   // produce a SNARK
-  let snark = SNARK::prove(&pk, circuit).unwrap();
+  let snark = SNARK::prove(&pk, circuit)?;
 
   // verify the SNARK
   snark.verify(&vk, &[])
@@ -211,10 +211,10 @@ fn verify_circuit_safe<G: Group, S: RelaxedR1CSSNARKTrait<G>>(
   let circuit = LessThanCircuitSafe::new(bound, input, num_bits);
 
   // produce keys
-  let (pk, vk) = SNARK::<G, S, LessThanCircuitSafe<_>>::setup(circuit.clone()).unwrap();
+  let (pk, vk) = SNARK::<G, S, LessThanCircuitSafe<_>>::setup(circuit.clone())?;
 
   // produce a SNARK
-  let snark = SNARK::prove(&pk, circuit).unwrap();
+  let snark = SNARK::prove(&pk, circuit)?;
 
   // verify the SNARK
   snark.verify(&vk, &[])

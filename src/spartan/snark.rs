@@ -24,9 +24,8 @@ use crate::{
   Commitment, CommitmentKey, CompressedCommitment,
 };
 use ark_ff::{AdditiveGroup, Field};
-use ark_relations::r1cs::{
-  ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, LinearCombination,
-};
+use ark_relations::lc;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -119,22 +118,14 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     // Padding the ShapeCS: constraints (rows) and variables (columns)
     let num_constraints = r1cs_cm.num_constraints;
     (num_constraints..num_constraints.next_power_of_two()).for_each(|i| {
-      cs.enforce_constraint(
-        LinearCombination::zero(),
-        LinearCombination::zero(),
-        LinearCombination::zero(),
-      )
-      .expect(&format!("Failed to enforce padding constraint {i}"));
+      cs.enforce_constraint(lc!(), lc!(), lc!())
+        .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
     let num_vars = r1cs_cm.num_instance_variables;
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
-      cs.enforce_constraint(
-        LinearCombination::zero(),
-        LinearCombination::zero(),
-        LinearCombination::zero(),
-      )
-      .expect(&format!("Failed to enforce padding variable {i}"));
+      cs.enforce_constraint(lc!(), lc!(), lc!())
+        .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
     // TODO: Generating a R1CS shape, commitment key, etc. from ark-relations R1CS seems to be
@@ -170,14 +161,11 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     let num_vars = cs_ref.num_instance_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
       cs_ref
-        .enforce_constraint(
-          LinearCombination::zero(),
-          LinearCombination::zero(),
-          LinearCombination::zero(),
-        )
+        .enforce_constraint(lc!(), lc!(), lc!())
         .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
+    let cs = cs_ref.borrow().unwrap();
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;

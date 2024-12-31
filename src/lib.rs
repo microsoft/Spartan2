@@ -111,13 +111,13 @@ mod tests {
   use super::*;
   use ark_ff::PrimeField;
   use ark_relations::lc;
-  use ark_relations::r1cs::{ConstraintSystemRef, LinearCombination, SynthesisError, Variable};
+  use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError, Variable};
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
   impl<F: PrimeField> ConstraintSynthesizer<F> for CubicCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
-      // Fixed toy values for testing
+      // Fixed values for testing
       let x = F::from(2u64); // Example: x = 2
       let y = F::from(15u64); // Example: y = 15 (2^3 + 2 + 5 = 15)
 
@@ -142,9 +142,8 @@ mod tests {
       )?;
 
       // 3. Add the constraint: x^3 + x + 5 = y
-      let constant_five = F::from(5u64);
       cs.enforce_constraint(
-        lc!() + x_cubed_var + (x, Variable::One) + (constant_five, Variable::One),
+        lc!() + x_cubed_var + (x, Variable::One) + (F::from(5u64), Variable::One),
         lc!() + Variable::One, // Identity multiplier for y
         lc!() + (y, Variable::One),
       )?;
@@ -159,9 +158,9 @@ mod tests {
   #[test]
   fn test_snark() {
     type G = ark_bls12_381::G1Projective;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<G>;
-    type S = crate::spartan::snark::RelaxedR1CSSNARK<G, EE>;
-    type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
+    type EE = provider::ipa_pc::EvaluationEngine<G>;
+    type S = spartan::snark::RelaxedR1CSSNARK<G, EE>;
+    type Spp = spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
     // test_snark_with::<G, S>(); // TODO
     // test_snark_with::<G, Spp>(); // TODO
 
@@ -200,6 +199,7 @@ mod tests {
 
     // verify the SNARK
     let res = snark.verify(&vk, &[<G as Group>::Scalar::from(15u64)]);
-    assert!(res.is_ok());
+    // assert!(res.is_ok());
+    res.unwrap();
   }
 }
