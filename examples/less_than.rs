@@ -4,8 +4,7 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::AllocatedBool;
 use ark_r1cs_std::fields::fp::AllocatedFp;
 use ark_relations::r1cs::{
-  ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, Namespace, SynthesisError,
-  Variable,
+  ConstraintSynthesizer, ConstraintSystemRef, Namespace, SynthesisError, Variable,
 };
 use ark_relations::{lc, ns};
 use num_traits::One;
@@ -104,32 +103,27 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitUnsafe<F> {
     let input = AllocatedFp::<F>::new_input(input_ns, || Ok(self.input))?;
 
     let shifted_ns = ns!(cs.clone(), "shifted_diff");
-    // TODO: Is this an input or a variable?
-    let shifted_diff = AllocatedFp::<F>::new_input(shifted_ns, || {
+    let shifted_diff = AllocatedFp::<F>::new_witness(shifted_ns, || {
       Ok(self.input + F::from(1 << self.num_bits) - self.bound)
     })?;
 
-    let shifted_diff_lc = LinearCombination::from(input.variable)
-      + LinearCombination::from((F::from(1 << self.num_bits) - self.bound, Variable::One))
-      - LinearCombination::from(shifted_diff.variable);
+    let shifted_diff_lc =
+      lc!() + (F::ONE, input.variable) + (F::from(1 << self.num_bits) - self.bound, Variable::One)
+        - (F::ONE, shifted_diff.variable);
 
-    // Enforce the linear combination (shifted_diff_lc == 0)
-    cs.enforce_constraint(
-      shifted_diff_lc,
-      LinearCombination::from((F::ONE, Variable::One)),
-      lc!(),
-    )?;
+    // Enforce shifted_diff_lc == 0
+    cs.enforce_constraint(shifted_diff_lc, lc!() + (F::ONE, Variable::One), lc!())?;
 
     let shifted_diff_bits =
       num_to_bits_le_bounded::<F>(cs.clone(), shifted_diff, self.num_bits + 1)?;
 
-    // Check that the last (i.e. most significant) bit is 0
+    // Check that the most significant bit is 0
     let msb_var = shifted_diff_bits[self.num_bits as usize].variable();
 
     // Enforce the constraint that the most significant bit is 0
     cs.enforce_constraint(
-      LinearCombination::from((F::ONE, msb_var)),
-      LinearCombination::from((F::ONE, Variable::One)),
+      lc!() + (F::ONE, msb_var),
+      lc!() + (F::ONE, Variable::One),
       lc!(),
     )?;
 

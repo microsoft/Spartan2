@@ -128,6 +128,10 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
+    // Update before commiting shape to the ProverKey
+    let r1cs_cm = cs
+      .to_matrices()
+      .expect("Failed to convert constraint system to R1CS");
     let S = R1CSShape::from(&r1cs_cm);
     let ck = R1CS::commitment_key(&S);
 
@@ -155,15 +159,18 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .generate_constraints(cs_ref.clone())
       .expect("TODO: Handle error");
 
-    // Padding variables
-    let num_vars = cs_ref.num_instance_variables();
+    let cs = cs_ref.borrow().unwrap();
+    let r1cs_cm = cs.to_matrices().unwrap();
+    let shape = R1CSShape::<G>::from(&r1cs_cm);
+
+    // Padding the variables
+    let num_vars = shape.num_vars;
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
       cs_ref
         .enforce_constraint(lc!(), lc!(), lc!())
         .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
-    let cs = cs_ref.borrow().unwrap();
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;

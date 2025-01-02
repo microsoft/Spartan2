@@ -38,17 +38,16 @@ pub struct R1CSShape<G: Group> {
 
 impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
   fn from(r1cs_cm: &ConstraintMatrices<G::Scalar>) -> Self {
-    Self {
-      // TODO: Is this mapping correct?
-      // TODO: These values are expected to be power of two.
-      //  Remove `next_power_of_two()` to reproduce errors
-      num_cons: r1cs_cm.num_constraints.next_power_of_two(),
-      num_vars: r1cs_cm.num_witness_variables.next_power_of_two(),
-      num_io: r1cs_cm.num_instance_variables - 1, // TODO: Always has one variable by default in ark-relations?
-      A: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
-      B: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
-      C: R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
-    }
+    R1CSShape::new(
+      r1cs_cm.num_constraints,
+      r1cs_cm.num_witness_variables,
+      // Arkworks creates one instance variable by default, need to it adjust here:
+      r1cs_cm.num_instance_variables - 1,
+      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
+      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
+      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
+    )
+    .expect("Invalid R1CSShape")
   }
 }
 
@@ -168,8 +167,8 @@ impl<G: Group> R1CSShape<G> {
     })
   }
 
-  // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
-  // Panics if num_cons, num_vars, or num_io are not powers of two, or if num_io > num_vars
+  /// Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
+  /// Panics if num_cons, num_vars, or num_io are not powers of two, or if num_io > num_vars
   #[inline]
   pub(crate) fn check_regular_shape(&self) {
     assert_eq!(self.num_cons.next_power_of_two(), self.num_cons);

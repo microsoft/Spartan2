@@ -20,13 +20,13 @@ mod tests {
 
   fn synthesize_alloc_bit<F: Field>(cs: &mut ConstraintSystem<F>) -> Result<(), SynthesisError> {
     // Allocate 'a' as a public input
-    let a_var = cs.new_witness_variable(|| Ok(F::ONE))?;
+    let a_var = cs.new_input_variable(|| Ok(F::ONE))?;
 
     // Enforce: a * (1 - a) = 0 (this ensures that 'a' is an 0 or 1)
     cs.enforce_constraint(lc!() + a_var, lc!() + Variable::One - a_var, lc!())?;
 
     // Allocate 'b' as a public input
-    let b_var = cs.new_witness_variable(|| Ok(F::ONE))?;
+    let b_var = cs.new_input_variable(|| Ok(F::ONE))?;
 
     // Enforce: b * (1 - b) = 0 (this ensures that 'b' is 0 or 1)
     cs.enforce_constraint(lc!() + b_var, lc!() + Variable::One - b_var, lc!())?;
