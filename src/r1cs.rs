@@ -7,7 +7,7 @@ use crate::{
   Commitment, CommitmentKey, CE,
 };
 use ark_ff::{AdditiveGroup, Field};
-use ark_relations::r1cs::ConstraintMatrices;
+use ark_relations::r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef};
 use core::{cmp::max, marker::PhantomData};
 use itertools::concat;
 use rayon::prelude::*;
@@ -36,18 +36,35 @@ pub struct R1CSShape<G: Group> {
   pub(crate) C: Vec<(usize, usize, G::Scalar)>,
 }
 
-impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
-  fn from(r1cs_cm: &ConstraintMatrices<G::Scalar>) -> Self {
+impl<G: Group> R1CSShape<G> {
+  /// Helper function to create an `R1CSShape` from any type that implements `to_matrices`.
+  fn from_matrices<F>(to_matrices: F) -> Self
+  where
+    F: Fn() -> Option<ConstraintMatrices<G::Scalar>>,
+  {
+    let r1cs_cm = to_matrices().expect("Failed to convert constraint system to R1CS");
     R1CSShape::new(
       r1cs_cm.num_constraints,
       r1cs_cm.num_witness_variables,
-      // Arkworks creates one instance variable by default, need to it adjust here:
+      // Arkworks creates one instance variable by default, need to adjust here:
       r1cs_cm.num_instance_variables - 1,
       &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
       &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
       &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
     )
     .expect("Invalid R1CSShape")
+  }
+}
+
+impl<G: Group> From<&ConstraintSystem<G::Scalar>> for R1CSShape<G> {
+  fn from(cm: &ConstraintSystem<G::Scalar>) -> Self {
+    R1CSShape::from_matrices(|| cm.to_matrices())
+  }
+}
+
+impl<G: Group> From<&ConstraintSystemRef<G::Scalar>> for R1CSShape<G> {
+  fn from(cm: &ConstraintSystemRef<G::Scalar>) -> Self {
+    R1CSShape::from_matrices(|| cm.to_matrices())
   }
 }
 

@@ -128,11 +128,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
         .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
-    // Update before commiting shape to the ProverKey
-    let r1cs_cm = cs
-      .to_matrices()
-      .expect("Failed to convert constraint system to R1CS");
-    let S = R1CSShape::from(&r1cs_cm);
+    let S = R1CSShape::from(&cs);
     let ck = R1CS::commitment_key(&S);
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
@@ -160,8 +156,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .expect("TODO: Handle error");
 
     let cs = cs_ref.borrow().unwrap();
-    let r1cs_cm = cs.to_matrices().unwrap();
-    let shape = R1CSShape::<G>::from(&r1cs_cm);
+    let shape = R1CSShape::<G>::from(&cs_ref);
 
     // Padding the variables
     let num_vars = shape.num_vars;
@@ -439,7 +434,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1),
+      usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1,
     );
 
     // outer sum-check

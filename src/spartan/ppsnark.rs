@@ -933,10 +933,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     circuit
       .generate_constraints(cs.clone())
       .expect("TODO: Handle error");
-    let r1cs_cm = cs
-      .to_matrices()
-      .expect("Failed to convert constraint system to R1CS");
-    let r1cs_shape = R1CSShape::from(&r1cs_cm);
+    let r1cs_shape = R1CSShape::from(&cs);
     let ck = R1CS::commitment_key(&r1cs_shape);
     let (pk_ee, vk_ee) = EE::setup(&ck);
     let shape_repr = R1CSShapeSparkRepr::new(&r1cs_shape);
