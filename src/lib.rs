@@ -136,8 +136,8 @@ mod tests {
         lc!() + x_cubed_var,   // Result: `x³`
       )?;
 
-      // Step 4: Compute `y` and enforce `y = x³ + x + 5`
-      let y_var = cs.new_input_variable(|| Ok(y))?;
+      // Step 4: Allocate `y` as a witness variable and enforce `y = x³ + x + 5`
+      let y_var = cs.new_witness_variable(|| Ok(y))?;
       cs.enforce_constraint(
         lc!() + x_cubed_var // `x³`
             + x_var // `x`
@@ -146,8 +146,7 @@ mod tests {
         lc!() + y_var,         // Public `y`
       )?;
 
-      // Step 5: Expose `y` explicitly as public input
-      // This adds one more constraint to ensure `y_var` matches the public input declared for the circuit.
+      // Step 5: Expose `y` as a public input
       cs.enforce_constraint(
         lc!() + y_var,
         lc!() + Variable::One,
