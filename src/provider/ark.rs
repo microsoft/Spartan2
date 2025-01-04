@@ -3,20 +3,24 @@ use crate::provider::pedersen::CommitmentEngine;
 use crate::traits::{CompressedGroup, Group, PrimeFieldExt, TranscriptReprTrait};
 use ark_bls12_381::g1::Config as G1Config;
 use ark_bls12_381::{Fq, Fr, G1Affine, G1Projective};
-use ark_ec::short_weierstrass::SWCurveConfig;
-use ark_ec::{
-  hashing::{curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve},
-  short_weierstrass::Projective,
+use ark_ec::hashing::{
+  curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve,
 };
+use ark_ec::short_weierstrass::SWCurveConfig;
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM};
 use ark_ff::field_hashers::DefaultFieldHasher;
 use ark_ff::{AdditiveGroup, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use num_bigint::BigInt;
-use num_traits::{Num, Zero};
+use num_traits::Zero;
+use rayon::prelude::*;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::Sha256;
+use sha3::{
+  digest::{ExtendableOutput, Update},
+  Shake256,
+};
+use std::io::Read;
 
 /// Compressed representation of BLS12-381 group elements
 #[derive(Clone, Copy, Debug, Eq, PartialEq, CanonicalDeserialize, CanonicalSerialize)]
@@ -68,7 +72,7 @@ impl<G: Group> TranscriptReprTrait<G> for BLS12CompressedElement {
   }
 }
 
-impl<G: Group> TranscriptReprTrait<G> for ark_bls12_381::Fq {
+impl<G: Group> TranscriptReprTrait<G> for Fq {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     let mut serialized_data = Vec::new();
     self
@@ -78,7 +82,7 @@ impl<G: Group> TranscriptReprTrait<G> for ark_bls12_381::Fq {
   }
 }
 
-impl<G: Group> TranscriptReprTrait<G> for ark_bls12_381::Fr {
+impl<G: Group> TranscriptReprTrait<G> for Fr {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     let mut serialized_data = Vec::new();
     self
@@ -121,24 +125,39 @@ impl Group for G1Projective {
     self.into_affine()
   }
 
-  // TODO: This is not actually a label "from_uniform_bytes", fix it
   fn from_label(label: &[u8], n: usize) -> Vec<G1Affine> {
-    let domain_separator = b"from_uniform_bytes";
-    // TODO: Doesn't work with sha3::Shake256, which was originally used here, what do?
+    let mut shake = Shake256::default();
+    shake.update(label);
+
+    let mut reader = shake.finalize_xof();
+
+    let mut uniform_bytes_vec = Vec::new();
+    for _ in 0..n {
+      let mut uniform_bytes = [0u8; 32];
+      reader
+        .read_exact(&mut uniform_bytes)
+        .expect("Failed to read bytes from XOF");
+      uniform_bytes_vec.push(uniform_bytes);
+    }
+
     let hasher = MapToCurveBasedHasher::<
-      Projective<G1Config>,
-      DefaultFieldHasher<Sha256, 128>,
+      G1Projective,
+      DefaultFieldHasher<sha2::Sha256, 128>,
       WBMap<G1Config>,
-    >::new(domain_separator)
+    >::new(b"from_uniform_bytes")
     .expect("Failed to create MapToCurveBasedHasher");
 
-    // Generate `n` curve points from the label
-    (0..n)
-      .map(|i| {
-        let input = [label, &i.to_be_bytes()].concat();
-        hasher.hash(&input).expect("Failed to hash to curve")
-      })
-      .collect()
+    let ck_proj = uniform_bytes_vec
+      .into_par_iter()
+      .map(|bytes| hasher.hash(&bytes).expect("Hashing to curve failed"))
+      .collect::<Vec<_>>();
+
+    let mut ck_affine = vec![G1Affine::identity(); n];
+    for (proj, affine) in ck_proj.iter().zip(ck_affine.iter_mut()) {
+      *affine = (*proj).into();
+    }
+
+    ck_affine
   }
 
   fn to_coordinates(&self) -> (Self::Base, Self::Base, bool) {
@@ -161,13 +180,9 @@ impl Group for G1Projective {
   }
 
   fn get_curve_params() -> (Self::Base, Self::Base, BigInt) {
-    let a = ark_bls12_381::g1::Config::COEFF_A;
-    let b = ark_bls12_381::g1::Config::COEFF_B;
-    let order = BigInt::from_str_radix(
-      "52435875175126190479447740508185965837690552500527637822603658699938581184512",
-      10,
-    )
-    .unwrap();
+    let a = G1Config::COEFF_A;
+    let b = G1Config::COEFF_B;
+    let order = Fr::MODULUS.into();
     (a, b, order)
   }
 }
