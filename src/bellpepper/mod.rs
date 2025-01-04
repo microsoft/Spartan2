@@ -41,7 +41,8 @@ mod tests {
     // First create the shape
     let mut cs: ConstraintSystem<G::Scalar> = ConstraintSystem::new();
     let _ = synthesize_alloc_bit(&mut cs);
-    let shape: R1CSShape<G> = R1CSShape::from(&cs);
+    let shape: R1CSShape<G> =
+      R1CSShape::from(&cs.to_matrices().expect("Failed to convert to R1CS"));
     let ck = R1CS::commitment_key(&shape);
 
     // Now get the assignment

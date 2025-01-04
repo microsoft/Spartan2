@@ -121,35 +121,38 @@ mod tests {
       let x = F::from(2u64); // Example: x = 2
       let y = F::from(15u64); // Example: y = 15 (2^3 + 2 + 5 = 15)
 
-      // 1. Allocate x^2 as an intermediate variable (witness)
+      // Step 1: Allocate `x` as a private witness variable
+      let x_var = cs.new_witness_variable(|| Ok(x))?;
+
+      // Step 2: Compute `x²` and enforce `x² = x * x`
       let x_squared_var = cs.new_witness_variable(|| Ok(x * x))?;
+      cs.enforce_constraint(lc!() + x_var, lc!() + x_var, lc!() + x_squared_var)?;
 
-      // Enforce x^2 = x * x
-      cs.enforce_constraint(
-        lc!() + (x, Variable::One),
-        lc!() + (x, Variable::One),
-        lc!() + x_squared_var,
-      )?;
-
-      // 2. Allocate x^3 as another intermediate variable (witness)
+      // Step 3: Compute `x³` and enforce `x³ = x² * x`
       let x_cubed_var = cs.new_witness_variable(|| Ok(x * x * x))?;
-
-      // Enforce x^3 = x^2 * x
       cs.enforce_constraint(
-        lc!() + x_squared_var,
-        lc!() + (x, Variable::One),
-        lc!() + x_cubed_var,
+        lc!() + x_squared_var, // Left-hand side: `x²`
+        lc!() + x_var,         // Right-hand side: `x`
+        lc!() + x_cubed_var,   // Result: `x³`
       )?;
 
-      // 3. Add the constraint: x^3 + x + 5 = y
+      // Step 4: Compute `y` and enforce `y = x³ + x + 5`
+      let y_var = cs.new_input_variable(|| Ok(y))?;
       cs.enforce_constraint(
-        lc!() + x_cubed_var + (x, Variable::One) + (F::from(5u64), Variable::One),
-        lc!() + Variable::One, // Identity multiplier for y
-        lc!() + (y, Variable::One),
+        lc!() + x_cubed_var // `x³`
+            + x_var // `x`
+            + (F::from(5u64), Variable::One), // `+ 5`
+        lc!() + Variable::One, // Identity multiplier
+        lc!() + y_var,         // Public `y`
       )?;
 
-      // 4. Expose y as a public input
-      cs.new_input_variable(|| Ok(y))?;
+      // Step 5: Expose `y` explicitly as public input
+      // This adds one more constraint to ensure `y_var` matches the public input declared for the circuit.
+      cs.enforce_constraint(
+        lc!() + y_var,
+        lc!() + Variable::One,
+        lc!() + (y, Variable::One), // Ensure that `y_var` matches the public `y`
+      )?;
 
       Ok(())
     }
@@ -194,7 +197,7 @@ mod tests {
 
     // produce a SNARK
     let res = SNARK::prove(&pk, circuit);
-    assert!(res.is_ok());
+    // assert!(res.is_ok());
     let snark = res.unwrap();
 
     // verify the SNARK

@@ -7,7 +7,7 @@ use crate::{
   Commitment, CommitmentKey, CE,
 };
 use ark_ff::{AdditiveGroup, Field};
-use ark_relations::r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef};
+use ark_relations::r1cs::ConstraintMatrices;
 use core::{cmp::max, marker::PhantomData};
 use itertools::concat;
 use rayon::prelude::*;
@@ -38,33 +38,24 @@ pub struct R1CSShape<G: Group> {
 
 impl<G: Group> R1CSShape<G> {
   /// Helper function to create an `R1CSShape` from any type that implements `to_matrices`.
-  fn from_matrices<F>(to_matrices: F) -> Self
-  where
-    F: Fn() -> Option<ConstraintMatrices<G::Scalar>>,
-  {
-    let r1cs_cm = to_matrices().expect("Failed to convert constraint system to R1CS");
+  fn from_matrices<F>(cm: ConstraintMatrices<G::Scalar>) -> Self {
     R1CSShape::new(
-      r1cs_cm.num_constraints,
-      r1cs_cm.num_witness_variables,
-      // Arkworks creates one instance variable by default, need to adjust here:
-      r1cs_cm.num_instance_variables - 1,
-      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.a),
-      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.b),
-      &*R1CSShape::<G>::flatten_r1cs_cm(&r1cs_cm.c),
+      cm.num_constraints,
+      cm.num_witness_variables,
+      // Arkworks creates one instance variable by default
+      // Don't count it as an input for shape's purposes.
+      cm.num_instance_variables - 1,
+      &*R1CSShape::<G>::flatten_r1cs_cm(&cm.a),
+      &*R1CSShape::<G>::flatten_r1cs_cm(&cm.b),
+      &*R1CSShape::<G>::flatten_r1cs_cm(&cm.c),
     )
     .expect("Invalid R1CSShape")
   }
 }
 
-impl<G: Group> From<&ConstraintSystem<G::Scalar>> for R1CSShape<G> {
-  fn from(cm: &ConstraintSystem<G::Scalar>) -> Self {
-    R1CSShape::from_matrices(|| cm.to_matrices())
-  }
-}
-
-impl<G: Group> From<&ConstraintSystemRef<G::Scalar>> for R1CSShape<G> {
-  fn from(cm: &ConstraintSystemRef<G::Scalar>) -> Self {
-    R1CSShape::from_matrices(|| cm.to_matrices())
+impl<G: Group> From<&ConstraintMatrices<G::Scalar>> for R1CSShape<G> {
+  fn from(cm: &ConstraintMatrices<G::Scalar>) -> Self {
+    R1CSShape::from_matrices::<G>(cm.clone())
   }
 }
 
@@ -78,6 +69,17 @@ impl<G: Group> R1CSShape<G> {
       .enumerate()
       .flat_map(|(row, cols)| cols.iter().map(move |(value, col)| (row, *col, *value)))
       .collect()
+  }
+
+  pub fn padded(&self) -> Self {
+    Self {
+      num_cons: self.num_cons.next_power_of_two(),
+      num_vars: self.num_vars.next_power_of_two(),
+      num_io: self.num_io,
+      A: self.A.clone(),
+      B: self.B.clone(),
+      C: self.C.clone(),
+    }
   }
 }
 

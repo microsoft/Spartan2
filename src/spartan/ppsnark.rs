@@ -928,27 +928,21 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   fn setup<C: ConstraintSynthesizer<G::Scalar>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    // Create an Arkworks-based constraint system and convert it to Spartan2 representation
-    let cs = ConstraintSystem::<G::Scalar>::new_ref();
+    let cs_ref = ConstraintSystem::<G::Scalar>::new_ref();
     circuit
-      .generate_constraints(cs.clone())
+      .generate_constraints(cs_ref.clone())
       .expect("TODO: Handle error");
-    let r1cs_shape = R1CSShape::from(&cs);
-    let ck = R1CS::commitment_key(&r1cs_shape);
+    let shape = R1CSShape::from(&cs_ref.to_matrices().expect("Failed to convert to R1CS"));
+    let ck = R1CS::commitment_key(&shape);
     let (pk_ee, vk_ee) = EE::setup(&ck);
-    let shape_repr = R1CSShapeSparkRepr::new(&r1cs_shape);
+    let shape_repr = R1CSShapeSparkRepr::new(&shape);
     let shape_comm = shape_repr.commit(&ck);
 
-    let vk = VerifierKey::new(
-      r1cs_shape.num_cons,
-      r1cs_shape.num_vars,
-      shape_comm.clone(),
-      vk_ee,
-    );
+    let vk = VerifierKey::new(shape.num_cons, shape.num_vars, shape_comm.clone(), vk_ee);
     let pk = ProverKey {
       ck,
       pk_ee,
-      S: r1cs_shape,
+      S: shape,
       S_repr: shape_repr,
       S_comm: shape_comm,
       vk_digest: vk.digest(),

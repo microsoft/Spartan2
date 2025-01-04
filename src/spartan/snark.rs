@@ -110,25 +110,22 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     circuit
       .generate_constraints(cs.clone())
       .expect("TODO: Handle error");
-    let r1cs_cm = cs
-      .to_matrices()
-      .expect("Failed to convert constraint system to R1CS");
 
-    // TODO: Do we still need that padding even if we don't use ShapeCS anymore?
-    // Padding the ShapeCS: constraints (rows) and variables (columns)
-    let num_constraints = r1cs_cm.num_constraints;
-    (num_constraints..num_constraints.next_power_of_two()).for_each(|i| {
+    // Padding the shape: constraints (rows) and variables (columns)
+    let num_cons = cs.num_constraints();
+    (num_cons..num_cons.next_power_of_two()).for_each(|i| {
       cs.enforce_constraint(lc!(), lc!(), lc!())
         .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
-    let num_vars = r1cs_cm.num_instance_variables;
+    let num_vars = cs.num_witness_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
       cs.enforce_constraint(lc!(), lc!(), lc!())
         .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
-    let S = R1CSShape::from(&cs);
+    // Update shape after padding
+    let S = R1CSShape::from(&cs.to_matrices().expect("Failed to convert to R1CS"));
     let ck = R1CS::commitment_key(&S);
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
@@ -155,17 +152,15 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
       .generate_constraints(cs_ref.clone())
       .expect("TODO: Handle error");
 
-    let cs = cs_ref.borrow().unwrap();
-    let shape = R1CSShape::<G>::from(&cs_ref);
-
     // Padding the variables
-    let num_vars = shape.num_vars;
+    let num_vars = cs_ref.num_instance_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
       cs_ref
         .enforce_constraint(lc!(), lc!(), lc!())
         .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
+    let cs = cs_ref.borrow().unwrap();
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;
