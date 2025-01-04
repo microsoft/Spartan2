@@ -25,7 +25,7 @@ use crate::{
 };
 use ark_ff::{AdditiveGroup, Field};
 use ark_relations::lc;
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     let num_vars = cs.num_witness_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
-      cs.enforce_constraint(lc!(), lc!(), lc!())
+      cs.new_witness_variable(|| Ok(G::Scalar::ZERO))
         .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
@@ -146,18 +146,17 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     pk: &Self::ProverKey,
     circuit: C,
   ) -> Result<Self, SpartanError> {
-    let cs = ConstraintSystem::<G::Scalar>::new();
-    let cs_ref = ConstraintSystemRef::new(cs.clone());
+    let cs_ref = ConstraintSystem::new_ref();
     circuit
       .generate_constraints(cs_ref.clone())
       .expect("TODO: Handle error");
 
-    // Padding the variables
-    let num_vars = cs_ref.num_instance_variables();
+    // Padding the witness variables
+    let num_vars = cs_ref.num_witness_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
       cs_ref
-        .enforce_constraint(lc!(), lc!(), lc!())
-        .expect(&format!("Failed to enforce padding constraint {i}"));
+        .new_witness_variable(|| Ok(G::Scalar::ZERO))
+        .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
     let cs = cs_ref.borrow().unwrap();

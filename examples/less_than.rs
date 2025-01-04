@@ -36,8 +36,7 @@ fn num_to_bits_le_bounded<F: PrimeField>(
       // TODO: Why do I need namespaces here?
       // TODO: Namespace can't use string ids, only const ids
       // let namespaced_cs = Namespace::from(cs.clone());
-      // TODO: Is it a "new_input" or a different type of a variable?
-        AllocatedBool::<F>::new_input(cs.clone(), || b.ok_or(SynthesisError::AssignmentMissing))
+        AllocatedBool::<F>::new_witness(cs.clone(), || b.ok_or(SynthesisError::AssignmentMissing))
     })
     .collect::<Result<Vec<AllocatedBool<F>>, SynthesisError>>()?;
 
@@ -100,7 +99,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitUnsafe<F> {
     assert!(F::MODULUS_BIT_SIZE > self.num_bits as u32 + 1);
 
     let input_ns = ns!(cs.clone(), "input");
-    let input = AllocatedFp::<F>::new_input(input_ns, || Ok(self.input))?;
+    let input = AllocatedFp::<F>::new_witness(input_ns, || Ok(self.input))?;
 
     let shifted_ns = ns!(cs.clone(), "shifted_diff");
     let shifted_diff = AllocatedFp::<F>::new_witness(shifted_ns, || {
@@ -158,7 +157,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for LessThanCircuitSafe<F> {
   fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
     // TODO: Do we need to use a namespace here?
     let input_ns = Namespace::from(cs.clone());
-    let input = AllocatedFp::<F>::new_input(input_ns, || Ok(self.input))?;
+    let input = AllocatedFp::<F>::new_witness(input_ns, || Ok(self.input))?;
 
     // Perform the input bit decomposition check
     num_to_bits_le_bounded::<F>(cs.clone(), input, self.num_bits)?;
