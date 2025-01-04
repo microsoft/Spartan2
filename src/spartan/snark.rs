@@ -4,14 +4,12 @@
 //! description of R1CS matrices. This is essentially optimal for the verifier when using
 //! an IPA-based polynomial commitment scheme.
 
+use crate::r1cs::R1CS;
 use crate::{
-  bellpepper::{
-    r1cs::{SpartanShape, SpartanWitness},
-    shape_cs::ShapeCS,
-    solver::SatisfyingAssignment,
-  },
+  bellpepper::r1cs::SpartanWitness,
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
+  provider::ark_serde::Canonical,
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness},
   spartan::{
     polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial},
@@ -25,19 +23,23 @@ use crate::{
   },
   Commitment, CommitmentKey, CompressedCommitment,
 };
-use bellpepper_core::{Circuit, ConstraintSystem};
-use ff::Field;
+use ark_ff::{AdditiveGroup, Field};
+use ark_relations::lc;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 /// A type that represents the prover's key
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct ProverKey<G: Group, EE: EvaluationEngineTrait<G>> {
   ck: CommitmentKey<G>,
   pk_ee: EE::ProverKey,
   S: R1CSShape<G>,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   vk_digest: G::Scalar, // digest of the verifier's key
 }
 
@@ -78,16 +80,21 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> VerifierKey<G, EE> {
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RelaxedR1CSSNARK<G: Group, EE: EvaluationEngineTrait<G>> {
   comm_W: CompressedCommitment<G>,
   sc_proof_outer: SumcheckProof<G>,
+  #[serde_as(as = "Canonical<(G::Scalar, G::Scalar, G::Scalar)>")]
   claims_outer: (G::Scalar, G::Scalar, G::Scalar),
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_E: G::Scalar,
   sc_proof_inner: SumcheckProof<G>,
+  #[serde_as(as = "Canonical<G::Scalar>")]
   eval_W: G::Scalar,
   sc_proof_batch: SumcheckProof<G>,
+  #[serde_as(as = "Canonical<Vec<G::Scalar>>")]
   evals_batch: Vec<G::Scalar>,
   eval_arg: EE::EvaluationArgument,
 }
@@ -96,32 +103,30 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
   type ProverKey = ProverKey<G, EE>;
   type VerifierKey = VerifierKey<G, EE>;
 
-  fn setup<C: Circuit<G::Scalar>>(
+  fn setup<C: ConstraintSynthesizer<G::Scalar>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let mut cs: ShapeCS<G> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
+    let cs = ConstraintSystem::<G::Scalar>::new_ref();
+    circuit
+      .generate_constraints(cs.clone())
+      .expect("TODO: Handle error");
 
-    // Padding the ShapeCS: constraints (rows) and variables (columns)
-    let num_constraints = cs.num_constraints();
-
-    (num_constraints..num_constraints.next_power_of_two()).for_each(|i| {
-      cs.enforce(
-        || format!("padding_constraint_{i}"),
-        |lc| lc,
-        |lc| lc,
-        |lc| lc,
-      )
+    // Padding the shape: constraints (rows) and variables (columns)
+    let num_cons = cs.num_constraints();
+    (num_cons..num_cons.next_power_of_two()).for_each(|i| {
+      cs.enforce_constraint(lc!(), lc!(), lc!())
+        .expect(&format!("Failed to enforce padding constraint {i}"));
     });
 
-    let num_vars = cs.num_aux();
-
+    let num_vars = cs.num_witness_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
-      cs.alloc(|| format!("padding_var_{i}"), || Ok(G::Scalar::ZERO))
-        .unwrap();
+      cs.new_witness_variable(|| Ok(G::Scalar::ZERO))
+        .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
-    let (S, ck) = cs.r1cs_shape();
+    // Update shape after padding
+    let S = R1CSShape::from(&cs.to_matrices().expect("Failed to convert to R1CS"));
+    let ck = R1CS::commitment_key(&S);
 
     let (pk_ee, vk_ee) = EE::setup(&ck);
 
@@ -136,19 +141,25 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
     Ok((pk, vk))
   }
 
-  /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
-  fn prove<C: Circuit<G::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
-    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
-    let _ = circuit.synthesize(&mut cs);
+  /// Produces a succinct proof of satisfiability of a `RelaxedR1CS` instance.
+  fn prove<C: ConstraintSynthesizer<G::Scalar>>(
+    pk: &Self::ProverKey,
+    circuit: C,
+  ) -> Result<Self, SpartanError> {
+    let cs_ref = ConstraintSystem::new_ref();
+    circuit
+      .generate_constraints(cs_ref.clone())
+      .expect("TODO: Handle error");
 
-    // Padding variables
-    let num_vars = cs.aux_slice().len();
-
+    // Padding the witness variables
+    let num_vars = cs_ref.num_witness_variables();
     (num_vars..num_vars.next_power_of_two()).for_each(|i| {
-      cs.alloc(|| format!("padding_var_{i}"), || Ok(G::Scalar::ZERO))
-        .unwrap();
+      cs_ref
+        .new_witness_variable(|| Ok(G::Scalar::ZERO))
+        .expect(&format!("Failed to enforce padding variable {i}"));
     });
 
+    let cs = cs_ref.borrow().unwrap();
     let (u, w) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat)?;
@@ -417,7 +428,7 @@ impl<G: Group, EE: EvaluationEngineTrait<G>> RelaxedR1CSSNARKTrait<G> for Relaxe
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1),
+      usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1,
     );
 
     // outer sum-check

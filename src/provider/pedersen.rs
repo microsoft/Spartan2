@@ -1,4 +1,5 @@
 //! This module provides an implementation of a commitment engine
+use crate::provider::ark_serde::Canonical;
 use crate::{
   errors::SpartanError,
   traits::{
@@ -13,24 +14,31 @@ use core::{
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 /// A type that holds commitment generators
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitmentKey<G: Group> {
+  #[serde_as(as = "Vec<Canonical<G::PreprocessedGroupElement>>")]
   ck: Vec<G::PreprocessedGroupElement>,
 }
 
 /// A type that holds a commitment
+#[serde_as]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Commitment<G: Group> {
+  #[serde_as(as = "Canonical<G>")]
   pub(crate) comm: G,
 }
 
 /// A type that holds a compressed commitment
+#[serde_as]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct CompressedCommitment<G: Group> {
+  #[serde_as(as = "Canonical<G::CompressedGroupElement>")]
   comm: G::CompressedGroupElement,
 }
 

@@ -1,6 +1,6 @@
 //! `EqPolynomial`: Represents multilinear extension of equality polynomials, evaluated based on binary input values.
 
-use ff::PrimeField;
+use ark_ff::PrimeField;
 use rayon::iter::IntoParallelIterator;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
@@ -71,10 +71,7 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
 
 #[cfg(test)]
 mod tests {
-  use crate::provider;
-
   use super::*;
-  use pasta_curves::Fp;
 
   fn test_eq_polynomial_with<F: PrimeField>() {
     let eq_poly = EqPolynomial::<F>::new(vec![F::ONE, F::ZERO, F::ONE]);
@@ -96,8 +93,9 @@ mod tests {
 
   #[test]
   fn test_eq_polynomial() {
-    test_eq_polynomial_with::<Fp>();
-    test_eq_polynomial_with::<provider::bn256_grumpkin::bn256::Scalar>();
-    test_eq_polynomial_with::<provider::secp_secq::secp256k1::Scalar>();
+    // test_eq_polynomial_with::<Fp>();
+    // test_eq_polynomial_with::<provider::bn256_grumpkin::bn256::Scalar>();
+    // test_eq_polynomial_with::<provider::secp_secq::secp256k1::Scalar>();
+    test_eq_polynomial_with::<ark_bls12_381::Fr>();
   }
 }

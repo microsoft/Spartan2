@@ -7,9 +7,9 @@ use std::{
 };
 
 use crate::traits::Group;
-use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use ark_ff::{Field, PrimeField};
+use ark_relations::r1cs::Variable;
 use core::fmt::Write;
-use ff::{Field, PrimeField};
 
 #[derive(Clone, Copy)]
 struct OrderedVariable(Variable);

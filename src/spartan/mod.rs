@@ -12,7 +12,7 @@ pub mod snark;
 mod sumcheck;
 
 use crate::{traits::Group, Commitment};
-use ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use polys::multilinear::SparsePolynomial;
 
 fn powers<G: Group>(s: &G::Scalar, n: usize) -> Vec<G::Scalar> {

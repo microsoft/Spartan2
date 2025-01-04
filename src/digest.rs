@@ -1,5 +1,5 @@
+use ark_ff::PrimeField;
 use bincode::Options;
-use ff::PrimeField;
 use serde::Serialize;
 use sha3::{Digest, Sha3_256};
 use std::io;
@@ -47,8 +47,8 @@ impl<'a, F: PrimeField, T: Digestible> DigestComputer<'a, F, T> {
     });
 
     // turn the bit vector into a scalar
-    let mut digest = F::ZERO;
-    let mut coeff = F::ONE;
+    let mut digest = F::zero();
+    let mut coeff = F::one();
     for bit in bv {
       if bit {
         digest += coeff;
@@ -80,9 +80,8 @@ impl<'a, F: PrimeField, T: Digestible> DigestComputer<'a, F, T> {
 
 #[cfg(test)]
 mod tests {
-  use ff::Field;
+  use ark_ff::Field;
   use once_cell::sync::OnceCell;
-  use pasta_curves::pallas;
   use serde::{Deserialize, Serialize};
 
   use crate::traits::Group;
@@ -115,7 +114,7 @@ mod tests {
     }
   }
 
-  type G = pallas::Point;
+  type G = ark_bls12_381::G1Projective;
 
   #[test]
   fn test_digest_field_not_ingested_in_computation() {
@@ -123,7 +122,7 @@ mod tests {
 
     // let's set up a struct with a weird digest field to make sure the digest computation does not depend of it
     let oc = OnceCell::new();
-    oc.set(<G as Group>::Scalar::ONE).unwrap();
+    oc.set(<<G as Group>::Scalar as Field>::ONE).unwrap();
 
     let s2: S<G> = S { i: 42, digest: oc };
 

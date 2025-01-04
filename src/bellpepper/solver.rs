@@ -1,9 +1,8 @@
 //! Support for generating R1CS witness using bellperson.
 
 use crate::traits::Group;
-use ff::{Field, PrimeField};
-
-use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use ark_ff::{AdditiveGroup, Field, PrimeField};
+use ark_relations::r1cs::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 
 /// A `ConstraintSystem` which calculates witness values for a concrete instance of an R1CS circuit.
 pub struct SatisfyingAssignment<G: Group>

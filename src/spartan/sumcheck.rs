@@ -1,12 +1,13 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
+
 use crate::errors::SpartanError;
 use crate::spartan::polys::{
   multilinear::MultilinearPolynomial,
   univariate::{CompressedUniPoly, UniPoly},
 };
 use crate::traits::{Group, TranscriptEngineTrait};
-use ff::Field;
+use ark_ff::AdditiveGroup;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 

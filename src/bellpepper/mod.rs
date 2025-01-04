@@ -3,43 +3,34 @@
 //! [Bellperson]: https://github.com/filecoin-project/bellperson
 
 pub mod r1cs;
-pub mod shape_cs;
-pub mod solver;
-pub mod test_shape_cs;
+
+// Superseded by ark-relations
+// pub mod solver;
+// pub mod shape_cs;
+// pub mod test_shape_cs;
 
 #[cfg(test)]
 mod tests {
-  use crate::{
-    bellpepper::{
-      r1cs::{SpartanShape, SpartanWitness},
-      shape_cs::ShapeCS,
-      solver::SatisfyingAssignment,
-    },
-    traits::Group,
-  };
-  use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
-  use ff::PrimeField;
+  use crate::{bellpepper::r1cs::SpartanWitness, traits::Group};
 
-  fn synthesize_alloc_bit<Fr: PrimeField, CS: ConstraintSystem<Fr>>(
-    cs: &mut CS,
-  ) -> Result<(), SynthesisError> {
-    // get two bits as input and check that they are indeed bits
-    let a = AllocatedNum::alloc(cs.namespace(|| "a"), || Ok(Fr::ONE))?;
-    let _ = a.inputize(cs.namespace(|| "a is input"));
-    cs.enforce(
-      || "check a is 0 or 1",
-      |lc| lc + CS::one() - a.get_variable(),
-      |lc| lc + a.get_variable(),
-      |lc| lc,
-    );
-    let b = AllocatedNum::alloc(cs.namespace(|| "b"), || Ok(Fr::ONE))?;
-    let _ = b.inputize(cs.namespace(|| "b is input"));
-    cs.enforce(
-      || "check b is 0 or 1",
-      |lc| lc + CS::one() - b.get_variable(),
-      |lc| lc + b.get_variable(),
-      |lc| lc,
-    );
+  use crate::r1cs::{R1CSShape, R1CS};
+  use ark_ff::Field;
+  use ark_relations::lc;
+  use ark_relations::r1cs::{ConstraintSystem, SynthesisError, Variable};
+
+  fn synthesize_alloc_bit<F: Field>(cs: &mut ConstraintSystem<F>) -> Result<(), SynthesisError> {
+    // Allocate 'a' as a public input
+    let a_var = cs.new_input_variable(|| Ok(F::ONE))?;
+
+    // Enforce: a * (1 - a) = 0 (this ensures that 'a' is an 0 or 1)
+    cs.enforce_constraint(lc!() + a_var, lc!() + Variable::One - a_var, lc!())?;
+
+    // Allocate 'b' as a public input
+    let b_var = cs.new_input_variable(|| Ok(F::ONE))?;
+
+    // Enforce: b * (1 - b) = 0 (this ensures that 'b' is 0 or 1)
+    cs.enforce_constraint(lc!() + b_var, lc!() + Variable::One - b_var, lc!())?;
+
     Ok(())
   }
 
@@ -48,12 +39,14 @@ mod tests {
     G: Group,
   {
     // First create the shape
-    let mut cs: ShapeCS<G> = ShapeCS::new();
+    let mut cs: ConstraintSystem<G::Scalar> = ConstraintSystem::new();
     let _ = synthesize_alloc_bit(&mut cs);
-    let (shape, ck) = cs.r1cs_shape();
+    let shape: R1CSShape<G> =
+      R1CSShape::from(&cs.to_matrices().expect("Failed to convert to R1CS"));
+    let ck = R1CS::commitment_key(&shape);
 
     // Now get the assignment
-    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
+    let mut cs: ConstraintSystem<G::Scalar> = ConstraintSystem::new();
     let _ = synthesize_alloc_bit(&mut cs);
     let (inst, witness) = cs.r1cs_instance_and_witness(&shape, &ck).unwrap();
 
@@ -63,7 +56,8 @@ mod tests {
 
   #[test]
   fn test_alloc_bit() {
-    test_alloc_bit_with::<pasta_curves::pallas::Point>();
-    test_alloc_bit_with::<crate::provider::bn256_grumpkin::bn256::Point>();
+    // test_alloc_bit_with::<pasta_curves::pallas::Point>();
+    // test_alloc_bit_with::<crate::provider::bn256_grumpkin::bn256::Point>();
+    test_alloc_bit_with::<ark_bls12_381::G1Projective>();
   }
 }
