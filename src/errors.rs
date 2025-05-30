@@ -8,6 +8,10 @@ pub enum SpartanError {
   /// returned if the supplied row or col in (row,col,val) tuple is out of range
   #[error("InvalidIndex")]
   InvalidIndex,
+  /// returned if the step circuit calls inputize or alloc_io in its synthesize method
+  /// instead of passing output with the return value
+  #[error("InvalidStepCircuitIO")]
+  InvalidStepCircuitIO,
   /// returned if the supplied input is not of the right length
   #[error("InvalidInputLength")]
   InvalidInputLength,
@@ -15,20 +19,26 @@ pub enum SpartanError {
   #[error("InvalidWitnessLength")]
   InvalidWitnessLength,
   /// returned if the supplied witness is not a satisfying witness to a given shape and instance
-  #[error("UnSat")]
-  UnSat,
-  /// returned when the supplied compressed commitment cannot be decompressed
-  #[error("DecompressionError")]
-  DecompressionError,
+  #[error("UnSat: {reason}")]
+  UnSat {
+    /// The reason for circuit UnSat failure
+    reason: String,
+  },
   /// returned if proof verification fails
   #[error("ProofVerifyError")]
-  ProofVerifyError,
+  ProofVerifyError {
+    /// The reason for the proof verification error
+    reason: String,
+  },
+  /// returned if the provided commitment key is not of sufficient length
+  #[error("InvalidCommitmentKeyLength")]
+  InvalidCommitmentKeyLength,
   /// returned if the provided number of steps is zero
   #[error("InvalidNumSteps")]
   InvalidNumSteps,
-  /// returned when an invalid inner product argument is provided
-  #[error("InvalidIPA")]
-  InvalidIPA,
+  /// returned when an invalid PCS evaluation argument is provided
+  #[error("InvalidPCS")]
+  InvalidPCS,
   /// returned when an invalid sum-check proof is provided
   #[error("InvalidSumcheckProof")]
   InvalidSumcheckProof,
@@ -50,4 +60,16 @@ pub enum SpartanError {
   /// returned when the consistency with public IO and assignment used fails
   #[error("IncorrectWitness")]
   IncorrectWitness,
+  /// return when error during synthesis
+  #[error("SynthesisError: {reason}")]
+  SynthesisError {
+    /// The reason for circuit synthesis failure
+    reason: String,
+  },
+  /// returned when there is an error creating a digest
+  #[error("DigestError")]
+  DigestError,
+  /// returned when the prover cannot prove the provided statement due to completeness error
+  #[error("InternalError")]
+  InternalError,
 }

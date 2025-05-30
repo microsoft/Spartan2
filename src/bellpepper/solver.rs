@@ -1,24 +1,24 @@
-//! Support for generating R1CS witness using bellperson.
+//! Support for generating R1CS witness using bellpepper.
 
-use crate::traits::Group;
+use crate::traits::Engine;
 use ff::{Field, PrimeField};
 
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 
 /// A `ConstraintSystem` which calculates witness values for a concrete instance of an R1CS circuit.
-pub struct SatisfyingAssignment<G: Group>
+pub struct SatisfyingAssignment<E: Engine>
 where
-  G::Scalar: PrimeField,
+  E::Scalar: PrimeField,
 {
   // Assignments of variables
-  pub(crate) input_assignment: Vec<G::Scalar>,
-  pub(crate) aux_assignment: Vec<G::Scalar>,
+  pub(crate) input_assignment: Vec<E::Scalar>,
+  pub(crate) aux_assignment: Vec<E::Scalar>,
 }
 use std::fmt;
 
-impl<G: Group> fmt::Debug for SatisfyingAssignment<G>
+impl<E: Engine> fmt::Debug for SatisfyingAssignment<E>
 where
-  G::Scalar: PrimeField,
+  E::Scalar: PrimeField,
 {
   fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
     fmt
@@ -29,20 +29,20 @@ where
   }
 }
 
-impl<G: Group> PartialEq for SatisfyingAssignment<G> {
-  fn eq(&self, other: &SatisfyingAssignment<G>) -> bool {
+impl<E: Engine> PartialEq for SatisfyingAssignment<E> {
+  fn eq(&self, other: &SatisfyingAssignment<E>) -> bool {
     self.input_assignment == other.input_assignment && self.aux_assignment == other.aux_assignment
   }
 }
 
-impl<G: Group> ConstraintSystem<G::Scalar> for SatisfyingAssignment<G>
+impl<E: Engine> ConstraintSystem<E::Scalar> for SatisfyingAssignment<E>
 where
-  G::Scalar: PrimeField,
+  E::Scalar: PrimeField,
 {
   type Root = Self;
 
   fn new() -> Self {
-    let input_assignment = vec![G::Scalar::ONE];
+    let input_assignment = vec![E::Scalar::ONE];
 
     Self {
       input_assignment,
@@ -52,7 +52,7 @@ where
 
   fn alloc<F, A, AR>(&mut self, _: A, f: F) -> Result<Variable, SynthesisError>
   where
-    F: FnOnce() -> Result<G::Scalar, SynthesisError>,
+    F: FnOnce() -> Result<E::Scalar, SynthesisError>,
     A: FnOnce() -> AR,
     AR: Into<String>,
   {
@@ -63,7 +63,7 @@ where
 
   fn alloc_input<F, A, AR>(&mut self, _: A, f: F) -> Result<Variable, SynthesisError>
   where
-    F: FnOnce() -> Result<G::Scalar, SynthesisError>,
+    F: FnOnce() -> Result<E::Scalar, SynthesisError>,
     A: FnOnce() -> AR,
     AR: Into<String>,
   {
@@ -76,9 +76,9 @@ where
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    LA: FnOnce(LinearCombination<G::Scalar>) -> LinearCombination<G::Scalar>,
-    LB: FnOnce(LinearCombination<G::Scalar>) -> LinearCombination<G::Scalar>,
-    LC: FnOnce(LinearCombination<G::Scalar>) -> LinearCombination<G::Scalar>,
+    LA: FnOnce(LinearCombination<E::Scalar>) -> LinearCombination<E::Scalar>,
+    LB: FnOnce(LinearCombination<E::Scalar>) -> LinearCombination<E::Scalar>,
+    LC: FnOnce(LinearCombination<E::Scalar>) -> LinearCombination<E::Scalar>,
   {
     // Do nothing: we don't care about linear-combination evaluations in this context.
   }
@@ -114,11 +114,11 @@ where
     true
   }
 
-  fn extend_inputs(&mut self, new_inputs: &[G::Scalar]) {
+  fn extend_inputs(&mut self, new_inputs: &[E::Scalar]) {
     self.input_assignment.extend(new_inputs);
   }
 
-  fn extend_aux(&mut self, new_aux: &[G::Scalar]) {
+  fn extend_aux(&mut self, new_aux: &[E::Scalar]) {
     self.aux_assignment.extend(new_aux);
   }
 
@@ -126,38 +126,38 @@ where
     &mut self,
     aux_n: usize,
     inputs_n: usize,
-  ) -> (&mut [G::Scalar], &mut [G::Scalar]) {
+  ) -> (&mut [E::Scalar], &mut [E::Scalar]) {
     let allocated_aux = {
       let i = self.aux_assignment.len();
-      self.aux_assignment.resize(aux_n + i, G::Scalar::ZERO);
+      self.aux_assignment.resize(aux_n + i, E::Scalar::ZERO);
       &mut self.aux_assignment[i..]
     };
 
     let allocated_inputs = {
       let i = self.input_assignment.len();
-      self.input_assignment.resize(inputs_n + i, G::Scalar::ZERO);
+      self.input_assignment.resize(inputs_n + i, E::Scalar::ZERO);
       &mut self.input_assignment[i..]
     };
 
     (allocated_aux, allocated_inputs)
   }
 
-  fn inputs_slice(&self) -> &[G::Scalar] {
+  fn inputs_slice(&self) -> &[E::Scalar] {
     &self.input_assignment
   }
 
-  fn aux_slice(&self) -> &[G::Scalar] {
+  fn aux_slice(&self) -> &[E::Scalar] {
     &self.aux_assignment
   }
 }
 
 #[allow(dead_code)]
-impl<G: Group> SatisfyingAssignment<G> {
-  pub fn scalar_inputs(&self) -> Vec<G::Scalar> {
+impl<E: Engine> SatisfyingAssignment<E> {
+  pub fn scalar_inputs(&self) -> Vec<E::Scalar> {
     self.input_assignment.clone()
   }
 
-  pub fn scalar_aux(&self) -> Vec<G::Scalar> {
+  pub fn scalar_aux(&self) -> Vec<E::Scalar> {
     self.aux_assignment.clone()
   }
 }

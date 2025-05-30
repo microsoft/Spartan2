@@ -5,44 +5,44 @@
 use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS};
 use crate::{
   errors::SpartanError,
-  r1cs::{R1CSInstance, R1CSShape, R1CSWitness, R1CS},
-  traits::Group,
+  r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
+  traits::Engine,
   CommitmentKey,
 };
 use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
-pub trait SpartanWitness<G: Group> {
+pub trait SpartanWitness<E: Engine> {
   /// Return an instance and witness, given a shape and ck.
   fn r1cs_instance_and_witness(
     &self,
-    shape: &R1CSShape<G>,
-    ck: &CommitmentKey<G>,
-  ) -> Result<(R1CSInstance<G>, R1CSWitness<G>), SpartanError>;
+    shape: &R1CSShape<E>,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
 /// `SpartanShape` provides methods for acquiring `R1CSShape` and `CommitmentKey` from implementers.
-pub trait SpartanShape<G: Group> {
+pub trait SpartanShape<E: Engine> {
   /// Return an appropriate `R1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape(&self) -> (R1CSShape<G>, CommitmentKey<G>);
+  fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>);
 }
 
-impl<G: Group> SpartanWitness<G> for SatisfyingAssignment<G>
+impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E>
 where
-  G::Scalar: PrimeField,
+  E::Scalar: PrimeField,
 {
   fn r1cs_instance_and_witness(
     &self,
-    shape: &R1CSShape<G>,
-    ck: &CommitmentKey<G>,
-  ) -> Result<(R1CSInstance<G>, R1CSWitness<G>), SpartanError> {
-    let W = R1CSWitness::<G>::new(shape, &self.aux_assignment)?;
+    shape: &R1CSShape<E>,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let W = R1CSWitness::<E>::new(shape, &self.aux_assignment)?;
     let X = &self.input_assignment[1..];
 
     let comm_W = W.commit(ck);
 
-    let instance = R1CSInstance::<G>::new(shape, &comm_W, X)?;
+    let instance = R1CSInstance::<E>::new(shape, &comm_W, X)?;
 
     Ok((instance, W))
   }
@@ -50,18 +50,17 @@ where
 
 macro_rules! impl_spartan_shape {
   ( $name:ident) => {
-    impl<G: Group> SpartanShape<G> for $name<G>
+    impl<E: Engine> SpartanShape<E> for $name<E>
     where
-      G::Scalar: PrimeField,
+      E::Scalar: PrimeField,
     {
-      fn r1cs_shape(&self) -> (R1CSShape<G>, CommitmentKey<G>) {
-        let mut A: Vec<(usize, usize, G::Scalar)> = Vec::new();
-        let mut B: Vec<(usize, usize, G::Scalar)> = Vec::new();
-        let mut C: Vec<(usize, usize, G::Scalar)> = Vec::new();
+      fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>) {
+        let mut A = SparseMatrix::<E::Scalar>::empty();
+        let mut B = SparseMatrix::<E::Scalar>::empty();
+        let mut C = SparseMatrix::<E::Scalar>::empty();
 
         let mut num_cons_added = 0;
         let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
-
         let num_inputs = self.num_inputs();
         let num_constraints = self.num_constraints();
         let num_vars = self.num_aux();
@@ -75,16 +74,15 @@ macro_rules! impl_spartan_shape {
             &constraint.2,
           );
         }
-
         assert_eq!(num_cons_added, num_constraints);
 
-        let S: R1CSShape<G> = {
-          // Don't count One as an input for shape's purposes.
-          let res = R1CSShape::new(num_constraints, num_vars, num_inputs - 1, &A, &B, &C);
-          res.unwrap()
-        };
+        A.cols = num_vars + num_inputs;
+        B.cols = num_vars + num_inputs;
+        C.cols = num_vars + num_inputs;
 
-        let ck = R1CS::<G>::commitment_key(&S);
+        // Don't count One as an input for shape's purposes.
+        let S = R1CSShape::new(num_constraints, num_vars, num_inputs - 1, A, B, C).unwrap();
+        let ck = S.commitment_key();
 
         (S, ck)
       }
@@ -97,9 +95,9 @@ impl_spartan_shape!(TestShapeCS);
 
 fn add_constraint<S: PrimeField>(
   X: &mut (
-    &mut Vec<(usize, usize, S)>,
-    &mut Vec<(usize, usize, S)>,
-    &mut Vec<(usize, usize, S)>,
+    &mut SparseMatrix<S>,
+    &mut SparseMatrix<S>,
+    &mut SparseMatrix<S>,
     &mut usize,
   ),
   num_vars: usize,
@@ -109,29 +107,43 @@ fn add_constraint<S: PrimeField>(
 ) {
   let (A, B, C, nn) = X;
   let n = **nn;
-  let one = S::ONE;
+  assert_eq!(n + 1, A.indptr.len(), "A: invalid shape");
+  assert_eq!(n + 1, B.indptr.len(), "B: invalid shape");
+  assert_eq!(n + 1, C.indptr.len(), "C: invalid shape");
 
-  let add_constraint_component = |index: Index, coeff, V: &mut Vec<_>| {
-    match index {
-      Index::Input(idx) => {
-        // Inputs come last, with input 0, reprsenting 'one',
-        // at position num_vars within the witness vector.
-        let i = idx + num_vars;
-        V.push((n, i, one * coeff))
+  let add_constraint_component = |index: Index, coeff: &S, M: &mut SparseMatrix<S>| {
+    // we add constraints to the matrix only if the associated coefficient is non-zero
+    if *coeff != S::ZERO {
+      match index {
+        Index::Input(idx) => {
+          // Inputs come last, with input 0, representing 'one',
+          // at position num_vars within the witness vector.
+          let idx = idx + num_vars;
+          M.data.push(*coeff);
+          M.indices.push(idx);
+        }
+        Index::Aux(idx) => {
+          M.data.push(*coeff);
+          M.indices.push(idx);
+        }
       }
-      Index::Aux(idx) => V.push((n, idx, one * coeff)),
     }
   };
 
   for (index, coeff) in a_lc.iter() {
     add_constraint_component(index.0, coeff, A);
   }
+  A.indptr.push(A.indices.len());
+
   for (index, coeff) in b_lc.iter() {
     add_constraint_component(index.0, coeff, B)
   }
+  B.indptr.push(B.indices.len());
+
   for (index, coeff) in c_lc.iter() {
     add_constraint_component(index.0, coeff, C)
   }
+  C.indptr.push(C.indices.len());
 
   **nn += 1;
 }

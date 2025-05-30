@@ -1,16 +1,8 @@
 pub trait Math {
-  fn get_bits(self, num_bits: usize) -> Vec<bool>;
   fn log_2(self) -> usize;
 }
 
 impl Math for usize {
-  /// Returns the `num_bits` from n in a canonical order
-  fn get_bits(self, num_bits: usize) -> Vec<bool> {
-    (0..num_bits)
-      .map(|shift_amount| ((self & (1 << (num_bits - shift_amount - 1))) > 0))
-      .collect::<Vec<bool>>()
-  }
-
   fn log_2(self) -> usize {
     assert_ne!(self, 0);
 

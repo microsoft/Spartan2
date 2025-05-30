@@ -27,19 +27,15 @@ use bellpepper_core::Circuit;
 use core::marker::PhantomData;
 use errors::SpartanError;
 use serde::{Deserialize, Serialize};
-use traits::{
-  commitment::{CommitmentEngineTrait, CommitmentTrait},
-  snark::RelaxedR1CSSNARKTrait,
-  Group,
-};
+use traits::{commitment::CommitmentEngineTrait, snark::RelaxedR1CSSNARKTrait, Engine};
 
 /// A type that holds the prover key
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ProverKey<G, S>
+pub struct ProverKey<E, S>
 where
-  G: Group,
-  S: RelaxedR1CSSNARKTrait<G>,
+  E: Engine,
+  S: RelaxedR1CSSNARKTrait<E>,
 {
   pk: S::ProverKey,
 }
@@ -47,10 +43,10 @@ where
 /// A type that holds the verifier key
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct VerifierKey<G, S>
+pub struct VerifierKey<E, S>
 where
-  G: Group,
-  S: RelaxedR1CSSNARKTrait<G>,
+  E: Engine,
+  S: RelaxedR1CSSNARKTrait<E>,
 {
   vk: S::VerifierKey,
 }
@@ -61,53 +57,50 @@ where
 /// (e.g., with the SNARKs implemented in ppsnark.rs or snark.rs).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct SNARK<G, S, C>
+pub struct SNARK<E, S, C>
 where
-  G: Group,
-  S: RelaxedR1CSSNARKTrait<G>,
-  C: Circuit<G::Scalar>,
+  E: Engine,
+  S: RelaxedR1CSSNARKTrait<E>,
+  C: Circuit<E::Scalar>,
 {
   snark: S, // snark proving the witness is satisfying
-  _p: PhantomData<G>,
-  _p2: PhantomData<C>,
+  _p: PhantomData<(E, C)>,
 }
 
-impl<G: Group, S: RelaxedR1CSSNARKTrait<G>, C: Circuit<G::Scalar>> SNARK<G, S, C> {
+impl<E: Engine, S: RelaxedR1CSSNARKTrait<E>, C: Circuit<E::Scalar>> SNARK<E, S, C> {
   /// Produces prover and verifier keys for the direct SNARK
-  pub fn setup(circuit: C) -> Result<(ProverKey<G, S>, VerifierKey<G, S>), SpartanError> {
+  pub fn setup(circuit: C) -> Result<(ProverKey<E, S>, VerifierKey<E, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
 
     Ok((ProverKey { pk }, VerifierKey { vk }))
   }
 
   /// Produces a proof of satisfiability of the provided circuit
-  pub fn prove(pk: &ProverKey<G, S>, circuit: C) -> Result<Self, SpartanError> {
+  pub fn prove(pk: &ProverKey<E, S>, circuit: C) -> Result<Self, SpartanError> {
     // prove the instance using Spartan
     let snark = S::prove(&pk.pk, circuit)?;
 
     Ok(SNARK {
       snark,
       _p: Default::default(),
-      _p2: Default::default(),
     })
   }
 
   /// Verifies a proof of satisfiability
-  pub fn verify(&self, vk: &VerifierKey<G, S>, io: &[G::Scalar]) -> Result<(), SpartanError> {
+  pub fn verify(&self, vk: &VerifierKey<E, S>, io: &[E::Scalar]) -> Result<(), SpartanError> {
     // verify the snark using the constructed instance
     self.snark.verify(&vk.vk, io)
   }
 }
 
-type CommitmentKey<G> = <<G as traits::Group>::CE as CommitmentEngineTrait<G>>::CommitmentKey;
-type Commitment<G> = <<G as Group>::CE as CommitmentEngineTrait<G>>::Commitment;
-type CompressedCommitment<G> = <<<G as Group>::CE as CommitmentEngineTrait<G>>::Commitment as CommitmentTrait<G>>::CompressedCommitment;
-type CE<G> = <G as Group>::CE;
+type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey;
+type Commitment<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment;
+type CE<E> = <E as Engine>::CE;
+type DerandKey<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::DerandKey;
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::provider::{bn256_grumpkin::bn256, secp_secq::secp256k1};
   use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
   use ff::PrimeField;
 
@@ -150,33 +143,17 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    type G = pasta_curves::pallas::Point;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<G>;
-    type S = crate::spartan::snark::RelaxedR1CSSNARK<G, EE>;
-    type Spp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G, EE>;
-    test_snark_with::<G, S>();
-    test_snark_with::<G, Spp>();
-
-    type G2 = bn256::Point;
-    type EE2 = crate::provider::ipa_pc::EvaluationEngine<G2>;
-    type S2 = crate::spartan::snark::RelaxedR1CSSNARK<G2, EE2>;
-    type S2pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G2, EE2>;
-    test_snark_with::<G2, S2>();
-    test_snark_with::<G2, S2pp>();
-
-    type G3 = secp256k1::Point;
-    type EE3 = crate::provider::ipa_pc::EvaluationEngine<G3>;
-    type S3 = crate::spartan::snark::RelaxedR1CSSNARK<G3, EE3>;
-    type S3pp = crate::spartan::ppsnark::RelaxedR1CSSNARK<G3, EE3>;
-    test_snark_with::<G3, S3>();
-    test_snark_with::<G3, S3pp>();
+    type E = crate::provider::PallasEngine;
+    type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
+    type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+    test_snark_with::<E, S>();
   }
 
-  fn test_snark_with<G: Group, S: RelaxedR1CSSNARKTrait<G>>() {
+  fn test_snark_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
     let circuit = CubicCircuit::default();
 
     // produce keys
-    let (pk, vk) = SNARK::<G, S, CubicCircuit>::setup(circuit.clone()).unwrap();
+    let (pk, vk) = SNARK::<E, S, CubicCircuit>::setup(circuit.clone()).unwrap();
 
     // produce a SNARK
     let res = SNARK::prove(&pk, circuit);
@@ -184,7 +161,7 @@ mod tests {
     let snark = res.unwrap();
 
     // verify the SNARK
-    let res = snark.verify(&vk, &[<G as Group>::Scalar::from(15u64)]);
+    let res = snark.verify(&vk, &[<E as Engine>::Scalar::from(15u64)]);
     assert!(res.is_ok());
   }
 }

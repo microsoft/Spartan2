@@ -15,7 +15,8 @@ mod tests {
       shape_cs::ShapeCS,
       solver::SatisfyingAssignment,
     },
-    traits::Group,
+    provider::PallasEngine,
+    traits::Engine,
   };
   use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
   use ff::PrimeField;
@@ -43,17 +44,17 @@ mod tests {
     Ok(())
   }
 
-  fn test_alloc_bit_with<G>()
+  fn test_alloc_bit_with<E>()
   where
-    G: Group,
+    E: Engine,
   {
     // First create the shape
-    let mut cs: ShapeCS<G> = ShapeCS::new();
+    let mut cs: ShapeCS<E> = ShapeCS::new();
     let _ = synthesize_alloc_bit(&mut cs);
     let (shape, ck) = cs.r1cs_shape();
 
     // Now get the assignment
-    let mut cs: SatisfyingAssignment<G> = SatisfyingAssignment::new();
+    let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
     let _ = synthesize_alloc_bit(&mut cs);
     let (inst, witness) = cs.r1cs_instance_and_witness(&shape, &ck).unwrap();
 
@@ -63,7 +64,6 @@ mod tests {
 
   #[test]
   fn test_alloc_bit() {
-    test_alloc_bit_with::<pasta_curves::pallas::Point>();
-    test_alloc_bit_with::<crate::provider::bn256_grumpkin::bn256::Point>();
+    test_alloc_bit_with::<PallasEngine>();
   }
 }
