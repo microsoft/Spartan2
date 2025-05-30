@@ -1,4 +1,4 @@
-//! This module defines R1CS related types and a folding scheme for Relaxed R1CS
+//! This module defines R1CS related types
 use crate::{
   digest::SimpleDigestible,
   errors::SpartanError,
@@ -114,7 +114,7 @@ impl<E: Engine> R1CSShape<E> {
   ///
   /// * `S`: The shape of the R1CS matrices.
   /// * `ck_floor`: A function that provides a floor for the number of generators. A good function
-  ///   to provide is the ck_floor field defined in the trait `RelaxedR1CSSNARK`.
+  ///   to provide is the ck_floor field defined in the trait `R1CSSNARK`.
   ///
   pub fn commitment_key(&self) -> CommitmentKey<E> {
     let num_cons = self.num_cons;
@@ -266,6 +266,24 @@ impl<E: Engine> R1CSWitness<E> {
   pub fn commit(&self, ck: &CommitmentKey<E>) -> Commitment<E> {
     CE::<E>::commit(ck, &self.W, &self.r_W)
   }
+
+  /// Pads the provided witness to the correct length
+  pub fn pad(&self, S: &R1CSShape<E>) -> R1CSWitness<E> {
+    let mut W = self.W.clone();
+    W.extend(vec![E::Scalar::ZERO; S.num_vars - W.len()]);
+
+    Self { W, r_W: self.r_W }
+  }
+
+  pub fn derandomize(&self) -> (Self, E::Scalar) {
+    (
+      R1CSWitness {
+        W: self.W.clone(),
+        r_W: E::Scalar::ZERO,
+      },
+      self.r_W,
+    )
+  }
 }
 
 impl<E: Engine> R1CSInstance<E> {
@@ -284,84 +302,29 @@ impl<E: Engine> R1CSInstance<E> {
       })
     }
   }
-}
 
-impl<E: Engine> RelaxedR1CSWitness<E> {
-  /// Initializes a new `RelaxedR1CSWitness` from an `R1CSWitness`
-  pub fn from_r1cs_witness(S: &R1CSShape<E>, witness: &R1CSWitness<E>) -> RelaxedR1CSWitness<E> {
-    RelaxedR1CSWitness {
-      W: witness.W.clone(),
-      r_W: witness.r_W,
-      E: vec![E::Scalar::ZERO; S.num_cons],
-      r_E: E::Scalar::ZERO,
-    }
-  }
-
-  /// Pads the provided witness to the correct length
-  pub fn pad(&self, S: &R1CSShape<E>) -> RelaxedR1CSWitness<E> {
-    let mut W = self.W.clone();
-    W.extend(vec![E::Scalar::ZERO; S.num_vars - W.len()]);
-
-    let mut E = self.E.clone();
-    E.extend(vec![E::Scalar::ZERO; S.num_cons - E.len()]);
-
-    Self {
-      W,
-      r_W: self.r_W,
-      E,
-      r_E: self.r_E,
-    }
-  }
-
-  pub fn derandomize(&self) -> (Self, E::Scalar, E::Scalar) {
-    (
-      RelaxedR1CSWitness {
-        W: self.W.clone(),
-        r_W: E::Scalar::ZERO,
-        E: self.E.clone(),
-        r_E: E::Scalar::ZERO,
-      },
-      self.r_W,
-      self.r_E,
-    )
-  }
-}
-
-impl<E: Engine> RelaxedR1CSInstance<E> {
-  /// Initializes a new `RelaxedR1CSInstance` from an `R1CSInstance`
-  pub fn from_r1cs_instance_unchecked(
+  pub fn new_unchecked(
     comm_W: &Commitment<E>,
     X: &[E::Scalar],
-  ) -> RelaxedR1CSInstance<E> {
-    RelaxedR1CSInstance {
+  ) -> Result<R1CSInstance<E>, SpartanError> {
+    Ok(R1CSInstance {
       comm_W: *comm_W,
-      comm_E: Commitment::<E>::default(),
-      u: E::Scalar::ONE,
-      X: X.to_vec(),
-    }
+      X: X.to_owned(),
+    })
   }
 
-  pub fn derandomize(
-    &self,
-    dk: &DerandKey<E>,
-    r_W: &E::Scalar,
-    r_E: &E::Scalar,
-  ) -> RelaxedR1CSInstance<E> {
-    RelaxedR1CSInstance {
+  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &E::Scalar) -> R1CSInstance<E> {
+    R1CSInstance {
       comm_W: CE::<E>::derandomize(dk, &self.comm_W, r_W),
-      comm_E: CE::<E>::derandomize(dk, &self.comm_E, r_E),
       X: self.X.clone(),
-      u: self.u,
     }
   }
 }
 
-impl<E: Engine> TranscriptReprTrait<E::GE> for RelaxedR1CSInstance<E> {
+impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     [
       self.comm_W.to_transcript_bytes(),
-      self.comm_E.to_transcript_bytes(),
-      self.u.to_transcript_bytes(),
       self.X.as_slice().to_transcript_bytes(),
     ]
     .concat()
