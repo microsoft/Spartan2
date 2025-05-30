@@ -1,24 +1,32 @@
-//! This module implements `RelaxedR1CSSNARKTrait` using Spartan that is generic
+//! This module implements `RelaxedR1CSSNARK` using Spartan that is generic
 //! over the polynomial commitment and evaluation argument (i.e., a PCS)
 //! We provide two implementations, one in snark.rs (which does not use any preprocessing)
 //! and another in ppsnark.rs (which uses preprocessing to keep the verifier's state small if the PCS provides a succinct verifier)
 //! We also provide direct.rs that allows proving a step circuit directly with either of the two SNARKs.
 //!
 //! In polynomial.rs we also provide foundational types and functions for manipulating multilinear polynomials.
-pub(crate) mod math;
-pub mod polys;
-pub mod ppsnark;
 pub mod snark;
-mod sumcheck;
 
-use crate::{traits::Group, Commitment};
+#[macro_use]
+mod macros;
+pub(crate) mod math;
+pub(crate) mod polys;
+pub(crate) mod sumcheck;
+
+use crate::{
+  r1cs::{R1CSShape, SparseMatrix},
+  traits::Engine,
+  Commitment,
+};
 use ff::Field;
-use polys::multilinear::SparsePolynomial;
+use itertools::Itertools as _;
+use rayon::{iter::IntoParallelRefIterator, prelude::*};
 
-fn powers<G: Group>(s: &G::Scalar, n: usize) -> Vec<G::Scalar> {
+// Creates a vector of the first `n` powers of `s`.
+fn powers<E: Engine>(s: &E::Scalar, n: usize) -> Vec<E::Scalar> {
   assert!(n >= 1);
-  let mut powers = Vec::new();
-  powers.push(G::Scalar::ONE);
+  let mut powers = Vec::with_capacity(n);
+  powers.push(E::Scalar::ONE);
   for i in 1..n {
     powers.push(powers[i - 1] * s);
   }
@@ -26,94 +34,167 @@ fn powers<G: Group>(s: &G::Scalar, n: usize) -> Vec<G::Scalar> {
 }
 
 /// A type that holds a witness to a polynomial evaluation instance
-pub struct PolyEvalWitness<G: Group> {
-  p: Vec<G::Scalar>, // polynomial
+struct PolyEvalWitness<E: Engine> {
+  p: Vec<E::Scalar>, // polynomial
 }
 
-impl<G: Group> PolyEvalWitness<G> {
-  fn pad(W: &[PolyEvalWitness<G>]) -> Vec<PolyEvalWitness<G>> {
-    // determine the maximum size
-    if let Some(n) = W.iter().map(|w| w.p.len()).max() {
-      W.iter()
-        .map(|w| {
-          let mut p = vec![G::Scalar::ZERO; n];
-          p[..w.p.len()].copy_from_slice(&w.p);
-          PolyEvalWitness { p }
+impl<E: Engine> PolyEvalWitness<E> {
+  /// Given [Pᵢ] and s, compute P = ∑ᵢ sⁱ⋅Pᵢ
+  ///
+  /// # Details
+  ///
+  /// We allow the input polynomials to have different sizes, and interpret smaller ones as
+  /// being padded with 0 to the maximum size of all polynomials.
+  fn batch_diff_size(W: Vec<PolyEvalWitness<E>>, s: E::Scalar) -> PolyEvalWitness<E> {
+    let powers = powers::<E>(&s, W.len());
+
+    let size_max = W.iter().map(|w| w.p.len()).max().unwrap();
+    // Scale the input polynomials by the power of s
+    let num_chunks = rayon::current_num_threads().next_power_of_two();
+    let chunk_size = size_max / num_chunks;
+
+    let p = if chunk_size > 0 {
+      (0..num_chunks)
+        .into_par_iter()
+        .flat_map_iter(|chunk_index| {
+          let mut chunk = vec![E::Scalar::ZERO; chunk_size];
+          for (coeff, poly) in powers.iter().zip(W.iter()) {
+            for (rlc, poly_eval) in chunk
+              .iter_mut()
+              .zip(poly.p[chunk_index * chunk_size..].iter())
+            {
+              if *coeff == E::Scalar::ONE {
+                *rlc += *poly_eval;
+              } else {
+                *rlc += *coeff * poly_eval;
+              };
+            }
+          }
+          chunk
         })
-        .collect()
+        .collect::<Vec<_>>()
     } else {
-      Vec::new()
-    }
-  }
+      W.into_par_iter()
+        .zip_eq(powers.par_iter())
+        .map(|(mut w, s)| {
+          if *s != E::Scalar::ONE {
+            w.p.par_iter_mut().for_each(|e| *e *= s);
+          }
+          w.p
+        })
+        .reduce(
+          || vec![E::Scalar::ZERO; size_max],
+          |left, right| {
+            // Sum into the largest polynomial
+            let (mut big, small) = if left.len() > right.len() {
+              (left, right)
+            } else {
+              (right, left)
+            };
 
-  fn weighted_sum(W: &[PolyEvalWitness<G>], s: &[G::Scalar]) -> PolyEvalWitness<G> {
-    assert_eq!(W.len(), s.len());
-    let mut p = vec![G::Scalar::ZERO; W[0].p.len()];
-    for i in 0..W.len() {
-      for j in 0..W[i].p.len() {
-        p[j] += W[i].p[j] * s[i]
-      }
-    }
-    PolyEvalWitness { p }
-  }
+            big
+              .par_iter_mut()
+              .zip(small.par_iter())
+              .for_each(|(b, s)| *b += s);
 
-  fn batch(p_vec: &[&Vec<G::Scalar>], s: &G::Scalar) -> PolyEvalWitness<G> {
-    let powers_of_s = powers::<G>(s, p_vec.len());
-    let mut p = vec![G::Scalar::ZERO; p_vec[0].len()];
-    for i in 0..p_vec.len() {
-      for (j, item) in p.iter_mut().enumerate().take(p_vec[i].len()) {
-        *item += p_vec[i][j] * powers_of_s[i]
-      }
-    }
+            big
+          },
+        )
+    };
+
     PolyEvalWitness { p }
   }
 }
 
 /// A type that holds a polynomial evaluation instance
-pub struct PolyEvalInstance<G: Group> {
-  c: Commitment<G>,  // commitment to the polynomial
-  x: Vec<G::Scalar>, // evaluation point
-  e: G::Scalar,      // claimed evaluation
+struct PolyEvalInstance<E: Engine> {
+  c: Commitment<E>,  // commitment to the polynomial
+  x: Vec<E::Scalar>, // evaluation point
+  e: E::Scalar,      // claimed evaluation
 }
 
-impl<G: Group> PolyEvalInstance<G> {
-  fn pad(U: &[PolyEvalInstance<G>]) -> Vec<PolyEvalInstance<G>> {
-    // determine the maximum size
-    if let Some(ell) = U.iter().map(|u| u.x.len()).max() {
-      U.iter()
-        .map(|u| {
-          let mut x = vec![G::Scalar::ZERO; ell - u.x.len()];
-          x.extend(u.x.clone());
-          PolyEvalInstance { c: u.c, x, e: u.e }
-        })
-        .collect()
-    } else {
-      Vec::new()
-    }
-  }
+impl<E: Engine> PolyEvalInstance<E> {
+  fn batch_diff_size(
+    c_vec: &[Commitment<E>],
+    e_vec: &[E::Scalar],
+    num_vars: &[usize],
+    x: Vec<E::Scalar>,
+    s: E::Scalar,
+  ) -> PolyEvalInstance<E> {
+    let num_instances = num_vars.len();
+    assert_eq!(c_vec.len(), num_instances);
+    assert_eq!(e_vec.len(), num_instances);
 
-  fn batch(
-    c_vec: &[Commitment<G>],
-    x: &[G::Scalar],
-    e_vec: &[G::Scalar],
-    s: &G::Scalar,
-  ) -> PolyEvalInstance<G> {
-    let powers_of_s = powers::<G>(s, c_vec.len());
-    let e = e_vec
-      .iter()
-      .zip(powers_of_s.iter())
-      .map(|(e, p)| *e * p)
-      .sum();
-    let c = c_vec
-      .iter()
-      .zip(powers_of_s.iter())
-      .map(|(c, p)| *c * *p)
-      .fold(Commitment::<G>::default(), |acc, item| acc + item);
+    let num_vars_max = x.len();
+    let powers: Vec<E::Scalar> = powers::<E>(&s, num_instances);
+    // Rescale evaluations by the first Lagrange polynomial,
+    // so that we can check its evaluation against x
+    let evals_scaled = zip_with!(iter, (e_vec, num_vars), |eval, num_rounds| {
+      // x_lo = [ x[0]   , ..., x[n-nᵢ-1] ]
+      // x_hi = [ x[n-nᵢ], ..., x[n]      ]
+      let (r_lo, _r_hi) = x.split_at(num_vars_max - num_rounds);
+      // Compute L₀(x_lo)
+      let lagrange_eval = r_lo
+        .iter()
+        .map(|r| E::Scalar::ONE - r)
+        .product::<E::Scalar>();
+
+      // vᵢ = L₀(x_lo)⋅Pᵢ(x_hi)
+      lagrange_eval * eval
+    })
+    .collect::<Vec<_>>();
+
+    // C = ∑ᵢ γⁱ⋅Cᵢ
+    let comm_joint = zip_with!(iter, (c_vec, powers), |c, g_i| *c * *g_i)
+      .fold(Commitment::<E>::default(), |acc, item| acc + item);
+
+    // v = ∑ᵢ γⁱ⋅vᵢ
+    let eval_joint = zip_with!((evals_scaled.into_iter(), powers.iter()), |e, g_i| e * g_i).sum();
 
     PolyEvalInstance {
-      c,
-      x: x.to_vec(),
-      e,
+      c: comm_joint,
+      x,
+      e: eval_joint,
     }
   }
+}
+
+/// Bounds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
+fn compute_eval_table_sparse<E: Engine>(
+  S: &R1CSShape<E>,
+  rx: &[E::Scalar],
+) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
+  assert_eq!(rx.len(), S.num_cons);
+
+  let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
+    for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
+      for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
+        M_evals[*col_idx] += rx[row_idx] * val;
+      }
+    }
+  };
+
+  let (A_evals, (B_evals, C_evals)) = rayon::join(
+    || {
+      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+      inner(&S.A, &mut A_evals);
+      A_evals
+    },
+    || {
+      rayon::join(
+        || {
+          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          inner(&S.B, &mut B_evals);
+          B_evals
+        },
+        || {
+          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          inner(&S.C, &mut C_evals);
+          C_evals
+        },
+      )
+    },
+  );
+
+  (A_evals, B_evals, C_evals)
 }

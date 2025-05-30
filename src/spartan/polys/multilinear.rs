@@ -2,16 +2,12 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use std::ops::{Add, Index};
-
-use ff::PrimeField;
-use rayon::prelude::{
-  IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-  IntoParallelRefMutIterator, ParallelIterator,
-};
-use serde::{Deserialize, Serialize};
-
 use crate::spartan::{math::Math, polys::eq::EqPolynomial};
+use core::ops::{Add, Index};
+use ff::PrimeField;
+use itertools::Itertools as _;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
@@ -38,13 +34,12 @@ pub struct MultilinearPolynomial<Scalar: PrimeField> {
 impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
   ///
+  /// # Panics
   /// The number of evaluations must be a power of two.
   pub fn new(Z: Vec<Scalar>) -> Self {
-    assert_eq!(Z.len(), (2_usize).pow((Z.len() as f64).log2() as u32));
-    MultilinearPolynomial {
-      num_vars: usize::try_from(Z.len().ilog2()).unwrap(),
-      Z,
-    }
+    let num_vars = Z.len().log_2();
+    assert_eq!(Z.len(), 1 << num_vars);
+    MultilinearPolynomial { num_vars, Z }
   }
 
   /// Returns the number of variables in the multilinear polynomial
@@ -57,27 +52,19 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     self.Z.len()
   }
 
-  /// Checks if the multilinear polynomial is empty.
-  ///
-  /// This method returns true if the polynomial has no evaluations, and false otherwise.
-  pub fn is_empty(&self) -> bool {
-    self.Z.is_empty()
-  }
-
-  /// Bounds the polynomial's top variable using the given scalar.
+  /// Binds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
-  pub fn bound_poly_var_top(&mut self, r: &Scalar) {
+  pub fn bind_poly_var_top(&mut self, r: &Scalar) {
+    assert!(self.num_vars > 0);
+
     let n = self.len() / 2;
 
     let (left, right) = self.Z.split_at_mut(n);
 
-    left
-      .par_iter_mut()
-      .zip(right.par_iter())
-      .for_each(|(a, b)| {
-        *a += *r * (*b - *a);
-      });
+    zip_with_for_each!((left.par_iter_mut(), right.par_iter()), |a, b| {
+      *a += *r * (*b - *a);
+    });
 
     self.Z.resize(n, Scalar::ZERO);
     self.num_vars -= 1;
@@ -90,32 +77,25 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
     assert_eq!(r.len(), self.get_num_vars());
-    let chis = EqPolynomial::new(r.to_vec()).evals();
-    assert_eq!(chis.len(), self.Z.len());
+    let chis = EqPolynomial::evals_from_points(r);
 
-    (0..chis.len())
-      .into_par_iter()
-      .map(|i| chis[i] * self.Z[i])
-      .sum()
+    zip_with!(
+      (chis.into_par_iter(), self.Z.par_iter()),
+      |chi_i, Z_i| chi_i * Z_i
+    )
+    .sum()
   }
 
   /// Evaluates the polynomial with the given evaluations and point.
   pub fn evaluate_with(Z: &[Scalar], r: &[Scalar]) -> Scalar {
-    EqPolynomial::new(r.to_vec())
-      .evals()
-      .into_par_iter()
-      .zip(Z.into_par_iter())
-      .map(|(a, b)| a * b)
-      .sum()
-  }
-
-  /// Multiplies the polynomial by a scalar.
-  pub fn scalar_mul(&self, scalar: &Scalar) -> Self {
-    let mut new_poly = self.clone();
-    for z in &mut new_poly.Z {
-      *z *= scalar;
-    }
-    new_poly
+    zip_with!(
+      (
+        EqPolynomial::evals_from_points(r).into_par_iter(),
+        Z.par_iter()
+      ),
+      |a, b| a * b
+    )
+    .sum()
   }
 }
 
@@ -129,47 +109,36 @@ impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
 }
 
 /// Sparse multilinear polynomial, which means the $Z(\cdot)$ is zero at most points.
-/// So we do not have to store every evaluations of $Z(\cdot)$, only store the non-zero points.
-///
-/// For example, the evaluations are [0, 0, 0, 1, 0, 1, 0, 2].
-/// The sparse polynomial only store the non-zero values, [(3, 1), (5, 1), (7, 2)].
-/// In the tuple, the first is index, the second is value.
+/// In our context, sparse polynomials are non-zeros over the hypercube at locations that map to "small" integers
+/// We exploit this property to implement a time-optimal algorithm
 pub(crate) struct SparsePolynomial<Scalar: PrimeField> {
   num_vars: usize,
-  Z: Vec<(usize, Scalar)>,
+  Z: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
-  pub fn new(num_vars: usize, Z: Vec<(usize, Scalar)>) -> Self {
+  pub fn new(num_vars: usize, Z: Vec<Scalar>) -> Self {
     SparsePolynomial { num_vars, Z }
   }
 
-  /// Computes the $\tilde{eq}$ extension polynomial.
-  /// return 1 when a == r, otherwise return 0.
-  fn compute_chi(a: &[bool], r: &[Scalar]) -> Scalar {
-    assert_eq!(a.len(), r.len());
-    let mut chi_i = Scalar::ONE;
-    for j in 0..r.len() {
-      if a[j] {
-        chi_i *= r[j];
-      } else {
-        chi_i *= Scalar::ONE - r[j];
-      }
-    }
-    chi_i
-  }
-
-  // Takes O(n log n)
+  // a time-optimal algorithm to evaluate sparse polynomials
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     assert_eq!(self.num_vars, r.len());
 
-    (0..self.Z.len())
-      .into_par_iter()
-      .map(|i| {
-        let bits = (self.Z[i].0).get_bits(r.len());
-        SparsePolynomial::compute_chi(&bits, r) * self.Z[i].1
-      })
-      .sum()
+    let num_vars_z = self.Z.len().next_power_of_two().log_2();
+    let chis = EqPolynomial::evals_from_points(&r[self.num_vars - 1 - num_vars_z..]);
+    let eval_partial: Scalar = self
+      .Z
+      .iter()
+      .zip(chis.iter())
+      .map(|(z, chi)| *z * *chi)
+      .sum();
+
+    let common = (0..self.num_vars - 1 - num_vars_z)
+      .map(|i| (Scalar::ONE - r[i]))
+      .product::<Scalar>();
+
+    common * eval_partial
   }
 }
 
@@ -183,12 +152,7 @@ impl<Scalar: PrimeField> Add for MultilinearPolynomial<Scalar> {
       return Err("The two polynomials must have the same number of variables");
     }
 
-    let sum: Vec<Scalar> = self
-      .Z
-      .iter()
-      .zip(other.Z.iter())
-      .map(|(a, b)| *a + *b)
-      .collect();
+    let sum: Vec<Scalar> = zip_with!(into_iter, (self.Z, other.Z), |a, b| a + b).collect();
 
     Ok(MultilinearPolynomial::new(sum))
   }
@@ -196,10 +160,10 @@ impl<Scalar: PrimeField> Add for MultilinearPolynomial<Scalar> {
 
 #[cfg(test)]
 mod tests {
-  use crate::provider::{self, bn256_grumpkin::bn256, secp_secq::secp256k1};
-
   use super::*;
-  use pasta_curves::Fp;
+  use crate::provider::pasta::pallas;
+  use rand_chacha::ChaCha20Rng;
+  use rand_core::{CryptoRng, RngCore, SeedableRng};
 
   fn make_mlp<F: PrimeField>(len: usize, value: F) -> MultilinearPolynomial<F> {
     MultilinearPolynomial {
@@ -235,28 +199,31 @@ mod tests {
   }
 
   fn test_sparse_polynomial_with<F: PrimeField>() {
-    // Let the polynomial have 3 variables, p(x_1, x_2, x_3) = (x_1 + x_2) * x_3
-    // Evaluations of the polynomial at boolean cube are [0, 0, 0, 1, 0, 1, 0, 2].
+    // Let the polynomial have 4 variables, but is non-zero at only 3 locations (out of 2^4 = 16) over the hypercube
+    let mut Z = vec![F::ONE, F::ONE, F::from(2)];
+    let m_poly = SparsePolynomial::<F>::new(4, Z.clone());
 
-    let TWO = F::from(2);
-    let Z = vec![(3, F::ONE), (5, F::ONE), (7, TWO)];
-    let m_poly = SparsePolynomial::<F>::new(3, Z);
+    Z.resize(16, F::ZERO); // append with zeros to make it a dense polynomial
+    let m_poly_dense = MultilinearPolynomial::new(Z);
 
-    let x = vec![F::ONE, F::ONE, F::ONE];
-    assert_eq!(m_poly.evaluate(x.as_slice()), TWO);
+    // evaluation point
+    let x = vec![F::from(5), F::from(8), F::from(5), F::from(3)];
 
-    let x = vec![F::ONE, F::ZERO, F::ONE];
-    assert_eq!(m_poly.evaluate(x.as_slice()), F::ONE);
+    // check evaluations
+    assert_eq!(
+      m_poly.evaluate(x.as_slice()),
+      m_poly_dense.evaluate(x.as_slice())
+    );
   }
 
   #[test]
   fn test_multilinear_polynomial() {
-    test_multilinear_polynomial_with::<Fp>();
+    test_multilinear_polynomial_with::<pallas::Scalar>();
   }
 
   #[test]
   fn test_sparse_polynomial() {
-    test_sparse_polynomial_with::<Fp>();
+    test_sparse_polynomial_with::<pallas::Scalar>();
   }
 
   fn test_mlp_add_with<F: PrimeField>() {
@@ -268,33 +235,16 @@ mod tests {
     assert_eq!(mlp3.Z, vec![F::from(10); 4]);
   }
 
-  fn test_mlp_scalar_mul_with<F: PrimeField>() {
-    let mlp = make_mlp(4, F::from(3));
-
-    let mlp2 = mlp.scalar_mul(&F::from(2));
-
-    assert_eq!(mlp2.Z, vec![F::from(6); 4]);
-  }
-
   #[test]
   fn test_mlp_add() {
-    test_mlp_add_with::<Fp>();
-    test_mlp_add_with::<bn256::Scalar>();
-    test_mlp_add_with::<secp256k1::Scalar>();
-  }
-
-  #[test]
-  fn test_mlp_scalar_mul() {
-    test_mlp_scalar_mul_with::<Fp>();
-    test_mlp_scalar_mul_with::<bn256::Scalar>();
-    test_mlp_scalar_mul_with::<secp256k1::Scalar>();
+    test_mlp_add_with::<pallas::Scalar>();
   }
 
   fn test_evaluation_with<F: PrimeField>() {
     let num_evals = 4;
     let mut evals: Vec<F> = Vec::with_capacity(num_evals);
     for _ in 0..num_evals {
-      evals.push(F::from_u128(8));
+      evals.push(F::from(8));
     }
     let dense_poly: MultilinearPolynomial<F> = MultilinearPolynomial::new(evals.clone());
 
@@ -314,8 +264,62 @@ mod tests {
 
   #[test]
   fn test_evaluation() {
-    test_evaluation_with::<Fp>();
-    test_evaluation_with::<provider::bn256_grumpkin::bn256::Scalar>();
-    test_evaluation_with::<provider::secp_secq::secp256k1::Scalar>();
+    test_evaluation_with::<pallas::Scalar>();
+  }
+
+  /// Returns a random ML polynomial
+  #[allow(clippy::needless_borrows_for_generic_args)]
+  fn random<R: RngCore + CryptoRng, Scalar: PrimeField>(
+    num_vars: usize,
+    mut rng: &mut R,
+  ) -> MultilinearPolynomial<Scalar> {
+    MultilinearPolynomial::new(
+      std::iter::from_fn(|| Some(Scalar::random(&mut rng)))
+        .take(1 << num_vars)
+        .collect(),
+    )
+  }
+
+  /// This binds the variables of a multilinear polynomial to a provided sequence
+  /// of values.
+  ///
+  /// Assuming `bind_poly_var_top` defines the "top" variable of the polynomial,
+  /// this aims to test whether variables should be provided to the
+  /// `evaluate` function in topmost-first (big endian) of topmost-last (lower endian)
+  /// order.
+  fn bind_sequence<F: PrimeField>(
+    poly: &MultilinearPolynomial<F>,
+    values: &[F],
+  ) -> MultilinearPolynomial<F> {
+    // Assert that the size of the polynomial being evaluated is a power of 2 greater than (1 << values.len())
+    assert!(poly.Z.len().is_power_of_two());
+    assert!(poly.Z.len() >= 1 << values.len());
+
+    let mut tmp = poly.clone();
+    for v in values.iter() {
+      tmp.bind_poly_var_top(v);
+    }
+    tmp
+  }
+
+  fn bind_and_evaluate_with<F: PrimeField>() {
+    for i in 0..50 {
+      // Initialize a random polynomial
+      let n = 7;
+      let mut rng = ChaCha20Rng::from_seed([i as u8; 32]);
+      let poly = random(n, &mut rng);
+
+      // draw a random point
+      let pt: Vec<_> = std::iter::from_fn(|| Some(F::random(&mut rng)))
+        .take(n)
+        .collect();
+      // this shows the order in which coordinates are evaluated
+      assert_eq!(poly.evaluate(&pt), bind_sequence(&poly, &pt).Z[0])
+    }
+  }
+
+  #[test]
+  fn test_bind_and_evaluate() {
+    bind_and_evaluate_with::<pallas::Scalar>();
   }
 }

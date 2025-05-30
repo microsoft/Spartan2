@@ -1,8 +1,6 @@
 //! `EqPolynomial`: Represents multilinear extension of equality polynomials, evaluated based on binary input values.
-
 use ff::PrimeField;
-use rayon::iter::IntoParallelIterator;
-use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::prelude::*;
 
 /// Represents the multilinear extension polynomial (MLE) of the equality polynomial $eq(x,e)$, denoted as $\tilde{eq}(x, e)$.
 ///
@@ -15,8 +13,9 @@ use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, Parall
 /// This polynomial evaluates to 1 if every component $x_i$ equals its corresponding $e_i$, and 0 otherwise.
 ///
 /// For instance, for e = 6 (with a binary representation of 0b110), the vector r would be [1, 1, 0].
+#[derive(Debug)]
 pub struct EqPolynomial<Scalar: PrimeField> {
-  r: Vec<Scalar>,
+  pub(in crate::spartan::polys) r: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField> EqPolynomial<Scalar> {
@@ -36,31 +35,35 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
   pub fn evaluate(&self, rx: &[Scalar]) -> Scalar {
     assert_eq!(self.r.len(), rx.len());
     (0..rx.len())
-      .into_par_iter()
       .map(|i| rx[i] * self.r[i] + (Scalar::ONE - rx[i]) * (Scalar::ONE - self.r[i]))
-      .product()
+      .fold(Scalar::ONE, |acc, item| acc * item)
   }
 
   /// Evaluates the `EqPolynomial` at all the `2^|r|` points in its domain.
   ///
   /// Returns a vector of Scalars, each corresponding to the polynomial evaluation at a specific point.
   pub fn evals(&self) -> Vec<Scalar> {
-    let ell = self.r.len();
+    Self::evals_from_points(&self.r)
+  }
+
+  /// Evaluates the `EqPolynomial` from the `2^|r|` points in its domain, without creating an intermediate polynomial
+  /// representation.
+  ///
+  /// Returns a vector of Scalars, each corresponding to the polynomial evaluation at a specific point.
+  pub fn evals_from_points(r: &[Scalar]) -> Vec<Scalar> {
+    let ell = r.len();
     let mut evals: Vec<Scalar> = vec![Scalar::ZERO; (2_usize).pow(ell as u32)];
     let mut size = 1;
     evals[0] = Scalar::ONE;
 
-    for r in self.r.iter().rev() {
+    for r in r.iter().rev() {
       let (evals_left, evals_right) = evals.split_at_mut(size);
       let (evals_right, _) = evals_right.split_at_mut(size);
 
-      evals_left
-        .par_iter_mut()
-        .zip(evals_right.par_iter_mut())
-        .for_each(|(x, y)| {
-          *y = *x * r;
-          *x -= &*y;
-        });
+      zip_with_for_each!(par_iter_mut, (evals_left, evals_right), |x, y| {
+        *y = *x * r;
+        *x -= &*y;
+      });
 
       size *= 2;
     }
@@ -69,12 +72,17 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
   }
 }
 
+impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
+  fn from_iter<I: IntoIterator<Item = Scalar>>(iter: I) -> Self {
+    let r: Vec<_> = iter.into_iter().collect();
+    EqPolynomial { r }
+  }
+}
+
 #[cfg(test)]
 mod tests {
-  use crate::provider;
-
   use super::*;
-  use pasta_curves::Fp;
+  use crate::provider::pasta::pallas;
 
   fn test_eq_polynomial_with<F: PrimeField>() {
     let eq_poly = EqPolynomial::<F>::new(vec![F::ONE, F::ZERO, F::ONE]);
@@ -96,8 +104,6 @@ mod tests {
 
   #[test]
   fn test_eq_polynomial() {
-    test_eq_polynomial_with::<Fp>();
-    test_eq_polynomial_with::<provider::bn256_grumpkin::bn256::Scalar>();
-    test_eq_polynomial_with::<provider::secp_secq::secp256k1::Scalar>();
+    test_eq_polynomial_with::<pallas::Scalar>();
   }
 }
