@@ -33,6 +33,7 @@ thiserror = "1.0"
 halo2curves = { version = "0.8.0", features = ["derive_serde"] }
 group = "0.13.0"
 once_cell = "1.18.0"
+circom-scotia = "0.1.2"
 
 [target.wasm32-unknown-unknown.dependencies]
 # see https://github.com/rust-random/rand/pull/948
