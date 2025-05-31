@@ -4,7 +4,7 @@ use bellpepper_core::Circuit;
 use serde::{Deserialize, Serialize};
 
 /// A trait that defines the behavior of a zkSNARK
-pub trait RelaxedR1CSSNARKTrait<E: Engine>:
+pub trait R1CSSNARKTrait<E: Engine>:
   Sized + Send + Sync + Serialize + for<'de> Deserialize<'de>
 {
   /// A type that represents the prover's key

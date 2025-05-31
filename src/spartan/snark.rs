@@ -1,4 +1,4 @@
-//! This module implements `RelaxedR1CSSNARK` using Spartan that is generic
+//! This module implements `R1CSSNARK` using Spartan that is generic
 //! over the polynomial commitment and evaluation argument (i.e., a PCS)
 //! This version of Spartan does not use preprocessing so the verifier keeps the entire
 //! description of R1CS matrices. This is essentially optimal for the verifier when using
@@ -12,26 +12,23 @@ use crate::{
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
-  r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness, SparseMatrix},
+  r1cs::{R1CSInstance, R1CSShape, SparseMatrix},
   spartan::{
     compute_eval_table_sparse,
     math::Math,
     polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial},
-    powers,
     sumcheck::SumcheckProof,
-    PolyEvalInstance, PolyEvalWitness,
   },
   traits::{
     commitment::CommitmentEngineTrait,
     evaluation::EvaluationEngineTrait,
-    snark::{DigestHelperTrait, RelaxedR1CSSNARKTrait},
+    snark::{DigestHelperTrait, R1CSSNARKTrait},
     Engine, TranscriptEngineTrait,
   },
-  zip_with, Commitment, CommitmentKey,
+  Commitment, CommitmentKey,
 };
 use bellpepper_core::{Circuit, ConstraintSystem};
 use ff::Field;
-use itertools::Itertools as _;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -87,19 +84,16 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierK
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct RelaxedR1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
+pub struct R1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
   comm_W: Commitment<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
-  eval_E: E::Scalar,
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
-  sc_proof_batch: SumcheckProof<E>,
-  evals_batch: Vec<E::Scalar>,
   eval_arg: EE::EvaluationArgument,
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for RelaxedR1CSSNARK<E, EE> {
+impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E, EE> {
   type ProverKey = ProverKey<E, EE>;
   type VerifierKey = VerifierKey<E, EE>;
 
@@ -159,32 +153,26 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
         .unwrap();
     });
 
-    let (u, w) = cs
+    let (U, W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
       })?;
 
-    // convert the instance and witness to relaxed form
-    let (U, W) = (
-      RelaxedR1CSInstance::<E>::from_r1cs_instance_unchecked(&u.comm_W, &u.X),
-      RelaxedR1CSWitness::from_r1cs_witness(&pk.S, &w),
-    );
-
     let W = W.pad(&pk.S); // pad the witness
 
     // derandomize instance
-    let (W, r_W, r_E) = W.derandomize();
-    let U = U.derandomize(&E::CE::derand_key(&pk.ck), &r_W, &r_E);
+    let (W, r_W) = W.derandomize();
+    let U = U.derandomize(&E::CE::derand_key(&pk.ck), &r_W);
 
-    let mut transcript = E::TE::new(b"RelaxedR1CSSNARK");
+    let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
     transcript.absorb(b"U", &U);
 
-    // compute the full satisfying assignment by concatenating W.W, U.u, and U.X
-    let mut z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
+    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
+    let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
@@ -197,16 +185,12 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
 
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
-    let (mut poly_Az, mut poly_Bz, poly_Cz, mut poly_uCz_E) = {
-      let (poly_Az, poly_Bz, poly_Cz) = pk.S.multiply_vec(&z)?;
-      let poly_uCz_E = (0..pk.S.num_cons)
-        .map(|i| U.u * poly_Cz[i] + W.E[i])
-        .collect::<Vec<E::Scalar>>();
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = {
+      let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
       (
-        MultilinearPolynomial::new(poly_Az),
-        MultilinearPolynomial::new(poly_Bz),
-        MultilinearPolynomial::new(poly_Cz),
-        MultilinearPolynomial::new(poly_uCz_E),
+        MultilinearPolynomial::new(Az),
+        MultilinearPolynomial::new(Bz),
+        MultilinearPolynomial::new(Cz),
       )
     };
 
@@ -222,19 +206,15 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &mut poly_tau,
       &mut poly_Az,
       &mut poly_Bz,
-      &mut poly_uCz_E,
+      &mut poly_Cz,
       comb_func_outer,
       &mut transcript,
     )?;
 
     // claims from the end of sum-check
-    let (claim_Az, claim_Bz): (E::Scalar, E::Scalar) = (claims_outer[1], claims_outer[2]);
-    let claim_Cz = poly_Cz.evaluate(&r_x);
-    let eval_E = MultilinearPolynomial::new(W.E.clone()).evaluate(&r_x);
-    transcript.absorb(
-      b"claims_outer",
-      &[claim_Az, claim_Bz, claim_Cz, eval_E].as_slice(),
-    );
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[1], claims_outer[2], claims_outer[3]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
 
     // inner sum-check
     let r = transcript.squeeze(b"r")?;
@@ -271,52 +251,24 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       &mut transcript,
     )?;
 
-    // Add additional claims about W and E polynomials to the list from CC
-    // We will reduce a vector of claims of evaluations at different points into claims about them at the same point.
-    // For example, eval_W =? W(r_y[1..]) and eval_E =? E(r_x) into
-    // two claims: eval_W_prime =? W(rz) and eval_E_prime =? E(rz)
-    // We can them combine the two into one: eval_W_prime + gamma * eval_E_prime =? (W + gamma*E)(rz),
-    // where gamma is a public challenge
-    // Since commitments to W and E are homomorphic, the verifier can compute a commitment
-    // to the batched polynomial.
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
-
-    let w_vec = vec![PolyEvalWitness { p: W.W }, PolyEvalWitness { p: W.E }];
-    let u_vec = vec![
-      PolyEvalInstance {
-        c: U.comm_W,
-        x: r_y[1..].to_vec(),
-        e: eval_W,
-      },
-      PolyEvalInstance {
-        c: U.comm_E,
-        x: r_x,
-        e: eval_E,
-      },
-    ];
-
-    let (batched_u, batched_w, sc_proof_batch, claims_batch_left) =
-      batch_eval_reduce(u_vec, w_vec, &mut transcript)?;
 
     let eval_arg = EE::prove(
       &pk.ck,
       &pk.pk_ee,
       &mut transcript,
-      &batched_u.c,
-      &batched_w.p,
-      &batched_u.x,
-      &batched_u.e,
+      &U.comm_W,
+      &W.W,
+      &r_y[1..],
+      &eval_W,
     )?;
 
-    Ok(RelaxedR1CSSNARK {
+    Ok(R1CSSNARK {
       comm_W: U.comm_W,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
-      eval_E,
       sc_proof_inner,
       eval_W,
-      sc_proof_batch,
-      evals_batch: claims_batch_left,
       eval_arg,
     })
   }
@@ -324,9 +276,9 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey, io: &[E::Scalar]) -> Result<(), SpartanError> {
     // construct an instance using the provided commitment to the witness and IO
-    let U = RelaxedR1CSInstance::<E>::from_r1cs_instance_unchecked(&self.comm_W, io);
+    let U = R1CSInstance::<E>::new_unchecked(&self.comm_W, io)?;
 
-    let mut transcript = E::TE::new(b"RelaxedR1CSSNARK");
+    let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest());
@@ -350,8 +302,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     // verify claim_outer_final
     let (claim_Az, claim_Bz, claim_Cz) = self.claims_outer;
     let taus_bound_rx = tau.evaluate(&r_x);
-    let claim_outer_final_expected =
-      taus_bound_rx * (claim_Az * claim_Bz - U.u * claim_Cz - self.eval_E);
+    let claim_outer_final_expected = taus_bound_rx * (claim_Az * claim_Bz - claim_Cz);
     if claim_outer_final != claim_outer_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
@@ -362,7 +313,6 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
         self.claims_outer.0,
         self.claims_outer.1,
         self.claims_outer.2,
-        self.eval_E,
       ]
       .as_slice(),
     );
@@ -380,8 +330,8 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
     // verify claim_inner_final
     let eval_Z = {
       let eval_X = {
-        // public IO is (u, X)
-        let X = vec![U.u]
+        // public IO is (1, X)
+        let X = vec![E::Scalar::ONE]
           .into_iter()
           .chain(U.X.iter().cloned())
           .collect::<Vec<E::Scalar>>();
@@ -426,176 +376,16 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> RelaxedR1CSSNARKTrait<E> for Relax
       return Err(SpartanError::InvalidSumcheckProof);
     }
 
-    // add claims about W and E polynomials
-    let u_vec: Vec<PolyEvalInstance<E>> = vec![
-      PolyEvalInstance {
-        c: U.comm_W,
-        x: r_y[1..].to_vec(),
-        e: self.eval_W,
-      },
-      PolyEvalInstance {
-        c: U.comm_E,
-        x: r_x,
-        e: self.eval_E,
-      },
-    ];
-
-    let batched_u = batch_eval_verify(
-      u_vec,
-      &mut transcript,
-      &self.sc_proof_batch,
-      &self.evals_batch,
-    )?;
-
     // verify
     EE::verify(
       &vk.vk_ee,
       &mut transcript,
-      &batched_u.c,
-      &batched_u.x,
-      &batched_u.e,
+      &self.comm_W,
+      &r_y[1..],
+      &self.eval_W,
       &self.eval_arg,
     )?;
 
     Ok(())
   }
-}
-
-/// Reduces a batch of polynomial evaluation claims using Sumcheck
-/// to a single claim at the same point.
-///
-/// # Details
-///
-/// We are given as input a list of instance/witness pairs
-/// u = [(Cᵢ, xᵢ, eᵢ)], w = [Pᵢ], such that
-/// - nᵢ = |xᵢ|
-/// - Cᵢ = Commit(Pᵢ)
-/// - eᵢ = Pᵢ(xᵢ)
-/// - |Pᵢ| = 2^nᵢ
-///
-/// We allow the polynomial Pᵢ to have different sizes, by appropriately scaling
-/// the claims and resulting evaluations from Sumcheck.
-fn batch_eval_reduce<E: Engine>(
-  u_vec: Vec<PolyEvalInstance<E>>,
-  w_vec: Vec<PolyEvalWitness<E>>,
-  transcript: &mut E::TE,
-) -> Result<
-  (
-    PolyEvalInstance<E>,
-    PolyEvalWitness<E>,
-    SumcheckProof<E>,
-    Vec<E::Scalar>,
-  ),
-  SpartanError,
-> {
-  let num_claims = u_vec.len();
-  assert_eq!(w_vec.len(), num_claims);
-
-  // Compute nᵢ and n = maxᵢ{nᵢ}
-  let num_rounds = u_vec.iter().map(|u| u.x.len()).collect::<Vec<_>>();
-
-  // Check polynomials match number of variables, i.e. |Pᵢ| = 2^nᵢ
-  w_vec
-    .iter()
-    .zip_eq(num_rounds.iter())
-    .for_each(|(w, num_vars)| assert_eq!(w.p.len(), 1 << num_vars));
-
-  // generate a challenge, and powers of it for random linear combination
-  let rho = transcript.squeeze(b"r")?;
-  let powers_of_rho = powers::<E>(&rho, num_claims);
-
-  let (claims, u_xs, comms): (Vec<_>, Vec<_>, Vec<_>) =
-    u_vec.into_iter().map(|u| (u.e, u.x, u.c)).multiunzip();
-
-  // Create clones of polynomials to be given to Sumcheck
-  // Pᵢ(X)
-  let polys_P: Vec<MultilinearPolynomial<E::Scalar>> = w_vec
-    .iter()
-    .map(|w| MultilinearPolynomial::new(w.p.clone()))
-    .collect();
-  // eq(xᵢ, X)
-  let polys_eq: Vec<MultilinearPolynomial<E::Scalar>> = u_xs
-    .into_iter()
-    .map(|ux| MultilinearPolynomial::new(EqPolynomial::evals_from_points(&ux)))
-    .collect();
-
-  // For each i, check eᵢ = ∑ₓ Pᵢ(x)eq(xᵢ,x), where x ∈ {0,1}^nᵢ
-  let comb_func = |poly_P: &E::Scalar, poly_eq: &E::Scalar| -> E::Scalar { *poly_P * *poly_eq };
-  let (sc_proof_batch, r, claims_batch) = SumcheckProof::prove_quad_batch(
-    &claims,
-    &num_rounds,
-    polys_P,
-    polys_eq,
-    &powers_of_rho,
-    comb_func,
-    transcript,
-  )?;
-
-  let (claims_batch_left, _): (Vec<E::Scalar>, Vec<E::Scalar>) = claims_batch;
-
-  transcript.absorb(b"l", &claims_batch_left.as_slice());
-
-  // we now combine evaluation claims at the same point r into one
-  let gamma = transcript.squeeze(b"g")?;
-
-  let u_joint =
-    PolyEvalInstance::batch_diff_size(&comms, &claims_batch_left, &num_rounds, r, gamma);
-
-  // P = ∑ᵢ γⁱ⋅Pᵢ
-  let w_joint = PolyEvalWitness::batch_diff_size(w_vec, gamma);
-
-  Ok((u_joint, w_joint, sc_proof_batch, claims_batch_left))
-}
-
-/// Verifies a batch of polynomial evaluation claims using Sumcheck
-/// reducing them to a single claim at the same point.
-fn batch_eval_verify<E: Engine>(
-  u_vec: Vec<PolyEvalInstance<E>>,
-  transcript: &mut E::TE,
-  sc_proof_batch: &SumcheckProof<E>,
-  evals_batch: &[E::Scalar],
-) -> Result<PolyEvalInstance<E>, SpartanError> {
-  let num_claims = u_vec.len();
-  assert_eq!(evals_batch.len(), num_claims);
-
-  // generate a challenge
-  let rho = transcript.squeeze(b"r")?;
-  let powers_of_rho = powers::<E>(&rho, num_claims);
-
-  // Compute nᵢ and n = maxᵢ{nᵢ}
-  let num_rounds = u_vec.iter().map(|u| u.x.len()).collect::<Vec<_>>();
-  let num_rounds_max = *num_rounds.iter().max().unwrap();
-
-  let claims = u_vec.iter().map(|u| u.e).collect::<Vec<_>>();
-
-  let (claim_batch_final, r) =
-    sc_proof_batch.verify_batch(&claims, &num_rounds, &powers_of_rho, 2, transcript)?;
-
-  let claim_batch_final_expected = {
-    let evals_r = u_vec.iter().map(|u| {
-      let (_, r_hi) = r.split_at(num_rounds_max - u.x.len());
-      EqPolynomial::new(r_hi.to_vec()).evaluate(&u.x)
-    });
-
-    zip_with!(
-      (evals_r, evals_batch.iter(), powers_of_rho.iter()),
-      |e_i, p_i, rho_i| e_i * *p_i * rho_i
-    )
-    .sum()
-  };
-
-  if claim_batch_final != claim_batch_final_expected {
-    return Err(SpartanError::InvalidSumcheckProof);
-  }
-
-  transcript.absorb(b"l", &evals_batch);
-
-  // we now combine evaluation claims at the same point r into one
-  let gamma = transcript.squeeze(b"g")?;
-
-  let comms = u_vec.into_iter().map(|u| u.c).collect::<Vec<_>>();
-
-  let u_joint = PolyEvalInstance::batch_diff_size(&comms, evals_batch, &num_rounds, r, gamma);
-
-  Ok(u_joint)
 }

@@ -27,7 +27,7 @@ use bellpepper_core::Circuit;
 use core::marker::PhantomData;
 use errors::SpartanError;
 use serde::{Deserialize, Serialize};
-use traits::{commitment::CommitmentEngineTrait, snark::RelaxedR1CSSNARKTrait, Engine};
+use traits::{commitment::CommitmentEngineTrait, snark::R1CSSNARKTrait, Engine};
 
 /// A type that holds the prover key
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ use traits::{commitment::CommitmentEngineTrait, snark::RelaxedR1CSSNARKTrait, En
 pub struct ProverKey<E, S>
 where
   E: Engine,
-  S: RelaxedR1CSSNARKTrait<E>,
+  S: R1CSSNARKTrait<E>,
 {
   pk: S::ProverKey,
 }
@@ -46,28 +46,28 @@ where
 pub struct VerifierKey<E, S>
 where
   E: Engine,
-  S: RelaxedR1CSSNARKTrait<E>,
+  S: R1CSSNARKTrait<E>,
 {
   vk: S::VerifierKey,
 }
 
 /// A SNARK proving a circuit expressed with bellperson
 /// This module provides interfaces to directly prove a step circuit by using Spartan SNARK.
-/// In particular, it supports any SNARK that implements RelaxedR1CSSNARK trait
+/// In particular, it supports any SNARK that implements R1CSSNARK trait
 /// (e.g., with the SNARKs implemented in ppsnark.rs or snark.rs).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SNARK<E, S, C>
 where
   E: Engine,
-  S: RelaxedR1CSSNARKTrait<E>,
+  S: R1CSSNARKTrait<E>,
   C: Circuit<E::Scalar>,
 {
   snark: S, // snark proving the witness is satisfying
   _p: PhantomData<(E, C)>,
 }
 
-impl<E: Engine, S: RelaxedR1CSSNARKTrait<E>, C: Circuit<E::Scalar>> SNARK<E, S, C> {
+impl<E: Engine, S: R1CSSNARKTrait<E>, C: Circuit<E::Scalar>> SNARK<E, S, C> {
   /// Produces prover and verifier keys for the direct SNARK
   pub fn setup(circuit: C) -> Result<(ProverKey<E, S>, VerifierKey<E, S>), SpartanError> {
     let (pk, vk) = S::setup(circuit)?;
@@ -145,11 +145,11 @@ mod tests {
   fn test_snark() {
     type E = crate::provider::PallasEngine;
     type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
-    type S = crate::spartan::snark::RelaxedR1CSSNARK<E, EE>;
+    type S = crate::spartan::snark::R1CSSNARK<E, EE>;
     test_snark_with::<E, S>();
   }
 
-  fn test_snark_with<E: Engine, S: RelaxedR1CSSNARKTrait<E>>() {
+  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
     let circuit = CubicCircuit::default();
 
     // produce keys

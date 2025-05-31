@@ -74,6 +74,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Returns Z(r) in O(n) time.
   ///
   /// The point must have a value for each variable.
+  #[allow(dead_code)]
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
     assert_eq!(r.len(), self.get_num_vars());
