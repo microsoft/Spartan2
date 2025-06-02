@@ -12,12 +12,12 @@
 #![forbid(unsafe_code)]
 
 // private modules
-mod bellpepper;
 mod constants;
 mod digest;
 mod r1cs;
 
 // public modules
+pub mod bellpepper;
 pub mod errors;
 pub mod provider;
 pub mod spartan;

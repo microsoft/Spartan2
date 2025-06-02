@@ -150,14 +150,3 @@ where
     &self.aux_assignment
   }
 }
-
-#[allow(dead_code)]
-impl<E: Engine> SatisfyingAssignment<E> {
-  pub fn scalar_inputs(&self) -> Vec<E::Scalar> {
-    self.input_assignment.clone()
-  }
-
-  pub fn scalar_aux(&self) -> Vec<E::Scalar> {
-    self.aux_assignment.clone()
-  }
-}
