@@ -104,7 +104,7 @@ pub trait DlogGroupExt: DlogGroup {
   }
 }
 
-/// Implements Nova's traits except DlogGroupExt so that the MSM can be implemented differently
+/// Implements Spartan's traits except DlogGroupExt so that the MSM can be implemented differently
 #[macro_export]
 macro_rules! impl_traits_no_dlog_ext {
   (
