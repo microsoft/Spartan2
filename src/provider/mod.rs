@@ -1,4 +1,4 @@
-//! This module implements Nova's traits using the following several different combinations
+//! This module implements Spartan's traits using the following several different combinations
 
 // public modules to be used as an evaluation engine with Spartan
 pub mod ipa_pc;
@@ -20,11 +20,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// An implementation of the Nova `Engine` trait with Pallas curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Pallas curve and Pedersen commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PallasEngine;
 
-/// An implementation of the Nova `Engine` trait with Vesta curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Vesta curve and Pedersen commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VestaEngine;
 
