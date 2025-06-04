@@ -229,7 +229,7 @@ macro_rules! impl_traits_no_dlog_ext {
   };
 }
 
-/// Implements Nova's traits
+/// Implements Spartan's traits
 #[macro_export]
 macro_rules! impl_traits {
   (
