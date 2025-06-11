@@ -1,5 +1,8 @@
 //! This module defines a collection of traits that define the behavior of a zkSNARK for RelaxedR1CS
-use crate::{errors::SpartanError, traits::Engine};
+use crate::{
+  errors::SpartanError,
+  traits::{Engine, Group, TranscriptReprTrait},
+};
 use bellpepper_core::Circuit;
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +28,18 @@ pub trait R1CSSNARKTrait<E: Engine>:
   fn verify(&self, vk: &Self::VerifierKey, io: &[E::Scalar]) -> Result<(), SpartanError>;
 }
 
+/// A type representing the digest of a verifier's key
+pub type SpartanDigest = [u8; 32];
+
 /// A helper trait that defines the behavior of a verifier key of `zkSNARK`
 pub trait DigestHelperTrait<E: Engine> {
   /// Returns the digest of the verifier's key
-  fn digest(&self) -> E::Scalar;
+  fn digest(&self) -> Result<SpartanDigest, SpartanError>;
+}
+
+// implement TranscriptReprTrait for the SpartanDigest
+impl<G: Group> TranscriptReprTrait<G> for SpartanDigest {
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    self.to_vec()
+  }
 }
