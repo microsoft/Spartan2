@@ -1,3 +1,4 @@
+//! This module defines traits for discrete logarithm groups and their operations.
 use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
 use core::{
   fmt::Debug,
