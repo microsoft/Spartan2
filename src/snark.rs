@@ -1,9 +1,7 @@
 //! This module implements `R1CSSNARK` using Spartan that is generic
 //! over the polynomial commitment and evaluation argument (i.e., a PCS)
 //! This version of Spartan does not use preprocessing so the verifier keeps the entire
-//! description of R1CS matrices. This is essentially optimal for the verifier when using
-//! an IPA-based polynomial commitment scheme.
-
+//! description of R1CS matrices.
 use crate::{
   bellpepper::{
     r1cs::{SpartanShape, SpartanWitness},
@@ -12,13 +10,10 @@ use crate::{
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
+  math::Math,
+  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial},
   r1cs::{R1CSInstance, R1CSShape, SparseMatrix},
-  spartan::{
-    compute_eval_table_sparse,
-    math::Math,
-    polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial},
-    sumcheck::SumcheckProof,
-  },
+  sumcheck::SumcheckProof,
   traits::{
     commitment::CommitmentEngineTrait,
     evaluation::EvaluationEngineTrait,
@@ -79,6 +74,46 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierK
         reason: "Unable to compute digest for VerifierKey".to_string(),
       })
   }
+}
+
+/// Bounds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
+fn compute_eval_table_sparse<E: Engine>(
+  S: &R1CSShape<E>,
+  rx: &[E::Scalar],
+) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
+  assert_eq!(rx.len(), S.num_cons);
+
+  let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
+    for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
+      for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
+        M_evals[*col_idx] += rx[row_idx] * val;
+      }
+    }
+  };
+
+  let (A_evals, (B_evals, C_evals)) = rayon::join(
+    || {
+      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+      inner(&S.A, &mut A_evals);
+      A_evals
+    },
+    || {
+      rayon::join(
+        || {
+          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          inner(&S.B, &mut B_evals);
+          B_evals
+        },
+        || {
+          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          inner(&S.C, &mut C_evals);
+          C_evals
+        },
+      )
+    },
+  );
+
+  (A_evals, B_evals, C_evals)
 }
 
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance

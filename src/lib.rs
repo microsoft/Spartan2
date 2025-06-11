@@ -13,13 +13,19 @@
 
 // private modules
 mod digest;
+mod math;
+mod polys;
 mod r1cs;
+mod snark;
+mod sumcheck;
+
+#[macro_use]
+mod macros;
 
 // public modules
 pub mod bellpepper;
 pub mod errors;
 pub mod provider;
-pub mod spartan;
 pub mod traits;
 
 use bellpepper_core::Circuit;
@@ -144,7 +150,7 @@ mod tests {
   fn test_snark() {
     type E = crate::provider::PallasEngine;
     type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
-    type S = crate::spartan::snark::R1CSSNARK<E, EE>;
+    type S = crate::snark::R1CSSNARK<E, EE>;
     test_snark_with::<E, S>();
   }
 

@@ -1,4 +1,5 @@
 //! `EqPolynomial`: Represents multilinear extension of equality polynomials, evaluated based on binary input values.
+use crate::zip_with_for_each;
 use ff::PrimeField;
 use rayon::prelude::*;
 
@@ -15,7 +16,7 @@ use rayon::prelude::*;
 /// For instance, for e = 6 (with a binary representation of 0b110), the vector r would be [1, 1, 0].
 #[derive(Debug)]
 pub struct EqPolynomial<Scalar: PrimeField> {
-  pub(in crate::spartan::polys) r: Vec<Scalar>,
+  r: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField> EqPolynomial<Scalar> {

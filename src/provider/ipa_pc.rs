@@ -1,8 +1,8 @@
 //! This module implements `EvaluationEngine` using an IPA-based polynomial commitment scheme
 use crate::{
   errors::SpartanError,
+  polys::eq::EqPolynomial,
   provider::{pedersen::CommitmentKeyExtTrait, traits::DlogGroup},
-  spartan::polys::eq::EqPolynomial,
   traits::{
     commitment::CommitmentEngineTrait, evaluation::EvaluationEngineTrait, Engine,
     TranscriptEngineTrait, TranscriptReprTrait,
