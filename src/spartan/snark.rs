@@ -101,7 +101,11 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let mut cs: ShapeCS<E> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
+    let _ = circuit.synthesize(&mut cs).or_else(|e| {
+      Err(SpartanError::UnSat {
+        reason: format!("Unable to synthesize circuit: {e}"),
+      })
+    })?;
 
     // Padding the ShapeCS: constraints (rows) and variables (columns)
     let num_constraints = cs.num_constraints();
@@ -143,7 +147,11 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
   /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
   fn prove<C: Circuit<E::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
-    let _ = circuit.synthesize(&mut cs);
+    let _ = circuit.synthesize(&mut cs).or_else(|e| {
+      Err(SpartanError::UnSat {
+        reason: format!("Unable to synthesize witness: {e}"),
+      })
+    })?;
 
     // Padding variables
     let num_vars = cs.aux_slice().len();
