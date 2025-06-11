@@ -68,7 +68,10 @@ pub enum SpartanError {
   },
   /// returned when there is an error creating a digest
   #[error("DigestError")]
-  DigestError,
+  DigestError {
+    /// The reason for the digest error
+    reason: String,
+  },
   /// returned when the prover cannot prove the provided statement due to completeness error
   #[error("InternalError")]
   InternalError,

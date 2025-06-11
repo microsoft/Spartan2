@@ -22,7 +22,7 @@ use crate::{
   traits::{
     commitment::CommitmentEngineTrait,
     evaluation::EvaluationEngineTrait,
-    snark::{DigestHelperTrait, R1CSSNARKTrait},
+    snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
     Engine, TranscriptEngineTrait,
   },
   Commitment, CommitmentKey,
@@ -40,7 +40,7 @@ pub struct ProverKey<E: Engine, EE: EvaluationEngineTrait<E>> {
   ck: CommitmentKey<E>,
   pk_ee: EE::ProverKey,
   S: R1CSShape<E>,
-  vk_digest: E::Scalar, // digest of the verifier's key
+  vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
 /// A type that represents the verifier's key
@@ -50,7 +50,7 @@ pub struct VerifierKey<E: Engine, EE: EvaluationEngineTrait<E>> {
   vk_ee: EE::VerifierKey,
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
-  digest: OnceCell<E::Scalar>,
+  digest: OnceCell<SpartanDigest>,
 }
 
 impl<E: Engine, EE: EvaluationEngineTrait<E>> SimpleDigestible for VerifierKey<E, EE> {}
@@ -67,15 +67,17 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> VerifierKey<E, EE> {
 
 impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierKey<E, EE> {
   /// Returns the digest of the verifier's key.
-  fn digest(&self) -> E::Scalar {
+  fn digest(&self) -> Result<SpartanDigest, SpartanError> {
     self
       .digest
       .get_or_try_init(|| {
-        let dc = DigestComputer::<E::Scalar, _>::new(self);
+        let dc = DigestComputer::<_>::new(self);
         dc.digest()
       })
       .cloned()
-      .expect("Failure to retrieve digest!")
+      .map_err(|_| SpartanError::DigestError {
+        reason: "Unable to compute digest for VerifierKey".to_string(),
+      })
   }
 }
 
@@ -134,7 +136,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
       ck,
       S,
       pk_ee,
-      vk_digest: vk.digest(),
+      vk_digest: vk.digest()?,
     };
 
     Ok((pk, vk))
@@ -281,7 +283,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
-    transcript.absorb(b"vk", &vk.digest());
+    transcript.absorb(b"vk", &vk.digest()?);
     transcript.absorb(b"U", &U);
 
     let (num_rounds_x, num_rounds_y) = (

@@ -12,7 +12,6 @@
 #![forbid(unsafe_code)]
 
 // private modules
-mod constants;
 mod digest;
 mod r1cs;
 
