@@ -4,10 +4,10 @@
 pub mod ipa_pc;
 pub mod pasta;
 pub mod pt256;
+pub mod traits;
 
 pub(crate) mod keccak;
 pub(crate) mod pedersen;
-pub(crate) mod traits;
 
 mod msm;
 
