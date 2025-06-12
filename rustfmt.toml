@@ -1,4 +1,10 @@
-edition = "2024"
-tab_spaces = 2
-newline_style = "Unix"
-use_try_shorthand = true
+edition                  = "2024"
+style_edition            = "2024"
+newline_style            = "Unix"
+tab_spaces               = 2
+max_width                = 100
+use_try_shorthand        = true
+reorder_imports          = true
+merge_derives            = true
+use_field_init_shorthand = true
+imports_granularity      = "Crate"
