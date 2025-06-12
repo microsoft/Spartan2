@@ -2,7 +2,7 @@
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.
 use ff::{Field, PrimeField};
-use halo2curves::{group::Group, CurveAffine};
+use halo2curves::{CurveAffine, group::Group};
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
@@ -127,11 +127,7 @@ pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
 }
 
 fn num_bits(n: usize) -> usize {
-  if n == 0 {
-    0
-  } else {
-    (n.ilog2() + 1) as usize
-  }
+  if n == 0 { 0 } else { (n.ilog2() + 1) as usize }
 }
 
 /// Multi-scalar multiplication using the best algorithm for the given scalars.
@@ -348,7 +344,7 @@ mod tests {
   use super::*;
   use crate::provider::pasta::{pallas, vesta};
   use ff::Field;
-  use halo2curves::{group::Group, CurveAffine};
+  use halo2curves::{CurveAffine, group::Group};
   use rand_core::OsRng;
 
   fn test_general_msm_with<F: Field, A: CurveAffine<ScalarExt = F>>() {

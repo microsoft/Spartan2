@@ -10,9 +10,9 @@ use crate::{
 use digest::{ExtendableOutput, Update};
 use ff::FromUniformBytes;
 use halo2curves::{
-  group::{cofactor::CofactorCurveAffine, Curve, Group as AnotherGroup},
-  pasta::{Pallas, PallasAffine, Vesta, VestaAffine},
   CurveAffine, CurveExt,
+  group::{Curve, Group as AnotherGroup, cofactor::CofactorCurveAffine},
+  pasta::{Pallas, PallasAffine, Vesta, VestaAffine},
 };
 use num_bigint::BigInt;
 use num_integer::Integer;

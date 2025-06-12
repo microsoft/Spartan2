@@ -2,7 +2,7 @@
 name = "spartan2"
 version = "0.1.0"
 authors = ["Srinath Setty <srinath@microsoft.com>"]
-edition = "2021"
+edition = "2024"
 description = "High-speed SNARKs"
 documentation = "https://docs.rs/spartan2-snark/"
 readme = "README.md"

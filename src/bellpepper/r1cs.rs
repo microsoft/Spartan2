@@ -4,10 +4,10 @@
 
 use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS};
 use crate::{
+  CommitmentKey,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
   traits::Engine,
-  CommitmentKey,
 };
 use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;

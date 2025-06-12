@@ -3,7 +3,7 @@
 //! and a commitment provided by the commitment engine is treated as a multilinear polynomial commitment
 use crate::{
   errors::SpartanError,
-  traits::{commitment::CommitmentEngineTrait, Engine},
+  traits::{Engine, commitment::CommitmentEngineTrait},
 };
 use serde::{Deserialize, Serialize};
 

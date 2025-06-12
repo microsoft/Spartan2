@@ -1,13 +1,13 @@
 //! This module implements `EvaluationEngine` using an IPA-based polynomial commitment scheme
 use crate::{
+  CE, Commitment, CommitmentKey,
   errors::SpartanError,
+  polys::eq::EqPolynomial,
   provider::{pedersen::CommitmentKeyExtTrait, traits::DlogGroup},
-  spartan::polys::eq::EqPolynomial,
   traits::{
-    commitment::CommitmentEngineTrait, evaluation::EvaluationEngineTrait, Engine,
-    TranscriptEngineTrait, TranscriptReprTrait,
+    Engine, TranscriptEngineTrait, TranscriptReprTrait, commitment::CommitmentEngineTrait,
+    evaluation::EvaluationEngineTrait,
   },
-  Commitment, CommitmentKey, CE,
 };
 use core::iter;
 use ff::Field;

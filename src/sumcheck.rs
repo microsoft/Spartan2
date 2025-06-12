@@ -1,6 +1,6 @@
 use crate::{
   errors::SpartanError,
-  spartan::polys::{
+  polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
   },
