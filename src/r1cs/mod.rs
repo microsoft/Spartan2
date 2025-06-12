@@ -297,7 +297,7 @@ impl<E: Engine> R1CSInstance<E> {
       Err(SpartanError::InvalidInputLength)
     } else {
       Ok(R1CSInstance {
-        comm_W: *comm_W,
+        comm_W: comm_W.clone(),
         X: X.to_owned(),
       })
     }
@@ -308,7 +308,7 @@ impl<E: Engine> R1CSInstance<E> {
     X: &[E::Scalar],
   ) -> Result<R1CSInstance<E>, SpartanError> {
     Ok(R1CSInstance {
-      comm_W: *comm_W,
+      comm_W: comm_W.clone(),
       X: X.to_owned(),
     })
   }

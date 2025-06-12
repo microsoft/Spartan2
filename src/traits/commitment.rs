@@ -19,7 +19,6 @@ impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Out
 /// This trait defines the behavior of the commitment
 pub trait CommitmentTrait<E: Engine>:
   Clone
-  + Copy
   + Debug
   + Default
   + PartialEq
