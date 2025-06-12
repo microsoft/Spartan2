@@ -47,10 +47,10 @@ use polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::S
 use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
+  Engine, TranscriptEngineTrait,
   commitment::CommitmentEngineTrait,
   evaluation::EvaluationEngineTrait,
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
-  Engine, TranscriptEngineTrait,
 };
 
 type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey;
@@ -460,7 +460,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
 #[cfg(test)]
 mod tests {
   use super::*;
-  use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+  use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use ff::PrimeField;
 
   #[derive(Clone, Debug, Default)]

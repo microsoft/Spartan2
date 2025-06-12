@@ -48,7 +48,7 @@ impl Engine for VestaEngine {
 mod tests {
   use crate::provider::{pasta::pallas, traits::DlogGroup};
   use digest::{ExtendableOutput, Update};
-  use halo2curves::{group::Curve, CurveExt};
+  use halo2curves::{CurveExt, group::Curve};
   use sha3::Shake256;
   use std::io::Read;
 

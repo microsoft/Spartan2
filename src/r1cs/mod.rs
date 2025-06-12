@@ -1,9 +1,9 @@
 //! This module defines R1CS related types
 use crate::{
+  CE, Commitment, CommitmentKey, DerandKey,
   digest::SimpleDigestible,
   errors::SpartanError,
-  traits::{commitment::CommitmentEngineTrait, Engine, TranscriptReprTrait},
-  Commitment, CommitmentKey, DerandKey, CE,
+  traits::{Engine, TranscriptReprTrait, commitment::CommitmentEngineTrait},
 };
 use core::cmp::max;
 use ff::Field;

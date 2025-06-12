@@ -98,7 +98,7 @@ impl<E: Engine> TranscriptEngineTrait<E> for Keccak256Transcript<E> {
 #[cfg(test)]
 mod tests {
   use crate::{
-    provider::{keccak::Keccak256Transcript, PallasEngine, VestaEngine},
+    provider::{PallasEngine, VestaEngine, keccak::Keccak256Transcript},
     traits::{Engine, PrimeFieldExt, TranscriptEngineTrait, TranscriptReprTrait},
   };
   use ff::PrimeField;
@@ -200,7 +200,7 @@ mod tests {
     let mut rng = rand::thread_rng();
 
     // ten scalars
-    let scalars = std::iter::from_fn(|| Some(<E as Engine>::Scalar::from(rng.gen::<u64>())))
+    let scalars = std::iter::from_fn(|| Some(<E as Engine>::Scalar::from(rng.r#gen::<u64>())))
       .take(10)
       .collect::<Vec<_>>();
 

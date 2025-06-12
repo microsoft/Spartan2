@@ -18,7 +18,7 @@ mod tests {
     provider::PallasEngine,
     traits::Engine,
   };
-  use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+  use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use ff::PrimeField;
 
   fn synthesize_alloc_bit<Fr: PrimeField, CS: ConstraintSystem<Fr>>(

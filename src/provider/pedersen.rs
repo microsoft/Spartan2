@@ -3,8 +3,8 @@ use crate::{
   errors::SpartanError,
   provider::traits::{DlogGroup, DlogGroupExt},
   traits::{
-    commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
     Engine, TranscriptReprTrait,
+    commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
   },
 };
 use core::{

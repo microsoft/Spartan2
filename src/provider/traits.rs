@@ -1,9 +1,9 @@
-use crate::traits::{commitment::ScalarMul, Group, TranscriptReprTrait};
+use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
 use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Sub, SubAssign},
 };
-use halo2curves::{serde::SerdeObject, CurveAffine};
+use halo2curves::{CurveAffine, serde::SerdeObject};
 use num_integer::Integer;
 use num_traits::ToPrimitive;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -64,7 +64,7 @@ pub trait DlogGroup:
   fn zero() -> Self;
 
   /// Returns the generator of the group
-  fn gen() -> Self;
+  fn generator() -> Self;
 
   /// Returns the affine coordinates (x, y, infinity) for the point
   fn to_coordinates(&self) -> (<Self as Group>::Base, <Self as Group>::Base, bool);
@@ -189,7 +189,7 @@ macro_rules! impl_traits_no_dlog_ext {
         $name::Point::identity()
       }
 
-      fn gen() -> Self {
+      fn generator() -> Self {
         $name::Point::generator()
       }
 
