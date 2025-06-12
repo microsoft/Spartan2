@@ -121,7 +121,7 @@ where
 {
   fn new(comm_a_vec: &Commitment<E>, b_vec: &[E::Scalar], c: &E::Scalar) -> Self {
     InnerProductInstance {
-      comm_a_vec: *comm_a_vec,
+      comm_a_vec: comm_a_vec.clone(),
       b_vec: b_vec.to_vec(),
       c: *c,
     }
@@ -308,7 +308,7 @@ where
     let r = transcript.squeeze(b"r")?;
     let ck_c = ck_c.scale(&r);
 
-    let P = U.comm_a_vec + CE::<E>::commit(&ck_c, &[U.c], &E::Scalar::ZERO);
+    let P = U.comm_a_vec.clone() + CE::<E>::commit(&ck_c, &[U.c], &E::Scalar::ZERO);
 
     let batch_invert = |v: &[E::Scalar]| -> Result<Vec<E::Scalar>, SpartanError> {
       let mut products = vec![E::Scalar::ZERO; v.len()];

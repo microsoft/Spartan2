@@ -297,20 +297,10 @@ impl<E: Engine> R1CSInstance<E> {
       Err(SpartanError::InvalidInputLength)
     } else {
       Ok(R1CSInstance {
-        comm_W: *comm_W,
+        comm_W: comm_W.clone(),
         X: X.to_owned(),
       })
     }
-  }
-
-  pub fn new_unchecked(
-    comm_W: &Commitment<E>,
-    X: &[E::Scalar],
-  ) -> Result<R1CSInstance<E>, SpartanError> {
-    Ok(R1CSInstance {
-      comm_W: *comm_W,
-      X: X.to_owned(),
-    })
   }
 
   pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &E::Scalar) -> R1CSInstance<E> {

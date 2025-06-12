@@ -24,8 +24,8 @@ pub trait R1CSSNARKTrait<E: Engine>:
   /// Produces a new SNARK for a relaxed R1CS
   fn prove<C: Circuit<E::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError>;
 
-  /// Verifies a SNARK for a relaxed R1CS
-  fn verify(&self, vk: &Self::VerifierKey, io: &[E::Scalar]) -> Result<(), SpartanError>;
+  /// Verifies a SNARK for a relaxed R1CS and returns the public IO
+  fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError>;
 }
 
 /// A type representing the digest of a verifier's key

@@ -155,7 +155,7 @@ fn compute_eval_table_sparse<E: Engine>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
-  comm_W: Commitment<E>,
+  U: R1CSInstance<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
@@ -334,7 +334,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
     )?;
 
     Ok(R1CSSNARK {
-      comm_W: U.comm_W,
+      U,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -344,15 +344,12 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
-  fn verify(&self, vk: &Self::VerifierKey, io: &[E::Scalar]) -> Result<(), SpartanError> {
-    // construct an instance using the provided commitment to the witness and IO
-    let U = R1CSInstance::<E>::new_unchecked(&self.comm_W, io)?;
-
+  fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest()?);
-    transcript.absorb(b"U", &U);
+    transcript.absorb(b"U", &self.U);
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
@@ -403,7 +400,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
-          .chain(U.X.iter().cloned())
+          .chain(self.U.X.iter().cloned())
           .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(vk.S.num_vars.log_2(), X).evaluate(&r_y[1..])
       };
@@ -450,13 +447,13 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
     EE::verify(
       &vk.vk_ee,
       &mut transcript,
-      &self.comm_W,
+      &self.U.comm_W,
       &r_y[1..],
       &self.eval_W,
       &self.eval_arg,
     )?;
 
-    Ok(())
+    Ok(self.U.X.clone())
   }
 }
 
@@ -523,7 +520,8 @@ mod tests {
     let snark = res.unwrap();
 
     // verify the SNARK
-    let res = snark.verify(&vk, &[<E as Engine>::Scalar::from(15u64)]);
+    let res = snark.verify(&vk);
     assert!(res.is_ok());
+    assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
   }
 }
