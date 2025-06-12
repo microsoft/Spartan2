@@ -303,16 +303,6 @@ impl<E: Engine> R1CSInstance<E> {
     }
   }
 
-  pub fn new_unchecked(
-    comm_W: &Commitment<E>,
-    X: &[E::Scalar],
-  ) -> Result<R1CSInstance<E>, SpartanError> {
-    Ok(R1CSInstance {
-      comm_W: comm_W.clone(),
-      X: X.to_owned(),
-    })
-  }
-
   pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &E::Scalar) -> R1CSInstance<E> {
     R1CSInstance {
       comm_W: CE::<E>::derandomize(dk, &self.comm_W, r_W),
