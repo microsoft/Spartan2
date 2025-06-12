@@ -2,8 +2,7 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial};
-use crate::{zip_with, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial, zip_with, zip_with_for_each};
 use core::ops::{Add, Index};
 use ff::PrimeField;
 use itertools::Itertools as _;
