@@ -43,7 +43,10 @@ use bellpepper::{
 use digest::{DigestComputer, SimpleDigestible};
 use errors::SpartanError;
 use math::Math;
-use polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, multilinear::SparsePolynomial};
+use polys::{
+  eq::EqPolynomial,
+  multilinear::{MultilinearPolynomial, SparsePolynomial},
+};
 use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
