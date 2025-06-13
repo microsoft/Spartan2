@@ -3,7 +3,7 @@
 use crate::traits::{Engine, TranscriptReprTrait};
 use core::{
   fmt::Debug,
-  ops::{Add, Mul, MulAssign},
+  ops::{Mul, MulAssign},
 };
 use num_integer::Integer;
 use num_traits::ToPrimitive;
@@ -28,8 +28,6 @@ pub trait CommitmentTrait<E: Engine>:
   + TranscriptReprTrait<E::GE>
   + Serialize
   + for<'de> Deserialize<'de>
-  + Add<Self, Output = Self>
-  + ScalarMul<E::Scalar>
 {
   /// Returns the coordinate representation of the commitment
   fn to_coordinates(&self) -> (E::Base, E::Base, bool);

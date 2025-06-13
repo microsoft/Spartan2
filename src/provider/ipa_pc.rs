@@ -3,17 +3,19 @@ use crate::{
   CE, Commitment, CommitmentKey,
   errors::SpartanError,
   polys::eq::EqPolynomial,
-  provider::{pedersen::CommitmentKeyExtTrait, traits::DlogGroup},
+  provider::{
+    pedersen::CommitmentKeyExtTrait,
+    traits::{DlogGroup, HomomorphicCommitmentTrait},
+  },
   traits::{
     Engine, TranscriptEngineTrait, TranscriptReprTrait, commitment::CommitmentEngineTrait,
     evaluation::EvaluationEngineTrait,
   },
 };
-use core::iter;
+use core::{iter, marker::PhantomData};
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 
 /// Provides an implementation of the prover key
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ where
   E: Engine,
   E::GE: DlogGroup,
   CommitmentKey<E>: CommitmentKeyExtTrait<E>,
+  <E::CE as CommitmentEngineTrait<E>>::Commitment: HomomorphicCommitmentTrait<E>,
 {
   type ProverKey = ProverKey<E>;
   type VerifierKey = VerifierKey<E>;
@@ -165,6 +168,7 @@ where
   E: Engine,
   E::GE: DlogGroup,
   CommitmentKey<E>: CommitmentKeyExtTrait<E>,
+  <E::CE as CommitmentEngineTrait<E>>::Commitment: HomomorphicCommitmentTrait<E>,
 {
   const fn protocol_name() -> &'static [u8] {
     b"IPA"

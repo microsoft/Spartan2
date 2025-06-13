@@ -1,7 +1,7 @@
 //! This module provides an implementation of a commitment engine
 use crate::{
   errors::SpartanError,
-  provider::traits::{DlogGroup, DlogGroupExt},
+  provider::traits::{DlogGroup, DlogGroupExt, HomomorphicCommitmentTrait},
   traits::{
     Engine, TranscriptReprTrait,
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
@@ -299,3 +299,5 @@ where
     })
   }
 }
+
+impl<E: Engine> HomomorphicCommitmentTrait<E> for Commitment<E> where E::GE: DlogGroupExt {}

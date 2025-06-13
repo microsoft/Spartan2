@@ -1,5 +1,7 @@
-//! This module defines traits for discrete logarithm groups and their operations.
-use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
+use crate::traits::{
+  Engine, Group, TranscriptReprTrait,
+  commitment::{CommitmentTrait, ScalarMul},
+};
 use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Sub, SubAssign},
@@ -103,6 +105,12 @@ pub trait DlogGroupExt: DlogGroup {
       .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()]))
       .collect::<Vec<_>>()
   }
+}
+
+/// A trait that defines the homomorphic commitment functionality
+pub trait HomomorphicCommitmentTrait<E: Engine>:
+  CommitmentTrait<E> + Add<Self, Output = Self> + ScalarMul<E::Scalar>
+{
 }
 
 /// Implements Spartan's traits except DlogGroupExt so that the MSM can be implemented differently
