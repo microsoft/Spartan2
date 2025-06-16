@@ -509,7 +509,7 @@ mod tests {
 
     type E2 = crate::provider::T256Engine;
     type EE2 = crate::provider::ipa_pc::EvaluationEngine<E2>;
-    type S2 = crate::spartan::snark::R1CSSNARK<E2, EE2>;
+    type S2 = crate::R1CSSNARK<E2, EE2>;
     test_snark_with::<E2, S2>();
   }
 
