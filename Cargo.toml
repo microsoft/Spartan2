@@ -16,7 +16,7 @@ ff = { version = "0.13.0", features = ["derive"] }
 digest = "0.10"
 sha3 = "0.10"
 rayon = "1.10.0"
-rand_core = { version = "0.6", default-features = false }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 rand_chacha = "0.3"
 itertools = "0.11"
 subtle = "2.5"
@@ -45,3 +45,6 @@ hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
+
+[patch.crates-io]
+halo2curves = {git = "https://github.com/privacy-scaling-explorations/halo2curves", rev = "1622e83c1533c09dbeda93f339d9478a5c744e2e", features = ["derive_serde, std"]}

@@ -1,12 +1,13 @@
-//! This module implements Nova's traits using the following several different combinations
+//! This module implements Spartan's traits using the following several different combinations
 
 // public modules to be used as an evaluation engine with Spartan
 pub mod ipa_pc;
 pub mod pasta;
+pub mod pt256;
+pub mod traits;
 
 pub(crate) mod keccak;
 pub(crate) mod pedersen;
-pub(crate) mod traits;
 
 mod msm;
 
@@ -15,16 +16,17 @@ use crate::{
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
     pedersen::CommitmentEngine as PedersenCommitmentEngine,
+    pt256::{p256, t256},
   },
   traits::Engine,
 };
 use serde::{Deserialize, Serialize};
 
-/// An implementation of the Nova `Engine` trait with Pallas curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Pallas curve and Pedersen commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PallasEngine;
 
-/// An implementation of the Nova `Engine` trait with Vesta curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Vesta curve and Pedersen commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VestaEngine;
 
@@ -40,6 +42,30 @@ impl Engine for VestaEngine {
   type Base = vesta::Base;
   type Scalar = vesta::Scalar;
   type GE = vesta::Point;
+  type TE = Keccak256Transcript<Self>;
+  type CE = PedersenCommitmentEngine<Self>;
+}
+
+/// An implementation of the Spartan `Engine` trait with P256 curve and Pedersen commitment scheme
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct P256Engine;
+
+/// An implementation of the Spartan `Engine` trait with T256 curve and Pedersen commitment scheme
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct T256Engine;
+
+impl Engine for P256Engine {
+  type Base = p256::Base;
+  type Scalar = p256::Scalar;
+  type GE = p256::Point;
+  type TE = Keccak256Transcript<Self>;
+  type CE = PedersenCommitmentEngine<Self>;
+}
+
+impl Engine for T256Engine {
+  type Base = t256::Base;
+  type Scalar = t256::Scalar;
+  type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
   type CE = PedersenCommitmentEngine<Self>;
 }

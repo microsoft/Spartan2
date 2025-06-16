@@ -1,3 +1,4 @@
+//! This module defines traits for discrete logarithm groups and their operations.
 use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
 use core::{
   fmt::Debug,
@@ -104,7 +105,7 @@ pub trait DlogGroupExt: DlogGroup {
   }
 }
 
-/// Implements Nova's traits except DlogGroupExt so that the MSM can be implemented differently
+/// Implements Spartan's traits except DlogGroupExt so that the MSM can be implemented differently
 #[macro_export]
 macro_rules! impl_traits_no_dlog_ext {
   (
@@ -229,7 +230,7 @@ macro_rules! impl_traits_no_dlog_ext {
   };
 }
 
-/// Implements Nova's traits
+/// Implements Spartan's traits
 #[macro_export]
 macro_rules! impl_traits {
   (
