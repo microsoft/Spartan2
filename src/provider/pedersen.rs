@@ -12,8 +12,10 @@ use core::{
   marker::PhantomData,
   ops::{Add, Mul, MulAssign},
 };
+use ff::Field;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
+use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -52,14 +54,7 @@ pub struct Commitment<E: Engine> {
   pub(crate) comm: E::GE,
 }
 
-impl<E: Engine> CommitmentTrait<E> for Commitment<E>
-where
-  E::GE: DlogGroup,
-{
-  fn to_coordinates(&self) -> (E::Base, E::Base, bool) {
-    self.comm.to_coordinates()
-  }
-}
+impl<E: Engine> CommitmentTrait<E> for Commitment<E> where E::GE: DlogGroup {}
 
 impl<E: Engine> Default for Commitment<E>
 where
@@ -149,6 +144,7 @@ where
 {
   type CommitmentKey = CommitmentKey<E>;
   type Commitment = Commitment<E>;
+  type Blind = E::Scalar;
   type DerandKey = DerandKey<E>;
 
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
@@ -166,7 +162,11 @@ where
     Self::DerandKey { h: ck.h }
   }
 
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &E::Scalar) -> Self::Commitment {
+  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+    E::Scalar::random(&mut OsRng)
+  }
+
+  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment {
     assert!(ck.ck.len() >= v.len());
 
     Commitment {
@@ -178,7 +178,7 @@ where
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[T],
-    r: &E::Scalar,
+    r: &Self::Blind,
   ) -> Self::Commitment {
     assert!(ck.ck.len() >= v.len());
 
@@ -191,7 +191,7 @@ where
   fn derandomize(
     dk: &Self::DerandKey,
     commit: &Self::Commitment,
-    r: &E::Scalar,
+    r: &Self::Blind,
   ) -> Self::Commitment {
     Commitment {
       comm: commit.comm - <E::GE as DlogGroup>::group(&dk.h) * r,

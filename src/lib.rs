@@ -60,6 +60,7 @@ type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>:
 type Commitment<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment;
 type CE<E> = <E as Engine>::CE;
 type DerandKey<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::DerandKey;
+type Blind<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Blind;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]

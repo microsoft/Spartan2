@@ -142,7 +142,7 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for InnerProductInstance<E> {
   }
 }
 
-struct InnerProductWitness<E: Engine> {
+pub(crate) struct InnerProductWitness<E: Engine> {
   a_vec: Vec<E::Scalar>,
 }
 

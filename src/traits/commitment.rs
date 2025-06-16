@@ -7,7 +7,7 @@ use core::{
 };
 use num_integer::Integer;
 use num_traits::ToPrimitive;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// A helper trait for types implementing scalar multiplication.
@@ -20,7 +20,6 @@ impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Out
 pub trait CommitmentTrait<E: Engine>:
   Clone
   + Debug
-  + Default
   + PartialEq
   + Eq
   + Send
@@ -29,8 +28,6 @@ pub trait CommitmentTrait<E: Engine>:
   + Serialize
   + for<'de> Deserialize<'de>
 {
-  /// Returns the coordinate representation of the commitment
-  fn to_coordinates(&self) -> (E::Base, E::Base, bool);
 }
 
 /// A trait that helps determine the length of a structure.
@@ -52,42 +49,48 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Holds the type of the commitment
   type Commitment: CommitmentTrait<E>;
 
+  /// Holds the type of the blind
+  type Blind: Clone + Debug + Send + Sync + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>;
+
   /// Samples a new commitment key of a specified size
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey;
 
   /// Extracts the blinding generator
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey;
 
-  /// Commits to the provided vector using the provided generators and random blind
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &E::Scalar) -> Self::Commitment;
+  /// Returns a blind to be used for commitment
+  fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
 
-  /// Batch commits to the provided vectors using the provided generators and random blind
+  /// Commits to the provided vector using the provided ck and returns the commitment
+  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment;
+
+  /// Batch commits to the provided vectors using the provided ck
   fn batch_commit(
     ck: &Self::CommitmentKey,
     v: &[Vec<E::Scalar>],
-    r: &[E::Scalar],
-  ) -> Vec<Self::Commitment> {
-    assert!(v.len() == r.len());
+    r: &[Self::Blind],
+  ) -> (Vec<Self::Commitment>, Vec<Self::Blind>) {
+    assert_eq!(v.len(), r.len());
     v.par_iter()
       .zip(r.par_iter())
       .map(|(v_i, r_i)| Self::commit(ck, v_i, r_i))
       .collect()
   }
 
-  /// Commits to the provided vector of "small" scalars (at most 64 bits) using the provided generators and random blind
+  /// Commits to the provided vector of "small" scalars (at most 64 bits) using the provided ck
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[T],
-    r: &E::Scalar,
+    r: &Self::Blind,
   ) -> Self::Commitment;
 
-  /// Batch commits to the provided vectors of "small" scalars (at most 64 bits) using the provided generators and random blind
+  /// Batch commits to the provided vectors of "small" scalars (at most 64 bits) using the provided ck
   fn batch_commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[Vec<T>],
-    r: &[E::Scalar],
+    r: &[Self::Blind],
   ) -> Vec<Self::Commitment> {
-    assert!(v.len() == r.len());
+    assert_eq!(v.len(), r.len());
     v.par_iter()
       .zip(r.par_iter())
       .map(|(v_i, r_i)| Self::commit_small(ck, v_i, r_i))
@@ -98,6 +101,6 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
   fn derandomize(
     dk: &Self::DerandKey,
     commit: &Self::Commitment,
-    r: &E::Scalar,
+    r: &Self::Blind,
   ) -> Self::Commitment;
 }
