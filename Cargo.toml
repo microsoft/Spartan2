@@ -47,4 +47,4 @@ sha2 = "0.10.7"
 proptest = "1.2.0"
 
 [patch.crates-io]
-halo2curves = {git = "https://github.com/srinathsetty/halo2curves", branch = "main"}
+halo2curves = {git = "https://github.com/privacy-scaling-explorations/halo2curves", rev = "1622e83c1533c09dbeda93f339d9478a5c744e2e", features = ["derive_serde, std"]}
