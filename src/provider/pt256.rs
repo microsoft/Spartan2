@@ -10,10 +10,10 @@ use crate::{
 use digest::{ExtendableOutput, Update};
 use ff::FromUniformBytes;
 use halo2curves::{
-  group::{cofactor::CofactorCurveAffine, Curve, Group as AnotherGroup},
-  secp256r1::{Secp256r1 as P256, Secp256r1Affine as P256Affine},
-  t256::{T256Affine, T256},
   CurveAffine, CurveExt,
+  group::{Curve, Group as AnotherGroup, cofactor::CofactorCurveAffine},
+  secp256r1::{Secp256r1 as P256, Secp256r1Affine as P256Affine},
+  t256::{T256, T256Affine},
 };
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -31,7 +31,7 @@ pub mod p256 {
 
 /// Re-exports that give access to the standard aliases used in the code base, for t256
 pub mod t256 {
-  pub use halo2curves::t256::{Fp as Base, Fq as Scalar, T256Affine as Affine, T256 as Point};
+  pub use halo2curves::t256::{Fp as Base, Fq as Scalar, T256 as Point, T256Affine as Affine};
 }
 
 impl_traits!(
