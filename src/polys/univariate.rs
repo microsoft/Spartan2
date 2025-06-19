@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 // ax^2 + bx + c stored as vec![c, b, a]
 // ax^3 + bx^2 + cx + d stored as vec![d, c, b, a]
+/// A univariate dense polynomial in coefficient form with big endian storage.
+///
+/// For a polynomial $ax^2 + bx + c$, coefficients are stored as `vec![c, b, a]`.
+/// For a polynomial $ax^3 + bx^2 + cx + d$, coefficients are stored as `vec![d, c, b, a]`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniPoly<Scalar: PrimeField> {
   pub(crate) coeffs: Vec<Scalar>,
@@ -16,12 +20,21 @@ pub struct UniPoly<Scalar: PrimeField> {
 
 // ax^2 + bx + c stored as vec![c, a]
 // ax^3 + bx^2 + cx + d stored as vec![d, c, a]
+/// A univariate dense polynomial with compressed representation (omitted linear term).
+///
+/// The linear term coefficient is omitted to save space. For a polynomial $ax^2 + bx + c$,
+/// coefficients are stored as `vec![c, a]`. For $ax^3 + bx^2 + cx + d$, stored as `vec![d, c, a]`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompressedUniPoly<Scalar: PrimeField> {
   coeffs_except_linear_term: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField> UniPoly<Scalar> {
+  /// Creates a `UniPoly` from its evaluations.
+  ///
+  /// Given evaluation points at consecutive integers starting from 0,
+  /// this function interpolates the unique polynomial of degree `n-1`
+  /// using Gaussian elimination.
   pub fn from_evals(evals: &[Scalar]) -> Self {
     let n = evals.len();
     let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
@@ -43,14 +56,17 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     Self { coeffs }
   }
 
+  /// Returns the degree of the polynomial.
   pub fn degree(&self) -> usize {
     self.coeffs.len() - 1
   }
 
+  /// Evaluates the polynomial at zero.
   pub fn eval_at_zero(&self) -> Scalar {
     self.coeffs[0]
   }
 
+  /// Evaluates the polynomial at one.
   pub fn eval_at_one(&self) -> Scalar {
     (0..self.coeffs.len())
       .into_par_iter()
@@ -58,6 +74,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
       .sum()
   }
 
+  /// Evaluates the polynomial at a given point `r`.
   pub fn evaluate(&self, r: &Scalar) -> Scalar {
     let mut eval = self.coeffs[0];
     let mut power = *r;
@@ -68,6 +85,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     eval
   }
 
+  /// Compresses the polynomial by omitting the linear coefficient.
   pub fn compress(&self) -> CompressedUniPoly<Scalar> {
     let coeffs_except_linear_term = [&self.coeffs[0..1], &self.coeffs[2..]].concat();
     assert_eq!(coeffs_except_linear_term.len() + 1, self.coeffs.len());
@@ -80,6 +98,13 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
 impl<Scalar: PrimeField> CompressedUniPoly<Scalar> {
   // we require eval(0) + eval(1) = hint, so we can solve for the linear term as:
   // linear_term = hint - 2 * constant_term - deg2 term - deg3 term
+  /// Decompresses the polynomial by reconstructing the linear coefficient.
+  ///
+  /// # Arguments
+  /// * `hint` - A hint value that helps reconstruct the linear term
+  ///
+  /// # Returns
+  /// The full `UniPoly` with all coefficients restored.
   pub fn decompress(&self, hint: &Scalar) -> UniPoly<Scalar> {
     let mut linear_term =
       *hint - self.coeffs_except_linear_term[0] - self.coeffs_except_linear_term[0];
@@ -108,6 +133,17 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 
 // This code is based on code from https://github.com/a16z/jolt/blob/main/jolt-core/src/utils/gaussian_elimination.rs, which itself is
 // inspired by https://github.com/TheAlgorithms/Rust/blob/master/src/math/gaussian_elimination.rs
+/// Performs Gaussian elimination on a matrix to solve a linear system.
+///
+/// This function solves for the coefficients of a polynomial given a matrix
+/// where each row represents an evaluation point and the last column contains
+/// the evaluation values.
+///
+/// # Arguments
+/// * `matrix` - A mutable reference to the augmented matrix
+///
+/// # Returns
+/// A vector containing the solution (polynomial coefficients).
 pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Vec<F> {
   let size = matrix.len();
   assert_eq!(size, matrix[0].len() - 1);
@@ -168,6 +204,17 @@ fn eliminate<F: PrimeField>(matrix: &mut [Vec<F>], i: usize) {
 /// # Panics
 ///
 /// Panics if `b` is zero.
+/// Divides two field elements with proper error handling.
+///
+/// # Arguments
+/// * `a` - The dividend
+/// * `b` - The divisor
+///
+/// # Returns
+/// The result of `a / b`
+///
+/// # Panics
+/// Panics if `b` is zero (not invertible).
 pub fn div_f<F: PrimeField>(a: F, b: F) -> F {
   let inverse_b = b.invert();
 

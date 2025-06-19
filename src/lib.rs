@@ -22,9 +22,7 @@ use serde::{Deserialize, Serialize};
 // private modules
 mod digest;
 mod math;
-mod polys;
 mod r1cs;
-mod sumcheck;
 
 #[macro_use]
 mod macros;
@@ -32,7 +30,9 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
+pub mod polys;
 pub mod provider;
+pub mod sumcheck;
 pub mod traits;
 
 use bellpepper::{
