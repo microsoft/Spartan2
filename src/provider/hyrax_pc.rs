@@ -43,7 +43,17 @@ where
 {
   num_rows: usize,
   num_cols: usize,
-  ck: PedersenCommitmentKey<E>,
+  ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
+  h: <E::GE as DlogGroup>::AffineGroupElement,
+}
+
+impl<E: Engine> Len for HyraxCommitmentKey<E>
+where
+  E::GE: DlogGroup,
+{
+  fn length(&self) -> usize {
+    self.num_rows * self.num_cols
+  }
 }
 
 /// Implements derandomization key for Hyrax commitment key
@@ -51,16 +61,16 @@ where
 #[serde(bound = "")]
 pub struct HyraxDerandKey<E: Engine>
 where
-  E::GE: DlogGroup,
+  E::GE: DlogGroupExt,
 {
-  dk: PedersenDerandKey<E>,
+  h: <E::GE as DlogGroup>::AffineGroupElement,
 }
 
 /// Structure that holds commitments
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxCommitment<E: Engine> {
-  comm: Vec<PedersenCommitment<E>>,
+  comm: Vec<E::GE>,
 }
 
 /// Structure that holds blinds
@@ -74,15 +84,6 @@ pub struct HyraxBlind<E: Engine> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HyraxCommitmentEngine<E: Engine> {
   _p: PhantomData<E>,
-}
-
-impl<E: Engine> Len for HyraxCommitmentKey<E>
-where
-  E::GE: DlogGroup,
-{
-  fn length(&self) -> usize {
-    self.num_rows * self.num_cols
-  }
 }
 
 impl<E: Engine> Default for HyraxBlind<E> {
@@ -112,26 +113,27 @@ where
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
     let n = n.next_power_of_two();
     let (num_rows, num_cols) = compute_factored_lens(n);
-    let ck = PedersenCommitmentEngine::setup(label, num_cols);
-    HyraxCommitmentKey {
+
+    let gens = E::GE::from_label(label, n.next_power_of_two() + 1);
+    let (h, ck) = gens.split_first().unwrap();
+
+    Self::CommitmentKey {
       num_rows,
       num_cols,
-      ck,
+      ck: ck.to_vec(),
+      h: *h,
     }
   }
 
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
-    HyraxDerandKey {
-      dk: PedersenCommitmentEngine::derand_key(&ck.ck),
-    }
+    HyraxDerandKey { h: ck.h }
   }
 
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
-    // TODO: make Pedersen blind also an option type
     HyraxBlind {
       blind: Some(
         (0..ck.num_rows)
-          .map(|_| PedersenCommitmentEngine::blind(&ck.ck))
+          .map(|_| E::Scalar::ZERO)
           .collect::<Vec<E::Scalar>>(),
       ),
     }
@@ -154,7 +156,10 @@ where
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        PedersenCommitmentEngine::commit(&ck.ck, &v[ck.num_cols * i..ck.num_cols * (i + 1)], &r[i])
+        E::GE::vartime_multiscalar_mul(
+          &v[ck.num_cols * i..ck.num_cols * (i + 1)],
+          &ck.ck[..v.len()],
+        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
 
@@ -182,11 +187,10 @@ where
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        PedersenCommitmentEngine::commit_small(
-          &ck.ck,
+        E::GE::vartime_multiscalar_mul_small(
           &v[ck.num_cols * i..ck.num_cols * (i + 1)],
-          &r[i],
-        )
+          &ck.ck[..v.len()],
+        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
 
@@ -204,7 +208,7 @@ where
       let r = r.blind.clone().unwrap();
       HyraxCommitment {
         comm: (0..comm.comm.len())
-          .map(|i| PedersenCommitmentEngine::derandomize(&dk.dk, &comm.comm[i], &r[i]))
+          .map(|i| comm.comm[i] - <E::GE as DlogGroup>::group(&dk.h) * r[i])
           .collect(),
       }
     }
@@ -213,14 +217,22 @@ where
 
 impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
 where
-  E::GE: DlogGroup,
+  E::GE: DlogGroupExt,
 {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     let mut v = Vec::new();
     v.append(&mut b"poly_commitment_begin".to_vec());
 
     for c in &self.comm {
-      v.append(&mut c.to_transcript_bytes());
+      let (x, y, is_infinity) = c.to_coordinates();
+      let is_infinity_byte = (!is_infinity).into();
+      let bytes = [
+        x.to_transcript_bytes(),
+        y.to_transcript_bytes(),
+        [is_infinity_byte].to_vec(),
+      ]
+      .concat();
+      v.extend(bytes);
     }
 
     v.append(&mut b"poly_commitment_end".to_vec());
@@ -228,7 +240,7 @@ where
   }
 }
 
-impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroup {}
+impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroupExt {}
 
 /*
 /// Provides an implementation of the hyrax key
@@ -263,22 +275,20 @@ pub struct HyraxEvaluationEngine<E: Engine> {
 impl<E> EvaluationEngineTrait<E> for HyraxEvaluationEngine<E>
 where
   E: Engine<CE = HyraxCommitmentEngine<E>>,
+  E::GE: DlogGroupExt,
 {
-  type CE = G::CE;
   type ProverKey = HyraxProverKey<E>;
   type VerifierKey = HyraxVerifierKey<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
-  fn setup(
-    ck: &<<G as Group>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
-  ) -> (Self::ProverKey, Self::VerifierKey) {
+  fn setup(ck: &CommitmentKey<E>) -> (Self::ProverKey, Self::VerifierKey) {
     let pk = HyraxProverKey::<E> {
-      ck_s: G::CE::setup(b"hyrax", 1),
+      ck_s: E::CE::setup(b"hyrax", 1),
     };
 
     let vk = HyraxVerifierKey::<E> {
       ck_v: ck.clone(),
-      ck_s: G::CE::setup(b"hyrax", 1),
+      ck_s: E::CE::setup(b"hyrax", 1),
     };
 
     (pk, vk)
@@ -287,37 +297,34 @@ where
   fn prove(
     ck: &CommitmentKey<E>,
     pk: &Self::ProverKey,
-    transcript: &mut G::TE,
+    transcript: &mut E::TE,
     comm: &Commitment<E>,
-    poly: &[G::Scalar],
-    point: &[G::Scalar],
-    eval: &G::Scalar,
+    poly: &[E::Scalar],
+    point: &[E::Scalar],
+    eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, SpartanError> {
+    if poly.len() != (2usize).pow(point.len() as u32) {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
     transcript.absorb(b"poly_com", comm);
 
-    let poly_m = MultilinearPolynomial::<G::Scalar>::new(poly.to_vec());
+    let (num_rows, num_cols) = compute_factored_lens(poly.len());
 
-    // assert vectors are of the right size
-    assert_eq!(poly_m.get_num_vars(), point.len());
+    let (num_vars_rows, _) = (num_rows.log_2(), num_cols.log_2());
 
-    let (left_num_vars, right_num_vars) =
-      EqPolynomial::<G::Scalar>::compute_factored_lens(point.len());
-    let L_size = (2usize).pow(left_num_vars as u32);
-    let R_size = (2usize).pow(right_num_vars as u32);
+    let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
+    let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
 
-    // compute the L and R vectors (these depend only on the public challenge point so they are public)
-    let eq = EqPolynomial::new(point.to_vec());
-    let (L, R) = eq.compute_factored_evals();
-
-    assert_eq!(L.len(), L_size);
-    assert_eq!(R.len(), R_size);
+    let poly_m = MultilinearPolynomial::<E::Scalar>::new(poly.to_vec());
 
     // compute the vector underneath L*Z
     // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = poly_m.bound(&L);
+    let LZ = poly_m.bind(&L, &R);
 
     // Commit to LZ
-    let com_LZ = PedersenCommitmentEngine::commit(&ck.ck, &LZ);
+    let r = <PedersenCommitmentEngine<E> as CommitmentEngineTrait<E>>::Blind::default();
+    let com_LZ = PedersenCommitmentEngine::commit(&ck.ck, &LZ, &r);
 
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&com_LZ, &R, eval);
@@ -335,22 +342,28 @@ where
 
   fn verify(
     vk: &Self::VerifierKey,
-    transcript: &mut G::TE,
+    transcript: &mut E::TE,
     comm: &Commitment<E>,
-    point: &[G::Scalar],
-    eval: &G::Scalar,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError> {
     transcript.absorb(b"poly_com", comm);
 
     // compute L and R
-    let eq = EqPolynomial::new(point.to_vec());
-    let (L, R) = eq.compute_factored_evals();
+    // n = 2^point.len()
+    let n = (2_usize).pow(point.len() as u32);
+    let (num_rows, num_cols) = compute_factored_lens(n);
+
+    let (num_vars_rows, num_vars_cols) = (num_rows.log_2(), num_cols.log_2());
+
+    let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
+    let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
 
     // compute a weighted sum of commitments and L
-    let ck = PedersenCommitmentEngine::reinterpret_commitments_as_ck(&comm.comm);
-
-    let com_LZ = PedersenCommitmentEngine::commit(&ck, &L); // computes MSM of commitment and L
+    let ck = PedersenCommitmentKey::<E>::reinterpret_commitments_as_ck(&comm.comm)?;
+    let r = <PedersenCommitmentEngine<E> as CommitmentEngineTrait<E>>::Blind::default();
+    let com_LZ = PedersenCommitmentEngine::commit(&ck.ck, &L, &r); // computes MSM of commitment and L // TODO: fix first argument
 
     let ipa_instance = InnerProductInstance::<E>::new(&com_LZ, &R, eval);
 
