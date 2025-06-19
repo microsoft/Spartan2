@@ -1,7 +1,7 @@
 //! This module implements Spartan's traits using the following several different combinations
 
 // public modules to be used as an evaluation engine with Spartan
-//pub mod hyrax_pc;
+pub mod hyrax_pc;
 pub mod ipa_pc;
 pub mod pasta;
 pub mod pt256;

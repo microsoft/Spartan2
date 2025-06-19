@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(unused_imports)]
 use crate::{
-  Commitment, CommitmentKey,
+  Blind, Commitment, CommitmentKey,
   errors::SpartanError,
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
@@ -10,9 +10,9 @@ use crate::{
     ipa_pc::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
     pedersen::{
       Commitment as PedersenCommitment, CommitmentEngine as PedersenCommitmentEngine,
-      CommitmentKey as PedersenCommitmentKey,
+      CommitmentKey as PedersenCommitmentKey, DerandKey as PedersenDerandKey,
     },
-    traits::DlogGroup,
+    traits::{DlogGroup, DlogGroupExt},
   },
   traits::{
     Engine, Group, TranscriptEngineTrait, TranscriptReprTrait,
@@ -24,10 +24,13 @@ use core::{
   marker::PhantomData,
   ops::{Add, AddAssign, Mul, MulAssign},
 };
+use ff::Field;
 use itertools::{
   EitherOrBoth::{Both, Left, Right},
   Itertools,
 };
+use num_integer::Integer;
+use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +41,19 @@ pub struct HyraxCommitmentKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
+  num_rows: usize,
+  num_cols: usize,
   ck: PedersenCommitmentKey<E>,
+}
+
+/// Implements derandomization key for Hyrax commitment key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxDerandKey<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  dk: PedersenDerandKey<E>,
 }
 
 /// Structure that holds commitments
@@ -46,6 +61,13 @@ where
 #[serde(bound = "")]
 pub struct HyraxCommitment<E: Engine> {
   comm: Vec<PedersenCommitment<E>>,
+}
+
+/// Structure that holds blinds
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxBlind<E: Engine> {
+  blind: Option<Vec<E::Scalar>>,
 }
 
 /// Provides a commitment engine
@@ -59,53 +81,139 @@ where
   E::GE: DlogGroup,
 {
   fn length(&self) -> usize {
-    self.ck.len() * self.ck.len() // we can commit to these many elements
+    self.num_rows * self.num_cols
   }
+}
+
+impl<E: Engine> Default for HyraxBlind<E> {
+  fn default() -> Self {
+    HyraxBlind { blind: None }
+  }
+}
+
+fn compute_factored_lens(n: usize) -> (usize, usize) {
+  let ell = n.log_2();
+  // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
+  let ell1 = (ell + 1) / 2; // This ensures ell1 >= ell2
+  let ell2 = ell / 2;
+  (ell1, ell2)
 }
 
 impl<E: Engine> CommitmentEngineTrait<E> for HyraxCommitmentEngine<E>
 where
-  E::GE: DlogGroup,
+  E::GE: DlogGroupExt,
 {
   type CommitmentKey = HyraxCommitmentKey<E>;
+  type DerandKey = HyraxDerandKey<E>;
   type Commitment = HyraxCommitment<E>;
+  type Blind = HyraxBlind<E>;
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
-    let num_vars = n.next_power_of_two().log_2();
-    let (_left, right) = EqPolynomial::<E::Scalar>::compute_factored_lens(num_vars);
-    let ck = PedersenCommitmentEngine::setup(label, (2usize).pow(right as u32));
-    HyraxCommitmentKey { ck }
+    let n = n.next_power_of_two();
+    let (num_rows, num_cols) = compute_factored_lens(n);
+    let ck = PedersenCommitmentEngine::setup(label, num_cols);
+    HyraxCommitmentKey {
+      num_rows,
+      num_cols,
+      ck,
+    }
   }
 
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar]) -> Self::Commitment {
-    let poly = MultilinearPolynomial::new(v.to_vec());
-    let n = poly.len();
-    let ell = poly.get_num_vars();
-    assert_eq!(n, (2usize).pow(ell as u32));
+  fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
+    HyraxDerandKey {
+      dk: PedersenCommitmentEngine::derand_key(&ck.ck),
+    }
+  }
 
-    let (left_num_vars, right_num_vars) = EqPolynomial::<E::Scalar>::compute_factored_lens(ell);
-    let L_size = (2usize).pow(left_num_vars as u32);
-    let R_size = (2usize).pow(right_num_vars as u32);
-    assert_eq!(L_size * R_size, n);
+  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+    // TODO: make Pedersen blind also an option type
+    HyraxBlind {
+      blind: Some(
+        (0..ck.num_rows)
+          .map(|_| PedersenCommitmentEngine::blind(&ck.ck))
+          .collect::<Vec<E::Scalar>>(),
+      ),
+    }
+  }
 
-    let comm = (0..L_size)
+  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment {
+    let mut v = v.to_vec();
+    // pad with zeros
+    if v.len() != ck.num_rows * ck.num_cols {
+      v.extend(vec![E::Scalar::ZERO; ck.num_rows * ck.num_cols - v.len()]);
+    }
+
+    let r = if r.blind.is_none() {
+      vec![E::Scalar::ZERO; ck.num_rows]
+    } else {
+      r.blind.clone().unwrap()
+    };
+
+    let comm = (0..ck.num_rows)
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        PedersenCommitmentEngine::commit(&ck.ck, &poly.get_Z()[R_size * i..R_size * (i + 1)])
+        PedersenCommitmentEngine::commit(&ck.ck, &v[ck.num_cols * i..ck.num_cols * (i + 1)], &r[i])
       })
       .collect();
 
-    HyraxCommitment {
-      comm,
-      is_default: false,
+    HyraxCommitment { comm }
+  }
+
+  fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
+    ck: &Self::CommitmentKey,
+    v: &[T],
+    r: &Self::Blind,
+  ) -> Self::Commitment {
+    let mut v = v.to_vec();
+    // pad with zeros
+    if v.len() != ck.num_rows * ck.num_cols {
+      v.extend(vec![T::zero(); ck.num_rows * ck.num_cols - v.len()]);
+    }
+
+    let r = if r.blind.is_none() {
+      vec![E::Scalar::ZERO; ck.num_rows]
+    } else {
+      r.blind.clone().unwrap()
+    };
+
+    let comm = (0..ck.num_rows)
+      .collect::<Vec<usize>>()
+      .into_par_iter()
+      .map(|i| {
+        PedersenCommitmentEngine::commit_small(
+          &ck.ck,
+          &v[ck.num_cols * i..ck.num_cols * (i + 1)],
+          &r[i],
+        )
+      })
+      .collect();
+
+    HyraxCommitment { comm }
+  }
+
+  fn derandomize(
+    dk: &Self::DerandKey,
+    comm: &Self::Commitment,
+    r: &Self::Blind,
+  ) -> Self::Commitment {
+    if r.blind.is_none() {
+      comm.clone()
+    } else {
+      let r = r.blind.clone().unwrap();
+      HyraxCommitment {
+        comm: (0..comm.comm.len())
+          .map(|i| PedersenCommitmentEngine::derandomize(&dk.dk, &comm.comm[i], &r[i]))
+          .collect(),
+      }
     }
   }
 }
 
-impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E> 
-  where E::GE: DlogGroup
+impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
+where
+  E::GE: DlogGroup,
 {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     let mut v = Vec::new();
@@ -120,12 +228,7 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
   }
 }
 
-impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E>
-where
-  E::GE: DlogGroup,
-{
-}
-
+impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroup {}
 
 /*
 /// Provides an implementation of the hyrax key
