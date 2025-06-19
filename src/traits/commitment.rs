@@ -50,7 +50,15 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
   type Commitment: CommitmentTrait<E>;
 
   /// Holds the type of the blind
-  type Blind: Clone + Debug + Send + Sync + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>;
+  type Blind: Clone
+    + Debug
+    + Default
+    + Send
+    + Sync
+    + PartialEq
+    + Eq
+    + Serialize
+    + for<'de> Deserialize<'de>;
 
   /// Samples a new commitment key of a specified size
   fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey;
@@ -69,7 +77,7 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
     ck: &Self::CommitmentKey,
     v: &[Vec<E::Scalar>],
     r: &[Self::Blind],
-  ) -> (Vec<Self::Commitment>, Vec<Self::Blind>) {
+  ) -> Vec<Self::Commitment> {
     assert_eq!(v.len(), r.len());
     v.par_iter()
       .zip(r.par_iter())

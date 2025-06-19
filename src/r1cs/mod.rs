@@ -253,16 +253,19 @@ impl<E: Engine> R1CSWitness<E> {
     let mut W = self.W.clone();
     W.extend(vec![E::Scalar::ZERO; S.num_vars - W.len()]);
 
-    Self { W, r_W: self.r_W }
+    Self {
+      W,
+      r_W: self.r_W.clone(),
+    }
   }
 
   pub fn derandomize(&self) -> (Self, Blind<E>) {
     (
       R1CSWitness {
         W: self.W.clone(),
-        r_W: E::Scalar::ZERO,
+        r_W: Blind::<E>::default(),
       },
-      self.r_W,
+      self.r_W.clone(),
     )
   }
 }
@@ -284,7 +287,7 @@ impl<E: Engine> R1CSInstance<E> {
     }
   }
 
-  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &E::Scalar) -> R1CSInstance<E> {
+  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &Blind<E>) -> R1CSInstance<E> {
     R1CSInstance {
       comm_W: CE::<E>::derandomize(dk, &self.comm_W, r_W),
       X: self.X.clone(),

@@ -162,7 +162,7 @@ where
     Self::DerandKey { h: ck.h }
   }
 
-  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+  fn blind(_: &Self::CommitmentKey) -> Self::Blind {
     E::Scalar::random(&mut OsRng)
   }
 

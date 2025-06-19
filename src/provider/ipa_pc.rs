@@ -1,6 +1,6 @@
 //! This module implements `EvaluationEngine` using an IPA-based polynomial commitment scheme
 use crate::{
-  CE, Commitment, CommitmentKey,
+  Blind, CE, Commitment, CommitmentKey,
   errors::SpartanError,
   polys::eq::EqPolynomial,
   provider::{
@@ -224,7 +224,7 @@ where
           .chain(iter::once(&c_L))
           .copied()
           .collect::<Vec<E::Scalar>>(),
-        &E::Scalar::ZERO,
+        &Blind::<E>::default(),
       );
       let R = CE::<E>::commit(
         &ck_L.combine(&ck_c),
@@ -233,7 +233,7 @@ where
           .chain(iter::once(&c_R))
           .copied()
           .collect::<Vec<E::Scalar>>(),
-        &E::Scalar::ZERO,
+        &Blind::<E>::default(),
       );
 
       transcript.absorb(b"L", &L);
@@ -312,7 +312,7 @@ where
     let r = transcript.squeeze(b"r")?;
     let ck_c = ck_c.scale(&r);
 
-    let P = U.comm_a_vec.clone() + CE::<E>::commit(&ck_c, &[U.c], &E::Scalar::ZERO);
+    let P = U.comm_a_vec.clone() + CE::<E>::commit(&ck_c, &[U.c], &Blind::<E>::default());
 
     let batch_invert = |v: &[E::Scalar]| -> Result<Vec<E::Scalar>, SpartanError> {
       let mut products = vec![E::Scalar::ZERO; v.len()];
@@ -378,7 +378,7 @@ where
     };
 
     let ck_hat = {
-      let c = CE::<E>::commit(&ck, &s, &E::Scalar::ZERO);
+      let c = CE::<E>::commit(&ck, &s, &Blind::<E>::default());
       CommitmentKey::<E>::reinterpret_commitments_as_ck(&[c])?
     };
 
@@ -400,7 +400,7 @@ where
           .chain(iter::once(&E::Scalar::ONE))
           .copied()
           .collect::<Vec<E::Scalar>>(),
-        &E::Scalar::ZERO,
+        &Blind::<E>::default(),
       )
     };
 
@@ -408,7 +408,7 @@ where
       == CE::<E>::commit(
         &ck_hat.combine(&ck_c),
         &[self.a_hat, self.a_hat * b_hat],
-        &E::Scalar::ZERO,
+        &Blind::<E>::default(),
       )
     {
       Ok(())

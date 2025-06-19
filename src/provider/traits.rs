@@ -1,3 +1,21 @@
+//! Provides traits and extensions for groups, discrete logarithm operations, and homomorphic commitments.
+//!
+//! This module defines several key traits that abstract over different cryptographic primitives:
+//!
+//! - [`GroupOps`]: A helper trait bundling common group operations (`Add`, `Sub`, `AddAssign`, `SubAssign`)
+//! - [`GroupOpsOwned`]: Extends `GroupOps` to work with references
+//! - [`ScalarMulOwned`]: Trait for scalar multiplication with references
+//! - [`DlogGroup`]: Core trait for groups supporting discrete logarithm operations
+//! - [`DlogGroupExt`]: Extension trait for multi-scalar multiplication (MSM) operations
+//! - [`HomomorphicCommitmentTrait`]: Trait for homomorphic commitments
+//!
+//! Additionally, the module provides two macros for implementing these traits:
+//!
+//! - [`impl_traits_no_dlog_ext`]: Implements all traits except for `DlogGroupExt`
+//! - [`impl_traits`]: Implements all traits including `DlogGroupExt`
+//!
+//! These traits and macros provide a consistent interface for elliptic curve operations
+//! and other algebraic structures used throughout the Spartan proof system.
 use crate::traits::{
   Engine, Group, TranscriptReprTrait,
   commitment::{CommitmentTrait, ScalarMul},
