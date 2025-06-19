@@ -1,5 +1,5 @@
 //! This module contains the definitions of polynomial types used in the Spartan SNARK.
-pub(crate) mod eq;
-pub(crate) mod multilinear;
-pub(crate) mod power;
-pub(crate) mod univariate;
+pub mod eq;
+pub mod multilinear;
+pub mod power;
+pub mod univariate;

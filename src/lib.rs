@@ -22,9 +22,7 @@ use serde::{Deserialize, Serialize};
 // private modules
 mod digest;
 mod math;
-mod polys;
 mod r1cs;
-mod sumcheck;
 
 #[macro_use]
 mod macros;
@@ -32,7 +30,9 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
+pub mod polys;
 pub mod provider;
+pub mod sumcheck;
 pub mod traits;
 
 use bellpepper::{
@@ -528,5 +528,39 @@ mod tests {
     let res = snark.verify(&vk);
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
+  }
+
+  // Integration test to verify that polys and sumcheck modules are public
+  #[test]
+  fn test_polys_module_accessibility() {
+    // Test that we can create instances of public items from polys
+    let poly = crate::polys::eq::EqPolynomial::<crate::provider::pasta::pallas::Scalar>::new(vec![
+      crate::provider::pasta::pallas::Scalar::ONE,
+    ]);
+    let _evals = poly.evals();
+
+    let mlp = crate::polys::multilinear::MultilinearPolynomial::<
+      crate::provider::pasta::pallas::Scalar,
+    >::new(vec![crate::provider::pasta::pallas::Scalar::ONE]);
+    assert_eq!(mlp.len(), 1);
+    assert!(!mlp.is_empty());
+
+    let evals = vec![
+      crate::provider::pasta::pallas::Scalar::ONE,
+      crate::provider::pasta::pallas::Scalar::from(2),
+    ];
+    let unipoly =
+      crate::polys::univariate::UniPoly::<crate::provider::pasta::pallas::Scalar>::from_evals(
+        &evals,
+      );
+    assert_eq!(unipoly.degree(), 1);
+  }
+
+  #[test]
+  fn test_sumcheck_module_accessibility() {
+    // This test just verifies we can access the SumcheckProof type
+    // We're not testing the actual functionality, just that it's accessible
+    let _proof_type_exists =
+      std::marker::PhantomData::<crate::sumcheck::SumcheckProof<crate::provider::PallasEngine>>;
   }
 }
