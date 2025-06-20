@@ -37,10 +37,8 @@ where
     shape: &R1CSShape<E>,
     ck: &CommitmentKey<E>,
   ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError> {
-    let W = R1CSWitness::<E>::new(shape, &self.aux_assignment)?;
+    let (W, comm_W) = R1CSWitness::<E>::new(ck, shape, &self.aux_assignment)?;
     let X = &self.input_assignment[1..];
-
-    let comm_W = W.commit(ck);
 
     let instance = R1CSInstance::<E>::new(shape, &comm_W, X)?;
 

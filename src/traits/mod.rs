@@ -1,5 +1,5 @@
 //! This module defines various traits required by the users of the library to implement.
-use crate::errors::SpartanError;
+use crate::{errors::SpartanError, traits::evaluation::EvaluationEngineTrait};
 use core::fmt::Debug;
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
@@ -44,6 +44,9 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
 
   /// A type that defines a commitment engine over scalars in the group
   type CE: CommitmentEngineTrait<Self>;
+
+  /// A type that defines an evaluation engine over scalars in the group
+  type EE: EvaluationEngineTrait<Self>;
 }
 
 /// This trait allows types to implement how they want to be added to `TranscriptEngine`

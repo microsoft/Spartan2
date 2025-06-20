@@ -1,6 +1,6 @@
 //! This module defines R1CS related types
 use crate::{
-  CE, Commitment, CommitmentKey, DerandKey,
+  Blind, CE, Commitment, CommitmentKey, DerandKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   traits::{Engine, TranscriptReprTrait, commitment::CommitmentEngineTrait},
@@ -8,7 +8,6 @@ use crate::{
 use core::cmp::max;
 use ff::Field;
 use once_cell::sync::OnceCell;
-use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +33,7 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSWitness<E: Engine> {
   pub(crate) W: Vec<E::Scalar>,
-  pub(crate) r_W: E::Scalar,
+  pub(crate) r_W: Blind<E>,
 }
 
 /// A type that holds an R1CS instance
@@ -43,25 +42,6 @@ pub struct R1CSWitness<E: Engine> {
 pub struct R1CSInstance<E: Engine> {
   pub(crate) comm_W: Commitment<E>,
   pub(crate) X: Vec<E::Scalar>,
-}
-
-/// A type that holds a witness for a given Relaxed R1CS instance
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RelaxedR1CSWitness<E: Engine> {
-  pub(crate) W: Vec<E::Scalar>,
-  pub(crate) r_W: E::Scalar,
-  pub(crate) E: Vec<E::Scalar>,
-  pub(crate) r_E: E::Scalar,
-}
-
-/// A type that holds a Relaxed R1CS instance
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct RelaxedR1CSInstance<E: Engine> {
-  pub(crate) comm_W: Commitment<E>,
-  pub(crate) comm_E: Commitment<E>,
-  pub(crate) X: Vec<E::Scalar>,
-  pub(crate) u: E::Scalar,
 }
 
 impl<E: Engine> R1CSShape<E> {
@@ -252,19 +232,20 @@ impl<E: Engine> R1CSShape<E> {
 
 impl<E: Engine> R1CSWitness<E> {
   /// A method to create a witness object using a vector of scalars
-  pub fn new(S: &R1CSShape<E>, W: &[E::Scalar]) -> Result<R1CSWitness<E>, SpartanError> {
+  pub fn new(
+    ck: &CommitmentKey<E>,
+    S: &R1CSShape<E>,
+    W: &[E::Scalar],
+  ) -> Result<(R1CSWitness<E>, Commitment<E>), SpartanError> {
     let mut W = W.to_vec();
     W.resize(S.num_vars, E::Scalar::ZERO);
 
-    Ok(R1CSWitness {
-      W,
-      r_W: E::Scalar::random(&mut OsRng),
-    })
-  }
+    let r_W = CE::<E>::blind(ck);
+    let comm_W = CE::<E>::commit(ck, &W, &r_W);
 
-  /// Commits to the witness using the supplied generators
-  pub fn commit(&self, ck: &CommitmentKey<E>) -> Commitment<E> {
-    CE::<E>::commit(ck, &self.W, &self.r_W)
+    let W = R1CSWitness { W, r_W };
+
+    Ok((W, comm_W))
   }
 
   /// Pads the provided witness to the correct length
@@ -272,16 +253,19 @@ impl<E: Engine> R1CSWitness<E> {
     let mut W = self.W.clone();
     W.extend(vec![E::Scalar::ZERO; S.num_vars - W.len()]);
 
-    Self { W, r_W: self.r_W }
+    Self {
+      W,
+      r_W: self.r_W.clone(),
+    }
   }
 
-  pub fn derandomize(&self) -> (Self, E::Scalar) {
+  pub fn derandomize(&self) -> (Self, Blind<E>) {
     (
       R1CSWitness {
         W: self.W.clone(),
-        r_W: E::Scalar::ZERO,
+        r_W: Blind::<E>::default(),
       },
-      self.r_W,
+      self.r_W.clone(),
     )
   }
 }
@@ -303,7 +287,7 @@ impl<E: Engine> R1CSInstance<E> {
     }
   }
 
-  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &E::Scalar) -> R1CSInstance<E> {
+  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &Blind<E>) -> R1CSInstance<E> {
     R1CSInstance {
       comm_W: CE::<E>::derandomize(dk, &self.comm_W, r_W),
       X: self.X.clone(),
@@ -340,7 +324,7 @@ mod tests {
       // `(Z1 + I0) * 1 - Z2 = 0`
       // `(Z2 + 5) * 1 - I1 = 0`
 
-      // Relaxed R1CS is a set of three sparse matrices (A B C), where there is a row for every
+      // R1CS is a set of three sparse matrices (A B C), where there is a row for every
       // constraint and a column for every entry in z = (vars, u, inputs)
       // An R1CS instance is satisfiable iff:
       // Az \circ Bz = u \cdot Cz + E, where z = (vars, 1, inputs)

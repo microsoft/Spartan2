@@ -75,6 +75,17 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     self.num_vars -= 1;
   }
 
+  /// binds the polynomial's top variables using the given scalars.
+  pub fn bind(&self, L: &[Scalar], R: &[Scalar]) -> Vec<Scalar> {
+    (0..R.len())
+      .map(|i| {
+        (0..L.len())
+          .map(|j| L[j] * self.Z[j * R.len() + i])
+          .fold(Scalar::ZERO, |x, y| x + y)
+      })
+      .collect()
+  }
+
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.
   ///

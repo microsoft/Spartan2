@@ -1,4 +1,20 @@
-//! This module defines traits for discrete logarithm groups and their operations.
+//! Provides traits and extensions for groups, discrete logarithm operations, and homomorphic commitments.
+//!
+//! This module defines several key traits that abstract over different cryptographic primitives:
+//!
+//! - [`GroupOps`]: A helper trait bundling common group operations (`Add`, `Sub`, `AddAssign`, `SubAssign`)
+//! - [`GroupOpsOwned`]: Extends `GroupOps` to work with references
+//! - [`ScalarMulOwned`]: Trait for scalar multiplication with references
+//! - [`DlogGroup`]: Core trait for groups supporting discrete logarithm operations
+//! - [`DlogGroupExt`]: Extension trait for multi-scalar multiplication (MSM) operations
+//!
+//! Additionally, the module provides two macros for implementing these traits:
+//!
+//! - [`impl_traits_no_dlog_ext`]: Implements all traits except for `DlogGroupExt`
+//! - [`impl_traits`]: Implements all traits including `DlogGroupExt`
+//!
+//! These traits and macros provide a consistent interface for elliptic curve operations
+//! and other algebraic structures used throughout the Spartan proof system.
 use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
 use core::{
   fmt::Debug,
@@ -32,6 +48,7 @@ impl<T, Rhs, Output> ScalarMulOwned<Rhs, Output> for T where T: for<'r> ScalarMu
 /// A trait that defines the core discrete logarithm group functionality
 pub trait DlogGroup:
   Group
+  + TranscriptReprTrait<Self>
   + Serialize
   + for<'de> Deserialize<'de>
   + GroupOps
@@ -222,6 +239,16 @@ macro_rules! impl_traits_no_dlog_ext {
     impl<G: DlogGroup> TranscriptReprTrait<G> for $name::Affine {
       fn to_transcript_bytes(&self) -> Vec<u8> {
         let coords = self.coordinates().unwrap();
+        let x_bytes = coords.x().to_bytes().into_iter();
+        let y_bytes = coords.y().to_bytes().into_iter();
+        x_bytes.rev().chain(y_bytes.rev()).collect()
+      }
+    }
+
+    impl<G: DlogGroup> TranscriptReprTrait<G> for $name::Point {
+      fn to_transcript_bytes(&self) -> Vec<u8> {
+        let affine = self.affine();
+        let coords = affine.coordinates().unwrap();
         let x_bytes = coords.x().to_bytes().into_iter();
         let y_bytes = coords.y().to_bytes().into_iter();
         x_bytes.rev().chain(y_bytes.rev()).collect()
