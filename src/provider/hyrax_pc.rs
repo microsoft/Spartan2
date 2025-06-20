@@ -83,7 +83,7 @@ impl<E: Engine> Default for HyraxBlind<E> {
 fn compute_factored_lens(n: usize) -> (usize, usize) {
   let ell = n.log_2();
   // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
-  let ell1 = (ell + 1) / 2; // This ensures ell1 >= ell2
+  let ell1 = ell.div_ceil(2); // This ensures ell1 >= ell2
   let ell2 = ell / 2;
 
   (1 << ell1, 1 << ell2)
