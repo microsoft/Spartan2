@@ -222,15 +222,7 @@ where
     v.append(&mut b"poly_commitment_begin".to_vec());
 
     for c in &self.comm {
-      let (x, y, is_infinity) = c.to_coordinates();
-      let is_infinity_byte = (!is_infinity).into();
-      let bytes = [
-        x.to_transcript_bytes(),
-        y.to_transcript_bytes(),
-        [is_infinity_byte].to_vec(),
-      ]
-      .concat();
-      v.extend(bytes);
+      v.extend(c.to_transcript_bytes());
     }
 
     v.append(&mut b"poly_commitment_end".to_vec());

@@ -6,10 +6,7 @@ use crate::{
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
   },
 };
-use core::{
-  fmt::Debug,
-  marker::PhantomData,
-};
+use core::{fmt::Debug, marker::PhantomData};
 use ff::Field;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
@@ -69,14 +66,7 @@ where
   E::GE: DlogGroup,
 {
   fn to_transcript_bytes(&self) -> Vec<u8> {
-    let (x, y, is_infinity) = self.comm.to_coordinates();
-    let is_infinity_byte = (!is_infinity).into();
-    [
-      x.to_transcript_bytes(),
-      y.to_transcript_bytes(),
-      [is_infinity_byte].to_vec(),
-    ]
-    .concat()
+    self.comm.to_transcript_bytes()
   }
 }
 
