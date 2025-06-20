@@ -23,14 +23,12 @@ use serde::{Deserialize, Serialize};
 mod math;
 mod r1cs;
 
-// public modules
-pub mod digest;
-
 #[macro_use]
 mod macros;
 
 // public modules
 pub mod bellpepper;
+pub mod digest;
 pub mod errors;
 pub mod polys;
 pub mod provider;
