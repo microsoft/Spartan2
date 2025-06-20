@@ -20,7 +20,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // private modules
-mod digest;
 mod math;
 mod r1cs;
 
@@ -29,6 +28,7 @@ mod macros;
 
 // public modules
 pub mod bellpepper;
+pub mod digest;
 pub mod errors;
 pub mod polys;
 pub mod provider;
