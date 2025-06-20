@@ -6,9 +6,8 @@ use crate::{
   provider::{
     pedersen::{
       CommitmentEngine as PedersenCommitmentEngine, CommitmentKey as PedersenCommitmentKey,
-      CommitmentKeyExtTrait,
     },
-    traits::{DlogGroup, DlogGroupExt, HomomorphicCommitmentTrait},
+    traits::{DlogGroup, DlogGroupExt},
   },
   traits::{
     Engine, TranscriptEngineTrait, TranscriptReprTrait, commitment::CommitmentEngineTrait,
@@ -51,8 +50,6 @@ impl<E> EvaluationEngineTrait<E> for EvaluationEngine<E>
 where
   E: Engine<CE = PedersenCommitmentEngine<E>>,
   E::GE: DlogGroupExt,
-  CommitmentKey<E>: CommitmentKeyExtTrait<E>,
-  <E::CE as CommitmentEngineTrait<E>>::Commitment: HomomorphicCommitmentTrait<E>,
 {
   type ProverKey = ProverKey<E>;
   type VerifierKey = VerifierKey<E>;
