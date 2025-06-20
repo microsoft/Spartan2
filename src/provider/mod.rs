@@ -14,20 +14,20 @@ mod msm;
 
 use crate::{
   provider::{
+    hyrax_pc::HyraxCommitmentEngine,
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
-    pedersen::CommitmentEngine as PedersenCommitmentEngine,
     pt256::{p256, t256},
   },
   traits::Engine,
 };
 use serde::{Deserialize, Serialize};
 
-/// An implementation of the Spartan `Engine` trait with Pallas curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Pallas curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PallasEngine;
 
-/// An implementation of the Spartan `Engine` trait with Vesta curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with Vesta curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VestaEngine;
 
@@ -36,7 +36,7 @@ impl Engine for PallasEngine {
   type Scalar = pallas::Scalar;
   type GE = pallas::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = PedersenCommitmentEngine<Self>;
+  type CE = HyraxCommitmentEngine<Self>;
 }
 
 impl Engine for VestaEngine {
@@ -44,14 +44,14 @@ impl Engine for VestaEngine {
   type Scalar = vesta::Scalar;
   type GE = vesta::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = PedersenCommitmentEngine<Self>;
+  type CE = HyraxCommitmentEngine<Self>;
 }
 
-/// An implementation of the Spartan `Engine` trait with P256 curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with P256 curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct P256Engine;
 
-/// An implementation of the Spartan `Engine` trait with T256 curve and Pedersen commitment scheme
+/// An implementation of the Spartan `Engine` trait with T256 curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct T256Engine;
 
@@ -60,7 +60,7 @@ impl Engine for P256Engine {
   type Scalar = p256::Scalar;
   type GE = p256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = PedersenCommitmentEngine<Self>;
+  type CE = HyraxCommitmentEngine<Self>;
 }
 
 impl Engine for T256Engine {
@@ -68,7 +68,7 @@ impl Engine for T256Engine {
   type Scalar = t256::Scalar;
   type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = PedersenCommitmentEngine<Self>;
+  type CE = HyraxCommitmentEngine<Self>;
 }
 
 #[cfg(test)]

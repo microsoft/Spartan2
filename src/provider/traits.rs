@@ -52,6 +52,7 @@ impl<T, Rhs, Output> ScalarMulOwned<Rhs, Output> for T where T: for<'r> ScalarMu
 /// A trait that defines the core discrete logarithm group functionality
 pub trait DlogGroup:
   Group
+  + TranscriptReprTrait<Self>
   + Serialize
   + for<'de> Deserialize<'de>
   + GroupOps
@@ -248,6 +249,16 @@ macro_rules! impl_traits_no_dlog_ext {
     impl<G: DlogGroup> TranscriptReprTrait<G> for $name::Affine {
       fn to_transcript_bytes(&self) -> Vec<u8> {
         let coords = self.coordinates().unwrap();
+        let x_bytes = coords.x().to_bytes().into_iter();
+        let y_bytes = coords.y().to_bytes().into_iter();
+        x_bytes.rev().chain(y_bytes.rev()).collect()
+      }
+    }
+
+    impl<G: DlogGroup> TranscriptReprTrait<G> for $name::Point {
+      fn to_transcript_bytes(&self) -> Vec<u8> {
+        let affine = self.affine();
+        let coords = affine.coordinates().unwrap();
         let x_bytes = coords.x().to_bytes().into_iter();
         let y_bytes = coords.y().to_bytes().into_iter();
         x_bytes.rev().chain(y_bytes.rev()).collect()

@@ -504,12 +504,12 @@ mod tests {
   #[test]
   fn test_snark() {
     type E = crate::provider::PallasEngine;
-    type EE = crate::provider::ipa_pc::EvaluationEngine<E>;
+    type EE = crate::provider::hyrax_pc::HyraxEvaluationEngine<E>;
     type S = R1CSSNARK<E, EE>;
     test_snark_with::<E, S>();
 
     type E2 = crate::provider::T256Engine;
-    type EE2 = crate::provider::ipa_pc::EvaluationEngine<E2>;
+    type EE2 = crate::provider::hyrax_pc::HyraxEvaluationEngine<E2>;
     type S2 = crate::R1CSSNARK<E2, EE2>;
     test_snark_with::<E2, S2>();
   }
