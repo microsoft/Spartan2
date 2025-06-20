@@ -5,6 +5,7 @@ use crate::{
   errors::SpartanError,
   traits::{Engine, commitment::CommitmentEngineTrait},
 };
+use core::fmt::Debug;
 use serde::{Deserialize, Serialize};
 
 /// A trait that ties different pieces of the commitment evaluation together
@@ -16,7 +17,7 @@ pub trait EvaluationEngineTrait<E: Engine>: Clone + Send + Sync {
   type VerifierKey: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// A type that holds the evaluation argument
-  type EvaluationArgument: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// A method to perform any additional setup needed to produce proofs of evaluations
   fn setup(

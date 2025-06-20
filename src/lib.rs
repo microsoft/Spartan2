@@ -65,9 +65,9 @@ type Blind<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Blind;
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ProverKey<E: Engine, EE: EvaluationEngineTrait<E>> {
+pub struct ProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  pk_ee: EE::ProverKey,
+  pk_ee: <E::EE as EvaluationEngineTrait<E>>::ProverKey,
   S: R1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -75,17 +75,17 @@ pub struct ProverKey<E: Engine, EE: EvaluationEngineTrait<E>> {
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct VerifierKey<E: Engine, EE: EvaluationEngineTrait<E>> {
-  vk_ee: EE::VerifierKey,
+pub struct VerifierKey<E: Engine> {
+  vk_ee: <E::EE as EvaluationEngineTrait<E>>::VerifierKey,
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> SimpleDigestible for VerifierKey<E, EE> {}
+impl<E: Engine> SimpleDigestible for VerifierKey<E> {}
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> VerifierKey<E, EE> {
-  fn new(shape: R1CSShape<E>, vk_ee: EE::VerifierKey) -> Self {
+impl<E: Engine> VerifierKey<E> {
+  fn new(shape: R1CSShape<E>, vk_ee: <E::EE as EvaluationEngineTrait<E>>::VerifierKey) -> Self {
     VerifierKey {
       vk_ee,
       S: shape,
@@ -94,7 +94,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> VerifierKey<E, EE> {
   }
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> DigestHelperTrait<E> for VerifierKey<E, EE> {
+impl<E: Engine> DigestHelperTrait<E> for VerifierKey<E> {
   /// Returns the digest of the verifier's key.
   fn digest(&self) -> Result<SpartanDigest, SpartanError> {
     self
@@ -155,18 +155,18 @@ fn compute_eval_table_sparse<E: Engine>(
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct R1CSSNARK<E: Engine, EE: EvaluationEngineTrait<E>> {
+pub struct R1CSSNARK<E: Engine> {
   U: R1CSInstance<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
-  eval_arg: EE::EvaluationArgument,
+  eval_arg: <E::EE as EvaluationEngineTrait<E>>::EvaluationArgument,
 }
 
-impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E, EE> {
-  type ProverKey = ProverKey<E, EE>;
-  type VerifierKey = VerifierKey<E, EE>;
+impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
+  type ProverKey = ProverKey<E>;
+  type VerifierKey = VerifierKey<E>;
 
   fn setup<C: Circuit<E::Scalar>>(
     circuit: C,
@@ -195,11 +195,11 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
 
     let (S, ck) = cs.r1cs_shape();
 
-    let (pk_ee, vk_ee) = EE::setup(&ck);
+    let (pk_ee, vk_ee) = E::EE::setup(&ck);
 
     let S = S.pad();
 
-    let vk: VerifierKey<E, EE> = VerifierKey::new(S.clone(), vk_ee);
+    let vk: VerifierKey<E> = VerifierKey::new(S.clone(), vk_ee);
 
     let pk = ProverKey {
       ck,
@@ -324,7 +324,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
 
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
 
-    let eval_arg = EE::prove(
+    let eval_arg = E::EE::prove(
       &pk.ck,
       &pk.pk_ee,
       &mut transcript,
@@ -445,7 +445,7 @@ impl<E: Engine, EE: EvaluationEngineTrait<E>> R1CSSNARKTrait<E> for R1CSSNARK<E,
     }
 
     // verify
-    EE::verify(
+    E::EE::verify(
       &vk.vk_ee,
       &mut transcript,
       &self.U.comm_W,
@@ -504,13 +504,11 @@ mod tests {
   #[test]
   fn test_snark() {
     type E = crate::provider::PallasEngine;
-    type EE = crate::provider::hyrax_pc::HyraxEvaluationEngine<E>;
-    type S = R1CSSNARK<E, EE>;
+    type S = R1CSSNARK<E>;
     test_snark_with::<E, S>();
 
     type E2 = crate::provider::T256Engine;
-    type EE2 = crate::provider::hyrax_pc::HyraxEvaluationEngine<E2>;
-    type S2 = crate::R1CSSNARK<E2, EE2>;
+    type S2 = crate::R1CSSNARK<E2>;
     test_snark_with::<E2, S2>();
   }
 

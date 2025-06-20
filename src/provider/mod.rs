@@ -14,7 +14,7 @@ mod msm;
 
 use crate::{
   provider::{
-    hyrax_pc::HyraxCommitmentEngine,
+    hyrax_pc::{HyraxCommitmentEngine, HyraxEvaluationEngine},
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
     pt256::{p256, t256},
@@ -37,6 +37,7 @@ impl Engine for PallasEngine {
   type GE = pallas::Point;
   type TE = Keccak256Transcript<Self>;
   type CE = HyraxCommitmentEngine<Self>;
+  type EE = HyraxEvaluationEngine<Self>;
 }
 
 impl Engine for VestaEngine {
@@ -45,6 +46,7 @@ impl Engine for VestaEngine {
   type GE = vesta::Point;
   type TE = Keccak256Transcript<Self>;
   type CE = HyraxCommitmentEngine<Self>;
+  type EE = HyraxEvaluationEngine<Self>;
 }
 
 /// An implementation of the Spartan `Engine` trait with P256 curve and Hyrax commitment scheme
@@ -61,6 +63,7 @@ impl Engine for P256Engine {
   type GE = p256::Point;
   type TE = Keccak256Transcript<Self>;
   type CE = HyraxCommitmentEngine<Self>;
+  type EE = HyraxEvaluationEngine<Self>;
 }
 
 impl Engine for T256Engine {
@@ -69,6 +72,7 @@ impl Engine for T256Engine {
   type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
   type CE = HyraxCommitmentEngine<Self>;
+  type EE = HyraxEvaluationEngine<Self>;
 }
 
 #[cfg(test)]
