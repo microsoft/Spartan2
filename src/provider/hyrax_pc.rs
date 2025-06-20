@@ -187,7 +187,7 @@ where
       .map(|i| {
         E::GE::vartime_multiscalar_mul_small(
           &v[ck.num_cols * i..ck.num_cols * (i + 1)],
-          &ck.ck[..v.len()],
+          &ck.ck[..ck.num_cols],
         ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
