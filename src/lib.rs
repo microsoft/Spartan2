@@ -20,9 +20,11 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // private modules
-mod digest;
 mod math;
 mod r1cs;
+
+// public modules
+pub mod digest;
 
 #[macro_use]
 mod macros;
