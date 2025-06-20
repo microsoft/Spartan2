@@ -7,7 +7,6 @@
 //! - [`ScalarMulOwned`]: Trait for scalar multiplication with references
 //! - [`DlogGroup`]: Core trait for groups supporting discrete logarithm operations
 //! - [`DlogGroupExt`]: Extension trait for multi-scalar multiplication (MSM) operations
-//! - [`HomomorphicCommitmentTrait`]: Trait for homomorphic commitments
 //!
 //! Additionally, the module provides two macros for implementing these traits:
 //!
@@ -16,10 +15,7 @@
 //!
 //! These traits and macros provide a consistent interface for elliptic curve operations
 //! and other algebraic structures used throughout the Spartan proof system.
-use crate::traits::{
-  Engine, Group, TranscriptReprTrait,
-  commitment::{CommitmentTrait, ScalarMul},
-};
+use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
 use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Sub, SubAssign},
@@ -124,12 +120,6 @@ pub trait DlogGroupExt: DlogGroup {
       .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()]))
       .collect::<Vec<_>>()
   }
-}
-
-/// A trait that defines the homomorphic commitment functionality
-pub trait HomomorphicCommitmentTrait<E: Engine>:
-  CommitmentTrait<E> + Add<Self, Output = Self> + ScalarMul<E::Scalar>
-{
 }
 
 /// Implements Spartan's traits except DlogGroupExt so that the MSM can be implemented differently
