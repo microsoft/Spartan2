@@ -2,7 +2,20 @@
 
 Spartan is a high-speed zkSNARK, where a zkSNARK is type cryptographic proof system that enables a prover to prove a mathematical statement to a verifier with a short proof and succinct verification, and without revealing anything beyond the validity of the statement. Spartan provides a linear-time polynomial IOP that when combined with a polynomial commitment scheme provides a succinct interactive argument. It is made non-interactive using the Fiat-Shamir transform.
 
-Compared to an earlier implementation of Spartan, the goal of this project is to provide an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellperson. We currently support R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The proofs are *not* zero-knowledge (we plan to add it in the near future). The first version of this code is derived from Nova's open-source code.
+Compared to an earlier implementation of Spartan, this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The proofs are *not* zero-knowledge (we plan to add it in the near future). The first version of this code is derived from Nova's open-source code.
+
+### Supported polynomial commitment schemes
+- [x] Elliptic-curve based schemes
+  - [x] Bulletproofs-based PCS
+  - [x] Hyrax PCS
+- [ ] Hash-based schemes
+  - [ ] Basefold
+  - [ ] WHIR
+  - [ ] Brakedown
+  - [ ] Binius
+  - [ ] Ligero
+- [ ] Lattice-based schemes
+  - [ ] Greyhound
 
 ## References
 The following paper, which appeared at CRYPTO 2020, provides details of the Spartan proof system:
