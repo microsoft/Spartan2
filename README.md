@@ -11,7 +11,7 @@ Spartan is a sum-check-based zkSNARK with an extremely efficient prover (a zkSNA
 
 * The witness-dependent work of the Spartan prover is shown to be MPC-friendly by more recent works, allowing the whole Spartan prover to be delegated.
 
-* For uniform constraint systems, Spartan's prover can be optimized further by eliminating the witness-indepdent work of the prover, which constitutes about 90% of the prover's work.
+* For uniform constraint systems, Spartan's prover can be optimized further by eliminating the witness-independent work of the prover, which constitutes about 90% of the prover's work.
 
 ## About this library
 Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The first version of this code is derived from Nova's open-source code.
