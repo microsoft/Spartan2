@@ -1,7 +1,10 @@
 //! This module provides an implementation of `TranscriptEngineTrait` using keccak256
 use crate::{
   errors::SpartanError,
-  traits::{Engine, PrimeFieldExt, TranscriptEngineTrait, TranscriptReprTrait},
+  traits::{
+    Engine, PrimeFieldExt,
+    transcript::{TranscriptEngineTrait, TranscriptReprTrait},
+  },
 };
 use core::marker::PhantomData;
 use sha3::{Digest, Keccak256};
@@ -99,7 +102,10 @@ impl<E: Engine> TranscriptEngineTrait<E> for Keccak256Transcript<E> {
 mod tests {
   use crate::{
     provider::{PallasIPAEngine, VestaIPAEngine, keccak::Keccak256Transcript},
-    traits::{Engine, PrimeFieldExt, TranscriptEngineTrait, TranscriptReprTrait},
+    traits::{
+      Engine, PrimeFieldExt,
+      transcript::{TranscriptEngineTrait, TranscriptReprTrait},
+    },
   };
   use ff::PrimeField;
   use rand::Rng;

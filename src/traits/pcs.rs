@@ -1,20 +1,14 @@
 //! This module defines a collection of traits that define the behavior of a commitment engine
 //! We require the commitment engine to provide a commitment to vectors with a single group element
-use crate::traits::{Engine, TranscriptReprTrait};
-use core::{
-  fmt::Debug,
-  ops::{Mul, MulAssign},
+use crate::{
+  errors::SpartanError,
+  traits::{Engine, TranscriptReprTrait},
 };
+use core::fmt::Debug;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-
-/// A helper trait for types implementing scalar multiplication.
-pub trait ScalarMul<Rhs, Output = Self>: Mul<Rhs, Output = Output> + MulAssign<Rhs> {}
-
-impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Output> + MulAssign<Rhs>
-{}
 
 /// This trait defines the behavior of the commitment
 pub trait CommitmentTrait<E: Engine>:
@@ -38,10 +32,13 @@ pub trait Len {
 }
 
 /// A trait that ties different pieces of the commitment generation together
-pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
+pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Holds the type of the commitment key
   /// The key should quantify its length in terms of group generators.
   type CommitmentKey: Clone + Debug + Len + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// A type that holds the verifier key
+  type VerifierKey: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Holds the type of the derandomization key
   type DerandKey: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
@@ -60,8 +57,11 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
     + Serialize
     + for<'de> Deserialize<'de>;
 
-  /// Samples a new commitment key of a specified size
-  fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey;
+  /// A type that holds the evaluation argument
+  type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// Samples a new commitment key of a specified size and a verifier key
+  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey);
 
   /// Extracts the blinding generator
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey;
@@ -111,4 +111,24 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
     commit: &Self::Commitment,
     r: &Self::Blind,
   ) -> Self::Commitment;
+
+  /// A method to prove the evaluation of a multilinear polynomial
+  fn prove(
+    ck: &Self::CommitmentKey,
+    transcript: &mut E::TE,
+    comm: &Self::Commitment,
+    poly: &[E::Scalar],
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+  ) -> Result<Self::EvaluationArgument, SpartanError>;
+
+  /// A method to verify the purported evaluation of a multilinear polynomials
+  fn verify(
+    vk: &Self::VerifierKey,
+    transcript: &mut E::TE,
+    comm: &Self::Commitment,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+    arg: &Self::EvaluationArgument,
+  ) -> Result<(), SpartanError>;
 }

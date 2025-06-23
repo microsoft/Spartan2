@@ -1,7 +1,7 @@
 //! Main components:
 //! - `UniPoly`: an univariate dense polynomial in coefficient form (big endian),
 //! - `CompressedUniPoly`: a univariate dense polynomial, compressed (omitted linear term), in coefficient form (little endian),
-use crate::traits::{Group, TranscriptReprTrait};
+use crate::traits::{Group, transcript::TranscriptReprTrait};
 use core::panic;
 use ff::PrimeField;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};

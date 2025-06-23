@@ -1,13 +1,15 @@
 //! This module defines various traits required by the users of the library to implement.
-use crate::{errors::SpartanError, traits::evaluation::EvaluationEngineTrait};
 use core::fmt::Debug;
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
-pub mod commitment;
+pub mod pcs;
+pub mod snark;
+pub mod transcript;
 
-use commitment::CommitmentEngineTrait;
+use pcs::PCSEngineTrait;
+use transcript::{TranscriptEngineTrait, TranscriptReprTrait};
 
 /// Represents an element of a group
 /// This is currently tailored for an elliptic curve group
@@ -43,31 +45,7 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
   type TE: TranscriptEngineTrait<Self>;
 
   /// A type that defines a commitment engine over scalars in the group
-  type CE: CommitmentEngineTrait<Self>;
-
-  /// A type that defines an evaluation engine over scalars in the group
-  type EE: EvaluationEngineTrait<Self>;
-}
-
-/// This trait allows types to implement how they want to be added to `TranscriptEngine`
-pub trait TranscriptReprTrait<G: Group>: Send + Sync {
-  /// returns a byte representation of self to be added to the transcript
-  fn to_transcript_bytes(&self) -> Vec<u8>;
-}
-
-/// This trait defines the behavior of a transcript engine compatible with Spartan
-pub trait TranscriptEngineTrait<E: Engine>: Send + Sync {
-  /// initializes the transcript
-  fn new(label: &'static [u8]) -> Self;
-
-  /// returns a scalar element of the group as a challenge
-  fn squeeze(&mut self, label: &'static [u8]) -> Result<E::Scalar, SpartanError>;
-
-  /// absorbs any type that implements `TranscriptReprTrait` under a label
-  fn absorb<T: TranscriptReprTrait<E::GE>>(&mut self, label: &'static [u8], o: &T);
-
-  /// adds a domain separator
-  fn dom_sep(&mut self, bytes: &'static [u8]);
+  type PCS: PCSEngineTrait<Self>;
 }
 
 /// Defines additional methods on `PrimeField` objects
@@ -75,15 +53,3 @@ pub trait PrimeFieldExt: PrimeField {
   /// Returns a scalar representing the bytes
   fn from_uniform(bytes: &[u8]) -> Self;
 }
-
-impl<G: Group, T: TranscriptReprTrait<G>> TranscriptReprTrait<G> for &[T] {
-  fn to_transcript_bytes(&self) -> Vec<u8> {
-    self
-      .iter()
-      .flat_map(|t| t.to_transcript_bytes())
-      .collect::<Vec<u8>>()
-  }
-}
-
-pub mod evaluation;
-pub mod snark;

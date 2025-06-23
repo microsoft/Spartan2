@@ -1,9 +1,9 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, CE, Commitment, CommitmentKey, DerandKey,
+  Blind, Commitment, CommitmentKey, DerandKey, PCS, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
-  traits::{Engine, TranscriptReprTrait, commitment::CommitmentEngineTrait},
+  traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptReprTrait},
 };
 use core::cmp::max;
 use ff::Field;
@@ -96,10 +96,10 @@ impl<E: Engine> R1CSShape<E> {
   /// * `ck_floor`: A function that provides a floor for the number of generators. A good function
   ///   to provide is the ck_floor field defined in the trait `R1CSSNARK`.
   ///
-  pub fn commitment_key(&self) -> CommitmentKey<E> {
+  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let num_cons = self.num_cons;
     let num_vars = self.num_vars;
-    E::CE::setup(b"ck", max(num_cons, num_vars))
+    E::PCS::setup(b"ck", max(num_cons, num_vars))
   }
 
   // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
@@ -151,7 +151,7 @@ impl<E: Engine> R1CSShape<E> {
     };
 
     // verify if comm_W is a commitment to W
-    let res_comm = U.comm_W == CE::<E>::commit(ck, &W.W, &W.r_W);
+    let res_comm = U.comm_W == PCS::<E>::commit(ck, &W.W, &W.r_W);
 
     if !res_eq {
       return Err(SpartanError::UnSat {
@@ -240,8 +240,8 @@ impl<E: Engine> R1CSWitness<E> {
     let mut W = W.to_vec();
     W.resize(S.num_vars, E::Scalar::ZERO);
 
-    let r_W = CE::<E>::blind(ck);
-    let comm_W = CE::<E>::commit(ck, &W, &r_W);
+    let r_W = PCS::<E>::blind(ck);
+    let comm_W = PCS::<E>::commit(ck, &W, &r_W);
 
     let W = R1CSWitness { W, r_W };
 
@@ -289,7 +289,7 @@ impl<E: Engine> R1CSInstance<E> {
 
   pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &Blind<E>) -> R1CSInstance<E> {
     R1CSInstance {
-      comm_W: CE::<E>::derandomize(dk, &self.comm_W, r_W),
+      comm_W: PCS::<E>::derandomize(dk, &self.comm_W, r_W),
       X: self.X.clone(),
     }
   }

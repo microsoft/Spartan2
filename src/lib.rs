@@ -10,6 +10,7 @@
   missing_docs
 )]
 #![allow(non_snake_case)]
+#![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 
@@ -50,24 +51,24 @@ use polys::{
 use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
-  Engine, TranscriptEngineTrait,
-  commitment::CommitmentEngineTrait,
-  evaluation::EvaluationEngineTrait,
+  Engine,
+  pcs::PCSEngineTrait,
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
+  transcript::TranscriptEngineTrait,
 };
 
-type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey;
-type Commitment<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment;
-type CE<E> = <E as Engine>::CE;
-type DerandKey<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::DerandKey;
-type Blind<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Blind;
+type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
+type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
+type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
+type PCS<E> = <E as Engine>::PCS;
+type DerandKey<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::DerandKey;
+type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ProverKey<E: Engine> {
+pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  pk_ee: <E::EE as EvaluationEngineTrait<E>>::ProverKey,
   S: R1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -75,18 +76,18 @@ pub struct ProverKey<E: Engine> {
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct VerifierKey<E: Engine> {
-  vk_ee: <E::EE as EvaluationEngineTrait<E>>::VerifierKey,
+pub struct SpartanVerifierKey<E: Engine> {
+  vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
 
-impl<E: Engine> SimpleDigestible for VerifierKey<E> {}
+impl<E: Engine> SimpleDigestible for SpartanVerifierKey<E> {}
 
-impl<E: Engine> VerifierKey<E> {
-  fn new(shape: R1CSShape<E>, vk_ee: <E::EE as EvaluationEngineTrait<E>>::VerifierKey) -> Self {
-    VerifierKey {
+impl<E: Engine> SpartanVerifierKey<E> {
+  fn new(shape: R1CSShape<E>, vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey) -> Self {
+    SpartanVerifierKey {
       vk_ee,
       S: shape,
       digest: OnceCell::new(),
@@ -94,7 +95,7 @@ impl<E: Engine> VerifierKey<E> {
   }
 }
 
-impl<E: Engine> DigestHelperTrait<E> for VerifierKey<E> {
+impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   /// Returns the digest of the verifier's key.
   fn digest(&self) -> Result<SpartanDigest, SpartanError> {
     self
@@ -105,7 +106,7 @@ impl<E: Engine> DigestHelperTrait<E> for VerifierKey<E> {
       })
       .cloned()
       .map_err(|_| SpartanError::DigestError {
-        reason: "Unable to compute digest for VerifierKey".to_string(),
+        reason: "Unable to compute digest for SpartanVerifierKey".to_string(),
       })
   }
 }
@@ -161,12 +162,12 @@ pub struct R1CSSNARK<E: Engine> {
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
-  eval_arg: <E::EE as EvaluationEngineTrait<E>>::EvaluationArgument,
+  eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
 impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
-  type ProverKey = ProverKey<E>;
-  type VerifierKey = VerifierKey<E>;
+  type ProverKey = SpartanProverKey<E>;
+  type VerifierKey = SpartanVerifierKey<E>;
 
   fn setup<C: Circuit<E::Scalar>>(
     circuit: C,
@@ -193,18 +194,15 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         .unwrap();
     });
 
-    let (S, ck) = cs.r1cs_shape();
-
-    let (pk_ee, vk_ee) = E::EE::setup(&ck);
+    let (S, ck, vk) = cs.r1cs_shape();
 
     let S = S.pad();
 
-    let vk: VerifierKey<E> = VerifierKey::new(S.clone(), vk_ee);
+    let vk: SpartanVerifierKey<E> = SpartanVerifierKey::new(S.clone(), vk);
 
-    let pk = ProverKey {
+    let pk = Self::ProverKey {
       ck,
       S,
-      pk_ee,
       vk_digest: vk.digest()?,
     };
 
@@ -234,7 +232,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // derandomize instance
     let (W, r_W) = W.derandomize();
-    let U = U.derandomize(&E::CE::derand_key(&pk.ck), &r_W);
+    let U = U.derandomize(&E::PCS::derand_key(&pk.ck), &r_W);
 
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
@@ -324,15 +322,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
 
-    let eval_arg = E::EE::prove(
-      &pk.ck,
-      &pk.pk_ee,
-      &mut transcript,
-      &U.comm_W,
-      &W.W,
-      &r_y[1..],
-      &eval_W,
-    )?;
+    let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
 
     Ok(R1CSSNARK {
       U,
@@ -445,7 +435,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     }
 
     // verify
-    E::EE::verify(
+    E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
       &self.U.comm_W,

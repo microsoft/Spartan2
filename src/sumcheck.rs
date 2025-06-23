@@ -10,7 +10,7 @@ use crate::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
   },
-  traits::{Engine, TranscriptEngineTrait},
+  traits::{Engine, transcript::TranscriptEngineTrait},
 };
 use ff::Field;
 use rayon::prelude::*;

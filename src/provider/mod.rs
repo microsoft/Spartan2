@@ -13,10 +13,7 @@ use crate::{
   provider::{
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
-    pcs::{
-      hyrax_pc::{HyraxCommitmentEngine, HyraxEvaluationEngine},
-      ipa_pc::{CommitmentEngine as IPACommitmentEngine, EvaluationEngine as IPAEvaluationEngine},
-    },
+    pcs::{hyrax_pc::HyraxPCS, ipa_pc::IPAPCS},
     pt256::{p256, t256},
   },
   traits::Engine,
@@ -45,8 +42,7 @@ impl Engine for PallasHyraxEngine {
   type Scalar = pallas::Scalar;
   type GE = pallas::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = HyraxCommitmentEngine<Self>;
-  type EE = HyraxEvaluationEngine<Self>;
+  type PCS = HyraxPCS<Self>;
 }
 
 impl Engine for VestaHyraxEngine {
@@ -54,8 +50,7 @@ impl Engine for VestaHyraxEngine {
   type Scalar = vesta::Scalar;
   type GE = vesta::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = HyraxCommitmentEngine<Self>;
-  type EE = HyraxEvaluationEngine<Self>;
+  type PCS = HyraxPCS<Self>;
 }
 
 impl Engine for P256HyraxEngine {
@@ -63,8 +58,7 @@ impl Engine for P256HyraxEngine {
   type Scalar = p256::Scalar;
   type GE = p256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = HyraxCommitmentEngine<Self>;
-  type EE = HyraxEvaluationEngine<Self>;
+  type PCS = HyraxPCS<Self>;
 }
 
 impl Engine for T256HyraxEngine {
@@ -72,8 +66,7 @@ impl Engine for T256HyraxEngine {
   type Scalar = t256::Scalar;
   type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = HyraxCommitmentEngine<Self>;
-  type EE = HyraxEvaluationEngine<Self>;
+  type PCS = HyraxPCS<Self>;
 }
 
 /// An implementation of the Spartan Engine trait with Pallas curve and IPA PCS
@@ -97,8 +90,7 @@ impl Engine for PallasIPAEngine {
   type Scalar = pallas::Scalar;
   type GE = pallas::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = IPACommitmentEngine<Self>;
-  type EE = IPAEvaluationEngine<Self>;
+  type PCS = IPAPCS<Self>;
 }
 
 impl Engine for VestaIPAEngine {
@@ -106,8 +98,7 @@ impl Engine for VestaIPAEngine {
   type Scalar = vesta::Scalar;
   type GE = vesta::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = IPACommitmentEngine<Self>;
-  type EE = IPAEvaluationEngine<Self>;
+  type PCS = IPAPCS<Self>;
 }
 
 impl Engine for P256IPAEngine {
@@ -115,8 +106,7 @@ impl Engine for P256IPAEngine {
   type Scalar = p256::Scalar;
   type GE = p256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = IPACommitmentEngine<Self>;
-  type EE = IPAEvaluationEngine<Self>;
+  type PCS = IPAPCS<Self>;
 }
 
 impl Engine for T256IPAEngine {
@@ -124,6 +114,5 @@ impl Engine for T256IPAEngine {
   type Scalar = t256::Scalar;
   type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
-  type CE = IPACommitmentEngine<Self>;
-  type EE = IPAEvaluationEngine<Self>;
+  type PCS = IPAPCS<Self>;
 }
