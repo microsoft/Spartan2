@@ -7,9 +7,10 @@ use crate::{
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{
-    Engine, TranscriptReprTrait,
+    Engine,
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
     evaluation::EvaluationEngineTrait,
+    transcript::TranscriptReprTrait,
   },
 };
 use core::{fmt::Debug, marker::PhantomData};

@@ -5,7 +5,7 @@ use crate::{
     msm::{msm, msm_small},
     traits::{DlogGroup, DlogGroupExt},
   },
-  traits::{Group, PrimeFieldExt, TranscriptReprTrait},
+  traits::{Group, PrimeFieldExt, transcript::TranscriptReprTrait},
 };
 use digest::{ExtendableOutput, Update};
 use ff::FromUniformBytes;

@@ -10,9 +10,10 @@ use crate::{
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{
-    Engine, TranscriptEngineTrait, TranscriptReprTrait,
+    Engine,
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
     evaluation::EvaluationEngineTrait,
+    transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
 use core::marker::PhantomData;

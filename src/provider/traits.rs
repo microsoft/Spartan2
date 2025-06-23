@@ -15,7 +15,7 @@
 //!
 //! These traits and macros provide a consistent interface for elliptic curve operations
 //! and other algebraic structures used throughout the Spartan proof system.
-use crate::traits::{Group, TranscriptReprTrait, commitment::ScalarMul};
+use crate::traits::{Group, commitment::ScalarMul, transcript::TranscriptReprTrait};
 use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Sub, SubAssign},

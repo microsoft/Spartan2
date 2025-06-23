@@ -3,7 +3,7 @@ use crate::{
   Blind, CE, Commitment, CommitmentKey, DerandKey,
   digest::SimpleDigestible,
   errors::SpartanError,
-  traits::{Engine, TranscriptReprTrait, commitment::CommitmentEngineTrait},
+  traits::{Engine, commitment::CommitmentEngineTrait, transcript::TranscriptReprTrait},
 };
 use core::cmp::max;
 use ff::Field;

@@ -2,7 +2,10 @@
 use crate::{
   errors::SpartanError,
   provider::traits::{DlogGroup, DlogGroupExt},
-  traits::{Engine, TranscriptEngineTrait, TranscriptReprTrait},
+  traits::{
+    Engine,
+    transcript::{TranscriptEngineTrait, TranscriptReprTrait},
+  },
 };
 use core::{fmt::Debug, iter};
 use ff::Field;

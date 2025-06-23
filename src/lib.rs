@@ -50,10 +50,11 @@ use polys::{
 use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
-  Engine, TranscriptEngineTrait,
+  Engine,
   commitment::CommitmentEngineTrait,
   evaluation::EvaluationEngineTrait,
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
+  transcript::TranscriptEngineTrait,
 };
 
 type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey;
