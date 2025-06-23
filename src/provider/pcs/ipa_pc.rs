@@ -126,8 +126,8 @@ where
 
     let vk = VerifierKey {
       ck: ck.clone(),
-      h: h.clone(),
-      ck_s: ck_s.clone(),
+      h,
+      ck_s,
     };
 
     let ck = CommitmentKey { ck, h, ck_s };

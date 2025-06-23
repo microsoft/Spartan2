@@ -10,6 +10,7 @@
   missing_docs
 )]
 #![allow(non_snake_case)]
+#![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 

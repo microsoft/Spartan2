@@ -135,20 +135,20 @@ where
     let h = gens[num_cols];
     let ck_s = gens[num_cols + 1];
 
-    let ck = Self::CommitmentKey {
-      num_rows,
-      num_cols,
-      ck: ck.clone(),
-      h: h.clone(),
-      ck_s: ck_s.clone(),
-    };
-
     let vk = Self::VerifierKey {
       num_rows,
       num_cols,
-      ck: ck.ck.clone(),
-      h: h.clone(),
-      ck_s: ck_s.clone(),
+      ck: ck.clone(),
+      h,
+      ck_s,
+    };
+
+    let ck = Self::CommitmentKey {
+      num_rows,
+      num_cols,
+      ck,
+      h,
+      ck_s,
     };
 
     (ck, vk)
