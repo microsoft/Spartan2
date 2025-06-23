@@ -15,7 +15,7 @@ mod tests {
       shape_cs::ShapeCS,
       solver::SatisfyingAssignment,
     },
-    provider::PallasEngine,
+    provider::PallasIPAEngine,
     traits::Engine,
   };
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
@@ -64,6 +64,6 @@ mod tests {
 
   #[test]
   fn test_alloc_bit() {
-    test_alloc_bit_with::<PallasEngine>();
+    test_alloc_bit_with::<PallasIPAEngine>();
   }
 }

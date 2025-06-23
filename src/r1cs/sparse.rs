@@ -155,7 +155,7 @@ impl<'a, F: PrimeField> Iterator for Iter<'a, F> {
 mod tests {
   use super::*;
   use crate::{
-    provider::PallasEngine,
+    provider::PallasIPAEngine,
     traits::{Engine, Group},
   };
   use ff::PrimeField;
@@ -164,7 +164,7 @@ mod tests {
     strategy::{BoxedStrategy, Just, Strategy},
   };
 
-  type G = <PallasEngine as Engine>::GE;
+  type G = <PallasIPAEngine as Engine>::GE;
   type Fr = <G as Group>::Scalar;
 
   /// Wrapper struct around a field element that implements additional traits

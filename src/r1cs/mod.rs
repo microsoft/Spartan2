@@ -308,7 +308,11 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{provider::PallasEngine, r1cs::sparse::SparseMatrix, traits::Engine};
+  use crate::{
+    provider::{PallasHyraxEngine, PallasIPAEngine},
+    r1cs::sparse::SparseMatrix,
+    traits::Engine,
+  };
   use ff::Field;
 
   fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
@@ -388,6 +392,7 @@ mod tests {
 
   #[test]
   fn test_pad_tiny_r1cs() {
-    test_pad_tiny_r1cs_with::<PallasEngine>();
+    test_pad_tiny_r1cs_with::<PallasIPAEngine>();
+    test_pad_tiny_r1cs_with::<PallasHyraxEngine>();
   }
 }

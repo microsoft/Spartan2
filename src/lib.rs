@@ -503,13 +503,21 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    type E = crate::provider::PallasEngine;
+    type E = crate::provider::PallasIPAEngine;
     type S = R1CSSNARK<E>;
     test_snark_with::<E, S>();
 
-    type E2 = crate::provider::T256Engine;
+    type E2 = crate::provider::T256IPAEngine;
     type S2 = crate::R1CSSNARK<E2>;
     test_snark_with::<E2, S2>();
+
+    type E3 = crate::provider::PallasHyraxEngine;
+    type S3 = R1CSSNARK<E3>;
+    test_snark_with::<E3, S3>();
+
+    type E4 = crate::provider::T256HyraxEngine;
+    type S4 = crate::R1CSSNARK<E4>;
+    test_snark_with::<E4, S4>();
   }
 
   fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
