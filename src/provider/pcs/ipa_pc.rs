@@ -31,7 +31,7 @@ where
   /// generator for the blind term
   h: <E::GE as DlogGroup>::AffineGroupElement,
 
-  /// generator for commiting to evaluation
+  /// generator for committing to evaluation
   ck_s: <E::GE as DlogGroup>::AffineGroupElement,
 }
 
@@ -48,7 +48,7 @@ where
   /// generator for the blind term
   h: <E::GE as DlogGroup>::AffineGroupElement,
 
-  /// generator for commiting to evaluation
+  /// generator for committing to evaluation
   ck_s: <E::GE as DlogGroup>::AffineGroupElement,
 }
 
