@@ -4,7 +4,7 @@
 
 use super::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS};
 use crate::{
-  CommitmentKey,
+  CommitmentKey, VerifierKey,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
   traits::Engine,
@@ -25,7 +25,7 @@ pub trait SpartanWitness<E: Engine> {
 /// `SpartanShape` provides methods for acquiring `R1CSShape` and `CommitmentKey` from implementers.
 pub trait SpartanShape<E: Engine> {
   /// Return an appropriate `R1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>);
+  fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>);
 }
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E>
@@ -52,7 +52,7 @@ macro_rules! impl_spartan_shape {
     where
       E::Scalar: PrimeField,
     {
-      fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>) {
+      fn r1cs_shape(&self) -> (R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>) {
         let mut A = SparseMatrix::<E::Scalar>::empty();
         let mut B = SparseMatrix::<E::Scalar>::empty();
         let mut C = SparseMatrix::<E::Scalar>::empty();
@@ -80,9 +80,9 @@ macro_rules! impl_spartan_shape {
 
         // Don't count One as an input for shape's purposes.
         let S = R1CSShape::new(num_constraints, num_vars, num_inputs - 1, A, B, C).unwrap();
-        let ck = S.commitment_key();
+        let (ck, vk) = S.commitment_key();
 
-        (S, ck)
+        (S, ck, vk)
       }
     }
   };

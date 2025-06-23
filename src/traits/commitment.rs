@@ -1,6 +1,9 @@
 //! This module defines a collection of traits that define the behavior of a commitment engine
 //! We require the commitment engine to provide a commitment to vectors with a single group element
-use crate::traits::{Engine, TranscriptReprTrait};
+use crate::{
+  errors::SpartanError,
+  traits::{Engine, TranscriptReprTrait},
+};
 use core::{
   fmt::Debug,
   ops::{Mul, MulAssign},
@@ -43,6 +46,9 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
   /// The key should quantify its length in terms of group generators.
   type CommitmentKey: Clone + Debug + Len + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
+  /// A type that holds the verifier key
+  type VerifierKey: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
   /// Holds the type of the derandomization key
   type DerandKey: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
@@ -60,8 +66,11 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
     + Serialize
     + for<'de> Deserialize<'de>;
 
-  /// Samples a new commitment key of a specified size
-  fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey;
+  /// A type that holds the evaluation argument
+  type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// Samples a new commitment key of a specified size and a verifier key
+  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey);
 
   /// Extracts the blinding generator
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey;
@@ -111,4 +120,24 @@ pub trait CommitmentEngineTrait<E: Engine>: Clone + Send + Sync {
     commit: &Self::Commitment,
     r: &Self::Blind,
   ) -> Self::Commitment;
+
+  /// A method to prove the evaluation of a multilinear polynomial
+  fn prove(
+    ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+    transcript: &mut E::TE,
+    comm: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+    poly: &[E::Scalar],
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+  ) -> Result<Self::EvaluationArgument, SpartanError>;
+
+  /// A method to verify the purported evaluation of a multilinear polynomials
+  fn verify(
+    vk: &Self::VerifierKey,
+    transcript: &mut E::TE,
+    comm: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+    arg: &Self::EvaluationArgument,
+  ) -> Result<(), SpartanError>;
 }

@@ -5,12 +5,10 @@ use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
 pub mod commitment;
-pub mod evaluation;
 pub mod snark;
 pub mod transcript;
 
 use commitment::CommitmentEngineTrait;
-use evaluation::EvaluationEngineTrait;
 use transcript::{TranscriptEngineTrait, TranscriptReprTrait};
 
 /// Represents an element of a group
@@ -48,9 +46,6 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
 
   /// A type that defines a commitment engine over scalars in the group
   type CE: CommitmentEngineTrait<Self>;
-
-  /// A type that defines an evaluation engine over scalars in the group
-  type EE: EvaluationEngineTrait<Self>;
 }
 
 /// Defines additional methods on `PrimeField` objects

@@ -12,7 +12,6 @@ use crate::{
   traits::{
     Engine,
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
-    evaluation::EvaluationEngineTrait,
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -34,6 +33,21 @@ where
   num_cols: usize,
   ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   h: <E::GE as DlogGroup>::AffineGroupElement,
+  ck_s: <E::GE as DlogGroup>::AffineGroupElement,
+}
+
+/// A type that holds the verifier key for Hyrax commitments
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxVerifierKey<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  num_rows: usize,
+  num_cols: usize,
+  ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
+  h: <E::GE as DlogGroup>::AffineGroupElement,
+  ck_s: <E::GE as DlogGroup>::AffineGroupElement,
 }
 
 impl<E: Engine> Len for HyraxCommitmentKey<E>
@@ -81,6 +95,16 @@ impl<E: Engine> Default for HyraxBlind<E> {
   }
 }
 
+/// Provides an implementation of a polynomial evaluation argument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct HyraxEvaluationArgument<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  ipa: InnerProductArgument<E>,
+}
+
 fn compute_factored_lens(n: usize) -> (usize, usize) {
   let ell = n.log_2();
   // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
@@ -95,24 +119,39 @@ where
   E::GE: DlogGroupExt,
 {
   type CommitmentKey = HyraxCommitmentKey<E>;
+  type VerifierKey = HyraxVerifierKey<E>;
   type DerandKey = HyraxDerandKey<E>;
   type Commitment = HyraxCommitment<E>;
   type Blind = HyraxBlind<E>;
+  type EvaluationArgument = HyraxEvaluationArgument<E>;
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  fn setup(label: &'static [u8], n: usize) -> Self::CommitmentKey {
+  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let n = n.next_power_of_two();
     let (num_rows, num_cols) = compute_factored_lens(n);
 
-    let gens = E::GE::from_label(label, num_cols + 1);
-    let (h, ck) = gens.split_first().unwrap();
+    let gens = E::GE::from_label(label, num_cols + 2);
+    let ck = gens[..num_cols].to_vec();
+    let h = gens[num_cols];
+    let ck_s = gens[num_cols + 1];
 
-    Self::CommitmentKey {
+    let ck = Self::CommitmentKey {
       num_rows,
       num_cols,
-      ck: ck.to_vec(),
-      h: *h,
-    }
+      ck: ck.clone(),
+      h: h.clone(),
+      ck_s: ck_s.clone(),
+    };
+
+    let vk = Self::VerifierKey {
+      num_rows,
+      num_cols,
+      ck: ck.ck.clone(),
+      h: h.clone(),
+      ck_s: ck_s.clone(),
+    };
+
+    (ck, vk)
   }
 
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
@@ -212,84 +251,9 @@ where
       }
     }
   }
-}
-
-impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
-where
-  E::GE: DlogGroupExt,
-{
-  fn to_transcript_bytes(&self) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.append(&mut b"poly_commitment_begin".to_vec());
-
-    for c in &self.comm {
-      v.extend(c.to_transcript_bytes());
-    }
-
-    v.append(&mut b"poly_commitment_end".to_vec());
-    v
-  }
-}
-
-impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroupExt {}
-
-/// Provides an implementation of the hyrax key
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct HyraxProverKey<E: Engine> {
-  ck_s: CommitmentKey<E>,
-}
-
-/// Provides an implementation of the hyrax key
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct HyraxVerifierKey<E: Engine> {
-  ck_v: CommitmentKey<E>,
-  ck_s: CommitmentKey<E>,
-}
-
-/// Provides an implementation of a polynomial evaluation argument
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct HyraxEvaluationArgument<E: Engine>
-where
-  E::GE: DlogGroup,
-{
-  ipa: InnerProductArgument<E>,
-}
-
-/// Provides an implementation of a polynomial evaluation engine using Hyrax PC
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct HyraxEvaluationEngine<E: Engine> {
-  _p: PhantomData<E>,
-}
-
-impl<E> EvaluationEngineTrait<E> for HyraxEvaluationEngine<E>
-where
-  E: Engine<CE = HyraxCommitmentEngine<E>>,
-  E::GE: DlogGroupExt,
-{
-  type ProverKey = HyraxProverKey<E>;
-  type VerifierKey = HyraxVerifierKey<E>;
-  type EvaluationArgument = HyraxEvaluationArgument<E>;
-
-  fn setup(ck: &CommitmentKey<E>) -> (Self::ProverKey, Self::VerifierKey) {
-    let pk = HyraxProverKey::<E> {
-      ck_s: E::CE::setup(b"hyrax", 1),
-    };
-
-    let vk = HyraxVerifierKey::<E> {
-      ck_v: ck.clone(),
-      ck_s: E::CE::setup(b"hyrax", 1),
-    };
-
-    (pk, vk)
-  }
 
   fn prove(
     ck: &CommitmentKey<E>,
-    pk: &Self::ProverKey,
     transcript: &mut E::TE,
     comm: &Commitment<E>,
     poly: &[E::Scalar],
@@ -321,13 +285,8 @@ where
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ);
-    let ipa = InnerProductArgument::<E>::prove(
-      &ck.ck,
-      &pk.ck_s.ck[0],
-      &ipa_instance,
-      &ipa_witness,
-      transcript,
-    )?;
+    let ipa =
+      InnerProductArgument::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
 
     Ok(HyraxEvaluationArgument { ipa })
   }
@@ -359,12 +318,27 @@ where
 
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
 
-    arg.ipa.verify(
-      &vk.ck_v.ck,
-      &vk.ck_s.ck[0],
-      R.len(),
-      &ipa_instance,
-      transcript,
-    )
+    arg
+      .ipa
+      .verify(&vk.ck, &vk.ck_s, R.len(), &ipa_instance, transcript)
   }
 }
+
+impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
+where
+  E::GE: DlogGroupExt,
+{
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.append(&mut b"poly_commitment_begin".to_vec());
+
+    for c in &self.comm {
+      v.extend(c.to_transcript_bytes());
+    }
+
+    v.append(&mut b"poly_commitment_end".to_vec());
+    v
+  }
+}
+
+impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroupExt {}

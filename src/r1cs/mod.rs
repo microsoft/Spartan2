@@ -1,6 +1,6 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, CE, Commitment, CommitmentKey, DerandKey,
+  Blind, CE, Commitment, CommitmentKey, DerandKey, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   traits::{Engine, commitment::CommitmentEngineTrait, transcript::TranscriptReprTrait},
@@ -96,7 +96,7 @@ impl<E: Engine> R1CSShape<E> {
   /// * `ck_floor`: A function that provides a floor for the number of generators. A good function
   ///   to provide is the ck_floor field defined in the trait `R1CSSNARK`.
   ///
-  pub fn commitment_key(&self) -> CommitmentKey<E> {
+  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let num_cons = self.num_cons;
     let num_vars = self.num_vars;
     E::CE::setup(b"ck", max(num_cons, num_vars))
