@@ -1,14 +1,12 @@
 //! This module implements Spartan's traits using the following several different combinations
 
-// public modules to be used as an evaluation engine with Spartan
+// public modules to be used as an commitment engine with Spartan
 pub mod hyrax_pc;
 pub mod ipa_pc;
+pub mod keccak;
 pub mod pasta;
 pub mod pt256;
 pub mod traits;
-
-pub(crate) mod keccak;
-pub(crate) mod pedersen;
 
 mod msm;
 
@@ -31,6 +29,14 @@ pub struct PallasEngine;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VestaEngine;
 
+/// An implementation of the Spartan `Engine` trait with P256 curve and Hyrax commitment scheme
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct P256Engine;
+
+/// An implementation of the Spartan `Engine` trait with T256 curve and Hyrax commitment scheme
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct T256Engine;
+
 impl Engine for PallasEngine {
   type Base = pallas::Base;
   type Scalar = pallas::Scalar;
@@ -48,14 +54,6 @@ impl Engine for VestaEngine {
   type CE = HyraxCommitmentEngine<Self>;
   type EE = HyraxEvaluationEngine<Self>;
 }
-
-/// An implementation of the Spartan `Engine` trait with P256 curve and Hyrax commitment scheme
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct P256Engine;
-
-/// An implementation of the Spartan `Engine` trait with T256 curve and Hyrax commitment scheme
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct T256Engine;
 
 impl Engine for P256Engine {
   type Base = p256::Base;
