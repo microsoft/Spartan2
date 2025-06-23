@@ -51,17 +51,17 @@ use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
   Engine,
-  commitment::CommitmentEngineTrait,
+  pcs::PCSEngineTrait,
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
   transcript::TranscriptEngineTrait,
 };
 
-type CommitmentKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey;
-type VerifierKey<E> = <<E as traits::Engine>::CE as CommitmentEngineTrait<E>>::VerifierKey;
-type Commitment<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment;
-type CE<E> = <E as Engine>::CE;
-type DerandKey<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::DerandKey;
-type Blind<E> = <<E as Engine>::CE as CommitmentEngineTrait<E>>::Blind;
+type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
+type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
+type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
+type PCS<E> = <E as Engine>::PCS;
+type DerandKey<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::DerandKey;
+type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
@@ -76,7 +76,7 @@ pub struct SpartanProverKey<E: Engine> {
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
-  vk_ee: <E::CE as CommitmentEngineTrait<E>>::VerifierKey,
+  vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
@@ -85,7 +85,7 @@ pub struct SpartanVerifierKey<E: Engine> {
 impl<E: Engine> SimpleDigestible for SpartanVerifierKey<E> {}
 
 impl<E: Engine> SpartanVerifierKey<E> {
-  fn new(shape: R1CSShape<E>, vk_ee: <E::CE as CommitmentEngineTrait<E>>::VerifierKey) -> Self {
+  fn new(shape: R1CSShape<E>, vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey) -> Self {
     SpartanVerifierKey {
       vk_ee,
       S: shape,
@@ -161,7 +161,7 @@ pub struct R1CSSNARK<E: Engine> {
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
-  eval_arg: <E::CE as CommitmentEngineTrait<E>>::EvaluationArgument,
+  eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
 impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
@@ -231,7 +231,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // derandomize instance
     let (W, r_W) = W.derandomize();
-    let U = U.derandomize(&E::CE::derand_key(&pk.ck), &r_W);
+    let U = U.derandomize(&E::PCS::derand_key(&pk.ck), &r_W);
 
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
@@ -321,7 +321,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
 
-    let eval_arg = E::CE::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
+    let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
 
     Ok(R1CSSNARK {
       U,
@@ -434,7 +434,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     }
 
     // verify
-    E::CE::verify(
+    E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
       &self.U.comm_W,

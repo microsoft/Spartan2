@@ -1,4 +1,4 @@
-//! This module provides an implementation of a `CommitmentEngine` and an `EvaluationEngine` using an IPA-based polynomial commitment scheme
+//! This module provides an implementation of a `PCS` using an IPA-based polynomial commitment scheme
 use crate::{
   errors::SpartanError,
   polys::eq::EqPolynomial,
@@ -8,7 +8,7 @@ use crate::{
   },
   traits::{
     Engine,
-    commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
+    pcs::{CommitmentTrait, Len, PCSEngineTrait},
     transcript::TranscriptReprTrait,
   },
 };
@@ -101,11 +101,11 @@ where
 
 /// Provides a commitment engine
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitmentEngine<E: Engine> {
+pub struct IPAPCS<E: Engine> {
   _p: PhantomData<E>,
 }
 
-impl<E: Engine> CommitmentEngineTrait<E> for CommitmentEngine<E>
+impl<E: Engine> PCSEngineTrait<E> for IPAPCS<E>
 where
   E::GE: DlogGroupExt,
 {
@@ -176,9 +176,9 @@ where
   }
 
   fn prove(
-    ck: &<E::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+    ck: &Self::CommitmentKey,
     transcript: &mut E::TE,
-    comm: &<E::CE as CommitmentEngineTrait<E>>::Commitment,
+    comm: &Self::Commitment,
     poly: &[E::Scalar],
     point: &[E::Scalar],
     eval: &E::Scalar,
@@ -193,7 +193,7 @@ where
   fn verify(
     vk: &Self::VerifierKey,
     transcript: &mut E::TE,
-    comm: &<E::CE as CommitmentEngineTrait<E>>::Commitment,
+    comm: &Self::Commitment,
     point: &[E::Scalar],
     eval: &E::Scalar,
     arg: &Self::EvaluationArgument,

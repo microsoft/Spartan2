@@ -15,10 +15,10 @@
 //!
 //! These traits and macros provide a consistent interface for elliptic curve operations
 //! and other algebraic structures used throughout the Spartan proof system.
-use crate::traits::{Group, commitment::ScalarMul, transcript::TranscriptReprTrait};
+use crate::traits::{Group, transcript::TranscriptReprTrait};
 use core::{
   fmt::Debug,
-  ops::{Add, AddAssign, Sub, SubAssign},
+  ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 use halo2curves::{CurveAffine, serde::SerdeObject};
 use num_integer::Integer;
@@ -40,6 +40,12 @@ impl<T, Rhs, Output> GroupOps<Rhs, Output> for T where
 /// A helper trait for references with a group operation.
 pub trait GroupOpsOwned<Rhs = Self, Output = Self>: for<'r> GroupOps<&'r Rhs, Output> {}
 impl<T, Rhs, Output> GroupOpsOwned<Rhs, Output> for T where T: for<'r> GroupOps<&'r Rhs, Output> {}
+
+/// A helper trait for types implementing scalar multiplication.
+pub trait ScalarMul<Rhs, Output = Self>: Mul<Rhs, Output = Output> + MulAssign<Rhs> {}
+
+impl<T, Rhs, Output> ScalarMul<Rhs, Output> for T where T: Mul<Rhs, Output = Output> + MulAssign<Rhs>
+{}
 
 /// A helper trait for references implementing group scalar multiplication.
 pub trait ScalarMulOwned<Rhs, Output = Self>: for<'r> ScalarMul<&'r Rhs, Output> {}

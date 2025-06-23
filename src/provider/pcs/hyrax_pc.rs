@@ -11,7 +11,7 @@ use crate::{
   },
   traits::{
     Engine,
-    commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
+    pcs::{CommitmentTrait, Len, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -85,7 +85,7 @@ pub struct HyraxBlind<E: Engine> {
 
 /// Provides a commitment engine
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HyraxCommitmentEngine<E: Engine> {
+pub struct HyraxPCS<E: Engine> {
   _p: PhantomData<E>,
 }
 
@@ -114,7 +114,7 @@ fn compute_factored_lens(n: usize) -> (usize, usize) {
   (1 << ell1, 1 << ell2)
 }
 
-impl<E: Engine> CommitmentEngineTrait<E> for HyraxCommitmentEngine<E>
+impl<E: Engine> PCSEngineTrait<E> for HyraxPCS<E>
 where
   E::GE: DlogGroupExt,
 {
@@ -253,9 +253,9 @@ where
   }
 
   fn prove(
-    ck: &CommitmentKey<E>,
+    ck: &Self::CommitmentKey,
     transcript: &mut E::TE,
-    comm: &Commitment<E>,
+    comm: &Self::Commitment,
     poly: &[E::Scalar],
     point: &[E::Scalar],
     eval: &E::Scalar,
@@ -294,7 +294,7 @@ where
   fn verify(
     vk: &Self::VerifierKey,
     transcript: &mut E::TE,
-    comm: &Commitment<E>,
+    comm: &Self::Commitment,
     point: &[E::Scalar],
     eval: &E::Scalar,
     arg: &Self::EvaluationArgument,

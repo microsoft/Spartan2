@@ -4,11 +4,11 @@ use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
-pub mod commitment;
+pub mod pcs;
 pub mod snark;
 pub mod transcript;
 
-use commitment::CommitmentEngineTrait;
+use pcs::PCSEngineTrait;
 use transcript::{TranscriptEngineTrait, TranscriptReprTrait};
 
 /// Represents an element of a group
@@ -45,7 +45,7 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
   type TE: TranscriptEngineTrait<Self>;
 
   /// A type that defines a commitment engine over scalars in the group
-  type CE: CommitmentEngineTrait<Self>;
+  type PCS: PCSEngineTrait<Self>;
 }
 
 /// Defines additional methods on `PrimeField` objects
