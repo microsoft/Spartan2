@@ -1,9 +1,15 @@
-//! This module provides an implementation of a commitment engine
+//! This module provides an implementation of a `CommitmentEngine` and an `EvaluationEngine` using an IPA-based polynomial commitment scheme
 use crate::{
-  provider::traits::{DlogGroup, DlogGroupExt},
+  errors::SpartanError,
+  polys::eq::EqPolynomial,
+  provider::{
+    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
+    traits::{DlogGroup, DlogGroupExt},
+  },
   traits::{
     Engine, TranscriptReprTrait,
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
+    evaluation::EvaluationEngineTrait,
   },
 };
 use core::{fmt::Debug, marker::PhantomData};
@@ -134,5 +140,93 @@ where
     Commitment {
       comm: commit.comm - <E::GE as DlogGroup>::group(&dk.h) * r,
     }
+  }
+}
+
+/// Provides an implementation of the prover key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct ProverKey<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  ck_s: CommitmentKey<E>,
+}
+
+/// Provides an implementation of the verifier key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct VerifierKey<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  ck_v: CommitmentKey<E>,
+  ck_s: CommitmentKey<E>,
+}
+
+/// Provides an implementation of a polynomial evaluation engine using IPA
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EvaluationEngine<E: Engine> {
+  _p: PhantomData<E>,
+}
+
+impl<E> EvaluationEngineTrait<E> for EvaluationEngine<E>
+where
+  E: Engine<CE = CommitmentEngine<E>>,
+  E::GE: DlogGroupExt,
+{
+  type ProverKey = ProverKey<E>;
+  type VerifierKey = VerifierKey<E>;
+  type EvaluationArgument = InnerProductArgument<E>;
+
+  fn setup(
+    ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
+  ) -> (Self::ProverKey, Self::VerifierKey) {
+    let ck_s = CommitmentEngine::setup(b"ipa", 1);
+
+    let pk = ProverKey { ck_s: ck_s.clone() };
+    let vk = VerifierKey {
+      ck_v: ck.clone(),
+      ck_s,
+    };
+
+    (pk, vk)
+  }
+
+  fn prove(
+    ck: &CommitmentKey<E>,
+    pk: &Self::ProverKey,
+    transcript: &mut E::TE,
+    comm: &Commitment<E>,
+    poly: &[E::Scalar],
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+  ) -> Result<Self::EvaluationArgument, SpartanError> {
+    let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
+    let w = InnerProductWitness::new(poly);
+
+    InnerProductArgument::prove(&ck.ck, &pk.ck_s.ck[0], &u, &w, transcript)
+  }
+
+  /// A method to verify purported evaluations of a batch of polynomials
+  fn verify(
+    vk: &Self::VerifierKey,
+    transcript: &mut E::TE,
+    comm: &Commitment<E>,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
+    arg: &Self::EvaluationArgument,
+  ) -> Result<(), SpartanError> {
+    let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
+
+    arg.verify(
+      &vk.ck_v.ck,
+      &vk.ck_s.ck[0],
+      (2_usize).pow(point.len() as u32),
+      &u,
+      transcript,
+    )?;
+
+    Ok(())
   }
 }

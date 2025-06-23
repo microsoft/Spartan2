@@ -1,112 +1,15 @@
-//! This module implements `EvaluationEngine` using an IPA-based polynomial commitment scheme
+//! Inner Product Argument (IPA) implementation
 use crate::{
-  Commitment, CommitmentKey,
   errors::SpartanError,
-  polys::eq::EqPolynomial,
-  provider::{
-    pedersen::{
-      CommitmentEngine as PedersenCommitmentEngine, CommitmentKey as PedersenCommitmentKey,
-    },
-    traits::{DlogGroup, DlogGroupExt},
-  },
-  traits::{
-    Engine, TranscriptEngineTrait, TranscriptReprTrait, commitment::CommitmentEngineTrait,
-    evaluation::EvaluationEngineTrait,
-  },
+  provider::traits::{DlogGroup, DlogGroupExt},
+  traits::{Engine, TranscriptEngineTrait, TranscriptReprTrait},
 };
-use core::{iter, marker::PhantomData};
+use core::{fmt::Debug, iter};
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Provides an implementation of the prover key
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct ProverKey<E: Engine>
-where
-  E::GE: DlogGroup,
-{
-  ck_s: PedersenCommitmentKey<E>,
-}
-
-/// Provides an implementation of the verifier key
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct VerifierKey<E: Engine>
-where
-  E::GE: DlogGroup,
-{
-  ck_v: PedersenCommitmentKey<E>,
-  ck_s: PedersenCommitmentKey<E>,
-}
-
-/// Provides an implementation of a polynomial evaluation engine using IPA
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EvaluationEngine<E: Engine> {
-  _p: PhantomData<E>,
-}
-
-impl<E> EvaluationEngineTrait<E> for EvaluationEngine<E>
-where
-  E: Engine<CE = PedersenCommitmentEngine<E>>,
-  E::GE: DlogGroupExt,
-{
-  type ProverKey = ProverKey<E>;
-  type VerifierKey = VerifierKey<E>;
-  type EvaluationArgument = InnerProductArgument<E>;
-
-  fn setup(
-    ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
-  ) -> (Self::ProverKey, Self::VerifierKey) {
-    let ck_s = PedersenCommitmentEngine::setup(b"ipa", 1);
-
-    let pk = ProverKey { ck_s: ck_s.clone() };
-    let vk = VerifierKey {
-      ck_v: ck.clone(),
-      ck_s,
-    };
-
-    (pk, vk)
-  }
-
-  fn prove(
-    ck: &CommitmentKey<E>,
-    pk: &Self::ProverKey,
-    transcript: &mut E::TE,
-    comm: &Commitment<E>,
-    poly: &[E::Scalar],
-    point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError> {
-    let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
-    let w = InnerProductWitness::new(poly);
-
-    InnerProductArgument::prove(&ck.ck, &pk.ck_s.ck[0], &u, &w, transcript)
-  }
-
-  /// A method to verify purported evaluations of a batch of polynomials
-  fn verify(
-    vk: &Self::VerifierKey,
-    transcript: &mut E::TE,
-    comm: &Commitment<E>,
-    point: &[E::Scalar],
-    eval: &E::Scalar,
-    arg: &Self::EvaluationArgument,
-  ) -> Result<(), SpartanError> {
-    let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
-
-    arg.verify(
-      &vk.ck_v.ck,
-      &vk.ck_s.ck[0],
-      (2_usize).pow(point.len() as u32),
-      &u,
-      transcript,
-    )?;
-
-    Ok(())
-  }
-}
-
+/// computes the inner product of two vectors in parallel.
 fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
   assert_eq!(a.len(), b.len());
   (0..a.len())

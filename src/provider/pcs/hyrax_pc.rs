@@ -6,7 +6,7 @@ use crate::{
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    ipa_pc::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
+    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{
