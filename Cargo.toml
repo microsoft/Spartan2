@@ -34,6 +34,8 @@ thiserror = "1.0"
 halo2curves = { version = "0.8.0", features = ["derive_serde"] }
 group = "0.13.0"
 once_cell = "1.18.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "time"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 # see https://github.com/rust-random/rand/pull/948
@@ -45,8 +47,6 @@ hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
-tracing           = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 
 [patch.crates-io]
 halo2curves = {git = "https://github.com/privacy-scaling-explorations/halo2curves", rev = "1622e83c1533c09dbeda93f339d9478a5c744e2e", features = ["derive_serde, std"]}

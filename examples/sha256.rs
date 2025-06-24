@@ -19,6 +19,7 @@ use spartan2::{
 };
 use std::{marker::PhantomData, time::Instant};
 use tracing::{info, info_span};
+use tracing_subscriber::EnvFilter;
 
 type E = T256HyraxEngine;
 
@@ -109,12 +110,13 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
 
 fn main() {
   tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()) // use RUST_LOG
-        .with_target(false)
-        .init();
+    .with_target(false)
+    .with_ansi(false)                // no bold colour codes
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
 
-  // Message lengths: 2⁶ … 2¹⁶ bytes.
-  let circuits: Vec<_> = (6..=12)
+  // Message lengths: 2^10 … 2^11 bytes.
+  let circuits: Vec<_> = (10..=11)
     .map(|k| Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k]))
     .collect();
 

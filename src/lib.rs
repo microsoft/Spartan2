@@ -19,6 +19,8 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 // private modules
 mod math;
@@ -56,6 +58,17 @@ use traits::{
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
   transcript::TranscriptEngineTrait,
 };
+
+/// Start a span + timer, return `(Span, Instant)`.
+macro_rules! start_span {
+    ($name:expr $(, $($fmt:tt)+)?) => {{
+        let span       = info_span!($name $(, $($fmt)+)?);
+        let span_clone = span.clone();    // lives as long as the guard
+        let _guard      = span_clone.enter();
+        (span, Instant::now())
+    }};
+}
+pub(crate) use start_span;
 
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
@@ -173,7 +186,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let mut cs: ShapeCS<E> = ShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
+    let _ = circuit
+      .synthesize(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize circuit: {}", e),
+      })?;
 
     // Padding the ShapeCS: constraints (rows) and variables (columns)
     let num_constraints = cs.num_constraints();
@@ -188,16 +205,24 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     });
 
     let num_vars = cs.num_aux();
+    let num_io = cs.num_inputs();
 
-    (num_vars..num_vars.next_power_of_two()).for_each(|i| {
+    let num_vars_padded = num_vars.next_power_of_two();
+    (num_vars..num_vars_padded).for_each(|i| {
       cs.alloc(|| format!("padding_var_{i}"), || Ok(E::Scalar::ZERO))
         .unwrap();
     });
 
+    // ensure num_io < num_vars
+    if num_io >= num_vars_padded {
+      (num_vars_padded..num_io).for_each(|i| {
+        cs.alloc(|| format!("padding_var_for_io_{i}"), || Ok(E::Scalar::ZERO))
+          .unwrap();
+      });
+    }
+
     let (S, ck, vk) = cs.r1cs_shape();
-
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey::new(S.clone(), vk);
-
     let pk = Self::ProverKey {
       ck,
       S,
@@ -212,7 +237,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
   ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
-    let _ = circuit.synthesize(&mut cs);
+    let _ = circuit
+      .synthesize(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize witness: {}", e),
+      })?;
 
     let (U, W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
@@ -248,6 +277,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     );
 
     // outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
@@ -283,8 +314,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
       (claims_outer[1], claims_outer[2], claims_outer[3]);
     transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
 
     // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
@@ -318,10 +351,15 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       comb_func,
       &mut transcript,
     )?;
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
+    let (_we_span, we_t) = start_span!("witness_polyeval");
     let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
+    info!(elapsed_ms = %we_t.elapsed().as_millis(), "witness_polyeval");
 
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
       U: U.clone(),
