@@ -552,7 +552,7 @@ mod tests {
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
     // generate a witness
-    let (U, W) = S::gen_witness(&pk, circuit.clone()).unwrap();
+    let (U, W) = S::gen_witness(&pk, circuit.clone(), false).unwrap();
 
     // produce a SNARK
     let res = S::prove(&pk, &U, &W);
