@@ -16,9 +16,10 @@ use ff::PrimeField;
 pub trait SpartanWitness<E: Engine> {
   /// Return an instance and witness, given a shape and ck.
   fn r1cs_instance_and_witness(
-    &self,
+    &mut self,
     shape: &R1CSShape<E>,
     ck: &CommitmentKey<E>,
+    is_small: bool,
   ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
@@ -33,11 +34,12 @@ where
   E::Scalar: PrimeField,
 {
   fn r1cs_instance_and_witness(
-    &self,
+    &mut self,
     shape: &R1CSShape<E>,
     ck: &CommitmentKey<E>,
+    is_small: bool,
   ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError> {
-    let (W, comm_W) = R1CSWitness::<E>::new(ck, shape, &self.aux_assignment)?;
+    let (W, comm_W) = R1CSWitness::<E>::new(ck, shape, &mut self.aux_assignment, is_small)?;
     let X = &self.input_assignment[1..];
 
     let instance = R1CSInstance::<E>::new(shape, &comm_W, X)?;

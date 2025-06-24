@@ -235,6 +235,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   fn gen_witness<C: Circuit<<E as Engine>::Scalar>>(
     pk: &Self::ProverKey,
     circuit: C,
+    is_small: bool,
   ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
     circuit
@@ -244,7 +245,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       })?;
 
     let (U, W) = cs
-      .r1cs_instance_and_witness(&pk.S, &pk.ck)
+      .r1cs_instance_and_witness(&pk.S, &pk.ck, is_small)
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
       })?;

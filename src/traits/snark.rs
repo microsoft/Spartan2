@@ -26,6 +26,7 @@ pub trait R1CSSNARKTrait<E: Engine>:
   fn gen_witness<C: Circuit<E::Scalar>>(
     pk: &Self::ProverKey,
     circuit: C,
+    is_small: bool, // do witness elements fit in machine words?
   ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 
   /// Produces a new SNARK for a relaxed R1CS

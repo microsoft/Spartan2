@@ -6,7 +6,7 @@ use crate::{
   traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptReprTrait},
 };
 use core::cmp::max;
-use ff::Field;
+use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -222,15 +222,31 @@ impl<E: Engine> R1CSWitness<E> {
   pub fn new(
     ck: &CommitmentKey<E>,
     S: &R1CSShape<E>,
-    W: &[E::Scalar],
+    W: &mut Vec<E::Scalar>,
+    is_small: bool,
   ) -> Result<(R1CSWitness<E>, Commitment<E>), SpartanError> {
-    let mut W = W.to_vec();
-    W.resize(S.num_vars, E::Scalar::ZERO);
-
     let r_W = PCS::<E>::blind(ck);
-    let comm_W = PCS::<E>::commit(ck, &W, &r_W);
 
-    let W = R1CSWitness { W, r_W };
+    // pad with zeros
+    if W.len() < S.num_vars {
+      W.resize(S.num_vars, E::Scalar::ZERO);
+    }
+
+    let comm_W = if is_small {
+      // extract small values from the witness
+      let W_small = W
+        .par_iter()
+        .map(|e| {
+          // map field element to u64
+          e.to_repr().as_ref()[0] as u64
+        })
+        .collect::<Vec<_>>();
+      PCS::<E>::commit_small(ck, &W_small, &r_W)
+    } else {
+      PCS::<E>::commit(ck, W, &r_W)
+    };
+
+    let W = R1CSWitness { W: W.to_vec(), r_W };
 
     Ok((W, comm_W))
   }

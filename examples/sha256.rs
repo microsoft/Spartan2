@@ -1,14 +1,14 @@
 //! examples/sha256.rs
 //! Measure Spartan-2 {setup, gen_witness, prove, verify} times for a SHA-256
-//! circuit with message lengths 2⁶ … 2¹⁶ bytes.
+//! circuit with varying message lengths
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
 #![allow(non_snake_case)]
-use bellpepper::gadgets::{Assignment, sha256::sha256};
+use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   Circuit, ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
-  num::{AllocatedNum, Num},
+  num::AllocatedNum,
 };
 use ff::{PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
@@ -60,31 +60,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
     // 2. SHA-256 gadget
     let hash_bits = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-    // 3. Pack 256 bits into two field elements
-    let mut hash_fes = Vec::new();
-    for (i, chunk) in hash_bits.chunks(128).enumerate() {
-      let mut num = Num::<Scalar>::zero();
-      let mut coeff = Scalar::ONE;
-      for bit in chunk {
-        num = num.add_bool_with_coeff(CS::one(), bit, coeff);
-        coeff = coeff.double();
-      }
-
-      let hash_fe = AllocatedNum::alloc(cs.namespace(|| format!("hash_fe {i}")), || {
-        Ok(*num.get_value().get()?)
-      })?;
-
-      // Enforce packing: num * 1 = hash_fe
-      cs.enforce(
-        || format!("packing constraint {i}"),
-        |_| num.lc(Scalar::ONE),
-        |lc| lc + CS::one(),
-        |lc| lc + hash_fe.get_variable(),
-      );
-      hash_fes.push(hash_fe);
-    }
-
-    // 4. Sanity-check against Rust SHA-256
+    // 3. Sanity-check against Rust SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&self.preimage);
     let expected = hasher.finalize();
@@ -93,7 +69,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       .iter()
       .flat_map(|&byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1));
 
-    for b in hash_bits {
+    for b in &hash_bits {
       match b {
         Boolean::Is(bit) => assert_eq!(expected_bits.next().unwrap(), bit.get_value().unwrap()),
         Boolean::Not(bit) => assert_ne!(expected_bits.next().unwrap(), bit.get_value().unwrap()),
@@ -101,9 +77,27 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       }
     }
 
-    // 5. Expose hash outputs as public inputs
-    hash_fes[0].inputize(cs.namespace(|| "hash output 0"))?;
-    hash_fes[1].inputize(cs.namespace(|| "hash output 1"))?;
+    for (i, bit) in hash_bits.iter().enumerate() {
+      // Allocate public input
+      let n = AllocatedNum::alloc_input(cs.namespace(|| format!("public num {i}")), || {
+        Ok(
+          if bit.get_value().ok_or(SynthesisError::AssignmentMissing)? {
+            Scalar::ONE
+          } else {
+            Scalar::ZERO
+          },
+        )
+      })?;
+
+      // Single equality constraint is enough
+      cs.enforce(
+        || format!("bit == num {i}"),
+        |_| bit.lc(CS::one(), Scalar::ONE),
+        |lc| lc + CS::one(),
+        |lc| lc + n.get_variable(),
+      );
+    }
+
     Ok(())
   }
 }
@@ -133,7 +127,8 @@ fn main() {
 
     // GENERATE WITNESS
     let t0 = Instant::now();
-    let (U, W) = R1CSSNARK::<E>::gen_witness(&pk, circuit.clone()).expect("gen_witness failed");
+    let (U, W) =
+      R1CSSNARK::<E>::gen_witness(&pk, circuit.clone(), true).expect("gen_witness failed");
     let gw_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = gw_ms, "gen_witness");
 
