@@ -196,8 +196,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     let (S, ck, vk) = cs.r1cs_shape();
 
-    let S = S.pad();
-
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey::new(S.clone(), vk);
 
     let pk = Self::ProverKey {
@@ -221,8 +219,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
       })?;
-
-    let W = W.pad(&pk.S); // pad the witness
 
     // derandomize instance
     let (W, r_W) = W.derandomize();
