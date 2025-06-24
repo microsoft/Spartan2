@@ -22,6 +22,8 @@ use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
+
 /// A type that holds commitment generators for Hyrax commitments
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -31,9 +33,9 @@ where
 {
   num_rows: usize,
   num_cols: usize,
-  ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
-  h: <E::GE as DlogGroup>::AffineGroupElement,
-  ck_s: <E::GE as DlogGroup>::AffineGroupElement,
+  ck: Vec<AffineGroupElement<E>>,
+  h: AffineGroupElement<E>,
+  ck_s: AffineGroupElement<E>,
 }
 
 /// A type that holds the verifier key for Hyrax commitments
@@ -45,9 +47,9 @@ where
 {
   num_rows: usize,
   num_cols: usize,
-  ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
-  h: <E::GE as DlogGroup>::AffineGroupElement,
-  ck_s: <E::GE as DlogGroup>::AffineGroupElement,
+  ck: Vec<AffineGroupElement<E>>,
+  h: AffineGroupElement<E>,
+  ck_s: AffineGroupElement<E>,
 }
 
 impl<E: Engine> Len for HyraxCommitmentKey<E>
@@ -66,7 +68,7 @@ pub struct HyraxDerandKey<E: Engine>
 where
   E::GE: DlogGroupExt,
 {
-  h: <E::GE as DlogGroup>::AffineGroupElement,
+  h: AffineGroupElement<E>,
 }
 
 /// Structure that holds commitments
@@ -169,19 +171,22 @@ where
   }
 
   fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment {
-    if v.len() > ck.num_rows * ck.num_cols {
+    let n = v.len();
+
+    if n > ck.num_rows * ck.num_cols {
       panic!(
-        "Input vector is too large {} and ck.num_rows = {}, ck.num_cols= {}",
-        v.len(),
-        ck.num_rows,
-        ck.num_cols
+        "Input vector is too large {} and ck can only commit to {}",
+        n,
+        ck.num_rows * ck.num_cols
       );
     }
 
+    // ensure that the input vector is padded to the next power of 2
+    let n = n.next_power_of_two();
     let mut v = v.to_vec();
     // pad with zeros
-    if v.len() < ck.num_rows * ck.num_cols {
-      v.extend(vec![E::Scalar::ZERO; ck.num_rows * ck.num_cols - v.len()]);
+    if v.len() < n {
+      v.extend(vec![E::Scalar::ZERO; n - v.len()]);
     }
 
     let r = if r.blind.is_none() {
@@ -190,14 +195,14 @@ where
       r.blind.clone().unwrap()
     };
 
-    let comm = (0..ck.num_rows)
+    let (num_rows, num_cols) = compute_factored_lens(n);
+
+    let comm = (0..num_rows)
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        E::GE::vartime_multiscalar_mul(
-          &v[ck.num_cols * i..ck.num_cols * (i + 1)],
-          &ck.ck[..ck.num_cols],
-        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
+        E::GE::vartime_multiscalar_mul(&v[num_cols * i..num_cols * (i + 1)], &ck.ck[..num_cols])
+          + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
 
@@ -209,10 +214,22 @@ where
     v: &[T],
     r: &Self::Blind,
   ) -> Self::Commitment {
+    let n = v.len();
+
+    if n > ck.num_rows * ck.num_cols {
+      panic!(
+        "Input vector is too large {} and ck can only commit to {}",
+        n,
+        ck.num_rows * ck.num_cols
+      );
+    }
+
+    // ensure that the input vector is padded to the next power of 2
+    let n = n.next_power_of_two();
     let mut v = v.to_vec();
     // pad with zeros
-    if v.len() != ck.num_rows * ck.num_cols {
-      v.extend(vec![T::zero(); ck.num_rows * ck.num_cols - v.len()]);
+    if v.len() < n {
+      v.extend(vec![T::zero(); n - v.len()]);
     }
 
     let r = if r.blind.is_none() {
@@ -221,13 +238,15 @@ where
       r.blind.clone().unwrap()
     };
 
-    let comm = (0..ck.num_rows)
+    let (num_rows, num_cols) = compute_factored_lens(n);
+
+    let comm = (0..num_rows)
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
         E::GE::vartime_multiscalar_mul_small(
-          &v[ck.num_cols * i..ck.num_cols * (i + 1)],
-          &ck.ck[..ck.num_cols],
+          &v[num_cols * i..num_cols * (i + 1)],
+          &ck.ck[..num_cols],
         ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
