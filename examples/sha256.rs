@@ -40,7 +40,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 
 impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scalar> {
   fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-    // 1. Preimage bits ----------------------------------------------------
+    // 1. Preimage bits
     let bit_values: Vec<_> = self
       .preimage
       .clone()
@@ -57,10 +57,10 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       .map(|b| b.map(Boolean::from))
       .collect::<Result<Vec<_>, _>>()?;
 
-    // 2. SHA-256 gadget ---------------------------------------------------
+    // 2. SHA-256 gadget
     let hash_bits = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-    // 3. Pack 256 bits into two field elements ---------------------------
+    // 3. Pack 256 bits into two field elements
     let mut hash_fes = Vec::new();
     for (i, chunk) in hash_bits.chunks(128).enumerate() {
       let mut num = Num::<Scalar>::zero();
@@ -84,7 +84,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       hash_fes.push(hash_fe);
     }
 
-    // 4. Sanity-check against Rust SHA-256 -------------------------------
+    // 4. Sanity-check against Rust SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&self.preimage);
     let expected = hasher.finalize();
@@ -101,7 +101,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       }
     }
 
-    // 5. Expose hash outputs as public inputs ----------------------------
+    // 5. Expose hash outputs as public inputs
     hash_fes[0].inputize(cs.namespace(|| "hash output 0"))?;
     hash_fes[1].inputize(cs.namespace(|| "hash output 1"))?;
     Ok(())
