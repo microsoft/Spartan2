@@ -7,7 +7,7 @@ Spartan is a sum-check-based zkSNARK with an extremely efficient prover (a zkSNA
 
 * Spartan is flexible with respect to arithmetization: it can support R1CS, Plonkish, AIR, and their generalization CCS. Spartan protocol itself internally uses lookup arguments, so one can additionally prove lookup constraints with Spartan.
 
-* The prover's work naturally splits into a witness-dependent part and a witness-independent part (a significant chunk, up to 90%, of the prover's work is incurred in the witness-independent part). The latter part can be offloaded to any untrusted entity without violating zero-knowledge. Note that such a clean decomposition between witness-dependent part and witness-independent part is not featured by other popular zkSNARKs (e.g., Groth16, Plonk, HyperPlonk, Honk).
+* The prover's work naturally splits into a witness-dependent part and a witness-independent part (a significant chunk, up to 90%, of the prover's work is incurred in the witness-independent part). The latter part can be offloaded to any untrusted entity without violating zero-knowledge. Note that such a clean decomposition between witness-dependent part and witness-independent part is not featured by other popular zkSNARKs (e.g., Plonk, HyperPlonk, Honk).
 
 * The witness-dependent work of the Spartan prover is shown to be MPC-friendly by more recent works, allowing the whole Spartan prover to be delegated.
 
