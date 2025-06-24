@@ -117,12 +117,12 @@ where
   type EvaluationArgument = InnerProductArgument<E>;
 
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    let n = n.next_power_of_two();
-    let gens = E::GE::from_label(label, n + 2);
+    let padded_n = n.next_power_of_two();
+    let gens = E::GE::from_label(label, padded_n + 2);
 
-    let ck = gens[..n].to_vec();
-    let h = gens[n];
-    let ck_s = gens[n + 1];
+    let ck = gens[..padded_n].to_vec();
+    let h = gens[padded_n];
+    let ck_s = gens[padded_n + 1];
 
     let vk = VerifierKey {
       ck: ck.clone(),
