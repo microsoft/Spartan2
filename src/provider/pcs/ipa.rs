@@ -132,27 +132,35 @@ where
       let n = a_vec.len();
       let (ck_L, ck_R) = ck.split_at(n / 2);
 
-      let c_L = inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]);
-      let c_R = inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]);
+      let (c_L, c_R) = rayon::join(
+        || inner_product(&a_vec[0..n / 2], &b_vec[n / 2..n]),
+        || inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]),
+      );
 
-      let L = E::GE::vartime_multiscalar_mul(
-        &a_vec[0..n / 2]
-          .iter()
-          .chain(iter::once(&c_L))
-          .copied()
-          .collect::<Vec<E::Scalar>>(),
-        &[ck_R, &[ck_c]].concat(),
-      )
-      .affine();
-      let R = E::GE::vartime_multiscalar_mul(
-        &a_vec[n / 2..n]
-          .iter()
-          .chain(iter::once(&c_R))
-          .copied()
-          .collect::<Vec<E::Scalar>>(),
-        &[ck_L, &[ck_c]].concat(),
-      )
-      .affine();
+      let (L, R) = rayon::join(
+        || {
+          E::GE::vartime_multiscalar_mul(
+            &a_vec[0..n / 2]
+              .iter()
+              .chain(iter::once(&c_L))
+              .copied()
+              .collect::<Vec<E::Scalar>>(),
+            &[ck_R, &[ck_c]].concat(),
+          )
+          .affine()
+        },
+        || {
+          E::GE::vartime_multiscalar_mul(
+            &a_vec[n / 2..n]
+              .iter()
+              .chain(iter::once(&c_R))
+              .copied()
+              .collect::<Vec<E::Scalar>>(),
+            &[ck_L, &[ck_c]].concat(),
+          )
+          .affine()
+        },
+      );
 
       transcript.absorb(b"L", &L);
       transcript.absorb(b"R", &R);
@@ -161,26 +169,34 @@ where
       let r_inverse = r.invert().unwrap();
 
       // fold the left half and the right half
-      let a_vec_folded = a_vec[0..n / 2]
-        .par_iter()
-        .zip(a_vec[n / 2..n].par_iter())
-        .map(|(a_L, a_R)| *a_L * r + r_inverse * *a_R)
-        .collect::<Vec<E::Scalar>>();
-
-      let b_vec_folded = b_vec[0..n / 2]
-        .par_iter()
-        .zip(b_vec[n / 2..n].par_iter())
-        .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
-        .collect::<Vec<E::Scalar>>();
-
-      let ck_folded = {
-        let (left, right) = ck.split_at(ck.len() / 2);
-        left
-          .iter()
-          .zip(right.iter())
-          .map(|(l_i, r_i)| (E::GE::group(l_i) * r_inverse + E::GE::group(r_i) * r).affine())
-          .collect::<Vec<_>>()
-      };
+      let ((a_vec_folded, b_vec_folded), ck_folded) = rayon::join(
+        || {
+          rayon::join(
+            || {
+              a_vec[0..n / 2]
+                .par_iter()
+                .zip(a_vec[n / 2..n].par_iter())
+                .map(|(a_L, a_R)| *a_L * r + r_inverse * *a_R)
+                .collect::<Vec<E::Scalar>>()
+            },
+            || {
+              b_vec[0..n / 2]
+                .par_iter()
+                .zip(b_vec[n / 2..n].par_iter())
+                .map(|(b_L, b_R)| *b_L * r_inverse + r * *b_R)
+                .collect::<Vec<E::Scalar>>()
+            },
+          )
+        },
+        || {
+          let (left, right) = ck.split_at(ck.len() / 2);
+          left
+            .par_iter()
+            .zip(right.par_iter())
+            .map(|(l_i, r_i)| (E::GE::group(l_i) * r_inverse + E::GE::group(r_i) * r).affine())
+            .collect::<Vec<_>>()
+        },
+      );
 
       Ok((L, R, a_vec_folded, b_vec_folded, ck_folded))
     };
