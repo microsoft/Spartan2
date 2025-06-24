@@ -1,12 +1,29 @@
 # Spartan: High-speed zero-knowledge SNARKs without trusted setup
-Spartan is a high-speed zkSNARK, where a zkSNARK is type cryptographic proof system that enables a prover to prove a mathematical statement to a verifier with a short proof and succinct verification, and without revealing anything beyond the validity of the statement. Spartan provides a linear-time polynomial IOP that when combined with a polynomial commitment scheme provides a succinct interactive argument. It is made non-interactive using the Fiat-Shamir transform.
+Spartan is a sum-check-based zkSNARK with an extremely efficient prover (a zkSNARK is type cryptographic proof system that enables a prover to prove a mathematical statement to a verifier with a short proof and succinct verification, and without revealing anything beyond the validity of the statement). Spartan also features several unique properties that are particularly relevant for applications where zero-knowledge is essential. Here are some highlights:
 
-Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The proofs are *not* zero-knowledge (we plan to add it in the near future). The first version of this code is derived from Nova's open-source code.
+* Spartan provides a linear-time polynomial IOP that when combined with a polynomial commitment scheme provides a succinct interactive argument. It is made non-interactive using the Fiat-Shamir transform.
+
+* Spartan can be instantiated with any multilinear polynomial commitment scheme (e.g., Binius, HyperKZG, Samaritan, WHIR, Mercury, BaseFold, PST13, Dory, Hyrax). Depending on the polynomial commitment scheme used, one can achieve different properties (e.g., small fields or big fields, post-quantum or pre-quantum security, transparent or universal setup, hash-based or curve-based, binary fields or prime fields).
+
+* Spartan is flexible with respect to arithmetization: it can support R1CS, Plonkish, AIR, and their generalization CCS. Spartan protocol itself internally uses lookup arguments, so one can additionally prove lookup constraints with Spartan.
+
+* The prover's work naturally splits into a witness-dependent part and a witness-independent part (a significant chunk, up to 90%, of the prover's work is incurred in the witness-independent part). The latter part can be offloaded to any untrusted entity without violating zero-knowledge. Note that such a clean decomposition between witness-dependent part and witness-independent part is not featured by other popular zkSNARKs (e.g., Plonk, HyperPlonk, Honk).
+
+* The witness-dependent work of the Spartan prover is shown to be MPC-friendly by more recent works, allowing the whole Spartan prover to be delegated.
+
+* For uniform constraint systems, Spartan's prover can be optimized further by eliminating the witness-independent work of the prover, which constitutes about 90% of the prover's work.
+
+## About this library
+Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The first version of this code is derived from Nova's open-source code.
+
+The proofs are *not* zero-knowledge (we plan to add it in the near future). Also, the current implementation does not implement the Spark protocol, so the verifier's work is proportional to the number of non-zero entries in the R1CS matrices.
 
 ### Supported polynomial commitment schemes
-- [x] Elliptic-curve based schemes
+- [ ] Elliptic-curve based schemes
   - [x] Bulletproofs-based PCS
   - [x] Hyrax PCS
+  - [ ] Dory
+  - [ ] Sona
   - [ ] HyperKZG (requires a universal trusted setup)
   - [ ] Mercury / Samaritan (require a universal trusted setup)
 - [ ] Hash-based schemes
