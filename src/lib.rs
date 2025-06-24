@@ -186,10 +186,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let mut cs: ShapeCS<E> = ShapeCS::new();
-    let _ = circuit
+    circuit
       .synthesize(&mut cs)
       .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize circuit: {}", e),
+        reason: format!("Unable to synthesize circuit: {e}"),
       })?;
 
     // Padding the ShapeCS: constraints (rows) and variables (columns)
@@ -237,10 +237,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
   ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
-    let _ = circuit
+    circuit
       .synthesize(&mut cs)
       .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize witness: {}", e),
+        reason: format!("Unable to synthesize witness: {e}"),
       })?;
 
     let (U, W) = cs
