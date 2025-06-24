@@ -48,7 +48,7 @@ use polys::{
   eq::EqPolynomial,
   multilinear::{MultilinearPolynomial, SparsePolynomial},
 };
-use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
+use r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
   Engine,
@@ -209,18 +209,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     Ok((pk, vk))
   }
 
-  /// produces a succinct proof of satisfiability of a `RelaxedR1CS` instance
-  fn prove<C: Circuit<E::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError> {
+  fn gen_witness<C: Circuit<<E as Engine>::Scalar>>(
+    pk: &Self::ProverKey,
+    circuit: C,
+  ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
     let _ = circuit.synthesize(&mut cs);
-
-    // Padding variables
-    let num_vars = cs.aux_slice().len();
-
-    (num_vars..num_vars.next_power_of_two()).for_each(|i| {
-      cs.alloc(|| format!("padding_var_{i}"), || Ok(E::Scalar::ZERO))
-        .unwrap();
-    });
 
     let (U, W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck)
@@ -234,11 +228,20 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (W, r_W) = W.derandomize();
     let U = U.derandomize(&E::PCS::derand_key(&pk.ck), &r_W);
 
+    Ok((U, W))
+  }
+
+  /// produces a succinct proof of satisfiability of an R1CS instance
+  fn prove(
+    pk: &Self::ProverKey,
+    U: &R1CSInstance<E>,
+    W: &R1CSWitness<E>,
+  ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"U", &U);
+    transcript.absorb(b"U", U);
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
     let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
@@ -325,7 +328,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
 
     Ok(R1CSSNARK {
-      U,
+      U: U.clone(),
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -457,10 +460,7 @@ mod tests {
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
-  impl<F> Circuit<F> for CubicCircuit
-  where
-    F: PrimeField,
-  {
+  impl<F: PrimeField> Circuit<F> for CubicCircuit {
     fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
       let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(F::ONE + F::ONE))?;
@@ -516,8 +516,11 @@ mod tests {
     // produce keys
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
+    // generate a witness
+    let (U, W) = S::gen_witness(&pk, circuit.clone()).unwrap();
+
     // produce a SNARK
-    let res = S::prove(&pk, circuit);
+    let res = S::prove(&pk, &U, &W);
     assert!(res.is_ok());
     let snark = res.unwrap();
 

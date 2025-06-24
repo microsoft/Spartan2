@@ -34,6 +34,10 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 pub struct R1CSWitness<E: Engine> {
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
+
+  pub(crate) Az: Vec<E::Scalar>,
+  pub(crate) Bz: Vec<E::Scalar>,
+  pub(crate) Cz: Vec<E::Scalar>,
 }
 
 /// A type that holds an R1CS instance

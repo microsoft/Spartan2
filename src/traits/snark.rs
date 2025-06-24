@@ -1,6 +1,7 @@
 //! This module defines a collection of traits that define the behavior of a zkSNARK for RelaxedR1CS
 use crate::{
   errors::SpartanError,
+  r1cs::{R1CSInstance, R1CSWitness},
   traits::{Engine, Group, TranscriptReprTrait},
 };
 use bellpepper_core::Circuit;
@@ -21,8 +22,18 @@ pub trait R1CSSNARKTrait<E: Engine>:
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError>;
 
+  /// Produces witness and instance for a given circuit
+  fn gen_witness<C: Circuit<E::Scalar>>(
+    pk: &Self::ProverKey,
+    circuit: C,
+  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
+
   /// Produces a new SNARK for a relaxed R1CS
-  fn prove<C: Circuit<E::Scalar>>(pk: &Self::ProverKey, circuit: C) -> Result<Self, SpartanError>;
+  fn prove(
+    pk: &Self::ProverKey,
+    U: &R1CSInstance<E>,
+    W: &R1CSWitness<E>,
+  ) -> Result<Self, SpartanError>;
 
   /// Verifies a SNARK for a relaxed R1CS and returns the public IO
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError>;

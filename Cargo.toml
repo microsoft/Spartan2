@@ -12,6 +12,7 @@ keywords = ["zkSNARKs", "cryptography", "proofs"]
 
 [dependencies]
 bellpepper-core = "0.4.0"
+bellpepper = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }
 digest = "0.10"
 sha3 = "0.10"
@@ -45,6 +46,10 @@ hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
+
+[[bench]]
+name = "sha256"
+harness = false
 
 [patch.crates-io]
 halo2curves = {git = "https://github.com/privacy-scaling-explorations/halo2curves", rev = "1622e83c1533c09dbeda93f339d9478a5c744e2e", features = ["derive_serde, std"]}
