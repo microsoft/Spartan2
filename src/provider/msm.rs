@@ -423,7 +423,7 @@ mod tests {
       .fold(A::CurveExt::identity(), |acc, (coeff, base)| {
         acc + *base * coeff
       });
-    let msm = msm(&coeffs, &bases);
+    let msm = msm(&coeffs, &bases, true);
 
     assert_eq!(naive, msm)
   }
@@ -447,8 +447,8 @@ mod tests {
         .map(|_| rand::random::<u64>() % (1 << bit_width))
         .collect::<Vec<_>>();
       let coeffs_scalar: Vec<F> = coeffs.iter().map(|b| F::from(*b)).collect::<Vec<_>>();
-      let general = msm(&coeffs_scalar, &bases);
-      let integer = msm_small(&coeffs, &bases);
+      let general = msm(&coeffs_scalar, &bases, true);
+      let integer = msm_small(&coeffs, &bases, true);
 
       assert_eq!(general, integer);
     }
