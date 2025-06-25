@@ -97,7 +97,11 @@ pub trait DlogGroup:
 /// Extension trait for DlogGroup that provides multi-scalar multiplication operations
 pub trait DlogGroupExt: DlogGroup {
   /// A method to compute a multiexponentation
-  fn vartime_multiscalar_mul(scalars: &[Self::Scalar], bases: &[Self::AffineGroupElement]) -> Self;
+  fn vartime_multiscalar_mul(
+    scalars: &[Self::Scalar],
+    bases: &[Self::AffineGroupElement],
+    use_parallelism_internally: bool,
+  ) -> Self;
 
   /// A method to compute a batch of multiexponentations
   fn batch_vartime_multiscalar_mul(
@@ -106,7 +110,7 @@ pub trait DlogGroupExt: DlogGroup {
   ) -> Vec<Self> {
     scalars
       .par_iter()
-      .map(|scalar| Self::vartime_multiscalar_mul(scalar, &bases[..scalar.len()]))
+      .map(|scalar| Self::vartime_multiscalar_mul(scalar, &bases[..scalar.len()], false))
       .collect::<Vec<_>>()
   }
 
@@ -114,6 +118,7 @@ pub trait DlogGroupExt: DlogGroup {
   fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     scalars: &[T],
     bases: &[Self::AffineGroupElement],
+    use_parallelism_internally: bool,
   ) -> Self;
 
   /// A method to compute a batch of multiexponentations with small scalars
@@ -123,7 +128,7 @@ pub trait DlogGroupExt: DlogGroup {
   ) -> Vec<Self> {
     scalars
       .par_iter()
-      .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()]))
+      .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()], false))
       .collect::<Vec<_>>()
   }
 }
@@ -285,15 +290,17 @@ macro_rules! impl_traits {
       fn vartime_multiscalar_mul(
         scalars: &[Self::Scalar],
         bases: &[Self::AffineGroupElement],
+        use_parallelism_internally: bool,
       ) -> Self {
-        msm(scalars, bases)
+        msm(scalars, bases, use_parallelism_internally)
       }
 
       fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
         scalars: &[T],
         bases: &[Self::AffineGroupElement],
+        use_parallelism_internally: bool,
       ) -> Self {
-        msm_small(scalars, bases)
+        msm_small(scalars, bases, use_parallelism_internally)
       }
     }
   };

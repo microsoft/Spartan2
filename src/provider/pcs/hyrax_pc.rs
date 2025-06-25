@@ -201,8 +201,11 @@ where
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        E::GE::vartime_multiscalar_mul(&v[num_cols * i..num_cols * (i + 1)], &ck.ck[..num_cols])
-          + <E::GE as DlogGroup>::group(&ck.h) * r[i]
+        E::GE::vartime_multiscalar_mul(
+          &v[num_cols * i..num_cols * (i + 1)],
+          &ck.ck[..num_cols],
+          false,
+        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
 
@@ -247,6 +250,7 @@ where
         E::GE::vartime_multiscalar_mul_small(
           &v[num_cols * i..num_cols * (i + 1)],
           &ck.ck[..num_cols],
+          false,
         ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
       })
       .collect();
@@ -299,7 +303,7 @@ where
     let LZ = poly_m.bind(&L, &R);
 
     // Commit to LZ with a blind of zero
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()]);
+    let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true);
 
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
@@ -333,7 +337,7 @@ where
     // compute a weighted sum of commitments and L
     // convert the commitments to affine form so we can do a multi-scalar multiplication
     let ck: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()]);
+    let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true);
 
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
 

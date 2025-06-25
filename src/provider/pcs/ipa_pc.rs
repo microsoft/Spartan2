@@ -147,7 +147,7 @@ where
     assert!(ck.ck.len() >= v.len());
 
     Commitment {
-      comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()])
+      comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)
         + <E::GE as DlogGroup>::group(&ck.h) * r,
     }
   }
@@ -160,7 +160,7 @@ where
     assert!(ck.ck.len() >= v.len());
 
     Commitment {
-      comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()])
+      comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()], true)
         + <E::GE as DlogGroup>::group(&ck.h) * r,
     }
   }

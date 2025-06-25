@@ -113,12 +113,21 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
 ///
 /// This will use multithreading if beneficial.
 /// Adapted from zcash/halo2
-pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+pub fn msm<C: CurveAffine>(
+  coeffs: &[C::Scalar],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> C::Curve {
   let (_msm_span, msm_t) = start_span!("msm", size = coeffs.len());
 
   assert_eq!(coeffs.len(), bases.len());
 
-  let num_threads = current_num_threads();
+  let num_threads = if use_parallelism_internally {
+    current_num_threads()
+  } else {
+    1
+  };
+
   let result = if coeffs.len() > num_threads {
     let chunk = coeffs.len() / num_threads;
     let (_parallel_span, parallel_t) = start_span!("msm_parallel_chunks");
@@ -148,6 +157,7 @@ fn num_bits(n: usize) -> usize {
 pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
   scalars: &[T],
   bases: &[C],
+  use_parallelism_internally: bool,
 ) -> C::Curve {
   let (_msm_small_span, msm_small_t) = start_span!("msm_small", size = scalars.len());
 
@@ -158,19 +168,19 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
     0 => C::identity().into(),
     1 => {
       let (_binary_span, binary_t) = start_span!("msm_binary");
-      let result = msm_binary(scalars, bases);
+      let result = msm_binary(scalars, bases, use_parallelism_internally);
       info!(elapsed_ms = %binary_t.elapsed().as_millis(), "msm_binary");
       result
     }
     2..=10 => {
       let (_msm_10_span, msm_10_t) = start_span!("msm_10", max_bits = max_num_bits);
-      let result = msm_10(scalars, bases, max_num_bits);
+      let result = msm_10(scalars, bases, max_num_bits, use_parallelism_internally);
       info!(elapsed_ms = %msm_10_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_10");
       result
     }
     _ => {
       let (_msm_rest_span, msm_rest_t) = start_span!("msm_small_rest", max_bits = max_num_bits);
-      let result = msm_small_rest(scalars, bases, max_num_bits);
+      let result = msm_small_rest(scalars, bases, max_num_bits, use_parallelism_internally);
       info!(elapsed_ms = %msm_rest_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_small_rest");
       result
     }
@@ -180,9 +190,17 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   result
 }
 
-fn msm_binary<C: CurveAffine, T: Integer + Sync>(scalars: &[T], bases: &[C]) -> C::Curve {
+fn msm_binary<C: CurveAffine, T: Integer + Sync>(
+  scalars: &[T],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> C::Curve {
   assert_eq!(scalars.len(), bases.len());
-  let num_threads = current_num_threads();
+  let num_threads = if use_parallelism_internally {
+    current_num_threads()
+  } else {
+    1
+  };
   let process_chunk = |scalars: &[T], bases: &[C]| {
     let mut acc = C::Curve::identity();
     scalars
@@ -212,6 +230,7 @@ fn msm_10<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   scalars: &[T],
   bases: &[C],
   max_num_bits: usize,
+  use_parallelism_internally: bool,
 ) -> C::Curve {
   fn msm_10_serial<C: CurveAffine, T: Into<u64> + Zero + Copy>(
     scalars: &[T],
@@ -239,7 +258,11 @@ fn msm_10<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
     result
   }
 
-  let num_threads = current_num_threads();
+  let num_threads = if use_parallelism_internally {
+    current_num_threads()
+  } else {
+    1
+  };
   if scalars.len() > num_threads {
     let chunk_size = scalars.len() / num_threads;
     scalars
@@ -256,6 +279,7 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   scalars: &[T],
   bases: &[C],
   max_num_bits: usize,
+  use_parallelism_internally: bool,
 ) -> C::Curve {
   fn msm_small_rest_serial<C: CurveAffine, T: Into<u64> + Zero + Copy>(
     scalars: &[T],
@@ -349,7 +373,11 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
         })
   }
 
-  let num_threads = current_num_threads();
+  let num_threads = if use_parallelism_internally {
+    current_num_threads()
+  } else {
+    1
+  };
   if scalars.len() > num_threads {
     let chunk_size = scalars.len() / num_threads;
     scalars
