@@ -277,22 +277,36 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       (usize::try_from(pk.S.num_vars.ilog2()).unwrap() + 1),
     );
 
-    // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
-
+    // outer sum-check preparation
+    let (_tau_span, tau_t) = start_span!("compute_tau");
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau");
 
+    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = {
-      let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
-      (
-        MultilinearPolynomial::new(Az),
-        MultilinearPolynomial::new(Bz),
-        MultilinearPolynomial::new(Cz),
-      )
-    };
+    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
+
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
+    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      constraints = %pk.S.num_cons,
+      vars = %pk.S.num_vars,
+      "matrix_vector_multiply"
+    );
+
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+      MultilinearPolynomial::new(Az),
+      MultilinearPolynomial::new(Bz),
+      MultilinearPolynomial::new(Cz),
+    );
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
+
+    // outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
     let comb_func_outer =
       |poly_A_comp: &E::Scalar,
@@ -317,29 +331,38 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
     info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
 
-    // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+    // inner sum-check preparation
+    let (_r_span, r_t) = start_span!("prepare_inner_claims");
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
-    let poly_ABC = {
-      // compute the initial evaluation table for R(\tau, x)
-      let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
+    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
+    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
+    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
-      let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
+    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
-      assert_eq!(evals_A.len(), evals_B.len());
-      assert_eq!(evals_A.len(), evals_C.len());
-      (0..evals_A.len())
-        .into_par_iter()
-        .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-        .collect::<Vec<E::Scalar>>()
-    };
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
+    assert_eq!(evals_A.len(), evals_B.len());
+    assert_eq!(evals_A.len(), evals_C.len());
+    let poly_ABC = (0..evals_A.len())
+      .into_par_iter()
+      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .collect::<Vec<E::Scalar>>();
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
+    let (_z_span, z_t) = start_span!("prepare_poly_z");
     let poly_z = {
       z.resize(pk.S.num_vars * 2, E::Scalar::ZERO);
       z
     };
+    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
+
+    // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
 
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
