@@ -127,12 +127,10 @@ pub fn msm<C: CurveAffine>(
     // Otherwise, we use a single thread.
     // This is a heuristic to avoid overhead from parallelism for small inputs.
     1
+  } else if use_parallelism_internally {
+    current_num_threads()
   } else {
-    if use_parallelism_internally {
-      current_num_threads()
-    } else {
-      1
-    }
+    1
   };
 
   let result = if coeffs.len() > num_threads {
