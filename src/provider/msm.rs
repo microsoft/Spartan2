@@ -122,10 +122,17 @@ pub fn msm<C: CurveAffine>(
 
   assert_eq!(coeffs.len(), bases.len());
 
-  let num_threads = if use_parallelism_internally {
-    current_num_threads()
-  } else {
+  let num_threads = if coeffs.len() > 1024 {
+    // If the number of coefficients is large, we use parallelism.
+    // Otherwise, we use a single thread.
+    // This is a heuristic to avoid overhead from parallelism for small inputs.
     1
+  } else {
+    if use_parallelism_internally {
+      current_num_threads()
+    } else {
+      1
+    }
   };
 
   let result = if coeffs.len() > num_threads {
@@ -169,7 +176,9 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
     1 => {
       let (_binary_span, binary_t) = start_span!("msm_binary");
       let result = msm_binary(scalars, bases, use_parallelism_internally);
-      info!(elapsed_ms = %binary_t.elapsed().as_millis(), "msm_binary");
+      if binary_t.elapsed().as_millis() != 0 {
+        info!(elapsed_ms = %binary_t.elapsed().as_millis(), size = scalars.len(), "msm_binary");
+      }
       result
     }
     2..=10 => {
@@ -186,7 +195,9 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
     }
   };
 
-  info!(elapsed_ms = %msm_small_t.elapsed().as_millis(), size = scalars.len(), max_bits = max_num_bits, "msm_small");
+  if msm_small_t.elapsed().as_millis() != 0 {
+    info!(elapsed_ms = %msm_small_t.elapsed().as_millis(), size = scalars.len(), max_bits = max_num_bits, "msm_small");
+  }
   result
 }
 

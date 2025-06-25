@@ -110,7 +110,7 @@ fn main() {
     .init();
 
   // Message lengths: 2^10 … 2^11 bytes.
-  let circuits: Vec<_> = (10..=10)
+  let circuits: Vec<_> = (10..=11)
     .map(|k| Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k]))
     .collect();
 

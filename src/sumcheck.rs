@@ -195,7 +195,9 @@ impl<E: Engine> SumcheckProof<E> {
         let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
         let (eval_point_0, eval_point_2) =
           Self::compute_eval_points_quad(poly_A, poly_B, &comb_func);
-        info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
+        }
 
         let evals = vec![eval_point_0, claim_per_round - eval_point_0, eval_point_2];
         UniPoly::from_evals(&evals)
@@ -342,8 +344,9 @@ impl<E: Engine> SumcheckProof<E> {
           Self::compute_eval_points_cubic_with_additive_term(
             poly_A, poly_B, poly_C, poly_D, &comb_func,
           );
-        info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
-
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
         let evals = vec![
           eval_point_0,
           claim_per_round - eval_point_0,
