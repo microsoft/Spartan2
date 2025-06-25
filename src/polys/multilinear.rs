@@ -2,12 +2,14 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, zip_with, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial, start_span, zip_with, zip_with_for_each};
 use core::ops::{Add, Index};
 use ff::PrimeField;
 use itertools::Itertools as _;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
@@ -105,14 +107,20 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
 
   /// Evaluates the polynomial with the given evaluations and point.
   pub fn evaluate_with(Z: &[Scalar], r: &[Scalar]) -> Scalar {
-    zip_with!(
+    let (_eval_span, eval_t) =
+      start_span!("multilinear_evaluate_with", vars = r.len(), evals = Z.len());
+
+    let result = zip_with!(
       (
         EqPolynomial::evals_from_points(r).into_par_iter(),
         Z.par_iter()
       ),
       |a, b| a * b
     )
-    .sum()
+    .sum();
+
+    info!(elapsed_ms = %eval_t.elapsed().as_millis(), vars = r.len(), evals = Z.len(), "multilinear_evaluate_with");
+    result
   }
 }
 
