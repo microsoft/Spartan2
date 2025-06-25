@@ -1,11 +1,14 @@
 //! This module provides a multi-scalar multiplication routine
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.
+use crate::start_span;
 use ff::{Field, PrimeField};
 use halo2curves::{CurveAffine, group::Group};
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 #[derive(Clone, Copy)]
 enum Bucket<C: CurveAffine> {
@@ -111,19 +114,30 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
 /// This will use multithreading if beneficial.
 /// Adapted from zcash/halo2
 pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+  let (_msm_span, msm_t) = start_span!("msm", size = coeffs.len());
+  
   assert_eq!(coeffs.len(), bases.len());
 
   let num_threads = current_num_threads();
-  if coeffs.len() > num_threads {
+  let result = if coeffs.len() > num_threads {
     let chunk = coeffs.len() / num_threads;
-    coeffs
+    let (_parallel_span, parallel_t) = start_span!("msm_parallel_chunks");
+    let result = coeffs
       .par_chunks(chunk)
       .zip(bases.par_chunks(chunk))
       .map(|(coeffs, bases)| cpu_msm_serial(coeffs, bases))
-      .reduce(C::Curve::identity, |sum, evl| sum + evl)
+      .reduce(C::Curve::identity, |sum, evl| sum + evl);
+    info!(elapsed_ms = %parallel_t.elapsed().as_millis(), chunks = %((coeffs.len() + chunk - 1) / chunk), "msm_parallel_chunks");
+    result
   } else {
-    cpu_msm_serial(coeffs, bases)
-  }
+    let (_serial_span, serial_t) = start_span!("msm_serial");
+    let result = cpu_msm_serial(coeffs, bases);
+    info!(elapsed_ms = %serial_t.elapsed().as_millis(), "msm_serial");
+    result
+  };
+  
+  info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
+  result
 }
 
 fn num_bits(n: usize) -> usize {
@@ -135,15 +149,35 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   scalars: &[T],
   bases: &[C],
 ) -> C::Curve {
+  let (_msm_small_span, msm_small_t) = start_span!("msm_small", size = scalars.len());
+  
   assert_eq!(bases.len(), scalars.len());
 
   let max_num_bits = num_bits(scalars.iter().max().unwrap().to_usize().unwrap());
-  match max_num_bits {
+  let result = match max_num_bits {
     0 => C::identity().into(),
-    1 => msm_binary(scalars, bases),
-    2..=10 => msm_10(scalars, bases, max_num_bits),
-    _ => msm_small_rest(scalars, bases, max_num_bits),
-  }
+    1 => {
+      let (_binary_span, binary_t) = start_span!("msm_binary");
+      let result = msm_binary(scalars, bases);
+      info!(elapsed_ms = %binary_t.elapsed().as_millis(), "msm_binary");
+      result
+    },
+    2..=10 => {
+      let (_msm_10_span, msm_10_t) = start_span!("msm_10", max_bits = max_num_bits);
+      let result = msm_10(scalars, bases, max_num_bits);
+      info!(elapsed_ms = %msm_10_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_10");
+      result
+    },
+    _ => {
+      let (_msm_rest_span, msm_rest_t) = start_span!("msm_small_rest", max_bits = max_num_bits);
+      let result = msm_small_rest(scalars, bases, max_num_bits);
+      info!(elapsed_ms = %msm_rest_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_small_rest");
+      result
+    },
+  };
+  
+  info!(elapsed_ms = %msm_small_t.elapsed().as_millis(), size = scalars.len(), max_bits = max_num_bits, "msm_small");
+  result
 }
 
 fn msm_binary<C: CurveAffine, T: Integer + Sync>(scalars: &[T], bases: &[C]) -> C::Curve {

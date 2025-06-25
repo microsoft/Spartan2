@@ -564,4 +564,35 @@ mod tests {
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
   }
+
+  #[test]
+  fn test_snark_with_tracing() {
+    // Initialize tracing subscriber to capture logs
+    use tracing_subscriber::{fmt, EnvFilter};
+    
+    let _ = fmt()
+      .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+      .try_init();
+
+    type E = crate::provider::PallasIPAEngine;
+    type S = R1CSSNARK<E>;
+    
+    let circuit = CubicCircuit::default();
+
+    // produce keys
+    let (pk, vk) = S::setup(circuit.clone()).unwrap();
+
+    // generate a witness
+    let (U, W) = S::gen_witness(&pk, circuit.clone(), false).unwrap();
+
+    // produce a SNARK (this should show tracing output)
+    let res = S::prove(&pk, &U, &W);
+    assert!(res.is_ok());
+    let snark = res.unwrap();
+
+    // verify the SNARK
+    let res = snark.verify(&vk);
+    assert!(res.is_ok());
+    assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
+  }
 }
