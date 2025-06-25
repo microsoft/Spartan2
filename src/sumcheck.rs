@@ -19,13 +19,12 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
 
-/// Adaptive parallel-for helper.
-/// Falls back to a plain `for` loop when the slice is small **or**
-/// we are already inside a Rayon worker, avoiding nested pools.
-
 /// 4 k elements is a good cut-off on a 16-core machine.
 const PAR_THRESHOLD: usize = 4 << 10; // 4096
 
+/// Adaptive parallel-for helper.
+/// Falls back to a plain `for` loop when the slice is small **or**
+/// we are already inside a Rayon worker, avoiding nested pools.
 /// `par_for` – run `map(i)` for `i = 0..len` and fold the
 /// results with `reduce`, starting from `identity()`.
 ///
@@ -135,8 +134,8 @@ impl<E: Engine> SumcheckProof<E> {
   {
     let len = poly_A.len() / 2;
 
-    // Using `par_for` keeps the map-reduce logic identical      
-    // but avoids Rayon overhead on tiny slices.                 
+    // Using `par_for` keeps the map-reduce logic identical
+    // but avoids Rayon overhead on tiny slices.
     par_for(
       len,
       // map-closure (returned pair is the per-index contribution)
