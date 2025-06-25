@@ -82,10 +82,10 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     (0..R.len())
       .into_par_iter()
       .map(|i| {
-      (0..L.len())
-        .into_par_iter()
-        .map(|j| L[j] * self.Z[j * R.len() + i])
-        .reduce(|| Scalar::ZERO, |x, y| x + y)
+        (0..L.len())
+          .into_par_iter()
+          .map(|j| L[j] * self.Z[j * R.len() + i])
+          .reduce(|| Scalar::ZERO, |x, y| x + y)
       })
       .collect()
   }
