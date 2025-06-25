@@ -115,7 +115,7 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
 /// Adapted from zcash/halo2
 pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
   let (_msm_span, msm_t) = start_span!("msm", size = coeffs.len());
-  
+
   assert_eq!(coeffs.len(), bases.len());
 
   let num_threads = current_num_threads();
@@ -127,7 +127,7 @@ pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
       .zip(bases.par_chunks(chunk))
       .map(|(coeffs, bases)| cpu_msm_serial(coeffs, bases))
       .reduce(C::Curve::identity, |sum, evl| sum + evl);
-    info!(elapsed_ms = %parallel_t.elapsed().as_millis(), chunks = %((coeffs.len() + chunk - 1) / chunk), "msm_parallel_chunks");
+    info!(elapsed_ms = %parallel_t.elapsed().as_millis(), chunks = %coeffs.len().div_ceil(chunk), "msm_parallel_chunks");
     result
   } else {
     let (_serial_span, serial_t) = start_span!("msm_serial");
@@ -135,7 +135,7 @@ pub fn msm<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     info!(elapsed_ms = %serial_t.elapsed().as_millis(), "msm_serial");
     result
   };
-  
+
   info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
   result
 }
@@ -150,7 +150,7 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   bases: &[C],
 ) -> C::Curve {
   let (_msm_small_span, msm_small_t) = start_span!("msm_small", size = scalars.len());
-  
+
   assert_eq!(bases.len(), scalars.len());
 
   let max_num_bits = num_bits(scalars.iter().max().unwrap().to_usize().unwrap());
@@ -161,21 +161,21 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
       let result = msm_binary(scalars, bases);
       info!(elapsed_ms = %binary_t.elapsed().as_millis(), "msm_binary");
       result
-    },
+    }
     2..=10 => {
       let (_msm_10_span, msm_10_t) = start_span!("msm_10", max_bits = max_num_bits);
       let result = msm_10(scalars, bases, max_num_bits);
       info!(elapsed_ms = %msm_10_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_10");
       result
-    },
+    }
     _ => {
       let (_msm_rest_span, msm_rest_t) = start_span!("msm_small_rest", max_bits = max_num_bits);
       let result = msm_small_rest(scalars, bases, max_num_bits);
       info!(elapsed_ms = %msm_rest_t.elapsed().as_millis(), max_bits = max_num_bits, "msm_small_rest");
       result
-    },
+    }
   };
-  
+
   info!(elapsed_ms = %msm_small_t.elapsed().as_millis(), size = scalars.len(), max_bits = max_num_bits, "msm_small");
   result
 }

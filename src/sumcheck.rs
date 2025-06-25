@@ -10,8 +10,8 @@ use crate::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
   },
-  traits::{Engine, transcript::TranscriptEngineTrait},
   start_span,
+  traits::{Engine, transcript::TranscriptEngineTrait},
 };
 use ff::Field;
 use rayon::prelude::*;
@@ -140,7 +140,7 @@ impl<E: Engine> SumcheckProof<E> {
     let mut claim_per_round = *claim;
     for round in 0..num_rounds {
       let (_round_span, round_t) = start_span!("sumcheck_quad_round", round = round);
-      
+
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
         let (eval_point_0, eval_point_2) =
@@ -280,7 +280,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     for round in 0..num_rounds {
       let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
-      
+
       let poly = {
         // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");

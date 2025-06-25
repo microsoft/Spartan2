@@ -2,7 +2,7 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, zip_with, zip_with_for_each, start_span};
+use crate::{math::Math, polys::eq::EqPolynomial, start_span, zip_with, zip_with_for_each};
 use core::ops::{Add, Index};
 use ff::PrimeField;
 use itertools::Itertools as _;
@@ -107,8 +107,9 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
 
   /// Evaluates the polynomial with the given evaluations and point.
   pub fn evaluate_with(Z: &[Scalar], r: &[Scalar]) -> Scalar {
-    let (_eval_span, eval_t) = start_span!("multilinear_evaluate_with", vars = r.len(), evals = Z.len());
-    
+    let (_eval_span, eval_t) =
+      start_span!("multilinear_evaluate_with", vars = r.len(), evals = Z.len());
+
     let result = zip_with!(
       (
         EqPolynomial::evals_from_points(r).into_par_iter(),
@@ -117,7 +118,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       |a, b| a * b
     )
     .sum();
-    
+
     info!(elapsed_ms = %eval_t.elapsed().as_millis(), vars = r.len(), evals = Z.len(), "multilinear_evaluate_with");
     result
   }

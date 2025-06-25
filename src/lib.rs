@@ -568,15 +568,15 @@ mod tests {
   #[test]
   fn test_snark_with_tracing() {
     // Initialize tracing subscriber to capture logs
-    use tracing_subscriber::{fmt, EnvFilter};
-    
+    use tracing_subscriber::{EnvFilter, fmt};
+
     let _ = fmt()
       .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
       .try_init();
 
     type E = crate::provider::PallasIPAEngine;
     type S = R1CSSNARK<E>;
-    
+
     let circuit = CubicCircuit::default();
 
     // produce keys
