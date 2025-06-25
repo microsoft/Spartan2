@@ -146,6 +146,7 @@ where
               .copied()
               .collect::<Vec<E::Scalar>>(),
             &[ck_R, &[ck_c]].concat(),
+            true,
           )
           .affine()
         },
@@ -157,6 +158,7 @@ where
               .copied()
               .collect::<Vec<E::Scalar>>(),
             &[ck_L, &[ck_c]].concat(),
+            true,
           )
           .affine()
         },
@@ -319,7 +321,7 @@ where
       s
     };
 
-    let ck_hat = E::GE::vartime_multiscalar_mul(&s, ck);
+    let ck_hat = E::GE::vartime_multiscalar_mul(&s, ck, true);
 
     let b_hat = inner_product(&U.b_vec, &s);
 
@@ -334,6 +336,7 @@ where
           .copied()
           .collect::<Vec<E::Scalar>>(),
         &ck_folded,
+        true,
       )
     };
 
