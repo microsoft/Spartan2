@@ -105,7 +105,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
 fn main() {
   tracing_subscriber::fmt()
     .with_target(false)
-    .with_ansi(false)                // no bold colour codes
+    .with_ansi(true)                // no bold colour codes
     .with_env_filter(EnvFilter::from_default_env())
     .init();
 

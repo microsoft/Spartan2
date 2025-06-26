@@ -286,7 +286,7 @@ where
     point: &[E::Scalar],
     eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, SpartanError> {
-    let (_setup_span, setup_t) = start_span!("hyrax_prove_setup");
+    let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if poly.len() != (2usize).pow(point.len() as u32) {
       return Err(SpartanError::InvalidInputLength);
     }
@@ -297,11 +297,13 @@ where
 
     let (num_vars_rows, _) = (num_rows.log_2(), num_cols.log_2());
 
-    let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
-    let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
+    let (L, R) = rayon::join(
+      || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
+      || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
+    );
 
     let poly_m = MultilinearPolynomial::<E::Scalar>::new(poly.to_vec());
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_setup");
+    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
     let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
     // compute the vector underneath L*Z

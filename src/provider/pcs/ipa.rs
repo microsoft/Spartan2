@@ -102,7 +102,6 @@ where
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
   ) -> Result<Self, SpartanError> {
-    let (_setup_span, setup_t) = start_span!("ipa_setup");
     transcript.dom_sep(Self::protocol_name());
 
     let (ck, _) = ck.split_at(U.b_vec.len());
@@ -117,7 +116,6 @@ where
     // sample a random base for committing to the inner product
     let r = transcript.squeeze(b"r")?;
     let ck_c = (E::GE::group(ck_c) * r).affine();
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "ipa_setup");
 
     // a closure that executes a step of the recursive inner product argument
     let prove_inner = |a_vec: &[E::Scalar],
