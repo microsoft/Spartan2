@@ -71,7 +71,7 @@ pub struct HyraxDerandKey<E: Engine>
 where
   E::GE: DlogGroupExt,
 {
-  h: AffineGroupElement<E>,
+  h: E::GE,
 }
 
 /// Structure that holds commitments
@@ -160,7 +160,8 @@ where
   }
 
   fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
-    HyraxDerandKey { h: ck.h }
+    let h = <E::GE as DlogGroup>::group(&ck.h);
+    HyraxDerandKey { h }
   }
 
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
@@ -272,7 +273,8 @@ where
       let r = r.blind.clone().unwrap();
       HyraxCommitment {
         comm: (0..comm.comm.len())
-          .map(|i| comm.comm[i] - <E::GE as DlogGroup>::group(&dk.h) * r[i])
+          .into_par_iter()
+          .map(|i| comm.comm[i] - dk.h * r[i])
           .collect(),
       }
     }
