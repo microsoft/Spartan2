@@ -2,6 +2,7 @@
 use crate::{
   errors::SpartanError,
   provider::traits::{DlogGroup, DlogGroupExt},
+  start_span,
   traits::{
     Engine,
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
@@ -11,6 +12,8 @@ use core::{fmt::Debug, iter};
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 /// computes the inner product of two vectors in parallel.
 fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
@@ -207,11 +210,13 @@ where
     let mut L_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement> = Vec::new();
     let mut R_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement> = Vec::new();
 
+    let (_recursion_span, recursion_t) = start_span!("ipa_recursion");
     // we create mutable copies of vectors and generators
     let mut a_vec = W.a_vec.to_vec();
     let mut b_vec = U.b_vec.to_vec();
     let mut ck = ck.to_vec();
-    for _i in 0..usize::try_from(U.b_vec.len().ilog2()).unwrap() {
+    let num_rounds = usize::try_from(U.b_vec.len().ilog2()).unwrap();
+    for _i in 0..num_rounds {
       let (L, R, a_vec_folded, b_vec_folded, ck_folded) =
         prove_inner(&a_vec, &b_vec, &ck, transcript)?;
       L_vec.push(L);
@@ -221,6 +226,11 @@ where
       b_vec = b_vec_folded;
       ck = ck_folded;
     }
+    info!(
+      elapsed_ms = %recursion_t.elapsed().as_millis(),
+      rounds = %num_rounds,
+      "ipa_recursion"
+    );
 
     Ok(InnerProductArgument {
       L_vec,

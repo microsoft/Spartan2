@@ -237,22 +237,28 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
     is_small: bool,
   ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize");
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
     circuit
       .synthesize(&mut cs)
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
+    let (_r1cs_span, r1cs_t) = start_span!("r1cs_instance_and_witness");
     let (U, W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck, is_small)
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
       })?;
+    info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "r1cs_instance_and_witness");
 
     // derandomize instance
+    let (_derand_span, derand_t) = start_span!("derandomize_witness_instance");
     let (W, r_W) = W.derandomize();
     let U = U.derandomize(&E::PCS::derand_key(&pk.ck), &r_W);
+    info!(elapsed_ms = %derand_t.elapsed().as_millis(), "derandomize_witness_instance");
 
     Ok((U, W))
   }

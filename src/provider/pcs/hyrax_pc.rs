@@ -9,6 +9,7 @@ use crate::{
     pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
+  start_span,
   traits::{
     Engine,
     pcs::{CommitmentTrait, Len, PCSEngineTrait},
@@ -21,6 +22,8 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
 
@@ -283,6 +286,7 @@ where
     point: &[E::Scalar],
     eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, SpartanError> {
+    let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if poly.len() != (2usize).pow(point.len() as u32) {
       return Err(SpartanError::InvalidInputLength);
     }
@@ -293,23 +297,32 @@ where
 
     let (num_vars_rows, _) = (num_rows.log_2(), num_cols.log_2());
 
-    let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
-    let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
+    let (L, R) = rayon::join(
+      || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
+      || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
+    );
 
     let poly_m = MultilinearPolynomial::<E::Scalar>::new(poly.to_vec());
+    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
+    let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
     // compute the vector underneath L*Z
     // compute vector-matrix product between L and Z viewed as a matrix
     let LZ = poly_m.bind(&L, &R);
+    info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
 
+    let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
     // Commit to LZ with a blind of zero
     let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true);
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
+    let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ);
     let ipa =
       InnerProductArgument::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
+    info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
     Ok(HyraxEvaluationArgument { ipa })
   }

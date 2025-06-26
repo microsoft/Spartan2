@@ -7,10 +7,13 @@ use crate::{
   CommitmentKey, VerifierKey,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
+  start_span,
   traits::Engine,
 };
 use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;
+use std::time::Instant;
+use tracing::{info, info_span};
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
@@ -39,10 +42,14 @@ where
     ck: &CommitmentKey<E>,
     is_small: bool,
   ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let (_witness_span, witness_t) = start_span!("create_r1cs_witness");
     let (W, comm_W) = R1CSWitness::<E>::new(ck, shape, &mut self.aux_assignment, is_small)?;
-    let X = &self.input_assignment[1..];
+    info!(elapsed_ms = %witness_t.elapsed().as_millis(), "create_r1cs_witness");
 
+    let (_instance_span, instance_t) = start_span!("create_r1cs_instance");
+    let X = &self.input_assignment[1..];
     let instance = R1CSInstance::<E>::new(shape, &comm_W, X)?;
+    info!(elapsed_ms = %instance_t.elapsed().as_millis(), "create_r1cs_instance");
 
     Ok((instance, W))
   }
