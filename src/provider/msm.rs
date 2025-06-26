@@ -135,15 +135,13 @@ pub fn msm<C: CurveAffine>(
 
   let result = if coeffs.len() > num_threads {
     let chunk = coeffs.len() / num_threads;
-    let result = coeffs
+    coeffs
       .par_chunks(chunk)
       .zip(bases.par_chunks(chunk))
       .map(|(coeffs, bases)| cpu_msm_serial(coeffs, bases))
-      .reduce(C::Curve::identity, |sum, evl| sum + evl);
-    result
+      .reduce(C::Curve::identity, |sum, evl| sum + evl)
   } else {
-    let result = cpu_msm_serial(coeffs, bases);
-    result
+    cpu_msm_serial(coeffs, bases)
   };
 
   info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
