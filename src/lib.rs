@@ -82,6 +82,7 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
+  dk: DerandKey<E>, // derandomization key
   S: R1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -91,22 +92,13 @@ pub struct SpartanProverKey<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
+  dk: DerandKey<E>, // derandomization key
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
 
 impl<E: Engine> SimpleDigestible for SpartanVerifierKey<E> {}
-
-impl<E: Engine> SpartanVerifierKey<E> {
-  fn new(shape: R1CSShape<E>, vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey) -> Self {
-    SpartanVerifierKey {
-      vk_ee,
-      S: shape,
-      digest: OnceCell::new(),
-    }
-  }
-}
 
 impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   /// Returns the digest of the verifier's key.
@@ -221,10 +213,17 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       });
     }
 
-    let (S, ck, vk) = cs.r1cs_shape();
-    let vk: SpartanVerifierKey<E> = SpartanVerifierKey::new(S.clone(), vk);
+    let (S, ck, vk_ee) = cs.r1cs_shape();
+    let dk = E::PCS::derand_key(&ck);
+    let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
+      S: S.clone(),
+      vk_ee,
+      dk: dk.clone(),
+      digest: OnceCell::new(),
+    };
     let pk = Self::ProverKey {
       ck,
+      dk,
       S,
       vk_digest: vk.digest()?,
     };
@@ -247,7 +246,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
     let (_r1cs_span, r1cs_t) = start_span!("r1cs_instance_and_witness");
-    let (U, W) = cs
+    let (mut U, mut W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck, is_small)
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
@@ -256,8 +255,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // derandomize instance
     let (_derand_span, derand_t) = start_span!("derandomize_witness_instance");
-    let (W, r_W) = W.derandomize();
-    let U = U.derandomize(&E::PCS::derand_key(&pk.ck), &r_W);
+    let r_W = W.derandomize();
+    U.derandomize(&pk.dk, &r_W);
     info!(elapsed_ms = %derand_t.elapsed().as_millis(), "derandomize_witness_instance");
 
     Ok((U, W))

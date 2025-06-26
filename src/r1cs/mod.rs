@@ -251,14 +251,13 @@ impl<E: Engine> R1CSWitness<E> {
     Ok((W, comm_W))
   }
 
-  pub fn derandomize(&self) -> (Self, Blind<E>) {
-    (
-      R1CSWitness {
-        W: self.W.clone(),
-        r_W: Blind::<E>::default(),
-      },
-      self.r_W.clone(),
-    )
+  pub fn derandomize(&mut self) -> Blind<E> {
+    let r_W = self.r_W.clone();
+
+    // set the blind to zero
+    self.r_W = Blind::<E>::default();
+
+    r_W
   }
 }
 
@@ -279,11 +278,8 @@ impl<E: Engine> R1CSInstance<E> {
     }
   }
 
-  pub fn derandomize(&self, dk: &DerandKey<E>, r_W: &Blind<E>) -> R1CSInstance<E> {
-    R1CSInstance {
-      comm_W: PCS::<E>::derandomize(dk, &self.comm_W, r_W),
-      X: self.X.clone(),
-    }
+  pub fn derandomize(&mut self, dk: &DerandKey<E>, r_W: &Blind<E>) {
+    self.comm_W = PCS::<E>::derandomize(dk, &self.comm_W, r_W);
   }
 }
 
