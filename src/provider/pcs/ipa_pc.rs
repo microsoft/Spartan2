@@ -6,6 +6,7 @@ use crate::{
     pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
+  start_span,
   traits::{
     Engine,
     pcs::{CommitmentTrait, Len, PCSEngineTrait},
@@ -18,6 +19,8 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 /// A type that holds commitment generators
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,10 +186,16 @@ where
     point: &[E::Scalar],
     eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, SpartanError> {
+    let (_prep_span, prep_t) = start_span!("ipa_prove_prepare");
     let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
     let w = InnerProductWitness::new(poly);
+    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "ipa_prove_prepare");
 
-    InnerProductArgument::prove(&ck.ck, &ck.ck_s, &u, &w, transcript)
+    let (_prove_span, prove_t) = start_span!("ipa_prove_argument");
+    let result = InnerProductArgument::prove(&ck.ck, &ck.ck_s, &u, &w, transcript);
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "ipa_prove_argument");
+
+    result
   }
 
   /// A method to verify purported evaluations of a committed polynomial
