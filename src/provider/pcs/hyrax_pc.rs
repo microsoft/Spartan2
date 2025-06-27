@@ -6,7 +6,9 @@ use crate::{
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
+    pcs::ipa::{
+      InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness, inner_product,
+    },
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -64,16 +66,6 @@ where
   }
 }
 
-/// Implements derandomization key for Hyrax commitment key
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct HyraxDerandKey<E: Engine>
-where
-  E::GE: DlogGroupExt,
-{
-  h: E::GE,
-}
-
 /// Structure that holds commitments
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -85,7 +77,7 @@ pub struct HyraxCommitment<E: Engine> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxBlind<E: Engine> {
-  blind: Option<Vec<E::Scalar>>,
+  blind: Vec<E::Scalar>,
 }
 
 /// Provides a commitment engine
@@ -94,20 +86,14 @@ pub struct HyraxPCS<E: Engine> {
   _p: PhantomData<E>,
 }
 
-impl<E: Engine> Default for HyraxBlind<E> {
-  fn default() -> Self {
-    HyraxBlind { blind: None }
-  }
-}
-
 /// Provides an implementation of a polynomial evaluation argument
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxEvaluationArgument<E: Engine>
 where
-  E::GE: DlogGroup,
+  E::GE: DlogGroupExt,
 {
-  ipa: InnerProductArgument<E>,
+  ipa: InnerProductArgumentLinear<E>,
 }
 
 fn compute_factored_lens(n: usize) -> (usize, usize) {
@@ -125,7 +111,6 @@ where
 {
   type CommitmentKey = HyraxCommitmentKey<E>;
   type VerifierKey = HyraxVerifierKey<E>;
-  type DerandKey = HyraxDerandKey<E>;
   type Commitment = HyraxCommitment<E>;
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
@@ -159,18 +144,11 @@ where
     (ck, vk)
   }
 
-  fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
-    let h = <E::GE as DlogGroup>::group(&ck.h);
-    HyraxDerandKey { h }
-  }
-
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
     HyraxBlind {
-      blind: Some(
-        (0..ck.num_rows)
-          .map(|_| E::Scalar::ZERO)
-          .collect::<Vec<E::Scalar>>(),
-      ),
+      blind: (0..ck.num_rows)
+        .map(|_| E::Scalar::ZERO)
+        .collect::<Vec<E::Scalar>>(),
     }
   }
 
@@ -193,12 +171,6 @@ where
       v.extend(vec![E::Scalar::ZERO; padded_n - v.len()]);
     }
 
-    let r = if r.blind.is_none() {
-      vec![E::Scalar::ZERO; ck.num_rows]
-    } else {
-      r.blind.clone().unwrap()
-    };
-
     let (num_rows, num_cols) = compute_factored_lens(padded_n);
 
     let comm = (0..num_rows)
@@ -209,7 +181,7 @@ where
           &v[num_cols * i..num_cols * (i + 1)],
           &ck.ck[..num_cols],
           false,
-        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
+        ) + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i]
       })
       .collect();
 
@@ -239,12 +211,6 @@ where
       v.extend(vec![T::zero(); padded_n - v.len()]);
     }
 
-    let r = if r.blind.is_none() {
-      vec![E::Scalar::ZERO; ck.num_rows]
-    } else {
-      r.blind.clone().unwrap()
-    };
-
     let (num_rows, num_cols) = compute_factored_lens(padded_n);
 
     let comm = (0..num_rows)
@@ -255,29 +221,11 @@ where
           &v[num_cols * i..num_cols * (i + 1)],
           &ck.ck[..num_cols],
           false,
-        ) + <E::GE as DlogGroup>::group(&ck.h) * r[i]
+        ) + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i]
       })
       .collect();
 
     HyraxCommitment { comm }
-  }
-
-  fn derandomize(
-    dk: &Self::DerandKey,
-    comm: &Self::Commitment,
-    r: &Self::Blind,
-  ) -> Self::Commitment {
-    if r.blind.is_none() {
-      comm.clone()
-    } else {
-      let r = r.blind.clone().unwrap();
-      HyraxCommitment {
-        comm: (0..comm.comm.len())
-          .into_par_iter()
-          .map(|i| comm.comm[i] - dk.h * r[i])
-          .collect(),
-      }
-    }
   }
 
   fn prove(
@@ -285,9 +233,9 @@ where
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     poly: &[E::Scalar],
+    blind: &Self::Blind,
     point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError> {
+  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
     let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if poly.len() != (2usize).pow(point.len() as u32) {
       return Err(SpartanError::InvalidInputLength);
@@ -304,29 +252,40 @@ where
       || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
     );
 
-    let poly_m = MultilinearPolynomial::<E::Scalar>::new(poly.to_vec());
     info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
     let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
     // compute the vector underneath L*Z
     // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = poly_m.bind(&L, &R);
+    let LZ = MultilinearPolynomial::bind_with(poly, &L, &R);
     info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
 
+    // compute the evaluation of the multilinear polynomial at the point
+    let eval = inner_product(&LZ, &R);
+
     let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
-    // Commit to LZ with a blind of zero
     let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true);
+    let r_LZ = (0..LZ.len())
+      .into_par_iter()
+      .map(|i| LZ[i] * blind.blind[i])
+      .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
     info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
     let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     // a dot product argument (IPA) of size R_size
-    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
-    let ipa_witness = InnerProductWitness::<E>::new(&LZ);
-    let ipa =
-      InnerProductArgument::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
+    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
+    let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ);
+    let ipa = InnerProductArgumentLinear::<E>::prove(
+      &ck.ck,
+      &ck.h,
+      &ck.ck_s,
+      &ipa_instance,
+      &ipa_witness,
+      transcript,
+    )?;
     info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
-    Ok(HyraxEvaluationArgument { ipa })
+    Ok((eval, HyraxEvaluationArgument { ipa }))
   }
 
   fn verify(
@@ -358,7 +317,7 @@ where
 
     arg
       .ipa
-      .verify(&vk.ck, &vk.ck_s, R.len(), &ipa_instance, transcript)
+      .verify(&vk.ck, &vk.h, &vk.ck_s, R.len(), &ipa_instance, transcript)
   }
 }
 

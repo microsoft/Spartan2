@@ -78,15 +78,10 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   }
 
   /// binds the polynomial's top variables using the given scalars.
-  pub fn bind(&self, L: &[Scalar], R: &[Scalar]) -> Vec<Scalar> {
+  pub fn bind_with(poly: &[Scalar], L: &[Scalar], R: &[Scalar]) -> Vec<Scalar> {
     (0..R.len())
       .into_par_iter()
-      .map(|i| {
-        (0..L.len())
-          .into_par_iter()
-          .map(|j| L[j] * self.Z[j * R.len() + i])
-          .reduce(|| Scalar::ZERO, |x, y| x + y)
-      })
+      .map(|i| (0..L.len()).map(|j| L[j] * poly[j * R.len() + i]).sum())
       .collect()
   }
 

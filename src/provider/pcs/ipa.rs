@@ -10,13 +10,14 @@ use crate::{
 };
 use core::{fmt::Debug, iter};
 use ff::Field;
+use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
 
 /// computes the inner product of two vectors in parallel.
-fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
+pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
   assert_eq!(a.len(), b.len());
   (0..a.len())
     .into_par_iter()
@@ -32,9 +33,14 @@ pub struct InnerProductInstance<E: Engine> {
   c: E::Scalar,
 }
 
-impl<E> InnerProductInstance<E>
+/// Holds witness for the inner product instance.
+pub struct InnerProductWitness<E: Engine> {
+  a_vec: Vec<E::Scalar>,
+  r_a: E::Scalar, // blind for the commitment to a_vec
+}
+
+impl<E: Engine> InnerProductInstance<E>
 where
-  E: Engine,
   E::GE: DlogGroup,
 {
   /// Creates a new inner product instance
@@ -61,33 +67,31 @@ where
   }
 }
 
-pub(crate) struct InnerProductWitness<E: Engine> {
-  a_vec: Vec<E::Scalar>,
-}
-
 impl<E: Engine> InnerProductWitness<E> {
-  pub fn new(a_vec: &[E::Scalar]) -> Self {
+  /// Creates a new inner product witness
+  pub fn new(a_vec: &[E::Scalar], r_a: &E::Scalar) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
+      r_a: *r_a,
     }
   }
 }
 
-/// An inner product argument
+/// An inner product argument using Bulletproofs
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct InnerProductArgument<E: Engine>
 where
   E::GE: DlogGroup,
 {
+  r_a: E::Scalar, // blind for the commitment to a_vec
   L_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   R_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   a_hat: E::Scalar,
 }
 
-impl<E> InnerProductArgument<E>
+impl<E: Engine> InnerProductArgument<E>
 where
-  E: Engine,
   E::GE: DlogGroupExt,
 {
   const fn protocol_name() -> &'static [u8] {
@@ -233,6 +237,7 @@ where
     );
 
     Ok(InnerProductArgument {
+      r_a: W.r_a,
       L_vec,
       R_vec,
       a_hat: a_vec[0],
@@ -243,6 +248,7 @@ where
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
     n: usize,
     U: &InnerProductInstance<E>,
@@ -262,11 +268,14 @@ where
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
 
+    // remove the blind
+    let comm_a_vec = U.comm_a_vec - E::GE::group(h) * self.r_a;
+
     // sample a random base for committing to the inner product
     let r = transcript.squeeze(b"r")?;
     let ck_c = (E::GE::group(ck_c) * r).affine();
 
-    let P = (U.comm_a_vec + E::GE::group(&ck_c) * U.c).affine();
+    let P = (comm_a_vec + E::GE::group(&ck_c) * U.c).affine();
 
     let batch_invert = |v: &[E::Scalar]| -> Result<Vec<E::Scalar>, SpartanError> {
       let mut products = vec![E::Scalar::ZERO; v.len()];
@@ -357,5 +366,133 @@ where
     } else {
       Err(SpartanError::InvalidPCS)
     }
+  }
+}
+
+// Instance: C_a, C_c, b_vec
+// Witness: a_vec, r_a, c, r_c
+// Sat if: C_x = Com(x, r_x), C_c = Com(c, r_c), and y = <a_vec, b_vec>
+//
+// P: samples d_vec, r_\beta, r_\delta, and sends:
+// \delta \gets Com(d_vec, r_delta)
+// \beta \gets Com(<b_vec, d_vec>, r_beta)
+//
+// V: sends a challenge r
+//
+// P: sends
+// z_vec \gets r * a_vec + d_vec
+// z_\delta \gets r * r_a + r_\delta
+// z_\beta \gets r * r_c + r_\beta
+//
+// V: checks
+// r * Comm_a + delta =? Com(z_vec, z_\delta)
+// r * Comm_c + beta =? Com(<z_vec, b_vec>, z_\beta)
+//
+/// An inner product argument using a linear-sized argument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct InnerProductArgumentLinear<E: Engine>
+where
+  E::GE: DlogGroupExt,
+{
+  delta: E::GE,
+  beta: E::GE,
+  z_vec: Vec<E::Scalar>,
+  z_delta: E::Scalar,
+  z_beta: E::Scalar,
+}
+
+impl<E: Engine> InnerProductArgumentLinear<E>
+where
+  E::GE: DlogGroupExt,
+{
+  fn protocol_name() -> &'static [u8] {
+    b"inner product argument (linear)"
+  }
+
+  /// Proves the inner product argument
+  pub fn prove(
+    ck: &[<E::GE as DlogGroup>::AffineGroupElement],
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
+    ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    U: &InnerProductInstance<E>,
+    W: &InnerProductWitness<E>,
+    transcript: &mut E::TE,
+  ) -> Result<Self, SpartanError> {
+    transcript.dom_sep(Self::protocol_name());
+
+    // absorb the instance in the transcript
+    transcript.absorb(b"U", U);
+
+    // produce randomness for the proofs
+    let d_vec = (0..U.b_vec.len())
+      .map(|_| E::Scalar::random(&mut OsRng))
+      .collect::<Vec<E::Scalar>>();
+    let r_delta = E::Scalar::random(&mut OsRng);
+    let r_beta = E::Scalar::random(&mut OsRng);
+
+    let delta =
+      E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true) + E::GE::group(h) * r_delta;
+    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h) * r_beta;
+
+    transcript.absorb(b"delta", &delta);
+    transcript.absorb(b"beta", &beta);
+
+    let r = transcript.squeeze(b"r")?;
+
+    let z_vec = (0..d_vec.len())
+      .map(|i| r * W.a_vec[i] + d_vec[i])
+      .collect::<Vec<E::Scalar>>();
+
+    let z_delta = r * W.r_a + r_delta;
+    let z_beta = r_beta; // since r_c = 0 
+
+    Ok(Self {
+      delta,
+      z_vec,
+      z_delta,
+      beta,
+      z_beta,
+    })
+  }
+
+  /// Verifies the inner product argument
+  pub fn verify(
+    &self,
+    ck: &[<E::GE as DlogGroup>::AffineGroupElement],
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
+    ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    n: usize,
+    U: &InnerProductInstance<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError> {
+    transcript.dom_sep(Self::protocol_name());
+
+    // absorb the instance in the transcript
+    transcript.absorb(b"U", U);
+
+    transcript.absorb(b"delta", &self.delta);
+    transcript.absorb(b"beta", &self.beta);
+
+    let r = transcript.squeeze(b"r")?;
+
+    if self.z_vec.len() != n || ck.len() < self.z_vec.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    if U.comm_a_vec * r + self.delta
+      != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)
+        + E::GE::group(h) * self.z_delta
+    {
+      return Err(SpartanError::InvalidPCS);
+    }
+
+    if E::GE::group(ck_c) * (U.c * r) + self.beta
+      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + E::GE::group(h) * self.z_beta
+    {
+      return Err(SpartanError::InvalidPCS);
+    }
+
+    Ok(())
   }
 }

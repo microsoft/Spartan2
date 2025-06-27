@@ -40,31 +40,17 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// A type that holds the verifier key
   type VerifierKey: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
-  /// Holds the type of the derandomization key
-  type DerandKey: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
-
   /// Holds the type of the commitment
   type Commitment: CommitmentTrait<E>;
 
   /// Holds the type of the blind
-  type Blind: Clone
-    + Debug
-    + Default
-    + Send
-    + Sync
-    + PartialEq
-    + Eq
-    + Serialize
-    + for<'de> Deserialize<'de>;
+  type Blind: Clone + Debug + Send + Sync + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>;
 
   /// A type that holds the evaluation argument
   type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Samples a new commitment key of a specified size and a verifier key
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey);
-
-  /// Extracts the blinding generator
-  fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey;
 
   /// Returns a blind to be used for commitment
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
@@ -105,22 +91,15 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
       .collect()
   }
 
-  /// Remove given blind from commitment
-  fn derandomize(
-    dk: &Self::DerandKey,
-    commit: &Self::Commitment,
-    r: &Self::Blind,
-  ) -> Self::Commitment;
-
   /// A method to prove the evaluation of a multilinear polynomial
   fn prove(
     ck: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     poly: &[E::Scalar],
+    blind: &Self::Blind,
     point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError>;
+  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError>;
 
   /// A method to verify the purported evaluation of a multilinear polynomials
   fn verify(

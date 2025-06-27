@@ -74,7 +74,6 @@ type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::Commi
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
 type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
 type PCS<E> = <E as Engine>::PCS;
-type DerandKey<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::DerandKey;
 type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
 /// A type that represents the prover's key
@@ -82,7 +81,6 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  dk: DerandKey<E>, // derandomization key
   S: R1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -92,7 +90,6 @@ pub struct SpartanProverKey<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  dk: DerandKey<E>, // derandomization key
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
@@ -214,16 +211,13 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     }
 
     let (S, ck, vk_ee) = cs.r1cs_shape();
-    let dk = E::PCS::derand_key(&ck);
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
-      dk: dk.clone(),
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
-      dk,
       S,
       vk_digest: vk.digest()?,
     };
@@ -246,18 +240,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
     let (_r1cs_span, r1cs_t) = start_span!("r1cs_instance_and_witness");
-    let (mut U, mut W) = cs
+    let (U, W) = cs
       .r1cs_instance_and_witness(&pk.S, &pk.ck, is_small)
       .map_err(|_e| SpartanError::UnSat {
         reason: "Unable to synthesize witness".to_string(),
       })?;
     info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "r1cs_instance_and_witness");
-
-    // derandomize instance
-    let (_derand_span, derand_t) = start_span!("derandomize_witness_instance");
-    let r_W = W.derandomize();
-    U.derandomize(&pk.dk, &r_W);
-    info!(elapsed_ms = %derand_t.elapsed().as_millis(), "derandomize_witness_instance");
 
     Ok((U, W))
   }
@@ -382,12 +370,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     )?;
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
-    let (_we_span, we_t) = start_span!("witness_polyeval");
-    let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
-    info!(elapsed_ms = %we_t.elapsed().as_millis(), "witness_polyeval");
-
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
+    let (eval_W, eval_arg) =
+      E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &W.r_W, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
