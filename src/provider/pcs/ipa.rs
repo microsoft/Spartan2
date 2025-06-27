@@ -10,6 +10,7 @@ use crate::{
 };
 use core::{fmt::Debug, iter};
 use ff::Field;
+use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -32,7 +33,8 @@ pub struct InnerProductInstance<E: Engine> {
   c: E::Scalar,
 }
 
-pub(crate) struct InnerProductWitness<E: Engine> {
+/// Holds witness for the inner product instance.
+pub struct InnerProductWitness<E: Engine> {
   a_vec: Vec<E::Scalar>,
   r_a: E::Scalar, // blind for the commitment to a_vec
 }
@@ -66,6 +68,7 @@ where
 }
 
 impl<E: Engine> InnerProductWitness<E> {
+  /// Creates a new inner product witness
   pub fn new(a_vec: &[E::Scalar], r_a: &E::Scalar) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
@@ -366,50 +369,57 @@ where
   }
 }
 
-/*
-Instance: C_a, C_c, b_vec
-Witness: a_vec, r_a, c, r_c
-Sat if: C_x = Com(x, r_x), C_c = Com(c, r_c), and y = <a_vec, b_vec>
-
-P: samples d_vec, r_\beta, r_\delta, and sends:
-
-\delta \gets Com(d_vec, r_delta)
-\beta \gets Com(<b_vec, d_vec>, r_beta)
-
-V: sends a challenge r
-
-P: sends
-
-z_vec \gets r * a_vec + d_vec
-z_\delta \gets r * r_a + r_\delta
-z_\beta \gets r * r_c + r_\beta
-
-V: checks
-
-r * Comm_x + delta =? Com(z_vec, z_\delta)
-r * Comm_y + beta =? Com(<z_vec, b_vec>, z_\beta)
-*/
-
-/*
+// Instance: C_a, C_c, b_vec
+// Witness: a_vec, r_a, c, r_c
+// Sat if: C_x = Com(x, r_x), C_c = Com(c, r_c), and y = <a_vec, b_vec>
+//
+// P: samples d_vec, r_\beta, r_\delta, and sends:
+// \delta \gets Com(d_vec, r_delta)
+// \beta \gets Com(<b_vec, d_vec>, r_beta)
+//
+// V: sends a challenge r
+//
+// P: sends
+// z_vec \gets r * a_vec + d_vec
+// z_\delta \gets r * r_a + r_\delta
+// z_\beta \gets r * r_c + r_\beta
+//
+// V: checks
+// r * Comm_a + delta =? Com(z_vec, z_\delta)
+// r * Comm_c + beta =? Com(<z_vec, b_vec>, z_\beta)
+//
+/// An inner product argument using a linear-sized argument
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InnerProductArgumentLinear<E: Engine> {
-  delta: <E::GE as DlogGroup>::AffineGroupElement,
-  z: Vec<E::Scalar>,
+#[serde(bound = "")]
+pub struct InnerProductArgumentLinear<E: Engine>
+where
+  E::GE: DlogGroupExt,
+{
+  delta: E::GE,
+  beta: E::GE,
+  z_vec: Vec<E::Scalar>,
+  z_delta: E::Scalar,
+  z_beta: E::Scalar,
 }
 
-impl InnerProductArgumentLinear {
+impl<E: Engine> InnerProductArgumentLinear<E>
+where
+  E::GE: DlogGroupExt,
+{
   fn protocol_name() -> &'static [u8] {
     b"inner product argument (linear)"
   }
 
+  /// Proves the inner product argument
   pub fn prove(
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
     U: &InnerProductInstance<E>,
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
-  ) -> Result<Self<E>, SpartanError> {
-    transcript.append_protocol_name(InnerProductArgumentLinear::protocol_name());
+  ) -> Result<Self, SpartanError> {
+    transcript.dom_sep(Self::protocol_name());
 
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
@@ -418,37 +428,39 @@ impl InnerProductArgumentLinear {
     let d_vec = (0..U.b_vec.len())
       .map(|_| E::Scalar::random(&mut OsRng))
       .collect::<Vec<E::Scalar>>();
+    let r_delta = E::Scalar::random(&mut OsRng);
+    let r_beta = E::Scalar::random(&mut OsRng);
 
-
-    let delta = E::GE::vartime_multiscalar_mul(
-      &d_vec,
-      &ck[0..d_vec.len()],
-      true,
-    );
-    let ip_a_d = inner_product(a_vec, &d_vec);
+    let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true);
+    let beta = E::GE::group(ck_c) * inner_product(&W.a_vec, &d_vec) + E::GE::group(h) * r_beta;
 
     transcript.absorb(b"delta", &delta);
-    transcript.absorb(b"ip_a_d", &ip_a_d);
+    transcript.absorb(b"beta", &beta);
 
-   let c = transcript.challenge_scalar(b"c");
+    let r = transcript.squeeze(b"r")?;
 
-    let z = (0..d_vec.len())
-      .map(|i| c * W.a_vec[i] + d_vec[i])
+    let z_vec = (0..d_vec.len())
+      .map(|i| r * W.a_vec[i] + d_vec[i])
       .collect::<Vec<E::Scalar>>();
 
+    let z_delta = r * W.r_a + r_delta;
+    let z_beta = r_beta; // since r_c = 0 
 
-    Ok(
-      Self {
-        delta,
-        z,
-      },
-    )
+    Ok(Self {
+      delta,
+      z_vec,
+      z_delta,
+      beta,
+      z_beta,
+    })
   }
 
+  /// Verifies the inner product argument
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
-    ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
+    _ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
@@ -458,21 +470,19 @@ impl InnerProductArgumentLinear {
     transcript.absorb(b"U", U);
 
     transcript.absorb(b"delta", &self.delta);
-    transcript.absorb(b"ip_a_d", &U.c);
+    transcript.absorb(b"beta", &self.beta);
 
+    let _r = transcript.squeeze(b"r")?;
 
-    let c = transcript.challenge_scalar(b"c");
-
-    let mut result =
-      c * Cx.unpack()? + self.delta.unpack()? == self.z.commit(&self.z_delta, gens_n);
-
-    let dotproduct_z_a = DotProductProof::compute_dotproduct(&self.z, a);
-    result &= c * Cy.unpack()? + self.beta.unpack()? == dotproduct_z_a.commit(&self.z_beta, gens_1);
-
-    if result {
-      Ok(())
-    } else {
-      Err(ProofVerifyError::InternalError)
+    if U.comm_a_vec + self.delta
+      != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)
+        + E::GE::group(h) * self.z_delta
+    {
+      return Err(SpartanError::InvalidPCS);
     }
+
+    // TODO: add the other check
+
+    Ok(())
   }
-}*/
+}
