@@ -6,7 +6,9 @@ use crate::{
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness, inner_product},
+    pcs::ipa::{
+      InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness, inner_product,
+    },
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -89,9 +91,9 @@ pub struct HyraxPCS<E: Engine> {
 #[serde(bound = "")]
 pub struct HyraxEvaluationArgument<E: Engine>
 where
-  E::GE: DlogGroup,
+  E::GE: DlogGroupExt,
 {
-  ipa: InnerProductArgument<E>,
+  ipa: InnerProductArgumentLinear<E>,
 }
 
 fn compute_factored_lens(n: usize) -> (usize, usize) {
@@ -273,8 +275,14 @@ where
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ);
-    let ipa =
-      InnerProductArgumentLinear::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
+    let ipa = InnerProductArgumentLinear::<E>::prove(
+      &ck.ck,
+      &ck.h,
+      &ck.ck_s,
+      &ipa_instance,
+      &ipa_witness,
+      transcript,
+    )?;
     info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
     Ok((eval, HyraxEvaluationArgument { ipa }))

@@ -389,7 +389,7 @@ where
 // r * Comm_c + beta =? Com(<z_vec, b_vec>, z_\beta)
 //
 /// An inner product argument using a linear-sized argument
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct InnerProductArgumentLinear<E: Engine>
 where
@@ -431,8 +431,9 @@ where
     let r_delta = E::Scalar::random(&mut OsRng);
     let r_beta = E::Scalar::random(&mut OsRng);
 
-    let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true);
-    let beta = E::GE::group(ck_c) * inner_product(&W.a_vec, &d_vec) + E::GE::group(h) * r_beta;
+    let delta =
+      E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true) + E::GE::group(h) * r_delta;
+    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h) * r_beta;
 
     transcript.absorb(b"delta", &delta);
     transcript.absorb(b"beta", &beta);
@@ -460,7 +461,8 @@ where
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
     h: &<E::GE as DlogGroup>::AffineGroupElement,
-    _ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    n: usize,
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
@@ -472,16 +474,24 @@ where
     transcript.absorb(b"delta", &self.delta);
     transcript.absorb(b"beta", &self.beta);
 
-    let _r = transcript.squeeze(b"r")?;
+    let r = transcript.squeeze(b"r")?;
 
-    if U.comm_a_vec + self.delta
+    if self.z_vec.len() != n || ck.len() < self.z_vec.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    if U.comm_a_vec * r + self.delta
       != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)
         + E::GE::group(h) * self.z_delta
     {
       return Err(SpartanError::InvalidPCS);
     }
 
-    // TODO: add the other check
+    if E::GE::group(ck_c) * (U.c * r) + self.beta
+      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + E::GE::group(h) * self.z_beta
+    {
+      return Err(SpartanError::InvalidPCS);
+    }
 
     Ok(())
   }
