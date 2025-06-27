@@ -274,7 +274,7 @@ where
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ);
     let ipa =
-      InnerProductArgument::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
+      InnerProductArgumentLinear::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
     info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
     Ok((eval, HyraxEvaluationArgument { ipa }))
