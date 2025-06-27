@@ -119,8 +119,7 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     comm: &Self::Commitment,
     poly: &[E::Scalar],
     point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError>;
+  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError>;
 
   /// A method to verify the purported evaluation of a multilinear polynomials
   fn verify(

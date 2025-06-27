@@ -382,12 +382,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     )?;
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
-    let (_we_span, we_t) = start_span!("witness_polyeval");
-    let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
-    info!(elapsed_ms = %we_t.elapsed().as_millis(), "witness_polyeval");
-
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let eval_arg = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..], &eval_W)?;
+    let (eval_W, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {

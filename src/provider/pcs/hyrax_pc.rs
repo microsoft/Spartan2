@@ -6,7 +6,7 @@ use crate::{
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
+    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness, inner_product},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -286,8 +286,7 @@ where
     comm: &Self::Commitment,
     poly: &[E::Scalar],
     point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError> {
+  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
     let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if poly.len() != (2usize).pow(point.len() as u32) {
       return Err(SpartanError::InvalidInputLength);
@@ -304,14 +303,16 @@ where
       || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
     );
 
-    let poly_m = MultilinearPolynomial::<E::Scalar>::new(poly.to_vec());
     info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
     let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
     // compute the vector underneath L*Z
     // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = poly_m.bind(&L, &R);
+    let LZ = MultilinearPolynomial::bind_with(poly, &L, &R);
     info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
+
+    // compute the evaluation of the multilinear polynomial at the point
+    let eval = inner_product(&LZ, &R);
 
     let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
     // Commit to LZ with a blind of zero
@@ -320,13 +321,13 @@ where
 
     let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     // a dot product argument (IPA) of size R_size
-    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
+    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ);
     let ipa =
       InnerProductArgument::<E>::prove(&ck.ck, &ck.ck_s, &ipa_instance, &ipa_witness, transcript)?;
     info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
-    Ok(HyraxEvaluationArgument { ipa })
+    Ok((eval, HyraxEvaluationArgument { ipa }))
   }
 
   fn verify(

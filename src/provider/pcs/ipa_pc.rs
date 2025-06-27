@@ -3,7 +3,7 @@ use crate::{
   errors::SpartanError,
   polys::eq::EqPolynomial,
   provider::{
-    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness},
+    pcs::ipa::{InnerProductArgument, InnerProductInstance, InnerProductWitness, inner_product},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -184,18 +184,20 @@ where
     comm: &Self::Commitment,
     poly: &[E::Scalar],
     point: &[E::Scalar],
-    eval: &E::Scalar,
-  ) -> Result<Self::EvaluationArgument, SpartanError> {
+  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
     let (_prep_span, prep_t) = start_span!("ipa_prove_prepare");
-    let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
+    let b_vec = EqPolynomial::new(point.to_vec()).evals();
+    let eval = inner_product(poly, &b_vec);
+
+    let u = InnerProductInstance::new(&comm.comm, &b_vec, &eval);
     let w = InnerProductWitness::new(poly);
     info!(elapsed_ms = %prep_t.elapsed().as_millis(), "ipa_prove_prepare");
 
     let (_prove_span, prove_t) = start_span!("ipa_prove_argument");
-    let result = InnerProductArgument::prove(&ck.ck, &ck.ck_s, &u, &w, transcript);
+    let result = InnerProductArgument::prove(&ck.ck, &ck.ck_s, &u, &w, transcript)?;
     info!(elapsed_ms = %prove_t.elapsed().as_millis(), "ipa_prove_argument");
 
-    result
+    Ok((eval, result))
   }
 
   /// A method to verify purported evaluations of a committed polynomial

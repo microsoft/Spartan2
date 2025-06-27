@@ -10,14 +10,13 @@ use crate::{
 };
 use core::{fmt::Debug, iter};
 use ff::Field;
-use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
 
 /// computes the inner product of two vectors in parallel.
-fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
+pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
   assert_eq!(a.len(), b.len());
   (0..a.len())
     .into_par_iter()
