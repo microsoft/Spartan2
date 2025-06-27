@@ -32,9 +32,13 @@ pub struct InnerProductInstance<E: Engine> {
   c: E::Scalar,
 }
 
-impl<E> InnerProductInstance<E>
+pub(crate) struct InnerProductWitness<E: Engine> {
+  a_vec: Vec<E::Scalar>,
+  r_a: E::Scalar, // blind for the commitment to a_vec
+}
+
+impl<E: Engine> InnerProductInstance<E>
 where
-  E: Engine,
   E::GE: DlogGroup,
 {
   /// Creates a new inner product instance
@@ -61,14 +65,11 @@ where
   }
 }
 
-pub(crate) struct InnerProductWitness<E: Engine> {
-  a_vec: Vec<E::Scalar>,
-}
-
 impl<E: Engine> InnerProductWitness<E> {
-  pub fn new(a_vec: &[E::Scalar]) -> Self {
+  pub fn new(a_vec: &[E::Scalar], r_a: &E::Scalar) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
+      r_a: *r_a,
     }
   }
 }
@@ -80,14 +81,14 @@ pub struct InnerProductArgument<E: Engine>
 where
   E::GE: DlogGroup,
 {
+  r_a: E::Scalar, // blind for the commitment to a_vec
   L_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   R_vec: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   a_hat: E::Scalar,
 }
 
-impl<E> InnerProductArgument<E>
+impl<E: Engine> InnerProductArgument<E>
 where
-  E: Engine,
   E::GE: DlogGroupExt,
 {
   const fn protocol_name() -> &'static [u8] {
@@ -233,6 +234,7 @@ where
     );
 
     Ok(InnerProductArgument {
+      r_a: W.r_a,
       L_vec,
       R_vec,
       a_hat: a_vec[0],
@@ -243,6 +245,7 @@ where
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
+    h: &<E::GE as DlogGroup>::AffineGroupElement,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
     n: usize,
     U: &InnerProductInstance<E>,
@@ -262,11 +265,14 @@ where
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
 
+    // remove the blind
+    let comm_a_vec = U.comm_a_vec - E::GE::group(h) * self.r_a;
+
     // sample a random base for committing to the inner product
     let r = transcript.squeeze(b"r")?;
     let ck_c = (E::GE::group(ck_c) * r).affine();
 
-    let P = (U.comm_a_vec + E::GE::group(&ck_c) * U.c).affine();
+    let P = (comm_a_vec + E::GE::group(&ck_c) * U.c).affine();
 
     let batch_invert = |v: &[E::Scalar]| -> Result<Vec<E::Scalar>, SpartanError> {
       let mut products = vec![E::Scalar::ZERO; v.len()];

@@ -1,6 +1,6 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, DerandKey, PCS, VerifierKey,
+  Blind, Commitment, CommitmentKey, PCS, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptReprTrait},
@@ -250,15 +250,6 @@ impl<E: Engine> R1CSWitness<E> {
 
     Ok((W, comm_W))
   }
-
-  pub fn derandomize(&mut self) -> Blind<E> {
-    let r_W = self.r_W.clone();
-
-    // set the blind to zero
-    self.r_W = Blind::<E>::default();
-
-    r_W
-  }
 }
 
 impl<E: Engine> R1CSInstance<E> {
@@ -276,10 +267,6 @@ impl<E: Engine> R1CSInstance<E> {
         X: X.to_owned(),
       })
     }
-  }
-
-  pub fn derandomize(&mut self, dk: &DerandKey<E>, r_W: &Blind<E>) {
-    self.comm_W = PCS::<E>::derandomize(dk, &self.comm_W, r_W);
   }
 }
 

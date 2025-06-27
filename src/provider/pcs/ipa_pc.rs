@@ -64,15 +64,6 @@ where
   }
 }
 
-/// A type that holds blinding generator
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DerandKey<E: Engine>
-where
-  E::GE: DlogGroup,
-{
-  h: <E::GE as DlogGroup>::AffineGroupElement,
-}
-
 /// A type that holds a commitment
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -116,7 +107,6 @@ where
   type VerifierKey = VerifierKey<E>;
   type Commitment = Commitment<E>;
   type Blind = E::Scalar;
-  type DerandKey = DerandKey<E>;
   type EvaluationArgument = InnerProductArgument<E>;
 
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
@@ -136,10 +126,6 @@ where
     let ck = CommitmentKey { ck, h, ck_s };
 
     (ck, vk)
-  }
-
-  fn derand_key(ck: &Self::CommitmentKey) -> Self::DerandKey {
-    Self::DerandKey { h: ck.h }
   }
 
   fn blind(_: &Self::CommitmentKey) -> Self::Blind {
@@ -168,21 +154,12 @@ where
     }
   }
 
-  fn derandomize(
-    dk: &Self::DerandKey,
-    commit: &Self::Commitment,
-    r: &Self::Blind,
-  ) -> Self::Commitment {
-    Commitment {
-      comm: commit.comm - <E::GE as DlogGroup>::group(&dk.h) * r,
-    }
-  }
-
   fn prove(
     ck: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     poly: &[E::Scalar],
+    blind: &E::Scalar,
     point: &[E::Scalar],
   ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
     let (_prep_span, prep_t) = start_span!("ipa_prove_prepare");
@@ -190,7 +167,7 @@ where
     let eval = inner_product(poly, &b_vec);
 
     let u = InnerProductInstance::new(&comm.comm, &b_vec, &eval);
-    let w = InnerProductWitness::new(poly);
+    let w = InnerProductWitness::new(poly, blind);
     info!(elapsed_ms = %prep_t.elapsed().as_millis(), "ipa_prove_prepare");
 
     let (_prove_span, prove_t) = start_span!("ipa_prove_argument");
@@ -213,6 +190,7 @@ where
 
     arg.verify(
       &vk.ck,
+      &vk.h,
       &vk.ck_s,
       (2_usize).pow(point.len() as u32),
       &u,
