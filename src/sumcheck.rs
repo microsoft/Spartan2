@@ -132,7 +132,7 @@ impl<E: Engine> SumcheckProof<E> {
   where
     F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let len = poly_A.len() / 2;
+    let len = poly_A.Z.len() / 2;
 
     // Using `par_for` keeps the map-reduce logic identical
     // but avoids Rayon overhead on tiny slices.
@@ -259,7 +259,7 @@ impl<E: Engine> SumcheckProof<E> {
   where
     F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let len = poly_A.len() / 2;
+    let len = poly_A.Z.len() / 2;
     par_for(
       len,
       |i| {

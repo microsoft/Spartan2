@@ -257,7 +257,7 @@ where
     let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
     // compute the vector underneath L*Z
     // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = MultilinearPolynomial::bind_with(poly, &L, &R);
+    let LZ = MultilinearPolynomial::bind_with(poly, &L, R.len());
     info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
 
     // compute the evaluation of the multilinear polynomial at the point
