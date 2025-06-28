@@ -3,9 +3,8 @@
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
 use crate::{math::Math, polys::eq::EqPolynomial, start_span, zip_with, zip_with_for_each};
-use core::ops::{Add, Index};
+use core::ops::Index;
 use ff::PrimeField;
-use itertools::Itertools as _;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -29,7 +28,6 @@ use tracing::{info, info_span};
 /// Vector $Z$ indicates $Z(e)$ where $e$ ranges from $0$ to $2^m-1$.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultilinearPolynomial<Scalar: PrimeField> {
-  num_vars: usize,           // the number of variables in the multilinear polynomial
   pub(crate) Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
 }
 
@@ -39,33 +37,16 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// # Panics
   /// The number of evaluations must be a power of two.
   pub fn new(Z: Vec<Scalar>) -> Self {
-    let num_vars = Z.len().log_2();
-    assert_eq!(Z.len(), 1 << num_vars);
-    MultilinearPolynomial { num_vars, Z }
-  }
-
-  /// Returns the number of variables in the multilinear polynomial
-  pub const fn get_num_vars(&self) -> usize {
-    self.num_vars
-  }
-
-  /// Returns the total number of evaluations.
-  pub fn len(&self) -> usize {
-    self.Z.len()
-  }
-
-  /// Returns `true` if the polynomial has no evaluations.
-  pub fn is_empty(&self) -> bool {
-    self.Z.is_empty()
+    MultilinearPolynomial { Z }
   }
 
   /// Binds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
   pub fn bind_poly_var_top(&mut self, r: &Scalar) {
-    assert!(self.num_vars > 0);
+    assert!(self.Z.len() > 0);
 
-    let n = self.len() / 2;
+    let n = self.Z.len() / 2;
 
     let (left, right) = self.Z.split_at_mut(n);
 
@@ -73,15 +54,14 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       *a += *r * (*b - *a);
     });
 
-    self.Z.resize(n, Scalar::ZERO);
-    self.num_vars -= 1;
+    self.Z.truncate(n);
   }
 
   /// binds the polynomial's top variables using the given scalars.
-  pub fn bind_with(poly: &[Scalar], L: &[Scalar], R: &[Scalar]) -> Vec<Scalar> {
-    (0..R.len())
+  pub fn bind_with(poly: &[Scalar], L: &[Scalar], R_len: usize) -> Vec<Scalar> {
+    (0..R_len)
       .into_par_iter()
-      .map(|i| (0..L.len()).map(|j| L[j] * poly[j * R.len() + i]).sum())
+      .map(|i| (0..L.len()).map(|j| L[j] * poly[j * R_len + i]).sum())
       .collect()
   }
 
@@ -92,7 +72,6 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   #[allow(dead_code)]
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
-    assert_eq!(r.len(), self.get_num_vars());
     let chis = EqPolynomial::evals_from_points(r);
 
     zip_with!(
@@ -161,22 +140,6 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
       .product::<Scalar>();
 
     common * eval_partial
-  }
-}
-
-/// Adds another multilinear polynomial to `self`.
-/// Assumes the two polynomials have the same number of variables.
-impl<Scalar: PrimeField> Add for MultilinearPolynomial<Scalar> {
-  type Output = Result<Self, &'static str>;
-
-  fn add(self, other: Self) -> Self::Output {
-    if self.get_num_vars() != other.get_num_vars() {
-      return Err("The two polynomials must have the same number of variables");
-    }
-
-    let sum: Vec<Scalar> = zip_with!(into_iter, (self.Z, other.Z), |a, b| a + b).collect();
-
-    Ok(MultilinearPolynomial::new(sum))
   }
 }
 
