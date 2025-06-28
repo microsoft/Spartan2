@@ -44,7 +44,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   ///
   /// This operation modifies the polynomial in-place.
   pub fn bind_poly_var_top(&mut self, r: &Scalar) {
-    assert!(self.Z.len() > 0);
+    assert!(self.Z.len() >= 2, "Vector Z must have at least two elements to bind the top variable.");
 
     let n = self.Z.len() / 2;
 
