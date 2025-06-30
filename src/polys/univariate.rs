@@ -35,9 +35,10 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   /// this function interpolates the unique polynomial of degree `n-1`
   /// using Gaussian elimination.
   ///
-  /// # Panics
-  /// Panics if the Gaussian elimination fails due to singular matrix.
-  pub fn from_evals(evals: &[Scalar]) -> Self {
+  /// # Errors
+  /// Returns `SpartanError` if the Gaussian elimination fails due to singular matrix
+  /// or invalid input dimensions.
+  pub fn from_evals(evals: &[Scalar]) -> Result<Self, crate::errors::SpartanError> {
     let n = evals.len();
     let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
 
@@ -54,8 +55,8 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
       matrix.push(row);
     }
 
-    let coeffs = gaussian_elimination(&mut matrix).expect("Gaussian elimination failed");
-    Self { coeffs }
+    let coeffs = gaussian_elimination(&mut matrix)?;
+    Ok(Self { coeffs })
   }
 
   /// Returns the degree of the polynomial.
@@ -248,7 +249,7 @@ mod tests {
     let e1 = F::from(6);
     let e2 = F::from(15);
     let evals = vec![e0, e1, e2];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);
@@ -280,7 +281,7 @@ mod tests {
     let e2 = F::from(23);
     let e3 = F::from(55);
     let evals = vec![e0, e1, e2, e3];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);
@@ -313,7 +314,7 @@ mod tests {
     let e3 = F::from(179);
     let e4 = F::from(453);
     let evals = vec![e0, e1, e2, e3, e4];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);

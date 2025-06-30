@@ -205,7 +205,7 @@ impl<E: Engine> SumcheckProof<E> {
         }
 
         let evals = vec![eval_point_0, claim_per_round - eval_point_0, eval_point_2];
-        UniPoly::from_evals(&evals)
+        UniPoly::from_evals(&evals)?
       };
 
       // append the prover's message to the transcript
@@ -367,7 +367,7 @@ impl<E: Engine> SumcheckProof<E> {
           eval_point_2,
           eval_point_3,
         ];
-        UniPoly::from_evals(&evals)
+        UniPoly::from_evals(&evals)?
       };
 
       // append the prover's message to the transcript
