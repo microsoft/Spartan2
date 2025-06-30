@@ -74,12 +74,14 @@ impl<E: Engine> R1CSShape<E> {
     is_valid(num_cons, num_vars, num_io, &B)?;
     is_valid(num_cons, num_vars, num_io, &C)?;
 
-    let cons_valid = num_cons.next_power_of_two() == num_cons;
     let vars_valid = num_vars.next_power_of_two() == num_vars;
     let io_lt_vars = num_io < num_vars;
-    if cons_valid && vars_valid && io_lt_vars {
+
+    let num_cons_padded = num_cons.next_power_of_two();
+
+    if vars_valid && io_lt_vars {
       Ok(R1CSShape {
-        num_cons,
+        num_cons: num_cons_padded,
         num_vars,
         num_io,
         A,
@@ -88,58 +90,41 @@ impl<E: Engine> R1CSShape<E> {
         digest: OnceCell::new(),
       })
     } else {
-      // pad the shape to meet the regularity conditions
-      // equalize the number of variables, constraints, and public IO
-      let m = max(max(num_vars, num_cons), num_io).next_power_of_two();
+      let n = max(num_vars, num_io).next_power_of_two();
 
-      // check if the number of variables are as expected, then
-      // we simply set the number of constraints to the next power of two
-      if num_vars == m {
-        Ok(R1CSShape {
-          num_cons: m,
-          num_vars: m,
-          num_io,
-          A,
-          B,
-          C,
-          digest: OnceCell::new(),
-        })
-      } else {
-        // otherwise, we need to pad the number of variables and renumber variable accesses
-        let num_vars_padded = m;
-        let num_cons_padded = m;
+      // otherwise, we need to pad the number of variables and renumber variable accesses
+      let num_vars_padded = n;
 
-        let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
-          M.indices.par_iter_mut().for_each(|c| {
-            if *c >= num_vars {
-              *c += num_vars_padded - num_vars
-            }
-          });
+      let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+        M.indices.par_iter_mut().for_each(|c| {
+          if *c >= num_vars {
+            *c += num_vars_padded - num_vars
+          }
+        });
 
-          M.cols += num_vars_padded - num_vars;
+        M.cols += num_vars_padded - num_vars;
 
-          let ex = {
-            let nnz = M.indptr.last().unwrap();
-            vec![*nnz; num_cons_padded - num_cons]
-          };
-          M.indptr.extend(ex);
-          M
+        let ex = {
+          let nnz = M.indptr.last().unwrap();
+          vec![*nnz; num_cons_padded - num_cons]
         };
+        M.indptr.extend(ex);
+        M
+      };
 
-        let A_padded = apply_pad(A);
-        let B_padded = apply_pad(B);
-        let C_padded = apply_pad(C);
+      let A_padded = apply_pad(A);
+      let B_padded = apply_pad(B);
+      let C_padded = apply_pad(C);
 
-        Ok(R1CSShape {
-          num_cons: num_cons_padded,
-          num_vars: num_vars_padded,
-          num_io,
-          A: A_padded,
-          B: B_padded,
-          C: C_padded,
-          digest: OnceCell::new(),
-        })
-      }
+      Ok(R1CSShape {
+        num_cons: num_cons_padded,
+        num_vars: num_vars_padded,
+        num_io,
+        A: A_padded,
+        B: B_padded,
+        C: C_padded,
+        digest: OnceCell::new(),
+      })
     }
   }
 

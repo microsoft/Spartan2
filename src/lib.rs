@@ -181,7 +181,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         reason: format!("Unable to synthesize circuit: {e}"),
       })?;
 
-    // Padding the ShapeCS: constraints (rows) and variables (columns)
     let num_constraints = cs.num_constraints();
 
     (num_constraints..num_constraints.next_power_of_two()).for_each(|i| {
@@ -204,7 +203,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // ensure num_io < num_vars
     if num_io >= num_vars_padded {
-      (num_vars_padded..num_io).for_each(|i| {
+      (num_vars_padded..num_io.next_power_of_two()).for_each(|i| {
         cs.alloc(|| format!("padding_var_for_io_{i}"), || Ok(E::Scalar::ZERO))
           .unwrap();
       });

@@ -140,12 +140,17 @@ impl<E: Engine> SumcheckProof<E> {
       len,
       // map-closure (returned pair is the per-index contribution)
       |i| {
+        let a_low = poly_A[i];
+        let a_high = poly_A[len + i];
+        let b_low = poly_B[i];
+        let b_high = poly_B[len + i];
+
         // eval 0:   A(low)
-        let eval0 = comb_func(&poly_A[i], &poly_B[i]);
+        let eval0 = comb_func(&a_low, &b_low);
 
         // eval 2:  −A(low) + 2·A(high)   (same for B)
-        let a_bound = poly_A[len + i] + poly_A[len + i] - poly_A[i];
-        let b_bound = poly_B[len + i] + poly_B[len + i] - poly_B[i];
+        let a_bound = a_high + a_high - a_low;
+        let b_bound = b_high + b_high - b_low;
         let eval2 = comb_func(&a_bound, &b_bound);
 
         (eval0, eval2)
