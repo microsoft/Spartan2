@@ -152,15 +152,14 @@ where
     }
   }
 
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment {
+  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
     if n > ck.num_rows * ck.num_cols {
-      panic!(
-        "Input vector is too large {} and ck can only commit to {}",
-        n,
-        ck.num_rows * ck.num_cols
-      );
+      return Err(SpartanError::InvalidVectorSize {
+        actual: n,
+        max: ck.num_rows * ck.num_cols,
+      });
     }
 
     // ensure that the input vector is padded to the next power of 2
@@ -185,22 +184,21 @@ where
       })
       .collect();
 
-    HyraxCommitment { comm }
+    Ok(HyraxCommitment { comm })
   }
 
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[T],
     r: &Self::Blind,
-  ) -> Self::Commitment {
+  ) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
     if n > ck.num_rows * ck.num_cols {
-      panic!(
-        "Input vector is too large {} and ck can only commit to {}",
-        n,
-        ck.num_rows * ck.num_cols
-      );
+      return Err(SpartanError::InvalidVectorSize {
+        actual: n,
+        max: ck.num_rows * ck.num_cols,
+      });
     }
 
     // ensure that the input vector is padded to the next power of 2
@@ -225,7 +223,7 @@ where
       })
       .collect();
 
-    HyraxCommitment { comm }
+    Ok(HyraxCommitment { comm })
   }
 
   fn prove(

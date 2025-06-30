@@ -132,26 +132,30 @@ where
     E::Scalar::random(&mut OsRng)
   }
 
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment {
-    assert!(ck.ck.len() >= v.len());
+  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Result<Self::Commitment, SpartanError> {
+    if ck.ck.len() < v.len() {
+      return Err(SpartanError::InvalidCommitmentKeyLength);
+    }
 
-    Commitment {
+    Ok(Commitment {
       comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)
         + <E::GE as DlogGroup>::group(&ck.h) * r,
-    }
+    })
   }
 
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[T],
     r: &Self::Blind,
-  ) -> Self::Commitment {
-    assert!(ck.ck.len() >= v.len());
+  ) -> Result<Self::Commitment, SpartanError> {
+    if ck.ck.len() < v.len() {
+      return Err(SpartanError::InvalidCommitmentKeyLength);
+    }
 
-    Commitment {
+    Ok(Commitment {
       comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()], true)
         + <E::GE as DlogGroup>::group(&ck.h) * r,
-    }
+    })
   }
 
   fn prove(

@@ -184,7 +184,7 @@ impl<E: Engine> R1CSShape<E> {
     };
 
     // verify if comm_W is a commitment to W
-    let res_comm = U.comm_W == PCS::<E>::commit(ck, &W.W, &W.r_W);
+    let res_comm = U.comm_W == PCS::<E>::commit(ck, &W.W, &W.r_W)?;
 
     if !res_eq {
       return Err(SpartanError::UnSat {
@@ -226,9 +226,9 @@ impl<E: Engine> R1CSWitness<E> {
           e.to_repr().as_ref()[0] as u64
         })
         .collect::<Vec<_>>();
-      PCS::<E>::commit_small(ck, &W_small, &r_W)
+      PCS::<E>::commit_small(ck, &W_small, &r_W)?
     } else {
-      PCS::<E>::commit(ck, W, &r_W)
+      PCS::<E>::commit(ck, W, &r_W)?
     };
 
     let W = R1CSWitness { W: W.to_vec(), r_W };
