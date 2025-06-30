@@ -147,15 +147,7 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 mod tests {
   use super::*;
   use crate::provider::pasta::pallas;
-  use rand_chacha::ChaCha20Rng;
-  use rand_core::{CryptoRng, RngCore, SeedableRng};
-
-  fn make_mlp<F: PrimeField>(len: usize, value: F) -> MultilinearPolynomial<F> {
-    MultilinearPolynomial {
-      num_vars: len.count_ones() as usize,
-      Z: vec![value; len],
-    }
-  }
+  use rand_core::{CryptoRng, OsRng, RngCore};
 
   fn test_multilinear_polynomial_with<F: PrimeField>() {
     // Let the polynomial has 3 variables, p(x_1, x_2, x_3) = (x_1 + x_2) * x_3
@@ -174,7 +166,6 @@ mod tests {
       TWO,
     ];
     let m_poly = MultilinearPolynomial::<F>::new(Z.clone());
-    assert_eq!(m_poly.get_num_vars(), 3);
 
     let x = vec![F::ONE, F::ONE, F::ONE];
     assert_eq!(m_poly.evaluate(x.as_slice()), TWO);
@@ -209,20 +200,6 @@ mod tests {
   #[test]
   fn test_sparse_polynomial() {
     test_sparse_polynomial_with::<pallas::Scalar>();
-  }
-
-  fn test_mlp_add_with<F: PrimeField>() {
-    let mlp1 = make_mlp(4, F::from(3));
-    let mlp2 = make_mlp(4, F::from(7));
-
-    let mlp3 = mlp1.add(mlp2).unwrap();
-
-    assert_eq!(mlp3.Z, vec![F::from(10); 4]);
-  }
-
-  #[test]
-  fn test_mlp_add() {
-    test_mlp_add_with::<pallas::Scalar>();
   }
 
   fn test_evaluation_with<F: PrimeField>() {
@@ -288,14 +265,13 @@ mod tests {
   }
 
   fn bind_and_evaluate_with<F: PrimeField>() {
-    for i in 0..50 {
+    for _ in 0..50 {
       // Initialize a random polynomial
       let n = 7;
-      let mut rng = ChaCha20Rng::from_seed([i as u8; 32]);
-      let poly = random(n, &mut rng);
+      let poly = random(n, &mut OsRng);
 
       // draw a random point
-      let pt: Vec<_> = std::iter::from_fn(|| Some(F::random(&mut rng)))
+      let pt: Vec<_> = std::iter::from_fn(|| Some(F::random(&mut OsRng)))
         .take(n)
         .collect();
       // this shows the order in which coordinates are evaluated

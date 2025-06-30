@@ -263,14 +263,23 @@ impl<E: Engine> SumcheckProof<E> {
     par_for(
       len,
       |i| {
+        let a_low = poly_A[i];
+        let a_high = poly_A[i + len];
+        let b_low = poly_B[i];
+        let b_high = poly_B[i + len];
+        let c_low = poly_C[i];
+        let c_high = poly_C[i + len];
+        let d_low = poly_D[i];
+        let d_high = poly_D[i + len];
+
         // eval 0: bound_func is A(low)
-        let eval_point_0 = comb_func(&poly_A[i], &poly_B[i], &poly_C[i], &poly_D[i]);
+        let eval_point_0 = comb_func(&a_low, &b_low, &c_low, &d_low);
 
         // eval 2: bound_func is -A(low) + 2*A(high)
-        let poly_A_bound_point = poly_A[len + i] + poly_A[len + i] - poly_A[i];
-        let poly_B_bound_point = poly_B[len + i] + poly_B[len + i] - poly_B[i];
-        let poly_C_bound_point = poly_C[len + i] + poly_C[len + i] - poly_C[i];
-        let poly_D_bound_point = poly_D[len + i] + poly_D[len + i] - poly_D[i];
+        let poly_A_bound_point = a_high + a_high - a_low;
+        let poly_B_bound_point = b_high + b_high - b_low;
+        let poly_C_bound_point = c_high + c_high - c_low;
+        let poly_D_bound_point = d_high + d_high - d_low;
         let eval_point_2 = comb_func(
           &poly_A_bound_point,
           &poly_B_bound_point,
@@ -279,10 +288,10 @@ impl<E: Engine> SumcheckProof<E> {
         );
 
         // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-        let poly_A_bound_point = poly_A_bound_point + poly_A[len + i] - poly_A[i];
-        let poly_B_bound_point = poly_B_bound_point + poly_B[len + i] - poly_B[i];
-        let poly_C_bound_point = poly_C_bound_point + poly_C[len + i] - poly_C[i];
-        let poly_D_bound_point = poly_D_bound_point + poly_D[len + i] - poly_D[i];
+        let poly_A_bound_point = poly_A_bound_point + a_high - a_low;
+        let poly_B_bound_point = poly_B_bound_point + b_high - b_low;
+        let poly_C_bound_point = poly_C_bound_point + c_high - c_low;
+        let poly_D_bound_point = poly_D_bound_point + d_high - d_low;
         let eval_point_3 = comb_func(
           &poly_A_bound_point,
           &poly_B_bound_point,
