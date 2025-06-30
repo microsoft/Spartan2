@@ -158,7 +158,7 @@ impl<E: Engine> R1CSShape<E> {
       || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
     );
 
-    Ok((Az, Bz, Cz))
+    Ok((Az?, Bz?, Cz?))
   }
 
   /// Checks if the R1CS instance is satisfiable given a witness and its shape

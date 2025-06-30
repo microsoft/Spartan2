@@ -56,7 +56,11 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
 
   /// Commits to the provided vector using the provided ck and returns the commitment
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Result<Self::Commitment, SpartanError>;
+  fn commit(
+    ck: &Self::CommitmentKey,
+    v: &[E::Scalar],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
 
   /// Batch commits to the provided vectors using the provided ck
   fn batch_commit(

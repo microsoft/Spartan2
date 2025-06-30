@@ -1,7 +1,7 @@
 //! This module provides a multi-scalar multiplication routine
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.
-use crate::start_span;
+use crate::{errors::SpartanError, start_span};
 use ff::{Field, PrimeField};
 use halo2curves::{CurveAffine, group::Group};
 use num_integer::Integer;
@@ -109,18 +109,21 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
 
 /// Performs a multi-scalar-multiplication operation without GPU acceleration.
 ///
-/// This function will panic if coeffs and bases have a different length.
-///
 /// This will use multithreading if beneficial.
 /// Adapted from zcash/halo2
+///
+/// # Errors
+/// Returns `SpartanError::InvalidInputLength` if coeffs and bases have different lengths.
 pub fn msm<C: CurveAffine>(
   coeffs: &[C::Scalar],
   bases: &[C],
   use_parallelism_internally: bool,
-) -> C::Curve {
+) -> Result<C::Curve, SpartanError> {
   let (_msm_span, msm_t) = start_span!("msm", size = coeffs.len());
 
-  assert_eq!(coeffs.len(), bases.len());
+  if coeffs.len() != bases.len() {
+    return Err(SpartanError::InvalidInputLength);
+  }
 
   let num_threads = if coeffs.len() > 1024 {
     // If the number of coefficients is large, we use parallelism.
@@ -145,7 +148,7 @@ pub fn msm<C: CurveAffine>(
   };
 
   info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
-  result
+  Ok(result)
 }
 
 fn num_bits(n: usize) -> usize {
@@ -153,16 +156,24 @@ fn num_bits(n: usize) -> usize {
 }
 
 /// Multi-scalar multiplication using the best algorithm for the given scalars.
+///
+/// # Errors
+/// Returns `SpartanError::InvalidInputLength` if bases and scalars have different lengths.
+/// Returns `SpartanError::InternalError` if scalars contain values that cannot be processed.
 pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
   scalars: &[T],
   bases: &[C],
   use_parallelism_internally: bool,
-) -> C::Curve {
+) -> Result<C::Curve, SpartanError> {
   let (_msm_small_span, msm_small_t) = start_span!("msm_small", size = scalars.len());
 
-  assert_eq!(bases.len(), scalars.len());
+  if bases.len() != scalars.len() {
+    return Err(SpartanError::InvalidInputLength);
+  }
 
-  let max_num_bits = num_bits(scalars.iter().max().unwrap().to_usize().unwrap());
+  let max_scalar = scalars.iter().max().ok_or(SpartanError::InternalError)?;
+  let max_scalar_usize = max_scalar.to_usize().ok_or(SpartanError::InternalError)?;
+  let max_num_bits = num_bits(max_scalar_usize);
   let result = match max_num_bits {
     0 => C::identity().into(),
     1 => {
@@ -190,7 +201,7 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   if msm_small_t.elapsed().as_millis() != 0 {
     info!(elapsed_ms = %msm_small_t.elapsed().as_millis(), size = scalars.len(), max_bits = max_num_bits, "msm_small");
   }
-  result
+  Ok(result)
 }
 
 fn msm_binary<C: CurveAffine, T: Integer + Sync>(
@@ -428,7 +439,7 @@ mod tests {
       });
     let msm = msm(&coeffs, &bases, true);
 
-    assert_eq!(naive, msm)
+    assert_eq!(naive, msm.unwrap())
   }
 
   #[test]
@@ -453,7 +464,7 @@ mod tests {
       let general = msm(&coeffs_scalar, &bases, true);
       let integer = msm_small(&coeffs, &bases, true);
 
-      assert_eq!(general, integer);
+      assert_eq!(general.unwrap(), integer.unwrap());
     }
   }
 

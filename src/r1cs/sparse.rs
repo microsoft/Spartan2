@@ -3,6 +3,7 @@
 //! This module defines a custom implementation of CSR/CSC sparse matrices.
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
+use crate::errors::SpartanError;
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -76,10 +77,15 @@ impl<F: PrimeField> SparseMatrix<F> {
   }
 
   /// Multiply by a dense vector; uses rayon/gpu.
-  pub fn multiply_vec(&self, vector: &[F]) -> Vec<F> {
-    assert_eq!(self.cols, vector.len(), "invalid shape");
+  ///
+  /// # Errors
+  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't match the matrix dimensions.
+  pub fn multiply_vec(&self, vector: &[F]) -> Result<Vec<F>, SpartanError> {
+    if self.cols != vector.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
 
-    self.multiply_vec_unchecked(vector)
+    Ok(self.multiply_vec_unchecked(vector))
   }
 
   /// Multiply by a dense vector; uses rayon/gpu.
@@ -220,7 +226,10 @@ mod tests {
 
     let result = sparse_matrix.multiply_vec(&vector);
 
-    assert_eq!(result, vec![Fr::from(25), Fr::from(9), Fr::from(4)]);
+    assert_eq!(
+      result.unwrap(),
+      vec![Fr::from(25), Fr::from(9), Fr::from(4)]
+    );
   }
 
   fn coo_strategy() -> BoxedStrategy<Vec<(usize, usize, FWrap<Fr>)>> {

@@ -149,7 +149,9 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 ///
 /// # Errors
 /// Returns `SpartanError::DivisionByZero` if any diagonal element is zero during the solving process.
-pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Result<Vec<F>, crate::errors::SpartanError> {
+pub fn gaussian_elimination<F: PrimeField>(
+  matrix: &mut [Vec<F>],
+) -> Result<Vec<F>, crate::errors::SpartanError> {
   let size = matrix.len();
   if size != matrix[0].len() - 1 {
     return Err(crate::errors::SpartanError::InvalidInputLength);
@@ -182,7 +184,11 @@ pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Result<Vec<
   Ok(result)
 }
 
-fn echelon<F: PrimeField>(matrix: &mut [Vec<F>], i: usize, j: usize) -> Result<(), crate::errors::SpartanError> {
+fn echelon<F: PrimeField>(
+  matrix: &mut [Vec<F>],
+  i: usize,
+  j: usize,
+) -> Result<(), crate::errors::SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
     let factor = div_f(matrix[j + 1][i], matrix[i][i])?;
@@ -194,7 +200,10 @@ fn echelon<F: PrimeField>(matrix: &mut [Vec<F>], i: usize, j: usize) -> Result<(
   Ok(())
 }
 
-fn eliminate<F: PrimeField>(matrix: &mut [Vec<F>], i: usize) -> Result<(), crate::errors::SpartanError> {
+fn eliminate<F: PrimeField>(
+  matrix: &mut [Vec<F>],
+  i: usize,
+) -> Result<(), crate::errors::SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
     for j in (1..i + 1).rev() {

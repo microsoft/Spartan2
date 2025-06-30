@@ -132,7 +132,11 @@ where
     E::Scalar::random(&mut OsRng)
   }
 
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Result<Self::Commitment, SpartanError> {
+  fn commit(
+    ck: &Self::CommitmentKey,
+    v: &[E::Scalar],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
     if ck.ck.len() < v.len() {
       return Err(SpartanError::InvalidCommitmentKeyLength);
     }

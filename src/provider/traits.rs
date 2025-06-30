@@ -292,7 +292,7 @@ macro_rules! impl_traits {
         bases: &[Self::AffineGroupElement],
         use_parallelism_internally: bool,
       ) -> Self {
-        msm(scalars, bases, use_parallelism_internally)
+        msm(scalars, bases, use_parallelism_internally).expect("MSM failed: input length mismatch")
       }
 
       fn vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
@@ -301,6 +301,7 @@ macro_rules! impl_traits {
         use_parallelism_internally: bool,
       ) -> Self {
         msm_small(scalars, bases, use_parallelism_internally)
+          .expect("MSM small failed: input length mismatch")
       }
     }
   };
