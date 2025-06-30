@@ -231,11 +231,10 @@ fn eliminate<F: PrimeField>(
 pub fn div_f<F: PrimeField>(a: F, b: F) -> Result<F, crate::errors::SpartanError> {
   let inverse_b = b.invert();
 
-  if inverse_b.into_option().is_none() {
-    return Err(crate::errors::SpartanError::DivisionByZero);
+  match inverse_b.into_option() {
+    Some(inv) => Ok(a * inv),
+    None => Err(crate::errors::SpartanError::DivisionByZero),
   }
-
-  Ok(a * inverse_b.unwrap())
 }
 
 #[cfg(test)]

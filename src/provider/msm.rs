@@ -371,7 +371,7 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
       .collect();
 
     // We store the sum for the lowest window.
-    let lowest = *window_sums.first().unwrap();
+    let lowest = window_sums.first().copied().unwrap_or(zero);
 
     // We're traversing windows from high to low.
     lowest

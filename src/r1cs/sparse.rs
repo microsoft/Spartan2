@@ -95,8 +95,10 @@ impl<F: PrimeField> SparseMatrix<F> {
       .indptr
       .par_windows(2)
       .map(|ptrs| {
+        // par_windows(2) guarantees ptrs has exactly 2 elements
+        let row_ptrs = [ptrs[0], ptrs[1]];
         self
-          .get_row_unchecked(ptrs.try_into().unwrap())
+          .get_row_unchecked(&row_ptrs)
           .map(|(val, col_idx)| *val * vector[*col_idx])
           .sum()
       })
@@ -106,14 +108,19 @@ impl<F: PrimeField> SparseMatrix<F> {
   /// returns a custom iterator
   pub fn iter(&self) -> Iter<'_, F> {
     let mut row = 0;
-    while self.indptr[row + 1] == 0 {
+    while row + 1 < self.indptr.len() && self.indptr[row + 1] == 0 {
       row += 1;
     }
+    let nnz = if self.indptr.is_empty() {
+      0
+    } else {
+      self.indptr[self.indptr.len() - 1]
+    };
     Iter {
       matrix: self,
       row,
       i: 0,
-      nnz: *self.indptr.last().unwrap(),
+      nnz,
     }
   }
 }

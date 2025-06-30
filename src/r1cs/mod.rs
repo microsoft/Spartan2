@@ -105,8 +105,12 @@ impl<E: Engine> R1CSShape<E> {
         M.cols += num_vars_padded - num_vars;
 
         let ex = {
-          let nnz = M.indptr.last().unwrap();
-          vec![*nnz; num_cons_padded - num_cons]
+          let nnz = if M.indptr.is_empty() {
+            0
+          } else {
+            M.indptr[M.indptr.len() - 1]
+          };
+          vec![nnz; num_cons_padded - num_cons]
         };
         M.indptr.extend(ex);
         M
