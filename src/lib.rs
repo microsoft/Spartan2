@@ -181,35 +181,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         reason: format!("Unable to synthesize circuit: {e}"),
       })?;
 
-    // Padding the ShapeCS: constraints (rows) and variables (columns)
-    let num_constraints = cs.num_constraints();
-
-    (num_constraints..num_constraints.next_power_of_two()).for_each(|i| {
-      cs.enforce(
-        || format!("padding_constraint_{i}"),
-        |lc| lc,
-        |lc| lc,
-        |lc| lc,
-      )
-    });
-
-    let num_vars = cs.num_aux();
-    let num_io = cs.num_inputs();
-
-    let num_vars_padded = num_vars.next_power_of_two();
-    (num_vars..num_vars_padded).for_each(|i| {
-      cs.alloc(|| format!("padding_var_{i}"), || Ok(E::Scalar::ZERO))
-        .unwrap();
-    });
-
-    // ensure num_io < num_vars
-    if num_io >= num_vars_padded {
-      (num_vars_padded..num_io).for_each(|i| {
-        cs.alloc(|| format!("padding_var_for_io_{i}"), || Ok(E::Scalar::ZERO))
-          .unwrap();
-      });
-    }
-
     let (S, ck, vk_ee) = cs.r1cs_shape();
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
@@ -225,7 +196,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     Ok((pk, vk))
   }
 
-  fn gen_witness<C: Circuit<<E as Engine>::Scalar>>(
+  fn gen_witness<C: Circuit<E::Scalar>>(
     pk: &Self::ProverKey,
     circuit: C,
     is_small: bool,
