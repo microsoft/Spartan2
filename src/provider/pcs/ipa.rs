@@ -144,7 +144,7 @@ where
         || inner_product(&a_vec[n / 2..n], &b_vec[0..n / 2]),
       );
 
-      let (L, R) = rayon::join(
+      let (L_result, R_result) = rayon::join(
         || {
           E::GE::vartime_multiscalar_mul(
             &a_vec[0..n / 2]
@@ -155,8 +155,7 @@ where
             &[ck_R, &[ck_c]].concat(),
             true,
           )
-          .expect("MSM should not fail in IPA prove")
-          .affine()
+          .map(|point| point.affine())
         },
         || {
           E::GE::vartime_multiscalar_mul(
@@ -168,10 +167,11 @@ where
             &[ck_L, &[ck_c]].concat(),
             true,
           )
-          .expect("MSM should not fail in IPA prove")
-          .affine()
+          .map(|point| point.affine())
         },
       );
+      let L = L_result?;
+      let R = R_result?;
 
       transcript.absorb(b"L", &L);
       transcript.absorb(b"R", &R);
@@ -430,8 +430,8 @@ where
     let r_delta = E::Scalar::random(&mut OsRng);
     let r_beta = E::Scalar::random(&mut OsRng);
 
-    let delta =
-      E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)? + E::GE::group(h) * r_delta;
+    let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)?
+      + E::GE::group(h) * r_delta;
     let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h) * r_beta;
 
     transcript.absorb(b"delta", &delta);
