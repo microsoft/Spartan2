@@ -300,9 +300,11 @@ where
     eval: &E::Scalar,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError> {
+    let (_verify_span, verify_t) = start_span!("hyrax_pcs_verify");
     transcript.absorb(b"poly_com", comm);
 
     // compute L and R
+    let (_lr_span, lr_t) = start_span!("hyrax_compute_lr");
     // n = 2^point.len()
     let n = (2_usize).pow(point.len() as u32);
     let (num_rows, num_cols) = compute_factored_lens(n);
@@ -316,12 +318,16 @@ where
     // convert the commitments to affine form so we can do a multi-scalar multiplication
     let ck: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
     let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true)?;
+    info!(elapsed_ms = %lr_t.elapsed().as_millis(), "hyrax_compute_lr");
 
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
 
-    arg
+    let result = arg
       .ipa
-      .verify(&vk.ck, &vk.h, &vk.ck_s, R.len(), &ipa_instance, transcript)
+      .verify(&vk.ck, &vk.h, &vk.ck_s, R.len(), &ipa_instance, transcript);
+
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "hyrax_pcs_verify");
+    result
   }
 }
 

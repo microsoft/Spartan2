@@ -88,6 +88,7 @@ impl<E: Engine> SumcheckProof<E> {
     degree_bound: usize,
     transcript: &mut E::TE,
   ) -> Result<(E::Scalar, Vec<E::Scalar>), SpartanError> {
+    let (_verify_span, verify_t) = start_span!("sumcheck_verify");
     let mut e = claim;
     let mut r: Vec<E::Scalar> = Vec::new();
 
@@ -97,6 +98,7 @@ impl<E: Engine> SumcheckProof<E> {
     }
 
     for i in 0..self.compressed_polys.len() {
+      let (_round_span, round_t) = start_span!("sumcheck_verify_round", round = i);
       let poly = self.compressed_polys[i].decompress(&e);
 
       // verify degree bound
@@ -118,8 +120,13 @@ impl<E: Engine> SumcheckProof<E> {
 
       // evaluate the claimed degree-ell polynomial at r_i
       e = poly.evaluate(&r_i);
+
+      if round_t.elapsed().as_millis() > 0 {
+        info!(elapsed_ms = %round_t.elapsed().as_millis(), "sumcheck_verify_round");
+      }
     }
 
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "sumcheck_verify");
     Ok((e, r))
   }
 
