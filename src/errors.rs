@@ -75,4 +75,15 @@ pub enum SpartanError {
   /// returned when the prover cannot prove the provided statement due to completeness error
   #[error("InternalError")]
   InternalError,
+  /// returned when attempting to divide by zero
+  #[error("DivisionByZero")]
+  DivisionByZero,
+  /// returned when input vector size exceeds commitment key capacity
+  #[error("InvalidVectorSize")]
+  InvalidVectorSize {
+    /// The actual size of the input vector
+    actual: usize,
+    /// The maximum size that can be handled
+    max: usize,
+  },
 }

@@ -1,8 +1,10 @@
 //! Main components:
 //! - `UniPoly`: an univariate dense polynomial in coefficient form (big endian),
 //! - `CompressedUniPoly`: a univariate dense polynomial, compressed (omitted linear term), in coefficient form (little endian),
-use crate::traits::{Group, transcript::TranscriptReprTrait};
-use core::panic;
+use crate::{
+  errors::SpartanError,
+  traits::{Group, transcript::TranscriptReprTrait},
+};
 use ff::PrimeField;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -35,7 +37,11 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   /// Given evaluation points at consecutive integers starting from 0,
   /// this function interpolates the unique polynomial of degree `n-1`
   /// using Gaussian elimination.
-  pub fn from_evals(evals: &[Scalar]) -> Self {
+  ///
+  /// # Errors
+  /// Returns `SpartanError` if the Gaussian elimination fails due to singular matrix
+  /// or invalid input dimensions.
+  pub fn from_evals(evals: &[Scalar]) -> Result<Self, SpartanError> {
     let n = evals.len();
     let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
 
@@ -52,8 +58,8 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
       matrix.push(row);
     }
 
-    let coeffs = gaussian_elimination(&mut matrix);
-    Self { coeffs }
+    let coeffs = gaussian_elimination(&mut matrix)?;
+    Ok(Self { coeffs })
   }
 
   /// Returns the degree of the polynomial.
@@ -143,19 +149,24 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 /// * `matrix` - A mutable reference to the augmented matrix
 ///
 /// # Returns
-/// A vector containing the solution (polynomial coefficients).
-pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Vec<F> {
+/// A vector containing the solution (polynomial coefficients), or an error if the system cannot be solved.
+///
+/// # Errors
+/// Returns `SpartanError::DivisionByZero` if any diagonal element is zero during the solving process.
+pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Result<Vec<F>, SpartanError> {
   let size = matrix.len();
-  assert_eq!(size, matrix[0].len() - 1);
+  if size != matrix[0].len() - 1 {
+    return Err(SpartanError::InvalidInputLength);
+  }
 
   for i in 0..size - 1 {
     for j in i..size - 1 {
-      echelon(matrix, i, j);
+      echelon(matrix, i, j)?;
     }
   }
 
   for i in (1..size).rev() {
-    eliminate(matrix, i);
+    eliminate(matrix, i)?;
   }
 
   // Disable cargo clippy warnings about needless range loops.
@@ -163,66 +174,62 @@ pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Vec<F> {
   #[allow(clippy::needless_range_loop)]
   for i in 0..size {
     if matrix[i][i] == F::ZERO {
-      println!("Infinitely many solutions");
+      return Err(SpartanError::DivisionByZero);
     }
   }
 
   let mut result: Vec<F> = vec![F::ZERO; size];
   for i in 0..size {
-    result[i] = div_f(matrix[i][size], matrix[i][i]);
+    result[i] = div_f(matrix[i][size], matrix[i][i])?;
   }
 
-  result
+  Ok(result)
 }
 
-fn echelon<F: PrimeField>(matrix: &mut [Vec<F>], i: usize, j: usize) {
+fn echelon<F: PrimeField>(matrix: &mut [Vec<F>], i: usize, j: usize) -> Result<(), SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
-    let factor = div_f(matrix[j + 1][i], matrix[i][i]);
+    let factor = div_f(matrix[j + 1][i], matrix[i][i])?;
     (i..size + 1).for_each(|k| {
       let tmp = matrix[i][k];
       matrix[j + 1][k] -= factor * tmp;
     });
   }
+  Ok(())
 }
 
-fn eliminate<F: PrimeField>(matrix: &mut [Vec<F>], i: usize) {
+fn eliminate<F: PrimeField>(matrix: &mut [Vec<F>], i: usize) -> Result<(), SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
     for j in (1..i + 1).rev() {
-      let factor = div_f(matrix[j - 1][i], matrix[i][i]);
+      let factor = div_f(matrix[j - 1][i], matrix[i][i])?;
       for k in (0..size + 1).rev() {
         let tmp = matrix[i][k];
         matrix[j - 1][k] -= factor * tmp;
       }
     }
   }
+  Ok(())
 }
 
 /// Division of two prime fields
-///
-/// # Panics
-///
-/// Panics if `b` is zero.
-/// Divides two field elements with proper error handling.
 ///
 /// # Arguments
 /// * `a` - The dividend
 /// * `b` - The divisor
 ///
 /// # Returns
-/// The result of `a / b`
+/// The result of `a / b` or an error if `b` is zero
 ///
-/// # Panics
-/// Panics if `b` is zero (not invertible).
-pub fn div_f<F: PrimeField>(a: F, b: F) -> F {
+/// # Errors
+/// Returns `SpartanError::DivisionByZero` if `b` is zero (not invertible).
+pub fn div_f<F: PrimeField>(a: F, b: F) -> Result<F, SpartanError> {
   let inverse_b = b.invert();
 
-  if inverse_b.into_option().is_none() {
-    panic!("Division by zero");
+  match inverse_b.into_option() {
+    Some(inv) => Ok(a * inv),
+    None => Err(SpartanError::DivisionByZero),
   }
-
-  a * inverse_b.unwrap()
 }
 
 #[cfg(test)]
@@ -236,7 +243,7 @@ mod tests {
     let e1 = F::from(6);
     let e2 = F::from(15);
     let evals = vec![e0, e1, e2];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);
@@ -268,7 +275,7 @@ mod tests {
     let e2 = F::from(23);
     let e3 = F::from(55);
     let evals = vec![e0, e1, e2, e3];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);
@@ -301,7 +308,7 @@ mod tests {
     let e3 = F::from(179);
     let e4 = F::from(453);
     let evals = vec![e0, e1, e2, e3, e4];
-    let poly = UniPoly::from_evals(&evals);
+    let poly = UniPoly::from_evals(&evals).unwrap();
 
     assert_eq!(poly.eval_at_zero(), e0);
     assert_eq!(poly.eval_at_one(), e1);

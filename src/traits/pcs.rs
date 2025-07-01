@@ -56,15 +56,21 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
 
   /// Commits to the provided vector using the provided ck and returns the commitment
-  fn commit(ck: &Self::CommitmentKey, v: &[E::Scalar], r: &Self::Blind) -> Self::Commitment;
+  fn commit(
+    ck: &Self::CommitmentKey,
+    v: &[E::Scalar],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
 
   /// Batch commits to the provided vectors using the provided ck
   fn batch_commit(
     ck: &Self::CommitmentKey,
     v: &[Vec<E::Scalar>],
     r: &[Self::Blind],
-  ) -> Vec<Self::Commitment> {
-    assert_eq!(v.len(), r.len());
+  ) -> Result<Vec<Self::Commitment>, SpartanError> {
+    if v.len() != r.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
     v.par_iter()
       .zip(r.par_iter())
       .map(|(v_i, r_i)| Self::commit(ck, v_i, r_i))
@@ -76,15 +82,17 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     ck: &Self::CommitmentKey,
     v: &[T],
     r: &Self::Blind,
-  ) -> Self::Commitment;
+  ) -> Result<Self::Commitment, SpartanError>;
 
   /// Batch commits to the provided vectors of "small" scalars (at most 64 bits) using the provided ck
   fn batch_commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[Vec<T>],
     r: &[Self::Blind],
-  ) -> Vec<Self::Commitment> {
-    assert_eq!(v.len(), r.len());
+  ) -> Result<Vec<Self::Commitment>, SpartanError> {
+    if v.len() != r.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
     v.par_iter()
       .zip(r.par_iter())
       .map(|(v_i, r_i)| Self::commit_small(ck, v_i, r_i))

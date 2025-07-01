@@ -15,7 +15,10 @@
 //!
 //! These traits and macros provide a consistent interface for elliptic curve operations
 //! and other algebraic structures used throughout the Spartan proof system.
-use crate::traits::{Group, transcript::TranscriptReprTrait};
+use crate::{
+  errors::SpartanError,
+  traits::{Group, transcript::TranscriptReprTrait},
+};
 use core::{
   fmt::Debug,
   ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
@@ -101,17 +104,17 @@ pub trait DlogGroupExt: DlogGroup {
     scalars: &[Self::Scalar],
     bases: &[Self::AffineGroupElement],
     use_parallelism_internally: bool,
-  ) -> Self;
+  ) -> Result<Self, SpartanError>;
 
   /// A method to compute a batch of multiexponentations
   fn batch_vartime_multiscalar_mul(
     scalars: &[Vec<Self::Scalar>],
     bases: &[Self::AffineGroupElement],
-  ) -> Vec<Self> {
+  ) -> Result<Vec<Self>, SpartanError> {
     scalars
       .par_iter()
       .map(|scalar| Self::vartime_multiscalar_mul(scalar, &bases[..scalar.len()], false))
-      .collect::<Vec<_>>()
+      .collect::<Result<Vec<_>, _>>()
   }
 
   /// A method to compute a multiexponentation with small scalars
@@ -119,17 +122,17 @@ pub trait DlogGroupExt: DlogGroup {
     scalars: &[T],
     bases: &[Self::AffineGroupElement],
     use_parallelism_internally: bool,
-  ) -> Self;
+  ) -> Result<Self, SpartanError>;
 
   /// A method to compute a batch of multiexponentations with small scalars
   fn batch_vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     scalars: &[Vec<T>],
     bases: &[Self::AffineGroupElement],
-  ) -> Vec<Self> {
+  ) -> Result<Vec<Self>, SpartanError> {
     scalars
       .par_iter()
       .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()], false))
-      .collect::<Vec<_>>()
+      .collect::<Result<Vec<_>, _>>()
   }
 }
 
@@ -291,7 +294,7 @@ macro_rules! impl_traits {
         scalars: &[Self::Scalar],
         bases: &[Self::AffineGroupElement],
         use_parallelism_internally: bool,
-      ) -> Self {
+      ) -> Result<Self, $crate::errors::SpartanError> {
         msm(scalars, bases, use_parallelism_internally)
       }
 
@@ -299,7 +302,7 @@ macro_rules! impl_traits {
         scalars: &[T],
         bases: &[Self::AffineGroupElement],
         use_parallelism_internally: bool,
-      ) -> Self {
+      ) -> Result<Self, $crate::errors::SpartanError> {
         msm_small(scalars, bases, use_parallelism_internally)
       }
     }

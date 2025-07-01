@@ -3,6 +3,7 @@
 //! This module defines a custom implementation of CSR/CSC sparse matrices.
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
+use crate::errors::SpartanError;
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -76,10 +77,15 @@ impl<F: PrimeField> SparseMatrix<F> {
   }
 
   /// Multiply by a dense vector; uses rayon/gpu.
-  pub fn multiply_vec(&self, vector: &[F]) -> Vec<F> {
-    assert_eq!(self.cols, vector.len(), "invalid shape");
+  ///
+  /// # Errors
+  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't match the matrix dimensions.
+  pub fn multiply_vec(&self, vector: &[F]) -> Result<Vec<F>, SpartanError> {
+    if self.cols != vector.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
 
-    self.multiply_vec_unchecked(vector)
+    Ok(self.multiply_vec_unchecked(vector))
   }
 
   /// Multiply by a dense vector; uses rayon/gpu.
@@ -89,8 +95,10 @@ impl<F: PrimeField> SparseMatrix<F> {
       .indptr
       .par_windows(2)
       .map(|ptrs| {
+        // par_windows(2) guarantees ptrs has exactly 2 elements
+        let row_ptrs = [ptrs[0], ptrs[1]];
         self
-          .get_row_unchecked(ptrs.try_into().unwrap())
+          .get_row_unchecked(&row_ptrs)
           .map(|(val, col_idx)| *val * vector[*col_idx])
           .sum()
       })
@@ -100,14 +108,19 @@ impl<F: PrimeField> SparseMatrix<F> {
   /// returns a custom iterator
   pub fn iter(&self) -> Iter<'_, F> {
     let mut row = 0;
-    while self.indptr[row + 1] == 0 {
+    while row + 1 < self.indptr.len() && self.indptr[row + 1] == 0 {
       row += 1;
     }
+    let nnz = if self.indptr.is_empty() {
+      0
+    } else {
+      self.indptr[self.indptr.len() - 1]
+    };
     Iter {
       matrix: self,
       row,
       i: 0,
-      nnz: *self.indptr.last().unwrap(),
+      nnz,
     }
   }
 }
@@ -220,7 +233,10 @@ mod tests {
 
     let result = sparse_matrix.multiply_vec(&vector);
 
-    assert_eq!(result, vec![Fr::from(25), Fr::from(9), Fr::from(4)]);
+    assert_eq!(
+      result.unwrap(),
+      vec![Fr::from(25), Fr::from(9), Fr::from(4)]
+    );
   }
 
   fn coo_strategy() -> BoxedStrategy<Vec<(usize, usize, FWrap<Fr>)>> {
