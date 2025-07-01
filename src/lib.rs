@@ -439,7 +439,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
             .enumerate()
             .map(|(row_idx, ptrs)| {
               M.get_row_unchecked(ptrs.try_into().unwrap())
-                .map(|(val, col_idx)| T_x[row_idx] * T_y[*col_idx] * val)
+                .map(|(val, col_idx)| {
+                  let prod = T_x[row_idx] * T_y[*col_idx];
+                  if *val == E::Scalar::ONE {
+                    prod
+                  } else if *val == -E::Scalar::ONE {
+                    -prod
+                  } else {
+                    prod * val
+                  }
+                })
                 .sum::<E::Scalar>()
             })
             .sum()
