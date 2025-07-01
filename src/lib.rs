@@ -358,6 +358,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
+    let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
@@ -370,10 +371,13 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     );
 
     // outer sum-check
+    let (_tau_span, tau_t) = start_span!("compute_tau_verify");
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
 
+    let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
       self
         .sc_proof_outer
@@ -386,6 +390,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     if claim_outer_final != claim_outer_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
+    info!(elapsed_ms = %outer_sumcheck_t.elapsed().as_millis(), "outer_sumcheck_verify");
 
     transcript.absorb(
       b"claims_outer",
@@ -398,6 +403,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     );
 
     // inner sum-check
+    let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint =
       self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
@@ -421,6 +427,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     };
 
     // compute evaluations of R1CS matrices
+    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let multi_evaluate = |M_vec: &[&SparseMatrix<E::Scalar>],
                           r_x: &[E::Scalar],
                           r_y: &[E::Scalar]|
@@ -455,8 +462,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     if claim_inner_final != claim_inner_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
+    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
+    info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
 
     // verify
+    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
@@ -465,7 +475,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       &self.eval_W,
       &self.eval_arg,
     )?;
+    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
     Ok(self.U.X.clone())
   }
 }

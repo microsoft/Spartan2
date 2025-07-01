@@ -256,6 +256,7 @@ where
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
+    let (_verify_span, verify_t) = start_span!("ipa_verify");
     let (ck, _) = ck.split_at(U.b_vec.len());
 
     transcript.dom_sep(Self::protocol_name());
@@ -306,6 +307,7 @@ where
     };
 
     // compute a vector of public coins using self.L_vec and self.R_vec
+    let (_challenges_span, challenges_t) = start_span!("ipa_compute_challenges");
     let r = (0..self.L_vec.len())
       .map(|i| {
         transcript.absorb(b"L", &self.L_vec[i]);
@@ -324,8 +326,10 @@ where
       .into_par_iter()
       .map(|i| r_inverse[i] * r_inverse[i])
       .collect();
+    info!(elapsed_ms = %challenges_t.elapsed().as_millis(), "ipa_compute_challenges");
 
     // compute the vector with the tensor structure
+    let (_tensor_span, tensor_t) = start_span!("ipa_compute_tensor");
     let s = {
       let mut s = vec![E::Scalar::ZERO; n];
       s[0] = {
@@ -345,7 +349,9 @@ where
     let ck_hat = E::GE::vartime_multiscalar_mul(&s, ck, true)?;
 
     let b_hat = inner_product(&U.b_vec, &s);
+    info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "ipa_compute_tensor");
 
+    let (_final_check_span, final_check_t) = start_span!("ipa_final_check");
     let ck_folded = [self.L_vec.clone(), self.R_vec.clone(), vec![P]].concat();
     let P_hat = E::GE::vartime_multiscalar_mul(
       &r_square
@@ -359,7 +365,9 @@ where
     )?;
 
     let rhs = ck_hat * self.a_hat + <E::GE as DlogGroup>::group(&ck_c) * (self.a_hat * b_hat);
+    info!(elapsed_ms = %final_check_t.elapsed().as_millis(), "ipa_final_check");
 
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "ipa_verify");
     if P_hat == rhs {
       Ok(())
     } else {

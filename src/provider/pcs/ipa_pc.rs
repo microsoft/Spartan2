@@ -194,6 +194,7 @@ where
     eval: &E::Scalar,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError> {
+    let (_verify_span, verify_t) = start_span!("ipa_pcs_verify");
     let u = InnerProductInstance::new(&comm.comm, &EqPolynomial::new(point.to_vec()).evals(), eval);
 
     arg.verify(
@@ -205,6 +206,7 @@ where
       transcript,
     )?;
 
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "ipa_pcs_verify");
     Ok(())
   }
 }
