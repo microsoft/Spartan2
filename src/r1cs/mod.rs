@@ -3,6 +3,7 @@ use crate::{
   Blind, Commitment, CommitmentKey, PCS, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
+  start_span,
   traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptReprTrait},
 };
 use core::cmp::max;
@@ -10,6 +11,8 @@ use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
@@ -217,12 +220,16 @@ impl<E: Engine> R1CSWitness<E> {
     let r_W = PCS::<E>::blind(ck);
 
     // pad with zeros
+    let (_pad_span, pad_t) = start_span!("pad_witness");
     if W.len() < S.num_vars {
       W.resize(S.num_vars, E::Scalar::ZERO);
     }
+    info!(elapsed_ms = %pad_t.elapsed().as_millis(), "pad_witness");
 
+    let (_commit_span, commit_t) = start_span!("commit_witness");
     let comm_W = if is_small {
       // extract small values from the witness
+      let (_extract_small_span, extract_small_t) = start_span!("extract_small_witness");
       let W_small = W
         .par_iter()
         .map(|e| {
@@ -230,10 +237,12 @@ impl<E: Engine> R1CSWitness<E> {
           e.to_repr().as_ref()[0] as u64
         })
         .collect::<Vec<_>>();
+      info!(elapsed_ms = %extract_small_t.elapsed().as_millis(), "extract_small_witness");
       PCS::<E>::commit_small(ck, &W_small, &r_W)?
     } else {
       PCS::<E>::commit(ck, W, &r_W)?
     };
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness");
 
     let W = R1CSWitness { W: W.to_vec(), r_W };
 

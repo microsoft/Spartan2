@@ -166,15 +166,7 @@ where
       });
     }
 
-    // ensure that the input vector is padded to the next power of 2
-    let padded_n = n.next_power_of_two();
-    let mut v = v.to_vec();
-    // pad with zeros
-    if v.len() < padded_n {
-      v.extend(vec![E::Scalar::ZERO; padded_n - v.len()]);
-    }
-
-    let (num_rows, num_cols) = compute_factored_lens(padded_n);
+    let (num_rows, num_cols) = compute_factored_lens(n);
 
     let comm: Result<Vec<_>, _> = (0..num_rows)
       .collect::<Vec<usize>>()
@@ -206,18 +198,9 @@ where
       });
     }
 
-    // ensure that the input vector is padded to the next power of 2
-    let padded_n = n.next_power_of_two();
-    let mut v = v.to_vec();
-    // pad with zeros
-    if v.len() < padded_n {
-      v.extend(vec![T::zero(); padded_n - v.len()]);
-    }
-
-    let (num_rows, num_cols) = compute_factored_lens(padded_n);
+    let (num_rows, num_cols) = compute_factored_lens(n);
 
     let comm: Result<Vec<_>, _> = (0..num_rows)
-      .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
         let msm_result = E::GE::vartime_multiscalar_mul_small(

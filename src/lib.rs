@@ -242,11 +242,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     );
 
     // outer sum-check preparation
-    let (_tau_span, tau_t) = start_span!("compute_tau");
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau");
 
     let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
