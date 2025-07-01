@@ -41,7 +41,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   /// # Errors
   /// Returns `SpartanError` if the Gaussian elimination fails due to singular matrix
   /// or invalid input dimensions.
-  pub fn from_evals(evals: &[Scalar]) -> Result<Self, crate::errors::SpartanError> {
+  pub fn from_evals(evals: &[Scalar]) -> Result<Self, SpartanError> {
     let n = evals.len();
     let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
 
@@ -155,10 +155,10 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 /// Returns `SpartanError::DivisionByZero` if any diagonal element is zero during the solving process.
 pub fn gaussian_elimination<F: PrimeField>(
   matrix: &mut [Vec<F>],
-) -> Result<Vec<F>, crate::errors::SpartanError> {
+) -> Result<Vec<F>, SpartanError> {
   let size = matrix.len();
   if size != matrix[0].len() - 1 {
-    return Err(crate::errors::SpartanError::InvalidInputLength);
+    return Err(SpartanError::InvalidInputLength);
   }
 
   for i in 0..size - 1 {
@@ -176,7 +176,7 @@ pub fn gaussian_elimination<F: PrimeField>(
   #[allow(clippy::needless_range_loop)]
   for i in 0..size {
     if matrix[i][i] == F::ZERO {
-      return Err(crate::errors::SpartanError::DivisionByZero);
+      return Err(SpartanError::DivisionByZero);
     }
   }
 
