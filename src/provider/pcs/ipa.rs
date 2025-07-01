@@ -155,6 +155,7 @@ where
             &[ck_R, &[ck_c]].concat(),
             true,
           )
+          .expect("MSM should not fail in IPA prove")
           .affine()
         },
         || {
@@ -167,6 +168,7 @@ where
             &[ck_L, &[ck_c]].concat(),
             true,
           )
+          .expect("MSM should not fail in IPA prove")
           .affine()
         },
       );
@@ -340,24 +342,21 @@ where
       s
     };
 
-    let ck_hat = E::GE::vartime_multiscalar_mul(&s, ck, true);
+    let ck_hat = E::GE::vartime_multiscalar_mul(&s, ck, true)?;
 
     let b_hat = inner_product(&U.b_vec, &s);
 
-    let P_hat = {
-      let ck_folded = [self.L_vec.clone(), self.R_vec.clone(), vec![P]].concat();
-
-      E::GE::vartime_multiscalar_mul(
-        &r_square
-          .iter()
-          .chain(r_inverse_square.iter())
-          .chain(iter::once(&E::Scalar::ONE))
-          .copied()
-          .collect::<Vec<E::Scalar>>(),
-        &ck_folded,
-        true,
-      )
-    };
+    let ck_folded = [self.L_vec.clone(), self.R_vec.clone(), vec![P]].concat();
+    let P_hat = E::GE::vartime_multiscalar_mul(
+      &r_square
+        .iter()
+        .chain(r_inverse_square.iter())
+        .chain(iter::once(&E::Scalar::ONE))
+        .copied()
+        .collect::<Vec<E::Scalar>>(),
+      &ck_folded,
+      true,
+    )?;
 
     let rhs = ck_hat * self.a_hat + <E::GE as DlogGroup>::group(&ck_c) * (self.a_hat * b_hat);
 
@@ -432,7 +431,7 @@ where
     let r_beta = E::Scalar::random(&mut OsRng);
 
     let delta =
-      E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true) + E::GE::group(h) * r_delta;
+      E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)? + E::GE::group(h) * r_delta;
     let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h) * r_beta;
 
     transcript.absorb(b"delta", &delta);
@@ -481,7 +480,7 @@ where
     }
 
     if U.comm_a_vec * r + self.delta
-      != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)
+      != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)?
         + E::GE::group(h) * self.z_delta
     {
       return Err(SpartanError::InvalidPCS);

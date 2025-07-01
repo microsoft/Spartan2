@@ -176,19 +176,20 @@ where
 
     let (num_rows, num_cols) = compute_factored_lens(padded_n);
 
-    let comm = (0..num_rows)
+    let comm: Result<Vec<_>, _> = (0..num_rows)
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        E::GE::vartime_multiscalar_mul(
+        let msm_result = E::GE::vartime_multiscalar_mul(
           &v[num_cols * i..num_cols * (i + 1)],
           &ck.ck[..num_cols],
           false,
-        ) + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i]
+        )?;
+        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect();
 
-    Ok(HyraxCommitment { comm })
+    Ok(HyraxCommitment { comm: comm? })
   }
 
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
@@ -215,19 +216,20 @@ where
 
     let (num_rows, num_cols) = compute_factored_lens(padded_n);
 
-    let comm = (0..num_rows)
+    let comm: Result<Vec<_>, _> = (0..num_rows)
       .collect::<Vec<usize>>()
       .into_par_iter()
       .map(|i| {
-        E::GE::vartime_multiscalar_mul_small(
+        let msm_result = E::GE::vartime_multiscalar_mul_small(
           &v[num_cols * i..num_cols * (i + 1)],
           &ck.ck[..num_cols],
           false,
-        ) + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i]
+        )?;
+        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect();
 
-    Ok(HyraxCommitment { comm })
+    Ok(HyraxCommitment { comm: comm? })
   }
 
   fn prove(
@@ -266,7 +268,7 @@ where
     let eval = inner_product(&LZ, &R);
 
     let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true);
+    let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?;
     let r_LZ = (0..LZ.len())
       .into_par_iter()
       .map(|i| LZ[i] * blind.blind[i])
@@ -313,7 +315,7 @@ where
     // compute a weighted sum of commitments and L
     // convert the commitments to affine form so we can do a multi-scalar multiplication
     let ck: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true);
+    let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true)?;
 
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
 

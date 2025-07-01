@@ -1,7 +1,10 @@
 //! Main components:
 //! - `UniPoly`: an univariate dense polynomial in coefficient form (big endian),
 //! - `CompressedUniPoly`: a univariate dense polynomial, compressed (omitted linear term), in coefficient form (little endian),
-use crate::traits::{Group, transcript::TranscriptReprTrait};
+use crate::{
+  errors::SpartanError,
+  traits::{Group, transcript::TranscriptReprTrait},
+};
 use ff::PrimeField;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -189,7 +192,7 @@ fn echelon<F: PrimeField>(
   matrix: &mut [Vec<F>],
   i: usize,
   j: usize,
-) -> Result<(), crate::errors::SpartanError> {
+) -> Result<(), SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
     let factor = div_f(matrix[j + 1][i], matrix[i][i])?;
@@ -204,7 +207,7 @@ fn echelon<F: PrimeField>(
 fn eliminate<F: PrimeField>(
   matrix: &mut [Vec<F>],
   i: usize,
-) -> Result<(), crate::errors::SpartanError> {
+) -> Result<(), SpartanError> {
   let size = matrix.len();
   if matrix[i][i] != F::ZERO {
     for j in (1..i + 1).rev() {
@@ -229,12 +232,12 @@ fn eliminate<F: PrimeField>(
 ///
 /// # Errors
 /// Returns `SpartanError::DivisionByZero` if `b` is zero (not invertible).
-pub fn div_f<F: PrimeField>(a: F, b: F) -> Result<F, crate::errors::SpartanError> {
+pub fn div_f<F: PrimeField>(a: F, b: F) -> Result<F, SpartanError> {
   let inverse_b = b.invert();
 
   match inverse_b.into_option() {
     Some(inv) => Ok(a * inv),
-    None => Err(crate::errors::SpartanError::DivisionByZero),
+    None => Err(SpartanError::DivisionByZero),
   }
 }
 

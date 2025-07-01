@@ -142,7 +142,7 @@ where
     }
 
     Ok(Commitment {
-      comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)
+      comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)?
         + <E::GE as DlogGroup>::group(&ck.h) * r,
     })
   }
@@ -157,7 +157,7 @@ where
     }
 
     Ok(Commitment {
-      comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()], true)
+      comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()], true)?
         + <E::GE as DlogGroup>::group(&ck.h) * r,
     })
   }
