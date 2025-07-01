@@ -204,6 +204,7 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   Ok(result)
 }
 
+#[inline(always)]
 fn msm_binary<C: CurveAffine, T: Integer + Sync>(
   scalars: &[T],
   bases: &[C],
@@ -240,6 +241,7 @@ fn msm_binary<C: CurveAffine, T: Integer + Sync>(
 }
 
 /// MSM optimized for up to 10-bit scalars
+#[inline(always)]
 fn msm_10<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   scalars: &[T],
   bases: &[C],
@@ -289,6 +291,7 @@ fn msm_10<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   }
 }
 
+#[inline(always)]
 fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   scalars: &[T],
   bases: &[C],
@@ -406,6 +409,7 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
   }
 }
 
+#[inline(always)]
 fn compute_ln(a: usize) -> usize {
   // log2(a) * ln(2)
   if a == 0 {
