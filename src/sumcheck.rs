@@ -483,7 +483,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// # Returns
   /// A tuple containing the sum-check proof, the sequence of verifier challenges,
   /// and the final evaluations of the polynomials.
-  pub fn prove_boolean<F>(
+  pub fn prove_boolean(
     num_rounds: usize,
     poly_eq: &mut MultilinearPolynomial<E::Scalar>,
     poly_b: &mut MultilinearPolynomial<E::Scalar>,
