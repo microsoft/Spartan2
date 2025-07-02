@@ -38,6 +38,9 @@ pub mod provider;
 pub mod sumcheck;
 pub mod traits;
 
+#[cfg(feature = "arkworks")]
+pub mod arkworks;
+
 use bellpepper::{
   r1cs::{SpartanShape, SpartanWitness},
   shape_cs::ShapeCS,
@@ -77,7 +80,7 @@ type PCS<E> = <E as Engine>::PCS;
 type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
 /// A type that represents the prover's key
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
@@ -86,7 +89,7 @@ pub struct SpartanProverKey<E: Engine> {
 }
 
 /// A type that represents the verifier's key
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
@@ -156,7 +159,7 @@ fn compute_eval_table_sparse<E: Engine>(
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
   U: R1CSInstance<E>,
