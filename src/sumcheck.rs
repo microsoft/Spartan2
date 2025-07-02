@@ -30,7 +30,7 @@ const PAR_THRESHOLD: usize = 4 << 10; // 4096
 ///
 /// When `len` is small or we’re already on a Rayon thread it executes
 /// serially; otherwise it uses `into_par_iter`.
-pub fn par_for<R, Map, Red, Id>(len: usize, map: Map, reduce: Red, identity: Id) -> R
+fn par_for<R, Map, Red, Id>(len: usize, map: Map, reduce: Red, identity: Id) -> R
 where
   R: Send, // result must cross Rayon threads
   Map: Fn(usize) -> R + Sync + Send,
@@ -261,7 +261,7 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Returns
   /// A tuple containing the evaluations at points 0, 2, and 3.
-  pub fn compute_eval_points_cubic_with_additive_term<F>(
+  fn compute_eval_points_cubic_with_additive_term<F>(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
     poly_C: &MultilinearPolynomial<E::Scalar>,
@@ -414,6 +414,133 @@ impl<E: Engine> SumcheckProof<E> {
       },
       r,
       vec![poly_A[0], poly_B[0], poly_C[0], poly_D[0]],
+    ))
+  }
+
+  #[inline]
+  /// Computes evaluation points for a cubic polynomial that checks booleanity.
+  ///
+  /// This function computes three evaluation points (at 0, 2, and 3) for a univariate
+  /// polynomial that represents the sum over a hypercube edge in the sum-check protocol
+  /// for a cubic combination
+  ///
+  /// # Arguments
+  /// * `poly_eq` - First multilinear polynomial
+  /// * `poly_b` - Second multilinear polynomial  
+  ///
+  /// # Returns
+  /// A tuple containing the evaluations at points 0, 2, and 3.
+  fn compute_eval_points_boolean<F>(
+    poly_eq: &MultilinearPolynomial<E::Scalar>,
+    poly_b: &MultilinearPolynomial<E::Scalar>,
+    comb_func: &F,
+  ) -> (E::Scalar, E::Scalar, E::Scalar)
+  where
+    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+  {
+    let len = poly_eq.Z.len() / 2;
+    par_for(
+      len,
+      |i| {
+        let a_low = poly_eq[i];
+        let a_high = poly_eq[i + len];
+        let b_low = poly_b[i];
+        let b_high = poly_b[i + len];
+
+        // eval 0: bound_func is A(low)
+        let eval_point_0 = comb_func(&a_low, &b_low);
+
+        // eval 2: bound_func is -A(low) + 2*A(high)
+        let poly_eq_bound_point = a_high + a_high - a_low;
+        let poly_b_bound_point = b_high + b_high - b_low;
+        let eval_point_2 = comb_func(&poly_eq_bound_point, &poly_b_bound_point);
+
+        // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
+        let poly_eq_bound_point = poly_eq_bound_point + a_high - a_low;
+        let poly_b_bound_point = poly_b_bound_point + b_high - b_low;
+        let eval_point_3 = comb_func(&poly_eq_bound_point, &poly_b_bound_point);
+        (eval_point_0, eval_point_2, eval_point_3)
+      },
+      |mut acc, val| {
+        acc.0 += val.0;
+        acc.1 += val.1;
+        acc.2 += val.2;
+        acc
+      },
+      || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+    )
+  }
+
+  /// Generates a sum-check proof for a booleanity check of a multilinear polynomial.
+  ///
+  /// # Arguments
+  /// * `num_rounds` - The number of variables/rounds in the sum-check
+  /// * `poly_eq` - First multilinear polynomial encoding evaluations of eq (mutable, will be bound during protocol)
+  /// * `poly_b` - Second multilinear polynomial (mutable, will be bound during protocol)
+  /// * `comb_func` - Function that combines evaluations of the four polynomials
+  /// * `transcript` - The transcript for generating randomness
+  ///
+  /// # Returns
+  /// A tuple containing the sum-check proof, the sequence of verifier challenges,
+  /// and the final evaluations of the polynomials.
+  pub fn prove_boolean<F>(
+    num_rounds: usize,
+    poly_eq: &mut MultilinearPolynomial<E::Scalar>,
+    poly_b: &mut MultilinearPolynomial<E::Scalar>,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let comb_func = |eq: &E::Scalar, b: &E::Scalar| -> E::Scalar { *eq * (*b * *b - *b) };
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
+    let mut claim_per_round = E::Scalar::ZERO; // initial claim is zero
+
+    for round in 0..num_rounds {
+      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+      let poly = {
+        // Make an iterator returning the contributions to the evaluations
+        let (_eval_span, eval_t) = start_span!("compute_eval_points");
+        let (eval_point_0, eval_point_2, eval_point_3) =
+          Self::compute_eval_points_boolean(poly_eq, poly_b, &comb_func);
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
+        let evals = vec![
+          eval_point_0,
+          claim_per_round - eval_point_0,
+          eval_point_2,
+          eval_point_3,
+        ];
+        UniPoly::from_evals(&evals)?
+      };
+
+      // append the prover's message to the transcript
+      transcript.absorb(b"p", &poly);
+
+      //derive the verifier's challenge for the next round
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // Set up next round
+      claim_per_round = poly.evaluate(&r_i);
+
+      // bound all tables to the verifier's challenge
+      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+      rayon::join(
+        || poly_eq.bind_poly_var_top(&r_i),
+        || poly_b.bind_poly_var_top(&r_i),
+      );
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+    }
+
+    Ok((
+      SumcheckProof {
+        compressed_polys: polys,
+      },
+      r,
+      vec![poly_eq[0], poly_b[0]],
     ))
   }
 }
