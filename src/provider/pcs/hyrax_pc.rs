@@ -112,11 +112,11 @@ where
     assert!(n >= 1024);
 
     // we will have at least 1024 columns, and remain so up to 2^20 sized polynomials
-    let num_cols = if padded_n <= 2 << 20 {
+    let num_cols = if padded_n <= 1 << 20 {
       1024
-    } else if padded_n <= 2 << 24 {
+    } else if padded_n <= 1 << 24 {
       2048
-    } else if padded_n <= 2 << 28 {
+    } else if padded_n <= 1 << 28 {
       4096
     } else {
       8192
