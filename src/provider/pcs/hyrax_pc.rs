@@ -183,7 +183,7 @@ where
         } else {
           &v[num_cols * i..num_cols * (i + 1)]
         };
-        let msm_result = E::GE::vartime_multiscalar_mul(&scalars, &ck.ck[..scalars.len()], false)?;
+        let msm_result = E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?;
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;
@@ -218,7 +218,7 @@ where
           &v[num_cols * i..num_cols * (i + 1)]
         };
         let msm_result =
-          E::GE::vartime_multiscalar_mul_small(&scalars, &ck.ck[..scalars.len()], false)?;
+          E::GE::vartime_multiscalar_mul_small(scalars, &ck.ck[..scalars.len()], false)?;
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;
