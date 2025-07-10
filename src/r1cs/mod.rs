@@ -77,7 +77,8 @@ impl<E: Engine> R1CSShape<E> {
     is_valid(num_cons, num_vars, num_io, &B)?;
     is_valid(num_cons, num_vars, num_io, &C)?;
 
-    let vars_valid = num_vars.next_power_of_two() == num_vars;
+    // we need at least 1024 variables
+    let vars_valid = num_vars.next_power_of_two() == num_vars && num_vars >= 1024;
     let io_lt_vars = num_io < num_vars;
 
     let num_cons_padded = num_cons.next_power_of_two();

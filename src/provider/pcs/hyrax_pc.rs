@@ -20,7 +20,7 @@ use crate::{
 };
 use core::marker::PhantomData;
 use ff::Field;
-use num_integer::Integer;
+use num_integer::{Integer, div_ceil};
 use num_traits::ToPrimitive;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -96,15 +96,6 @@ where
   ipa: InnerProductArgumentLinear<E>,
 }
 
-fn compute_factored_lens(n: usize) -> (usize, usize) {
-  let ell = n.log_2();
-  // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
-  let ell1 = ell.div_ceil(2); // This ensures ell1 >= ell2
-  let ell2 = ell / 2;
-
-  (1 << ell1, 1 << ell2)
-}
-
 impl<E: Engine> PCSEngineTrait<E> for HyraxPCS<E>
 where
   E::GE: DlogGroupExt,
@@ -118,7 +109,21 @@ where
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let padded_n = n.next_power_of_two();
-    let (num_rows, num_cols) = compute_factored_lens(padded_n);
+     assert!(n >= 1024);
+
+    // we will have at least 1024 columns, and remain so up to 2^20 sized polynomials
+    let num_cols = if padded_n <= 2 << 20 {
+      1024
+    } else if padded_n <= 2 << 24 {
+      2048
+    } else if padded_n <= 2 << 28 {
+      4096
+    } else {
+      8192
+    };
+
+    // we will have at least one row
+    let num_rows = div_ceil(padded_n, num_cols);
 
     let gens = E::GE::from_label(label, num_cols + 2);
     let ck = gens[..num_cols].to_vec();
@@ -166,22 +171,24 @@ where
       });
     }
 
-    let (num_rows, num_cols) = compute_factored_lens(n);
+    // compute the expected number of columns
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
 
-    let comm: Result<Vec<_>, _> = (0..num_rows)
-      .collect::<Vec<usize>>()
+    let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
-        let msm_result = E::GE::vartime_multiscalar_mul(
-          &v[num_cols * i..num_cols * (i + 1)],
-          &ck.ck[..num_cols],
-          false,
-        )?;
+        let scalars = if v[num_cols * i..].len() < num_cols {
+          &v[num_cols * i..]
+        } else {
+          &v[num_cols * i..num_cols * (i + 1)]
+        };
+        let msm_result = E::GE::vartime_multiscalar_mul(&scalars, &ck.ck[..scalars.len()], false)?;
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
-      .collect();
+      .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(HyraxCommitment { comm: comm? })
+    Ok(HyraxCommitment { comm })
   }
 
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
@@ -198,21 +205,25 @@ where
       });
     }
 
-    let (num_rows, num_cols) = compute_factored_lens(n);
+    // compute the expected number of columns
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, ck.num_cols);
 
-    let comm: Result<Vec<_>, _> = (0..num_rows)
+    let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
-        let msm_result = E::GE::vartime_multiscalar_mul_small(
-          &v[num_cols * i..num_cols * (i + 1)],
-          &ck.ck[..num_cols],
-          false,
-        )?;
+        let scalars = if v[num_cols * i..].len() < num_cols {
+          &v[num_cols * i..]
+        } else {
+          &v[num_cols * i..num_cols * (i + 1)]
+        };
+        let msm_result =
+          E::GE::vartime_multiscalar_mul_small(&scalars, &ck.ck[..scalars.len()], false)?;
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
-      .collect();
+      .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(HyraxCommitment { comm: comm? })
+    Ok(HyraxCommitment { comm })
   }
 
   fn prove(
@@ -223,42 +234,60 @@ where
     blind: &Self::Blind,
     point: &[E::Scalar],
   ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
+    let n = poly.len();
     let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
-    if poly.len() != (2usize).pow(point.len() as u32) {
+    if n != (2usize).pow(point.len() as u32) {
       return Err(SpartanError::InvalidInputLength);
     }
 
     transcript.absorb(b"poly_com", comm);
 
-    let (num_rows, num_cols) = compute_factored_lens(poly.len());
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
 
     let (num_vars_rows, _) = (num_rows.log_2(), num_cols.log_2());
 
-    let (L, R) = rayon::join(
-      || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
-      || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
-    );
+    let (comm_LZ, R, LZ, r_LZ) = if num_vars_rows == 0 {
+      let comm_LZ = comm.comm[0];
+      let R = EqPolynomial::new(point.to_vec()).evals();
+      let LZ = poly.to_vec();
+      let r_LZ = blind.blind[0];
 
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
+      (comm_LZ, R, LZ, r_LZ)
+    } else {
+      let (L, R) = rayon::join(
+        || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
+        || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
+      );
 
-    let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
-    // compute the vector underneath L*Z
-    // compute vector-matrix product between L and Z viewed as a matrix
-    let LZ = MultilinearPolynomial::bind_with(poly, &L, R.len());
-    info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
+      info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
+      let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
+      // compute the vector underneath L*Z
+      // compute vector-matrix product between L and Z viewed as a matrix
+      let LZ = MultilinearPolynomial::bind_with(poly, &L, R.len());
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
+
+      let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
+      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?;
+      let r_LZ = (0..LZ.len())
+        .into_par_iter()
+        .map(|i| 
+          if i >= blind.blind.len() {
+            E::Scalar::ZERO
+          } else {
+            LZ[i] * blind.blind[i]
+          })
+        .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
+      info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
+
+      (comm_LZ, R, LZ, r_LZ)
+    };
+
+    let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     // compute the evaluation of the multilinear polynomial at the point
     let eval = inner_product(&LZ, &R);
 
-    let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?;
-    let r_LZ = (0..LZ.len())
-      .into_par_iter()
-      .map(|i| LZ[i] * blind.blind[i])
-      .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
-
-    let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     // a dot product argument (IPA) of size R_size
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ);
@@ -290,18 +319,26 @@ where
     let (_lr_span, lr_t) = start_span!("hyrax_compute_lr");
     // n = 2^point.len()
     let n = (2_usize).pow(point.len() as u32);
-    let (num_rows, num_cols) = compute_factored_lens(n);
+    let num_cols = vk.num_cols;
+    let num_rows = div_ceil(n, num_cols);
 
     let (num_vars_rows, _num_vars_cols) = (num_rows.log_2(), num_cols.log_2());
 
-    let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
-    let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
+    let (comm_LZ, R) = if num_vars_rows == 0 {
+      let R = EqPolynomial::new(point.to_vec()).evals();
+      (comm.comm[0], R)
+    } else {
+      let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
+      let R = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
 
-    // compute a weighted sum of commitments and L
-    // convert the commitments to affine form so we can do a multi-scalar multiplication
-    let ck: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
-    let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true)?;
-    info!(elapsed_ms = %lr_t.elapsed().as_millis(), "hyrax_compute_lr");
+      // compute a weighted sum of commitments and L
+      // convert the commitments to affine form so we can do a multi-scalar multiplication
+      let ck: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
+      let comm_LZ = E::GE::vartime_multiscalar_mul(&L, &ck[..L.len()], true)?;
+      info!(elapsed_ms = %lr_t.elapsed().as_millis(), "hyrax_compute_lr");
+
+      (comm_LZ, R)
+    };
 
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
 
