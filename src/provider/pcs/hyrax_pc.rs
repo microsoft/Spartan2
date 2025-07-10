@@ -109,7 +109,7 @@ where
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let padded_n = n.next_power_of_two();
-     assert!(n >= 1024);
+    assert!(n >= 1024);
 
     // we will have at least 1024 columns, and remain so up to 2^20 sized polynomials
     let num_cols = if padded_n <= 2 << 20 {
@@ -272,12 +272,13 @@ where
       let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?;
       let r_LZ = (0..LZ.len())
         .into_par_iter()
-        .map(|i| 
+        .map(|i| {
           if i >= blind.blind.len() {
             E::Scalar::ZERO
           } else {
             LZ[i] * blind.blind[i]
-          })
+          }
+        })
         .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 

@@ -67,13 +67,18 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     // however, some rows may be shorter than R_len, so we need to handle that
     (0..R_len)
       .into_par_iter()
-      .map(|i| (0..L.len()).map(
-        |j| if (j * R_len + i) >= poly.len() {
-          Scalar::ZERO
-        } else {
-          L[j] * poly[j * R_len + i]
-        }
-      ).sum()).collect()
+      .map(|i| {
+        (0..L.len())
+          .map(|j| {
+            if (j * R_len + i) >= poly.len() {
+              Scalar::ZERO
+            } else {
+              L[j] * poly[j * R_len + i]
+            }
+          })
+          .sum()
+      })
+      .collect()
   }
 
   /// Evaluates the polynomial at the given point.
