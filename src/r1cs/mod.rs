@@ -77,8 +77,10 @@ impl<E: Engine> R1CSShape<E> {
     is_valid(num_cons, num_vars, num_io, &B)?;
     is_valid(num_cons, num_vars, num_io, &C)?;
 
+    let min_num_vars = 1024;
+
     // we need at least 1024 variables
-    let vars_valid = num_vars.next_power_of_two() == num_vars && num_vars >= 1024;
+    let vars_valid = num_vars.next_power_of_two() == num_vars && num_vars >= min_num_vars;
     let io_lt_vars = num_io < num_vars;
 
     let num_cons_padded = num_cons.next_power_of_two();
@@ -94,7 +96,7 @@ impl<E: Engine> R1CSShape<E> {
         digest: OnceCell::new(),
       })
     } else {
-      let n = max(num_vars, num_io).next_power_of_two();
+      let n = max(min_num_vars, max(num_vars, num_io)).next_power_of_two();
 
       // otherwise, we need to pad the number of variables and renumber variable accesses
       let num_vars_padded = n;
