@@ -260,7 +260,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     }
 
     // partial commitment to precommitted witness variables
-    let mut comm_W = PCS::<E>::combine_partial(&pk.ck, &[comm_W_shared.clone()])?;
+    let mut comm_W = PCS::<E>::combine_partial(&[comm_W_shared.clone()])?;
     let (_commit_precommitted_span, commit_precommitted_t) =
       start_span!("commit_witness_precommitted");
     let comm_W_precommitted = PCS::<E>::commit_partial(

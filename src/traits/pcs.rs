@@ -66,8 +66,9 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     is_small: bool,
   ) -> Result<Self::PartialCommitment, SpartanError>;
 
+  /// Combines the provided partial commitments into a single commitment
+  /// This method is used to finalize the commitment after multiple partial commitments have been made
   fn combine_partial(
-    ck: &Self::CommitmentKey,
     partial_comms: &[Self::PartialCommitment],
   ) -> Result<Self::Commitment, SpartanError>;
 

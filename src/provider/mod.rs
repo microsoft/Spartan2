@@ -13,7 +13,7 @@ use crate::{
   provider::{
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
-    pcs::{hyrax_pc::HyraxPCS, ipa_pc::IPAPCS},
+    pcs::hyrax_pc::HyraxPCS,
     pt256::{p256, t256},
   },
   traits::Engine,

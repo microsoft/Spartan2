@@ -93,6 +93,7 @@ where
   type CommitmentKey = HyraxCommitmentKey<E>;
   type VerifierKey = HyraxVerifierKey<E>;
   type Commitment = HyraxCommitment<E>;
+  type PartialCommitment = HyraxCommitment<E>;
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
@@ -191,6 +192,51 @@ where
       })
       .collect::<Result<Vec<_>, _>>()?;
 
+    Ok(HyraxCommitment { comm })
+  }
+
+  fn commit_partial(
+    ck: &Self::CommitmentKey,
+    mut comm: Option<&mut Self::Commitment>,
+    v: &[E::Scalar],
+    r: &Self::Blind,
+    is_small: bool,
+  ) -> Result<Self::PartialCommitment, SpartanError> {
+    // check if we have already hold a commitment
+    let blind_idx = if let Some(ref c) = comm {
+      c.comm.len()
+    } else {
+      0
+    };
+
+    let r = HyraxBlind {
+      blind: r.blind[blind_idx..].to_vec(),
+    };
+
+    // commit to the vector using the provided blinds
+    let partial_comm = Self::commit(ck, v, &r, is_small)?;
+
+    // if we don't have a commitment, return the partial commitment
+    if let Some(ref mut c) = comm {
+      // if we have a commitment, append the new commitment to it
+      c.comm.extend(&partial_comm.comm);
+    }
+
+    // return the partial commitment
+    Ok(partial_comm)
+  }
+
+  fn combine_partial(
+    partial_comms: &[Self::PartialCommitment],
+  ) -> Result<Self::Commitment, SpartanError> {
+    if partial_comms.is_empty() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+    // combine comm from each partial commitment
+    let comm = partial_comms
+      .iter()
+      .flat_map(|pc| pc.comm.clone())
+      .collect::<Vec<_>>();
     Ok(HyraxCommitment { comm })
   }
 
