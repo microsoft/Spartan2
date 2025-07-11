@@ -69,6 +69,7 @@ impl Engine for T256HyraxEngine {
   type PCS = HyraxPCS<Self>;
 }
 
+/*
 /// An implementation of the Spartan Engine trait with Pallas curve and IPA PCS
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PallasIPAEngine;
@@ -116,3 +117,4 @@ impl Engine for T256IPAEngine {
   type TE = Keccak256Transcript<Self>;
   type PCS = IPAPCS<Self>;
 }
+*/
