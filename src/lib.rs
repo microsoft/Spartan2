@@ -70,6 +70,7 @@ pub(crate) use start_span;
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
 type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
+type PartialCommitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::PartialCommitment;
 type PCS<E> = <E as Engine>::PCS;
 type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
@@ -159,7 +160,10 @@ fn compute_eval_table_sparse<E: Engine>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
-  U: R1CSInstance<E>,
+  comm_W_shared: PartialCommitment<E>,
+  comm_W_precommitted: PartialCommitment<E>,
+  comm_W_rest: PartialCommitment<E>,
+  X: Vec<E::Scalar>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
@@ -212,12 +216,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     Ok((pk, vk))
   }
 
-  fn gen_witness<C: SpartanCircuit<E>>(
+  /// produces a succinct proof of satisfiability of an R1CS instance
+  fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
     is_small: bool,
-    transcript: &mut E::TE,
-  ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
+  ) -> Result<Self, SpartanError> {
+    let mut transcript = E::TE::new(b"R1CSSNARK");
+    transcript.absorb(b"vk", &pk.vk_digest);
+    // TODO: add public IO of the statement to be proven
+
     let (_synth_span, synth_t) = start_span!("circuit_synthesize");
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
 
@@ -275,7 +283,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
 
     circuit
-      .synthesize(&mut cs, &shared, &precommitted, Some(transcript))
+      .synthesize(&mut cs, &shared, &precommitted, Some(&mut transcript))
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
@@ -291,7 +299,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     // TODO: We need to send partial commitments to the verifier
-    let _comm_W_rest = PCS::<E>::commit_partial(
+    let comm_W_rest = PCS::<E>::commit_partial(
       &pk.ck,
       Some(&mut comm_W),
       &W[pk.S.num_shared..pk.S.num_shared + pk.S.num_rest],
@@ -304,21 +312,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
 
     let W = R1CSWitness::<E>::new_unchecked(W, r_W)?;
-
-    Ok((U, W))
-  }
-
-  /// produces a succinct proof of satisfiability of an R1CS instance
-  fn prove(
-    pk: &Self::ProverKey,
-    U: &R1CSInstance<E>,
-    W: &R1CSWitness<E>,
-  ) -> Result<Self, SpartanError> {
-    let mut transcript = E::TE::new(b"R1CSSNARK");
-
-    // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
-    transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"U", U);
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
     let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
@@ -433,7 +426,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
-      U: U.clone(),
+      comm_W_shared,
+      comm_W_precommitted,
+      comm_W_rest,
+      X: U.X.clone(),
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -449,7 +445,18 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest()?);
-    transcript.absorb(b"U", &self.U);
+
+    transcript.absorb(b"comm_W_shared", &self.comm_W_shared);
+    transcript.absorb(b"comm_W_precommitted", &self.comm_W_precommitted);
+    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
+
+    let comm_W = PCS::<E>::combine_partial(&[
+      self.comm_W_shared.clone(),
+      self.comm_W_precommitted.clone(),
+      self.comm_W_rest.clone(),
+    ])?;
+
+    let U = R1CSInstance::<E>::new_unchecked(comm_W, self.X.clone())?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 
@@ -507,7 +514,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
-          .chain(self.U.X.iter().cloned())
+          .chain(U.X.iter().cloned())
           .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
@@ -567,7 +574,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
-      &self.U.comm_W,
+      &U.comm_W,
       &r_y[1..],
       &self.eval_W,
       &self.eval_arg,
@@ -575,7 +582,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
-    Ok(self.U.X.clone())
+    Ok(U.X.clone())
   }
 }
 
