@@ -5,9 +5,6 @@ use crate::{
   traits::{Engine, TranscriptReprTrait},
 };
 use core::fmt::Debug;
-use num_integer::Integer;
-use num_traits::ToPrimitive;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// This trait defines the behavior of the commitment
@@ -24,24 +21,20 @@ pub trait CommitmentTrait<E: Engine>:
 {
 }
 
-/// A trait that helps determine the length of a structure.
-/// Note this does not impose any memory representation constraints on the structure.
-pub trait Len {
-  /// Returns the length of the structure.
-  fn length(&self) -> usize;
-}
-
 /// A trait that ties different pieces of the commitment generation together
 pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Holds the type of the commitment key
   /// The key should quantify its length in terms of group generators.
-  type CommitmentKey: Clone + Debug + Len + Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type CommitmentKey: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// A type that holds the verifier key
   type VerifierKey: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Holds the type of the commitment
   type Commitment: CommitmentTrait<E>;
+
+  /// Holds the type of the partial commitment
+  type PartialCommitment: CommitmentTrait<E>;
 
   /// Holds the type of the blind
   type Blind: Clone + Debug + Send + Sync + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>;
@@ -60,44 +53,23 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     ck: &Self::CommitmentKey,
     v: &[E::Scalar],
     r: &Self::Blind,
+    is_small: bool,
   ) -> Result<Self::Commitment, SpartanError>;
 
-  /// Batch commits to the provided vectors using the provided ck
-  fn batch_commit(
+  /// Commits to v using the provided ck and returns a partial commitment
+  /// Also, updates the provided optional commitment to include the new partial commitment
+  fn commit_partial(
     ck: &Self::CommitmentKey,
-    v: &[Vec<E::Scalar>],
-    r: &[Self::Blind],
-  ) -> Result<Vec<Self::Commitment>, SpartanError> {
-    if v.len() != r.len() {
-      return Err(SpartanError::InvalidInputLength);
-    }
-    v.par_iter()
-      .zip(r.par_iter())
-      .map(|(v_i, r_i)| Self::commit(ck, v_i, r_i))
-      .collect()
-  }
-
-  /// Commits to the provided vector of "small" scalars (at most 64 bits) using the provided ck
-  fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
-    ck: &Self::CommitmentKey,
-    v: &[T],
+    comm: Option<&mut Self::Commitment>,
+    v: &[E::Scalar],
     r: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError>;
+    is_small: bool,
+  ) -> Result<Self::PartialCommitment, SpartanError>;
 
-  /// Batch commits to the provided vectors of "small" scalars (at most 64 bits) using the provided ck
-  fn batch_commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
+  fn combine_partial(
     ck: &Self::CommitmentKey,
-    v: &[Vec<T>],
-    r: &[Self::Blind],
-  ) -> Result<Vec<Self::Commitment>, SpartanError> {
-    if v.len() != r.len() {
-      return Err(SpartanError::InvalidInputLength);
-    }
-    v.par_iter()
-      .zip(r.par_iter())
-      .map(|(v_i, r_i)| Self::commit_small(ck, v_i, r_i))
-      .collect()
-  }
+    partial_comms: &[Self::PartialCommitment],
+  ) -> Result<Self::Commitment, SpartanError>;
 
   /// A method to prove the evaluation of a multilinear polynomial
   fn prove(

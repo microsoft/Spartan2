@@ -14,14 +14,13 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::{CommitmentTrait, Len, PCSEngineTrait},
+    pcs::{CommitmentTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
 use core::marker::PhantomData;
-use ff::Field;
-use num_integer::{Integer, div_ceil};
-use num_traits::ToPrimitive;
+use ff::{Field, PrimeField};
+use num_integer::div_ceil;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -55,15 +54,6 @@ where
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
   ck_s: AffineGroupElement<E>,
-}
-
-impl<E: Engine> Len for HyraxCommitmentKey<E>
-where
-  E::GE: DlogGroup,
-{
-  fn length(&self) -> usize {
-    self.num_rows * self.num_cols
-  }
 }
 
 /// Structure that holds commitments
@@ -161,6 +151,7 @@ where
     ck: &Self::CommitmentKey,
     v: &[E::Scalar],
     r: &Self::Blind,
+    is_small: bool,
   ) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
@@ -183,42 +174,19 @@ where
         } else {
           &v[num_cols * i..num_cols * (i + 1)]
         };
-        let msm_result = E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?;
-        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(HyraxCommitment { comm })
-  }
-
-  fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
-    ck: &Self::CommitmentKey,
-    v: &[T],
-    r: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError> {
-    let n = v.len();
-
-    if n > ck.num_rows * ck.num_cols {
-      return Err(SpartanError::InvalidVectorSize {
-        actual: n,
-        max: ck.num_rows * ck.num_cols,
-      });
-    }
-
-    // compute the expected number of columns
-    let num_cols = ck.num_cols;
-    let num_rows = div_ceil(n, ck.num_cols);
-
-    let comm = (0..num_rows)
-      .into_par_iter()
-      .map(|i| {
-        let scalars = if v[num_cols * i..].len() < num_cols {
-          &v[num_cols * i..]
+        let msm_result = if !is_small {
+          E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
         } else {
-          &v[num_cols * i..num_cols * (i + 1)]
+          let scalars_small = scalars
+            .par_iter()
+            .map(|s| s.to_repr().as_ref()[0] as u64)
+            .collect::<Vec<_>>();
+          E::GE::vartime_multiscalar_mul_small(
+            &scalars_small,
+            &ck.ck[..scalars_small.len()],
+            false,
+          )?
         };
-        let msm_result =
-          E::GE::vartime_multiscalar_mul_small(scalars, &ck.ck[..scalars.len()], false)?;
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;

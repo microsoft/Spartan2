@@ -9,15 +9,14 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::{CommitmentTrait, Len, PCSEngineTrait},
+    pcs::{CommitmentTrait, PCSEngineTrait},
     transcript::TranscriptReprTrait,
   },
 };
 use core::{fmt::Debug, marker::PhantomData};
-use ff::Field;
-use num_integer::Integer;
-use num_traits::ToPrimitive;
+use ff::{Field, PrimeField};
 use rand_core::OsRng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
@@ -53,15 +52,6 @@ where
 
   /// generator for committing to evaluation
   ck_s: <E::GE as DlogGroup>::AffineGroupElement,
-}
-
-impl<E: Engine> Len for CommitmentKey<E>
-where
-  E::GE: DlogGroup,
-{
-  fn length(&self) -> usize {
-    self.ck.len()
-  }
 }
 
 /// A type that holds a commitment
@@ -136,30 +126,25 @@ where
     ck: &Self::CommitmentKey,
     v: &[E::Scalar],
     r: &Self::Blind,
+    is_small: bool,
   ) -> Result<Self::Commitment, SpartanError> {
     if ck.ck.len() < v.len() {
       return Err(SpartanError::InvalidCommitmentKeyLength);
     }
 
-    Ok(Commitment {
-      comm: E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)?
-        + <E::GE as DlogGroup>::group(&ck.h) * r,
-    })
-  }
+    let comm = if !is_small {
+      E::GE::vartime_multiscalar_mul(v, &ck.ck[..v.len()], true)?
+        + <E::GE as DlogGroup>::group(&ck.h) * r
+    } else {
+      let scalars_small = v
+        .par_iter()
+        .map(|s| s.to_repr().as_ref()[0] as u64)
+        .collect::<Vec<_>>();
+      E::GE::vartime_multiscalar_mul_small(&scalars_small, &ck.ck[..scalars_small.len()], false)?
+        + <E::GE as DlogGroup>::group(&ck.h) * r
+    };
 
-  fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
-    ck: &Self::CommitmentKey,
-    v: &[T],
-    r: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError> {
-    if ck.ck.len() < v.len() {
-      return Err(SpartanError::InvalidCommitmentKeyLength);
-    }
-
-    Ok(Commitment {
-      comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()], true)?
-        + <E::GE as DlogGroup>::group(&ck.h) * r,
-    })
+    Ok(Commitment { comm })
   }
 
   fn prove(
