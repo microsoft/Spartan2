@@ -79,6 +79,7 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
+  num_challenges: usize, // number of challenges in the circuit
   S: R1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -88,6 +89,7 @@ pub struct SpartanProverKey<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
+  num_challenges: usize, // number of challenges in the circuit
   S: R1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
@@ -202,12 +204,14 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     let (S, ck, vk_ee) = cs.r1cs_shape(shared.len(), precommitted.len());
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
+      num_challenges: circuit.num_challenges(),
       S: S.clone(),
       vk_ee,
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
+      num_challenges: circuit.num_challenges(),
       S,
       vk_digest: vk.digest()?,
     };
@@ -292,8 +296,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     };
     info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
 
+    let challenges = (0..pk.num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
     circuit
-      .synthesize(&mut cs, &shared, &precommitted, Some(&mut transcript))
+      .synthesize(&mut cs, &shared, &precommitted, Some(&challenges))
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
@@ -492,6 +500,20 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
+    // obtain challenges from the transcript
+    let challenges = (0..vk.num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    // check that the public IO of the circuit matches the expected values
+    if vk.num_challenges > 0 {
+      if self.X.len() < vk.num_challenges || self.X[..vk.num_challenges] != challenges[..] {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "Public IO does not match the expected challenge values".to_string(),
+        });
+      }
+    }
+
     let mut partial_comms = Vec::new();
     if let Some(comm) = &self.comm_W_shared {
       partial_comms.push(comm.clone());
@@ -664,12 +686,17 @@ mod tests {
       Ok(vec![])
     }
 
+    fn num_challenges(&self) -> usize {
+      // In this example, we do not use challenges.
+      0
+    }
+
     fn synthesize<CS: ConstraintSystem<E::Scalar>>(
       &self,
       cs: &mut CS,
       _: &[AllocatedNum<E::Scalar>],
       _: &[AllocatedNum<E::Scalar>],
-      _: Option<&mut E::TE>,
+      _: Option<&[E::Scalar]>,
     ) -> Result<(), SynthesisError> {
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
       let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ONE + E::Scalar::ONE))?;

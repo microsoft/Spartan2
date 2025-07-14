@@ -55,12 +55,17 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
     Ok(vec![])
   }
 
+  fn num_challenges(&self) -> usize {
+    // SHA-256 circuit does not expect any challenges
+    0
+  }
+
   fn synthesize<CS: ConstraintSystem<E::Scalar>>(
     &self,
     cs: &mut CS,
     _: &[AllocatedNum<E::Scalar>],
     _: &[AllocatedNum<E::Scalar>],
-    _: Option<&mut E::TE>,
+    _: Option<&[E::Scalar]>,
   ) -> Result<(), SynthesisError> {
     // 1. Preimage bits
     let bit_values: Vec<_> = self
