@@ -48,11 +48,10 @@ pub struct R1CSInstance<E: Engine> {
 
 /// Round `n` up to the next multiple of 1024.
 /// (If `n` is already a multiple and higher than zero, it is returned unchanged.)
-/// If `n` is zero, it is padded to 1024.
 #[inline]
 pub fn pad_to_1024(n: usize) -> usize {
   // 1024 == 1 << 10, so the mask is 1024-1 == 0b111_1111_1111 (10 bits set).
-  (n.saturating_add(1023) & !1023).max(1024)
+  n.saturating_add(1023) & !1023
 }
 
 impl<E: Engine> R1CSShape<E> {

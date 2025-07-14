@@ -57,14 +57,13 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   ) -> Result<Self::Commitment, SpartanError>;
 
   /// Commits to v using the provided ck and returns a partial commitment
-  /// Also, updates the provided optional commitment to include the new partial commitment
+  /// Also, returns the unused blind if the commitment is partial
   fn commit_partial(
     ck: &Self::CommitmentKey,
-    comm: Option<&mut Self::Commitment>,
     v: &[E::Scalar],
     r: &Self::Blind,
     is_small: bool,
-  ) -> Result<Self::PartialCommitment, SpartanError>;
+  ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError>;
 
   /// Combines the provided partial commitments into a single commitment
   /// This method is used to finalize the commitment after multiple partial commitments have been made

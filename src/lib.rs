@@ -159,8 +159,8 @@ fn compute_eval_table_sparse<E: Engine>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
-  comm_W_shared: PartialCommitment<E>,
-  comm_W_precommitted: PartialCommitment<E>,
+  comm_W_shared: Option<PartialCommitment<E>>,
+  comm_W_precommitted: Option<PartialCommitment<E>>,
   comm_W_rest: PartialCommitment<E>,
   X: Vec<E::Scalar>,
   sc_proof_outer: SumcheckProof<E>,
@@ -224,13 +224,15 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
     // TODO: add public IO of the statement to be proven
-
     let (_synth_span, synth_t) = start_span!("circuit_synthesize");
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    info!(
+      "num_shared: {}, num_precommitted:{}, num_rest: {}, num_vars: {}",
+      pk.S.num_shared, pk.S.num_precommitted, pk.S.num_rest, num_vars
+    );
 
-    info!("num_vars: {}", num_vars);
     // produce blinds for all commitments we will send
     let r_W = PCS::<E>::blind(&pk.ck);
     let mut W = vec![E::Scalar::ZERO; num_vars];
@@ -250,11 +252,15 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
-    let comm_W_shared =
-      PCS::<E>::commit_partial(&pk.ck, None, &W[0..pk.S.num_shared], &r_W, is_small)?;
+    let (comm_W_shared, r_W_remaining) = if pk.S.num_shared > 0 {
+      let (comm_W_shared, r_remaining) =
+        PCS::<E>::commit_partial(&pk.ck, &W[0..pk.S.num_shared], &r_W, is_small)?;
+      transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
+      (Some(comm_W_shared), r_remaining)
+    } else {
+      (None, r_W.clone())
+    };
     info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
-
-    transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
 
     // produce precommitted witness variables
     let precommitted = circuit
@@ -270,19 +276,21 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     }
 
     // partial commitment to precommitted witness variables
-    let mut comm_W = PCS::<E>::combine_partial(&[comm_W_shared.clone()])?;
     let (_commit_precommitted_span, commit_precommitted_t) =
       start_span!("commit_witness_precommitted");
-    let comm_W_precommitted = PCS::<E>::commit_partial(
-      &pk.ck,
-      Some(&mut comm_W),
-      &W[pk.S.num_shared..pk.S.num_shared + pk.S.num_precommitted],
-      &r_W,
-      is_small,
-    )?;
+    let (comm_W_precommitted, r_W_remaining) = if pk.S.num_precommitted > 0 {
+      let (comm_W_precommitted, r_W_remaining) = PCS::<E>::commit_partial(
+        &pk.ck,
+        &W[pk.S.num_shared..pk.S.num_shared + pk.S.num_precommitted],
+        &r_W_remaining,
+        is_small,
+      )?;
+      transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
+      (Some(comm_W_precommitted), r_W_remaining)
+    } else {
+      (None, r_W_remaining)
+    };
     info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
-
-    transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
 
     circuit
       .synthesize(&mut cs, &shared, &precommitted, Some(&mut transcript))
@@ -300,19 +308,27 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
-    let comm_W_rest = PCS::<E>::commit_partial(
+    let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
       &pk.ck,
-      Some(&mut comm_W),
       &W[pk.S.num_shared + pk.S.num_precommitted..],
-      &r_W,
+      &r_W_remaining,
       is_small,
     )?;
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
 
+    let mut partial_comms = vec![];
+    if let Some(ref comm) = comm_W_shared {
+      partial_comms.push(comm.clone());
+    }
+    if let Some(ref comm) = comm_W_precommitted {
+      partial_comms.push(comm.clone());
+    }
+    partial_comms.push(comm_W_rest.clone());
+    let comm_W = E::PCS::combine_partial(&partial_comms)?;
+
     let X = cs.input_assignment[1..].to_vec();
     let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
-
     let W = R1CSWitness::<E>::new_unchecked(W, r_W)?;
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
@@ -454,15 +470,38 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest()?);
 
-    transcript.absorb(b"comm_W_shared", &self.comm_W_shared);
-    transcript.absorb(b"comm_W_precommitted", &self.comm_W_precommitted);
+    if vk.S.num_shared > 0 {
+      if let Some(comm) = &self.comm_W_shared {
+        transcript.absorb(b"comm_W_shared", comm);
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_shared is missing".to_string(),
+        });
+      }
+    }
+
+    if vk.S.num_precommitted > 0 {
+      if let Some(comm) = &self.comm_W_precommitted {
+        transcript.absorb(b"comm_W_precommitted", comm);
+      } else {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "comm_W_precommitted is missing".to_string(),
+        });
+      }
+    }
+
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
-    let comm_W = PCS::<E>::combine_partial(&[
-      self.comm_W_shared.clone(),
-      self.comm_W_precommitted.clone(),
-      self.comm_W_rest.clone(),
-    ])?;
+    let mut partial_comms = Vec::new();
+    if let Some(comm) = &self.comm_W_shared {
+      partial_comms.push(comm.clone());
+    }
+    if let Some(comm) = &self.comm_W_precommitted {
+      partial_comms.push(comm.clone());
+    }
+    partial_comms.push(self.comm_W_rest.clone());
+
+    let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
 
     let U = R1CSInstance::<E>::new_unchecked(comm_W, self.X.clone())?;
 

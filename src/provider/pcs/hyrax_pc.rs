@@ -143,7 +143,7 @@ where
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
     HyraxBlind {
       blind: (0..ck.num_rows)
-        .map(|_| E::Scalar::ZERO)
+        .map(|_| E::Scalar::ZERO) // TODO: produce a random value
         .collect::<Vec<E::Scalar>>(),
     }
   }
@@ -197,33 +197,20 @@ where
 
   fn commit_partial(
     ck: &Self::CommitmentKey,
-    mut comm: Option<&mut Self::Commitment>,
     v: &[E::Scalar],
     r: &Self::Blind,
     is_small: bool,
-  ) -> Result<Self::PartialCommitment, SpartanError> {
-    // check if we have already hold a commitment
-    let blind_idx = if let Some(ref c) = comm {
-      c.comm.len()
-    } else {
-      0
-    };
-
-    let r = HyraxBlind {
-      blind: r.blind[blind_idx..].to_vec(),
-    };
-
+  ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError> {
     // commit to the vector using the provided blinds
-    let partial_comm = Self::commit(ck, v, &r, is_small)?;
+    let partial = Self::commit(ck, v, r, is_small)?;
 
-    // if we don't have a commitment, return the partial commitment
-    if let Some(ref mut c) = comm {
-      // if we have a commitment, append the new commitment to it
-      c.comm.extend(&partial_comm.comm);
-    }
+    // check how many blinds were used
+    let r_remaining = HyraxBlind {
+      blind: r.blind[partial.comm.len()..].to_vec(),
+    };
 
-    // return the partial commitment
-    Ok(partial_comm)
+    // return the partial commitment and the remaining blinds
+    Ok((partial, r_remaining))
   }
 
   fn combine_partial(
