@@ -101,7 +101,7 @@ impl<E: Engine> TranscriptEngineTrait<E> for Keccak256Transcript<E> {
 #[cfg(test)]
 mod tests {
   use crate::{
-    provider::{PallasIPAEngine, VestaIPAEngine, keccak::Keccak256Transcript},
+    provider::{PallasHyraxEngine, VestaHyraxEngine, keccak::Keccak256Transcript},
     traits::{
       Engine, PrimeFieldExt,
       transcript::{TranscriptEngineTrait, TranscriptReprTrait},
@@ -139,7 +139,7 @@ mod tests {
 
   #[test]
   fn test_keccak_transcript() {
-    test_keccak_transcript_with::<PallasIPAEngine>(
+    test_keccak_transcript_with::<PallasHyraxEngine>(
       "b67339da79ce5f6dc72ad23c8c3b4179f49655cadf92d47e79c3e7788f00f125",
       "b7f033d47b3519dd6efe320b995eaad1dc11712cb9b655d2e7006ed5f86bd321",
     );
@@ -236,7 +236,7 @@ mod tests {
 
   #[test]
   fn test_keccak_transcript_incremental_vs_explicit() {
-    test_keccak_transcript_incremental_vs_explicit_with::<PallasIPAEngine>();
-    test_keccak_transcript_incremental_vs_explicit_with::<VestaIPAEngine>();
+    test_keccak_transcript_incremental_vs_explicit_with::<PallasHyraxEngine>();
+    test_keccak_transcript_incremental_vs_explicit_with::<VestaHyraxEngine>();
   }
 }

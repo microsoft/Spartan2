@@ -590,19 +590,40 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 mod tests {
   use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
-  use ff::PrimeField;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
-  impl<F: PrimeField> Circuit<F> for CubicCircuit {
-    fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+  impl<E: Engine> SpartanCircuit<E> for CubicCircuit {
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      // In this example, we do not have shared variables.
+      Ok(vec![])
+    }
+
+    fn precommitted<CS: ConstraintSystem<<E as Engine>::Scalar>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<<E as Engine>::Scalar>>, SynthesisError> {
+      // In this example, we do not have precommitted variables.
+      Ok(vec![])
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      cs: &mut CS,
+      _: &[AllocatedNum<E::Scalar>],
+      _: &[AllocatedNum<E::Scalar>],
+      _: Option<&mut E::TE>,
+    ) -> Result<(), SynthesisError> {
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
-      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(F::ONE + F::ONE))?;
+      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ONE + E::Scalar::ONE))?;
       let x_sq = x.square(cs.namespace(|| "x_sq"))?;
       let x_cu = x_sq.mul(cs.namespace(|| "x_cu"), &x)?;
       let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + F::from(5u64))
+        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + E::Scalar::from(5u64))
       })?;
 
       cs.enforce(
@@ -628,21 +649,13 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    type E = crate::provider::PallasIPAEngine;
+    type E = crate::provider::PallasHyraxEngine;
     type S = R1CSSNARK<E>;
     test_snark_with::<E, S>();
 
-    type E2 = crate::provider::T256IPAEngine;
+    type E2 = crate::provider::T256HyraxEngine;
     type S2 = crate::R1CSSNARK<E2>;
     test_snark_with::<E2, S2>();
-
-    type E3 = crate::provider::PallasHyraxEngine;
-    type S3 = R1CSSNARK<E3>;
-    test_snark_with::<E3, S3>();
-
-    type E4 = crate::provider::T256HyraxEngine;
-    type S4 = crate::R1CSSNARK<E4>;
-    test_snark_with::<E4, S4>();
   }
 
   fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
@@ -651,11 +664,8 @@ mod tests {
     // produce keys
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
-    // generate a witness
-    let (U, W) = S::gen_witness(&pk, circuit.clone(), false).unwrap();
-
-    // produce a SNARK
-    let res = S::prove(&pk, &U, &W);
+    // generate a witness and proof
+    let res = S::prove(&pk, circuit.clone(), false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 
