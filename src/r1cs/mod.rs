@@ -118,13 +118,34 @@ impl<E: Engine> R1CSShape<E> {
       M.indices.par_iter_mut().for_each(|c| {
         if *c >= num_shared && *c < num_shared + num_precommitted {
           // precommitted variables
+          println!(
+            "Padding precommitted variable index: from {} to {}",
+            *c,
+            *c + num_shared_padded - num_shared
+          );
           *c += num_shared_padded - num_shared;
         } else if *c >= num_shared + num_precommitted && *c < num_vars {
           // rest of the variables
+          println!(
+            "Padding rest variable index: from {} to {}",
+            *c,
+            *c + num_shared_padded + num_precommitted_padded - num_shared - num_precommitted
+          );
           *c += num_shared_padded + num_precommitted_padded - num_shared - num_precommitted;
         } else if *c >= num_vars {
           // public IO variables
-          *c += num_vars_padded - num_vars
+          println!(
+            "Padding public IO variable index: from {} to {}",
+            *c,
+            *c + num_shared_padded + num_precommitted_padded + num_rest_padded
+              - num_shared
+              - num_precommitted
+              - num_rest
+          );
+          *c += num_shared_padded + num_precommitted_padded + num_rest_padded
+            - num_shared
+            - num_precommitted
+            - num_rest;
         }
       });
 

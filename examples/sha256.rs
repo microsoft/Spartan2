@@ -10,12 +10,12 @@ use bellpepper_core::{
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
-use ff::{PrimeField, PrimeFieldBits, Field};
+use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
   R1CSSNARK,
   provider::T256HyraxEngine,
-  traits::{Engine, snark::R1CSSNARKTrait, circuit::SpartanCircuit},
+  traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
 use std::{marker::PhantomData, time::Instant};
 use tracing::{info, info_span};
@@ -40,22 +40,28 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 
 impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   fn shared<CS: ConstraintSystem<E::Scalar>>(
-      &self,
-      _: &mut CS,
-    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-      // No shared variables in this circuit
-      Ok(vec![])
+    &self,
+    _: &mut CS,
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    // No shared variables in this circuit
+    Ok(vec![])
   }
 
   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
-      &self,
-      _: &mut CS,
-    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    &self,
+    _: &mut CS,
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     // No precommitted variables in this circuit
     Ok(vec![])
   }
 
-  fn synthesize<CS: ConstraintSystem<E::Scalar>>(&self, cs: &mut CS, _: &[AllocatedNum<E::Scalar>], _: &[AllocatedNum<E::Scalar>], _: Option<&mut E::TE>) -> Result<(), SynthesisError> {
+  fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+    _: &[AllocatedNum<E::Scalar>],
+    _: &[AllocatedNum<E::Scalar>],
+    _: Option<&mut E::TE>,
+  ) -> Result<(), SynthesisError> {
     // 1. Preimage bits
     let bit_values: Vec<_> = self
       .preimage

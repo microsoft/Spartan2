@@ -126,24 +126,23 @@ fn compute_eval_table_sparse<E: Engine>(
     }
   };
 
+  let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
+
   let (A_evals, (B_evals, C_evals)) = rayon::join(
     || {
-      let mut A_evals: Vec<E::Scalar> =
-        vec![E::Scalar::ZERO; 2 * S.num_shared + S.num_precommitted + S.num_rest];
+      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
       inner(&S.A, &mut A_evals);
       A_evals
     },
     || {
       rayon::join(
         || {
-          let mut B_evals: Vec<E::Scalar> =
-            vec![E::Scalar::ZERO; 2 * S.num_shared + S.num_precommitted + S.num_rest];
+          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.B, &mut B_evals);
           B_evals
         },
         || {
-          let mut C_evals: Vec<E::Scalar> =
-            vec![E::Scalar::ZERO; 2 * S.num_shared + S.num_precommitted + S.num_rest];
+          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.C, &mut C_evals);
           C_evals
         },
@@ -229,9 +228,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (_synth_span, synth_t) = start_span!("circuit_synthesize");
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
 
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+
+    info!("num_vars: {}", num_vars);
     // produce blinds for all commitments we will send
     let r_W = PCS::<E>::blind(&pk.ck);
-    let mut W = vec![E::Scalar::ZERO; pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest];
+    let mut W = vec![E::Scalar::ZERO; num_vars];
 
     // produce shared witness variables and commit to them
     let shared = circuit
@@ -289,24 +291,33 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       })?;
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
+    println!(
+      "{}, {}, {}",
+      shared.len(),
+      precommitted.len(),
+      cs.aux_assignment.len()
+    );
+
     for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
       .iter()
       .enumerate()
     {
-      W[pk.S.num_shared + pk.S.num_rest + i] = *s;
+      W[pk.S.num_shared + pk.S.num_precommitted + i] = *s;
     }
 
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
-    // TODO: We need to send partial commitments to the verifier
     let comm_W_rest = PCS::<E>::commit_partial(
       &pk.ck,
       Some(&mut comm_W),
-      &W[pk.S.num_shared..pk.S.num_shared + pk.S.num_rest],
+      &W[pk.S.num_shared + pk.S.num_precommitted..],
       &r_W,
       is_small,
     )?;
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
+    transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
+
+    println!("W.len(): {}", W.len());
 
     let X = cs.input_assignment[1..].to_vec();
     let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
@@ -327,9 +338,19 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
 
+    for t in tau.evals().iter() {
+      println!("tau eval: {:?}", t);
+    }
+
     let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
     info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
+
+    for (i, z_i) in z.iter().enumerate() {
+      if z_i != &E::Scalar::ZERO {
+        println!("z[{}]: {:?}", i, z_i);
+      }
+    }
 
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
@@ -339,6 +360,13 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       vars = %num_vars,
       "matrix_vector_multiply"
     );
+
+    // debug: check if Az \circ Bz = Cz
+    for i in 0..Az.len() {
+      if Az[i] * Bz[i] != Cz[i] {
+        panic!("Invalid witness: Az[i] * Bz[i] != Cz[i] at index {}", i);
+      }
+    }
 
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
@@ -407,6 +435,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // inner sum-check
     let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
 
+    info!("Proving inner sum-check with {} rounds", num_rounds_y);
+    info!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
     };
@@ -465,12 +499,21 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
+    info!(
+      "Verifying R1CS SNARK with {} rounds for outer sum-check and {} rounds for inner sum-check",
+      num_rounds_x, num_rounds_y
+    );
+
     // outer sum-check
     let (_tau_span, tau_t) = start_span!("compute_tau_verify");
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
     info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
+
+    for t in tau.evals().iter() {
+      println!("tau eval: {:?}", t);
+    }
 
     let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
@@ -590,6 +633,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 mod tests {
   use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
+  use tracing_subscriber::EnvFilter;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
@@ -649,6 +693,12 @@ mod tests {
 
   #[test]
   fn test_snark() {
+    tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)                // no bold colour codes
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+
     type E = crate::provider::PallasHyraxEngine;
     type S = R1CSSNARK<E>;
     test_snark_with::<E, S>();

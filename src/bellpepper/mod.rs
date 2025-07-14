@@ -10,10 +10,7 @@ pub mod test_shape_cs;
 #[cfg(test)]
 mod tests {
   use crate::{
-    bellpepper::{
-      r1cs::{SpartanShape},
-      shape_cs::ShapeCS,
-    },
+    bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
     provider::PallasHyraxEngine,
     traits::Engine,
   };
