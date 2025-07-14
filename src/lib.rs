@@ -291,13 +291,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       })?;
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
-    println!(
-      "{}, {}, {}",
-      shared.len(),
-      precommitted.len(),
-      cs.aux_assignment.len()
-    );
-
     for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
       .iter()
       .enumerate()
@@ -316,8 +309,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     )?;
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
-
-    println!("W.len(): {}", W.len());
 
     let X = cs.input_assignment[1..].to_vec();
     let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
@@ -338,19 +329,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
 
-    for t in tau.evals().iter() {
-      println!("tau eval: {:?}", t);
-    }
-
     let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
     info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
-
-    for (i, z_i) in z.iter().enumerate() {
-      if z_i != &E::Scalar::ZERO {
-        println!("z[{}]: {:?}", i, z_i);
-      }
-    }
 
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
@@ -360,13 +341,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       vars = %num_vars,
       "matrix_vector_multiply"
     );
-
-    // debug: check if Az \circ Bz = Cz
-    for i in 0..Az.len() {
-      if Az[i] * Bz[i] != Cz[i] {
-        panic!("Invalid witness: Az[i] * Bz[i] != Cz[i] at index {}", i);
-      }
-    }
 
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
@@ -510,10 +484,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
     info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
-
-    for t in tau.evals().iter() {
-      println!("tau eval: {:?}", t);
-    }
 
     let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
