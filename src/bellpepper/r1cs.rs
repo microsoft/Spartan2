@@ -66,7 +66,7 @@ macro_rules! impl_spartan_shape {
           circuit
             .precommitted(&mut cs, &shared)
             .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Unable to allocate precommited variables: {e}"),
+              reason: format!("Unable to allocate precommitted variables: {e}"),
             })?;
 
         // synthesize the circuit
