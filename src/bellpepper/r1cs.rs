@@ -64,7 +64,7 @@ macro_rules! impl_spartan_shape {
         // allocate precommitted variables
         let precommitted =
           circuit
-            .precommitted(&mut cs)
+            .precommitted(&mut cs, &shared)
             .map_err(|e| SpartanError::SynthesisError {
               reason: format!("Unable to allocate precommited variables: {e}"),
             })?;
@@ -245,11 +245,12 @@ where
     info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
 
     // produce precommitted witness variables
-    let precommitted = circuit
-      .precommitted(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to allocate precommitted variables: {e}"),
-      })?;
+    let precommitted =
+      circuit
+        .precommitted(&mut cs, &shared)
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to allocate precommitted variables: {e}"),
+        })?;
 
     for (i, s) in precommitted.iter().enumerate() {
       W[shape.num_shared + i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {

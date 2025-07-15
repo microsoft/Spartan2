@@ -167,7 +167,7 @@ pub struct R1CSSNARK<E: Engine> {
   comm_W_shared: Option<PartialCommitment<E>>,
   comm_W_precommitted: Option<PartialCommitment<E>>,
   comm_W_rest: PartialCommitment<E>,
-  X: Vec<E::Scalar>,
+  public_io: Vec<E::Scalar>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
@@ -208,7 +208,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
-    // TODO: absorb public IO in the transcript
+
+    let public_io = circuit
+      .public_io()
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })?;
+
+    // absorb the public IO into the transcript
+    transcript.absorb(b"public_io", &public_io.as_slice());
+
     let (partial_comms, U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
       &pk.S,
       &pk.ck,
@@ -340,7 +349,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       comm_W_shared: partial_comms[0].clone(),
       comm_W_precommitted: partial_comms[1].clone(),
       comm_W_rest: partial_comms[2].clone().unwrap(),
-      X: U.X.clone(),
+      public_io,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -354,10 +363,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
-    // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
+    // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
 
-    // TODO: absorb public IO in the transcript
+    // absorb the public IO into the transcript
+    transcript.absorb(b"public_io", &self.public_io.as_slice());
 
     if vk.S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
@@ -390,13 +400,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
     // check that the public IO of the circuit matches the expected values
-    if vk.num_challenges > 0
-      && (self.X.len() < vk.num_challenges || self.X[..vk.num_challenges] != challenges[..])
-    {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "Public IO does not match the expected challenge values".to_string(),
-      });
-    }
+    let X = [self.public_io.clone(), challenges].concat();
 
     let partial_comms = [
       self.comm_W_shared.clone(),
@@ -408,7 +412,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     .collect::<Vec<PartialCommitment<E>>>();
     let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
 
-    let U = R1CSInstance::<E>::new_unchecked(comm_W, self.X.clone())?;
+    let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 

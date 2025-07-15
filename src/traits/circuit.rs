@@ -1,4 +1,4 @@
-//! This module defines traits that a step function must implement
+//! This module defines traits that a circuit provider must implement to be used with Spartan.
 use crate::traits::Engine;
 use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 
@@ -11,20 +11,25 @@ use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 /// (4) The circuit checks a set of constraints over witness = (shared, precommitted, aux)
 /// The public IO includes the challenge and other things made public by the circuit
 pub trait SpartanCircuit<E: Engine>: Send + Sync + Clone {
+  /// Returns the public IO of the circuit, which is the list of values that will be made public
+  /// The circuit must make public the challenges followed by these values
+  fn public_io(&self) -> Result<Vec<E::Scalar>, SynthesisError>;
+
   /// Allocated variables in the circuit that are shared with other circuits
   fn shared<CS: ConstraintSystem<E::Scalar>>(
     &self,
     cs: &mut CS,
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError>;
 
-  /// Allocates precommitted variables including variables that will be made public via inputize
-  /// The latter is crucial as challenges need to depend on the entire instance including the public IO
+  /// Allocates precommitted variables
   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
     &self,
     cs: &mut CS,
+    shared: &[AllocatedNum<E::Scalar>],
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError>;
 
-  /// Returns the number of challenges that the circuit expects from the verifier.
+  /// Returns the number of challenges that the circuit expects from the verifier
+  /// for randomized checks added in synthesize
   fn num_challenges(&self) -> usize;
 
   /// Allocate the rest of the variables and constraints in the circuit.
