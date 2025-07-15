@@ -136,7 +136,7 @@ where
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
     HyraxBlind {
       blind: (0..ck.num_rows)
-        .map(|_| E::Scalar::ZERO) // TODO: produce a random value
+        .map(|_| E::Scalar::ZERO)
         .collect::<Vec<E::Scalar>>(),
     }
   }
