@@ -56,6 +56,7 @@ pub fn pad_to_width(width: usize, n: usize) -> usize {
 
 impl<E: Engine> R1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
+  #[allow(clippy::too_many_arguments)]
   pub fn new(
     width: usize,
     num_cons: usize,

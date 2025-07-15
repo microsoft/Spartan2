@@ -361,7 +361,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     if vk.S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
-        E::PCS::check_partial(&comm, vk.S.num_shared)?;
+        E::PCS::check_partial(comm, vk.S.num_shared)?;
         transcript.absorb(b"comm_W_shared", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -372,7 +372,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     if vk.S.num_precommitted > 0 {
       if let Some(comm) = &self.comm_W_precommitted {
-        E::PCS::check_partial(&comm, vk.S.num_precommitted)?;
+        E::PCS::check_partial(comm, vk.S.num_precommitted)?;
         transcript.absorb(b"comm_W_precommitted", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -390,12 +390,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
     // check that the public IO of the circuit matches the expected values
-    if vk.num_challenges > 0 {
-      if self.X.len() < vk.num_challenges || self.X[..vk.num_challenges] != challenges[..] {
-        return Err(SpartanError::ProofVerifyError {
-          reason: "Public IO does not match the expected challenge values".to_string(),
-        });
-      }
+    if vk.num_challenges > 0
+      && (self.X.len() < vk.num_challenges || self.X[..vk.num_challenges] != challenges[..])
+    {
+      return Err(SpartanError::ProofVerifyError {
+        reason: "Public IO does not match the expected challenge values".to_string(),
+      });
     }
 
     let mut partial_comms = Vec::new();
