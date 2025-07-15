@@ -1,11 +1,12 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, VerifierKey,
+  Blind, Commitment, CommitmentKey, PCS, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptReprTrait},
 };
 use core::cmp::max;
+use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSWitness<E: Engine> {
+  is_small: bool, // whether the witness elements fit in machine words
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
 }
@@ -160,6 +162,47 @@ impl<E: Engine> R1CSShape<E> {
     })
   }
 
+  /// Checks if the R1CS instance is satisfiable given a witness and its shape
+  #[allow(dead_code)]
+  pub fn is_sat(
+    &self,
+    ck: &CommitmentKey<E>,
+    U: &R1CSInstance<E>,
+    W: &R1CSWitness<E>,
+  ) -> Result<(), SpartanError> {
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    assert_eq!(W.W.len(), num_vars);
+    assert_eq!(U.X.len(), self.num_io);
+
+    // verify if Az * Bz = u*Cz
+    let res_eq = {
+      let z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
+      let (Az, Bz, Cz) = self.multiply_vec(&z)?;
+      assert_eq!(Az.len(), self.num_cons);
+      assert_eq!(Bz.len(), self.num_cons);
+      assert_eq!(Cz.len(), self.num_cons);
+
+      (0..self.num_cons).all(|i| Az[i] * Bz[i] == Cz[i])
+    };
+
+    // verify if comm_W is a commitment to W
+    let res_comm = U.comm_W == PCS::<E>::commit(ck, &W.W, &W.r_W, W.is_small)?;
+
+    if !res_eq {
+      return Err(SpartanError::UnSat {
+        reason: "R1CS is unsatisfiable".to_string(),
+      });
+    }
+
+    if !res_comm {
+      return Err(SpartanError::UnSat {
+        reason: "Invalid commitment".to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
   /// Generates public parameters for a Rank-1 Constraint System (R1CS).
   ///
   /// This function takes into consideration the shape of the R1CS matrices and a hint function
@@ -195,8 +238,12 @@ impl<E: Engine> R1CSShape<E> {
 
 impl<E: Engine> R1CSWitness<E> {
   /// A method to create a witness object using a vector of scalars
-  pub fn new_unchecked(W: Vec<E::Scalar>, r_W: Blind<E>) -> Result<R1CSWitness<E>, SpartanError> {
-    Ok(Self { W, r_W })
+  pub fn new_unchecked(
+    W: Vec<E::Scalar>,
+    r_W: Blind<E>,
+    is_small: bool,
+  ) -> Result<R1CSWitness<E>, SpartanError> {
+    Ok(Self { W, r_W, is_small })
   }
 }
 

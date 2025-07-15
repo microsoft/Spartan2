@@ -314,7 +314,7 @@ where
 
     let X = cs.input_assignment[1..].to_vec();
     let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
-    let W = R1CSWitness::<E>::new_unchecked(W, r_W)?;
+    let W = R1CSWitness::<E>::new_unchecked(W, r_W, is_small)?;
 
     Ok((partial_comms.to_vec(), U, W))
   }
