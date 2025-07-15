@@ -1,40 +1,46 @@
-//! Support for generating R1CS using bellperson.
-
+//! Support for generating R1CS using bellpepper.
 #![allow(non_snake_case)]
-
-use super::{shape_cs::ShapeCS, test_shape_cs::TestShapeCS};
 use crate::{
-  CommitmentKey,
-  VerifierKey,
+  CommitmentKey, PCS, PartialCommitment, VerifierKey,
+  bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS},
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
-  //start_span,
-  traits::{Engine, pcs::PCSEngineTrait},
+  start_span,
+  traits::{
+    Engine, circuit::SpartanCircuit, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait,
+  },
 };
-use bellpepper_core::{Index, LinearCombination};
-use ff::PrimeField;
-//use std::time::Instant;
-//use tracing::{info, info_span};
+use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
+use ff::{Field, PrimeField};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 /// `SpartanShape` provides methods for acquiring `R1CSShape` and `CommitmentKey` from implementers.
 pub trait SpartanShape<E: Engine> {
   /// Return an appropriate `R1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape(
-    &self,
-    num_shared: usize,
-    num_precommitted: usize,
-  ) -> (R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>);
+  fn r1cs_shape<C: SpartanCircuit<E>>(
+    circuit: &C,
+  ) -> Result<(R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError>;
 }
 
 /// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
   /// Return an instance and witness, given a shape and ck.
-  fn r1cs_instance_and_witness(
-    &mut self,
+  fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
     shape: &R1CSShape<E>,
     ck: &CommitmentKey<E>,
+    circuit: &C,
     is_small: bool,
-  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
+    num_challenges: usize,
+    transcript: &mut E::TE,
+  ) -> Result<
+    (
+      Vec<Option<PartialCommitment<E>>>,
+      R1CSInstance<E>,
+      R1CSWitness<E>,
+    ),
+    SpartanError,
+  >;
 }
 
 macro_rules! impl_spartan_shape {
@@ -43,22 +49,47 @@ macro_rules! impl_spartan_shape {
     where
       E::Scalar: PrimeField,
     {
-      fn r1cs_shape(
-        &self,
-        num_shared: usize,
-        num_precommitted: usize,
-      ) -> (R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>) {
+      fn r1cs_shape<C: SpartanCircuit<E>>(
+        circuit: &C,
+      ) -> Result<(R1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+        let mut cs: Self = Self::new();
+
+        // allocate shared variables
+        let shared = circuit
+          .shared(&mut cs)
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Unable to allocate shared variables: {e}"),
+          })?;
+
+        // allocate precommitted variables
+        let precommitted =
+          circuit
+            .precommitted(&mut cs)
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Unable to allocate precommited variables: {e}"),
+            })?;
+
+        // synthesize the circuit
+        circuit
+          .synthesize(&mut cs, &shared, &precommitted, None)
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Unable to synthesize circuit: {e}"),
+          })?;
+
+        let num_shared = shared.len();
+        let num_precommitted = precommitted.len();
+
         let mut A = SparseMatrix::<E::Scalar>::empty();
         let mut B = SparseMatrix::<E::Scalar>::empty();
         let mut C = SparseMatrix::<E::Scalar>::empty();
 
         let mut num_cons_added = 0;
         let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
-        let num_inputs = self.num_inputs();
-        let num_constraints = self.num_constraints();
-        let num_vars = self.num_aux();
+        let num_inputs = cs.num_inputs();
+        let num_constraints = cs.num_constraints();
+        let num_vars = cs.num_aux();
 
-        for constraint in self.constraints.iter() {
+        for constraint in cs.constraints.iter() {
           add_constraint(
             &mut X,
             num_vars,
@@ -92,7 +123,7 @@ macro_rules! impl_spartan_shape {
         .unwrap();
         let (ck, vk) = S.commitment_key();
 
-        (S, ck, vk)
+        Ok((S, ck, vk))
       }
     }
   };
@@ -156,28 +187,134 @@ fn add_constraint<S: PrimeField>(
   **nn += 1;
 }
 
-/*
-Move code from gen_witness to this
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E>
 where
   E::Scalar: PrimeField,
 {
-  fn r1cs_instance_and_witness(
-    &mut self,
+  fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
     shape: &R1CSShape<E>,
     ck: &CommitmentKey<E>,
+    circuit: &C,
     is_small: bool,
-  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError> {
-    let (_witness_span, witness_t) = start_span!("create_r1cs_witness");
-    let (W, comm_W) = R1CSWitness::<E>::new(ck, shape, &mut self.aux_assignment, is_small)?;
-    info!(elapsed_ms = %witness_t.elapsed().as_millis(), "create_r1cs_witness");
+    num_challenges: usize,
+    transcript: &mut E::TE,
+  ) -> Result<
+    (
+      Vec<Option<PartialCommitment<E>>>,
+      R1CSInstance<E>,
+      R1CSWitness<E>,
+    ),
+    SpartanError,
+  > {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize");
+    let mut cs = Self::new();
 
-    let (_instance_span, instance_t) = start_span!("create_r1cs_instance");
-    let X = &self.input_assignment[1..];
-    let instance = R1CSInstance::<E>::new(shape, &comm_W, X)?;
-    info!(elapsed_ms = %instance_t.elapsed().as_millis(), "create_r1cs_instance");
+    let num_vars = shape.num_shared + shape.num_precommitted + shape.num_rest;
+    info!(
+      "num_shared: {}, num_precommitted:{}, num_rest: {}, num_vars: {}",
+      shape.num_shared, shape.num_precommitted, shape.num_rest, num_vars
+    );
 
-    Ok((instance, W))
+    // produce blinds for all commitments we will send
+    let r_W = PCS::<E>::blind(ck);
+    let mut W = vec![E::Scalar::ZERO; num_vars];
+
+    // produce shared witness variables and commit to them
+    let shared = circuit
+      .shared(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to allocate shared variables: {e}"),
+      })?;
+
+    for (i, s) in shared.iter().enumerate() {
+      W[i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
+        reason: "Shared variables are not allocated".to_string(),
+      })?;
+    }
+
+    // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
+    let (_commit_span, commit_t) = start_span!("commit_witness_shared");
+    let (comm_W_shared, r_W_remaining) = if shape.num_shared > 0 {
+      let (comm_W_shared, r_remaining) =
+        PCS::<E>::commit_partial(ck, &W[0..shape.num_shared], &r_W, is_small)?;
+      transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
+      (Some(comm_W_shared), r_remaining)
+    } else {
+      (None, r_W.clone())
+    };
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
+
+    // produce precommitted witness variables
+    let precommitted = circuit
+      .precommitted(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to allocate precommitted variables: {e}"),
+      })?;
+
+    for (i, s) in precommitted.iter().enumerate() {
+      W[shape.num_shared + i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
+        reason: "Precommitted variables are not allocated".to_string(),
+      })?;
+    }
+
+    // partial commitment to precommitted witness variables
+    let (_commit_precommitted_span, commit_precommitted_t) =
+      start_span!("commit_witness_precommitted");
+    let (comm_W_precommitted, r_W_remaining) = if shape.num_precommitted > 0 {
+      let (comm_W_precommitted, r_W_remaining) = PCS::<E>::commit_partial(
+        ck,
+        &W[shape.num_shared..shape.num_shared + shape.num_precommitted],
+        &r_W_remaining,
+        is_small,
+      )?;
+      transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
+      (Some(comm_W_precommitted), r_W_remaining)
+    } else {
+      (None, r_W_remaining)
+    };
+    info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
+
+    let challenges = (0..num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    circuit
+      .synthesize(&mut cs, &shared, &precommitted, Some(&challenges))
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize witness: {e}"),
+      })?;
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
+
+    for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
+      .iter()
+      .enumerate()
+    {
+      W[shape.num_shared + shape.num_precommitted + i] = *s;
+    }
+
+    // commit to the rest with partial commitment
+    let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
+    let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
+      ck,
+      &W[shape.num_shared + shape.num_precommitted..],
+      &r_W_remaining,
+      is_small,
+    )?;
+    info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
+    transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
+
+    let partial_comms = [comm_W_shared, comm_W_precommitted, Some(comm_W_rest)];
+    let comm_W = E::PCS::combine_partial(
+      &partial_comms
+        .iter()
+        .filter_map(|opt| opt.clone())
+        .collect::<Vec<_>>(),
+    )?;
+
+    let X = cs.input_assignment[1..].to_vec();
+    let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
+    let W = R1CSWitness::<E>::new_unchecked(W, r_W)?;
+
+    Ok((partial_comms.to_vec(), U, W))
   }
 }
-*/

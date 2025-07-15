@@ -14,7 +14,6 @@
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 
-use bellpepper_core::ConstraintSystem;
 use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
@@ -38,7 +37,11 @@ pub mod provider;
 pub mod sumcheck;
 pub mod traits;
 
-use bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS, solver::SatisfyingAssignment};
+use bellpepper::{
+  r1cs::{SpartanShape, SpartanWitness},
+  shape_cs::ShapeCS,
+  solver::SatisfyingAssignment,
+};
 use digest::{DigestComputer, SimpleDigestible};
 use errors::SpartanError;
 use math::Math;
@@ -46,7 +49,7 @@ use polys::{
   eq::EqPolynomial,
   multilinear::{MultilinearPolynomial, SparsePolynomial},
 };
-use r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix};
+use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
 use sumcheck::SumcheckProof;
 use traits::{
   Engine,
@@ -179,30 +182,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let mut cs: ShapeCS<E> = ShapeCS::new();
+    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit)?;
 
-    // allocate shared variables
-    let shared = circuit
-      .shared(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to allocate shared variables: {e}"),
-      })?;
-
-    // allocate precommitted variables
-    let precommitted = circuit
-      .precommitted(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to allocate precommited variables: {e}"),
-      })?;
-
-    // synthesize the circuit
-    circuit
-      .synthesize(&mut cs, &shared, &precommitted, None)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize circuit: {e}"),
-      })?;
-
-    let (S, ck, vk_ee) = cs.r1cs_shape(shared.len(), precommitted.len());
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       num_challenges: circuit.num_challenges(),
       S: S.clone(),
@@ -230,116 +211,14 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // Since all variables that will be made public are captured in the committed witness,
     // we do not need to explicitly absorb the public IO.
     // TODO: REVISIT
-    let (_synth_span, synth_t) = start_span!("circuit_synthesize");
-    let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
-
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    info!(
-      "num_shared: {}, num_precommitted:{}, num_rest: {}, num_vars: {}",
-      pk.S.num_shared, pk.S.num_precommitted, pk.S.num_rest, num_vars
-    );
-
-    // produce blinds for all commitments we will send
-    let r_W = PCS::<E>::blind(&pk.ck);
-    let mut W = vec![E::Scalar::ZERO; num_vars];
-
-    // produce shared witness variables and commit to them
-    let shared = circuit
-      .shared(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to allocate shared variables: {e}"),
-      })?;
-
-    for (i, s) in shared.iter().enumerate() {
-      W[i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
-        reason: "Shared variables are not allocated".to_string(),
-      })?;
-    }
-
-    // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
-    let (_commit_span, commit_t) = start_span!("commit_witness_shared");
-    let (comm_W_shared, r_W_remaining) = if pk.S.num_shared > 0 {
-      let (comm_W_shared, r_remaining) =
-        PCS::<E>::commit_partial(&pk.ck, &W[0..pk.S.num_shared], &r_W, is_small)?;
-      transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
-      (Some(comm_W_shared), r_remaining)
-    } else {
-      (None, r_W.clone())
-    };
-    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
-
-    // produce precommitted witness variables
-    let precommitted = circuit
-      .precommitted(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to allocate precommitted variables: {e}"),
-      })?;
-
-    for (i, s) in precommitted.iter().enumerate() {
-      W[pk.S.num_shared + i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
-        reason: "Precommitted variables are not allocated".to_string(),
-      })?;
-    }
-
-    // partial commitment to precommitted witness variables
-    let (_commit_precommitted_span, commit_precommitted_t) =
-      start_span!("commit_witness_precommitted");
-    let (comm_W_precommitted, r_W_remaining) = if pk.S.num_precommitted > 0 {
-      let (comm_W_precommitted, r_W_remaining) = PCS::<E>::commit_partial(
-        &pk.ck,
-        &W[pk.S.num_shared..pk.S.num_shared + pk.S.num_precommitted],
-        &r_W_remaining,
-        is_small,
-      )?;
-      transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
-      (Some(comm_W_precommitted), r_W_remaining)
-    } else {
-      (None, r_W_remaining)
-    };
-    info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
-
-    let challenges = (0..pk.num_challenges)
-      .map(|_| transcript.squeeze(b"challenge"))
-      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
-
-    circuit
-      .synthesize(&mut cs, &shared, &precommitted, Some(&challenges))
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize witness: {e}"),
-      })?;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
-
-    for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
-      .iter()
-      .enumerate()
-    {
-      W[pk.S.num_shared + pk.S.num_precommitted + i] = *s;
-    }
-
-    // commit to the rest with partial commitment
-    let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
-    let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
+    let (partial_comms, U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
+      &pk.S,
       &pk.ck,
-      &W[pk.S.num_shared + pk.S.num_precommitted..],
-      &r_W_remaining,
+      &circuit,
       is_small,
+      pk.num_challenges,
+      &mut transcript,
     )?;
-    info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
-    transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
-
-    let mut partial_comms = vec![];
-    if let Some(ref comm) = comm_W_shared {
-      partial_comms.push(comm.clone());
-    }
-    if let Some(ref comm) = comm_W_precommitted {
-      partial_comms.push(comm.clone());
-    }
-    partial_comms.push(comm_W_rest.clone());
-    let comm_W = E::PCS::combine_partial(&partial_comms)?;
-
-    let X = cs.input_assignment[1..].to_vec();
-    let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
-    let W = R1CSWitness::<E>::new_unchecked(W, r_W)?;
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
     let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
@@ -460,9 +339,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
-      comm_W_shared,
-      comm_W_precommitted,
-      comm_W_rest,
+      comm_W_shared: partial_comms[0].clone(),
+      comm_W_precommitted: partial_comms[1].clone(),
+      comm_W_rest: partial_comms[2].clone().unwrap(),
       X: U.X.clone(),
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
