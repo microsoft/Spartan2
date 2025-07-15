@@ -1,5 +1,5 @@
 //! examples/sha256.rs
-//! Measure Spartan-2 {setup, gen_witness, prove, verify} times for a SHA-256
+//! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
 //! circuit with varying message lengths
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
@@ -39,6 +39,27 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 }
 
 impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
+  fn public_io(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+    // compute the SHA-256 hash of the preimage
+    let mut hasher = Sha256::new();
+    hasher.update(&self.preimage);
+    let hash = hasher.finalize();
+    // convert the hash to a vector of scalars
+    let hash_scalars: Vec<<E as Engine>::Scalar> = hash
+      .iter()
+      .flat_map(|&byte| {
+        (0..8).rev().map(move |i| {
+          if (byte >> i) & 1 == 1 {
+            E::Scalar::ONE
+          } else {
+            E::Scalar::ZERO
+          }
+        })
+      })
+      .collect();
+    Ok(hash_scalars)
+  }
+
   fn shared<CS: ConstraintSystem<E::Scalar>>(
     &self,
     _: &mut CS,
@@ -50,6 +71,7 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
     &self,
     _: &mut CS,
+    _: &[AllocatedNum<E::Scalar>], // shared variables, if any
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     // No precommitted variables in this circuit
     Ok(vec![])

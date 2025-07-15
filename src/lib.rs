@@ -557,6 +557,10 @@ mod tests {
   struct CubicCircuit {}
 
   impl<E: Engine> SpartanCircuit<E> for CubicCircuit {
+    fn public_io(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+      Ok(vec![E::Scalar::from(15u64)])
+    }
+
     fn shared<CS: ConstraintSystem<E::Scalar>>(
       &self,
       _: &mut CS,
@@ -568,6 +572,7 @@ mod tests {
     fn precommitted<CS: ConstraintSystem<<E as Engine>::Scalar>>(
       &self,
       _: &mut CS,
+      _: &[AllocatedNum<E::Scalar>], // shared variables, if any
     ) -> Result<Vec<AllocatedNum<<E as Engine>::Scalar>>, SynthesisError> {
       // In this example, we do not have precommitted variables.
       Ok(vec![])
