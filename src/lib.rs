@@ -208,9 +208,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
-    // Since all variables that will be made public are captured in the committed witness,
-    // we do not need to explicitly absorb the public IO.
-    // TODO: REVISIT
+    // TODO: absorb public IO in the transcript
     let (partial_comms, U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
       &pk.S,
       &pk.ck,
@@ -359,6 +357,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &vk.digest()?);
 
+    // TODO: absorb public IO in the transcript
+
     if vk.S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
         E::PCS::check_partial(comm, vk.S.num_shared)?;
@@ -398,17 +398,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       });
     }
 
-    let mut partial_comms = Vec::new();
-    if let Some(comm) = &self.comm_W_shared {
-      partial_comms.push(comm.clone());
-    }
-    if let Some(comm) = &self.comm_W_precommitted {
-      partial_comms.push(comm.clone());
-    }
-    partial_comms.push(self.comm_W_rest.clone());
+    let partial_comms = [
+      self.comm_W_shared.clone(),
+      self.comm_W_precommitted.clone(),
+      Some(self.comm_W_rest.clone()),
+    ]
+    .iter()
+    .filter_map(|comm| comm.clone())
+    .collect::<Vec<PartialCommitment<E>>>();
     let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
 
-    // we do not need to absorb public IO into the transcript as it is already included in the precommitted commitments
     let U = R1CSInstance::<E>::new_unchecked(comm_W, self.X.clone())?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
