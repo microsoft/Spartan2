@@ -33,9 +33,12 @@ pub enum SpartanError {
   /// returned if the provided commitment key is not of sufficient length
   #[error("InvalidCommitmentKeyLength")]
   InvalidCommitmentKeyLength,
-  /// returned if the provided number of steps is zero
-  #[error("InvalidNumSteps")]
-  InvalidNumSteps,
+  /// returned if the provided commitment is not of sufficient length
+  #[error("InvalidCommitmentLength: {reason}")]
+  InvalidCommitmentLength {
+    /// The reason for the invalid commitment length error
+    reason: String,
+  },
   /// returned when an invalid PCS evaluation argument is provided
   #[error("InvalidPCS")]
   InvalidPCS,

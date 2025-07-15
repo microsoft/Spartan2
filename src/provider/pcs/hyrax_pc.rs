@@ -97,24 +97,17 @@ where
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
+  fn width() -> usize {
+    1024 // Hyrax PC is always 1024 columns wide
+  }
+
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let padded_n = n.next_power_of_two();
-    assert!(n >= 1024);
-
-    // we will have at least 1024 columns, and remain so up to 2^20 sized polynomials
-    let num_cols = if padded_n <= 1 << 20 {
-      1024
-    } else if padded_n <= 1 << 24 {
-      2048
-    } else if padded_n <= 1 << 28 {
-      4096
-    } else {
-      8192
-    };
 
     // we will have at least one row
-    let num_rows = div_ceil(padded_n, num_cols);
+    let num_cols = Self::width();
+    let num_rows = div_ceil(padded_n, Self::width());
 
     let gens = E::GE::from_label(label, num_cols + 2);
     let ck = gens[..num_cols].to_vec();
@@ -211,6 +204,20 @@ where
 
     // return the partial commitment and the remaining blinds
     Ok((partial, r_remaining))
+  }
+
+  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {
+    let num_rows = div_ceil(n, Self::width());
+    if comm.comm.len() != num_rows {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: format!(
+          "InvalidCommitmentLength: actual: {}, expected: {}",
+          comm.comm.len(),
+          num_rows
+        ),
+      });
+    }
+    Ok(())
   }
 
   fn combine_partial(

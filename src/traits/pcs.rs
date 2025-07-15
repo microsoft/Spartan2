@@ -45,6 +45,9 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Samples a new commitment key of a specified size and a verifier key
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey);
 
+  /// Size of the polynomial committed with one unit
+  fn width() -> usize;
+
   /// Returns a blind to be used for commitment
   fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
 
@@ -64,6 +67,9 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     r: &Self::Blind,
     is_small: bool,
   ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError>;
+
+  /// Checks if the provided partial commitment commits to a vector of the specified length
+  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError>;
 
   /// Combines the provided partial commitments into a single commitment
   /// This method is used to finalize the commitment after multiple partial commitments have been made

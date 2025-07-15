@@ -9,7 +9,7 @@ use crate::{
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix},
   //start_span,
-  traits::Engine,
+  traits::{Engine, pcs::PCSEngineTrait},
 };
 use bellpepper_core::{Index, LinearCombination};
 use ff::PrimeField;
@@ -75,8 +75,11 @@ macro_rules! impl_spartan_shape {
 
         let num_rest = num_vars - num_shared - num_precommitted;
 
+        let width = E::PCS::width();
+
         // Don't count One as an input for shape's purposes.
         let S = R1CSShape::new(
+          width,
           num_constraints,
           num_shared,
           num_precommitted,

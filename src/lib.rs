@@ -227,7 +227,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
-    // TODO: add public IO of the statement to be proven
+    // Since all variables that will be made public are captured in the committed witness,
+    // we do not need to explicitly absorb the public IO.
+    // TODO: REVISIT
     let (_synth_span, synth_t) = start_span!("circuit_synthesize");
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
 
@@ -480,6 +482,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     if vk.S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
+        E::PCS::check_partial(&comm, vk.S.num_shared)?;
         transcript.absorb(b"comm_W_shared", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -490,6 +493,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     if vk.S.num_precommitted > 0 {
       if let Some(comm) = &self.comm_W_precommitted {
+        E::PCS::check_partial(&comm, vk.S.num_precommitted)?;
         transcript.absorb(b"comm_W_precommitted", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -498,6 +502,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       }
     }
 
+    E::PCS::check_partial(&self.comm_W_rest, vk.S.num_rest)?;
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
     // obtain challenges from the transcript
@@ -522,9 +527,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       partial_comms.push(comm.clone());
     }
     partial_comms.push(self.comm_W_rest.clone());
-
     let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
 
+    // we do not need to absorb public IO into the transcript as it is already included in the precommitted commitments
     let U = R1CSInstance::<E>::new_unchecked(comm_W, self.X.clone())?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;

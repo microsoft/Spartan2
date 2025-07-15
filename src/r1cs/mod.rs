@@ -46,17 +46,18 @@ pub struct R1CSInstance<E: Engine> {
   pub(crate) X: Vec<E::Scalar>,
 }
 
-/// Round `n` up to the next multiple of 1024.
+/// Round `n` up to the next multiple of width.
 /// (If `n` is already a multiple and higher than zero, it is returned unchanged.)
 #[inline]
-pub fn pad_to_1024(n: usize) -> usize {
-  // 1024 == 1 << 10, so the mask is 1024-1 == 0b111_1111_1111 (10 bits set).
-  n.saturating_add(1023) & !1023
+pub fn pad_to_width(width: usize, n: usize) -> usize {
+  // width == 1024 == 1 << 10, so the mask is width-1 == 0b111_1111_1111 (10 bits set).
+  n.saturating_add(width - 1) & !(width - 1)
 }
 
 impl<E: Engine> R1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
   pub fn new(
+    width: usize,
     num_cons: usize,
     num_shared: usize,
     num_precommitted: usize,
@@ -88,10 +89,10 @@ impl<E: Engine> R1CSShape<E> {
     is_valid(num_rows, num_cols, &B)?;
     is_valid(num_rows, num_cols, &C)?;
 
-    // We need to pad num_shared, num_precommitted, and num_rest. We need each of them to be a multiple of 1024.
-    let num_shared_padded = pad_to_1024(num_shared);
-    let num_precommitted_padded = pad_to_1024(num_precommitted);
-    let mut num_rest_padded = pad_to_1024(num_rest);
+    // We need to pad num_shared, num_precommitted, and num_rest. We need each of them to be a multiple of num_cols.
+    let num_shared_padded = pad_to_width(width, num_shared);
+    let num_precommitted_padded = pad_to_width(width, num_precommitted);
+    let mut num_rest_padded = pad_to_width(width, num_rest);
 
     // We need to make sure num_vars_padded >= num_io + 1 (for the constant term).
     let num_vars_padded = num_shared_padded + num_precommitted_padded + num_rest_padded;
