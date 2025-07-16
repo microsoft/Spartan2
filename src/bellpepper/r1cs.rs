@@ -1,5 +1,4 @@
 //! Support for generating R1CS using bellpepper.
-#![allow(non_snake_case)]
 use crate::{
   CommitmentKey, PCS, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
@@ -15,15 +14,15 @@ use ff::{Field, PrimeField};
 use std::time::Instant;
 use tracing::{info, info_span};
 
-/// `SpartanShape` provides methods for acquiring `R1CSShape` and `CommitmentKey` from implementers.
+/// `SpartanShape` provides methods for acquiring `SplitR1CSShape` and `CommitmentKey` from implementers.
 pub trait SpartanShape<E: Engine> {
-  /// Return an appropriate `R1CSShape` and `CommitmentKey` structs.
+  /// Return an appropriate `SplitR1CSShape` and `CommitmentKey` structs.
   fn r1cs_shape<C: SpartanCircuit<E>>(
     circuit: &C,
   ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError>;
 }
 
-/// `SpartanWitness` provide a method for acquiring an `R1CSInstance` and `R1CSWitness` from implementers.
+/// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
   /// Return an instance and witness, given a shape and ck.
   fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
@@ -117,7 +116,7 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
   }
 }
 
-fn add_constraint<S: PrimeField>(
+pub(crate) fn add_constraint<S: PrimeField>(
   X: &mut (
     &mut SparseMatrix<S>,
     &mut SparseMatrix<S>,
@@ -172,10 +171,7 @@ fn add_constraint<S: PrimeField>(
   **nn += 1;
 }
 
-impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E>
-where
-  E::Scalar: PrimeField,
-{
+impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
     S: &SplitR1CSShape<E>,
     ck: &CommitmentKey<E>,

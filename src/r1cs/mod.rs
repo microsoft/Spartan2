@@ -3,6 +3,7 @@ use crate::{
   Blind, Commitment, CommitmentKey, PCS, PartialCommitment, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
+  start_span,
   traits::{
     Engine,
     pcs::PCSEngineTrait,
@@ -14,6 +15,8 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{info, info_span};
 
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
@@ -173,6 +176,35 @@ impl<E: Engine> R1CSShape<E> {
 
 impl<E: Engine> R1CSWitness<E> {
   /// A method to create a witness object using a vector of scalars
+  pub fn new(
+    ck: &CommitmentKey<E>,
+    S: &R1CSShape<E>,
+    W: &mut Vec<E::Scalar>,
+    is_small: bool,
+  ) -> Result<(R1CSWitness<E>, Commitment<E>), SpartanError> {
+    let r_W = PCS::<E>::blind(ck);
+
+    // pad with zeros
+    let (_pad_span, pad_t) = start_span!("pad_witness");
+    if W.len() < S.num_vars {
+      W.resize(S.num_vars, E::Scalar::ZERO);
+    }
+    info!(elapsed_ms = %pad_t.elapsed().as_millis(), "pad_witness");
+
+    let (_commit_span, commit_t) = start_span!("commit_witness");
+    let comm_W = PCS::<E>::commit(ck, W, &r_W, is_small)?;
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness");
+
+    let W = R1CSWitness {
+      W: W.to_vec(),
+      r_W,
+      is_small,
+    };
+
+    Ok((W, comm_W))
+  }
+
+  /// A method to create a witness object using a vector of scalars
   pub fn new_unchecked(
     W: Vec<E::Scalar>,
     r_W: Blind<E>,
@@ -183,6 +215,22 @@ impl<E: Engine> R1CSWitness<E> {
 }
 
 impl<E: Engine> R1CSInstance<E> {
+  /// A method to create an instance object using constituent elements
+  pub fn new(
+    S: &R1CSShape<E>,
+    comm_W: &Commitment<E>,
+    X: &[E::Scalar],
+  ) -> Result<R1CSInstance<E>, SpartanError> {
+    if S.num_io != X.len() {
+      Err(SpartanError::InvalidInputLength)
+    } else {
+      Ok(R1CSInstance {
+        comm_W: comm_W.clone(),
+        X: X.to_owned(),
+      })
+    }
+  }
+
   /// A method to create an instance object using constituent elements
   pub fn new_unchecked(
     comm_W: Commitment<E>,
