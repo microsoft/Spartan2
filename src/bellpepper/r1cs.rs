@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 use crate::{
   CommitmentKey, PCS, VerifierKey,
-  bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment, test_shape_cs::TestShapeCS},
+  bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
   start_span,
@@ -35,97 +35,87 @@ pub trait SpartanWitness<E: Engine> {
   ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
-macro_rules! impl_spartan_shape {
-  ( $name:ident) => {
-    impl<E: Engine> SpartanShape<E> for $name<E>
-    where
-      E::Scalar: PrimeField,
-    {
-      fn r1cs_shape<C: SpartanCircuit<E>>(
-        circuit: &C,
-      ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError> {
-        let num_challenges = circuit.num_challenges();
+impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
+  fn r1cs_shape<C: SpartanCircuit<E>>(
+    circuit: &C,
+  ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+    let num_challenges = circuit.num_challenges();
 
-        let mut cs: Self = Self::new();
-        // allocate shared variables
-        let shared = circuit
-          .shared(&mut cs)
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Unable to allocate shared variables: {e}"),
-          })?;
+    let mut cs: Self = Self::new();
+    // allocate shared variables
+    let shared = circuit
+      .shared(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to allocate shared variables: {e}"),
+      })?;
 
-        // allocate precommitted variables
-        let precommitted =
-          circuit
-            .precommitted(&mut cs, &shared)
-            .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Unable to allocate precommitted variables: {e}"),
-            })?;
+    // allocate precommitted variables
+    let precommitted =
+      circuit
+        .precommitted(&mut cs, &shared)
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to allocate precommitted variables: {e}"),
+        })?;
 
-        // synthesize the circuit
-        circuit
-          .synthesize(&mut cs, &shared, &precommitted, None)
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Unable to synthesize circuit: {e}"),
-          })?;
+    // synthesize the circuit
+    circuit
+      .synthesize(&mut cs, &shared, &precommitted, None)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize circuit: {e}"),
+      })?;
 
-        let num_shared = shared.len();
-        let num_precommitted = precommitted.len();
+    let num_shared = shared.len();
+    let num_precommitted = precommitted.len();
 
-        let mut A = SparseMatrix::<E::Scalar>::empty();
-        let mut B = SparseMatrix::<E::Scalar>::empty();
-        let mut C = SparseMatrix::<E::Scalar>::empty();
+    let mut A = SparseMatrix::<E::Scalar>::empty();
+    let mut B = SparseMatrix::<E::Scalar>::empty();
+    let mut C = SparseMatrix::<E::Scalar>::empty();
 
-        let mut num_cons_added = 0;
-        let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
-        let num_inputs = cs.num_inputs();
-        let num_constraints = cs.num_constraints();
-        let num_vars = cs.num_aux();
+    let mut num_cons_added = 0;
+    let mut X = (&mut A, &mut B, &mut C, &mut num_cons_added);
+    let num_inputs = cs.num_inputs();
+    let num_constraints = cs.num_constraints();
+    let num_vars = cs.num_aux();
 
-        for constraint in cs.constraints.iter() {
-          add_constraint(
-            &mut X,
-            num_vars,
-            &constraint.0,
-            &constraint.1,
-            &constraint.2,
-          );
-        }
-        assert_eq!(num_cons_added, num_constraints);
-        assert!(num_inputs > num_challenges);
-
-        A.cols = num_vars + num_inputs;
-        B.cols = num_vars + num_inputs;
-        C.cols = num_vars + num_inputs;
-
-        let num_rest = num_vars - num_shared - num_precommitted;
-
-        let width = E::PCS::width();
-
-        // Don't count One as an input for shape's purposes.
-        let S = SplitR1CSShape::new(
-          width,
-          num_constraints,
-          num_shared,
-          num_precommitted,
-          num_rest,
-          num_inputs - 1 - num_challenges,
-          num_challenges,
-          A,
-          B,
-          C,
-        )
-        .unwrap();
-        let (ck, vk) = S.commitment_key();
-
-        Ok((S, ck, vk))
-      }
+    for constraint in cs.constraints.iter() {
+      add_constraint(
+        &mut X,
+        num_vars,
+        &constraint.0,
+        &constraint.1,
+        &constraint.2,
+      );
     }
-  };
-}
+    assert_eq!(num_cons_added, num_constraints);
+    assert!(num_inputs > num_challenges);
 
-impl_spartan_shape!(ShapeCS);
-impl_spartan_shape!(TestShapeCS);
+    A.cols = num_vars + num_inputs;
+    B.cols = num_vars + num_inputs;
+    C.cols = num_vars + num_inputs;
+
+    let num_rest = num_vars - num_shared - num_precommitted;
+
+    let width = E::PCS::width();
+
+    // Don't count One as an input for shape's purposes.
+    let S = SplitR1CSShape::new(
+      width,
+      num_constraints,
+      num_shared,
+      num_precommitted,
+      num_rest,
+      num_inputs - 1 - num_challenges,
+      num_challenges,
+      A,
+      B,
+      C,
+    )
+    .unwrap();
+    let (ck, vk) = S.commitment_key();
+
+    Ok((S, ck, vk))
+  }
+}
 
 fn add_constraint<S: PrimeField>(
   X: &mut (
