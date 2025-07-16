@@ -162,6 +162,18 @@ impl<E: Engine> R1CSShape<E> {
     })
   }
 
+  pub fn num_cons(&self) -> usize {
+    self.num_cons
+  }
+
+  pub fn num_vars(&self) -> usize {
+    self.num_shared + self.num_precommitted + self.num_rest
+  }
+
+  pub fn num_io(&self) -> usize {
+    self.num_io
+  }
+
   /// Checks if the R1CS instance is satisfiable given a witness and its shape
   #[allow(dead_code)]
   pub fn is_sat(
