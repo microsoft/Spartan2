@@ -11,9 +11,9 @@ use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 /// (4) The circuit checks a set of constraints over witness = (shared, precommitted, aux)
 /// The public IO includes the challenge and other things made public by the circuit
 pub trait SpartanCircuit<E: Engine>: Send + Sync + Clone {
-  /// Returns the public IO of the circuit, which is the list of values that will be made public
-  /// The circuit must make public the challenges followed by these values
-  fn public_io(&self) -> Result<Vec<E::Scalar>, SynthesisError>;
+  /// Returns the public values of the circuit, which is the list of values that will be made public
+  /// The circuit must make public these values followed by the challenges generated via the transcript
+  fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError>;
 
   /// Allocated variables in the circuit that are shared with other circuits
   fn shared<CS: ConstraintSystem<E::Scalar>>(

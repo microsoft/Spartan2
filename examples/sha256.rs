@@ -39,7 +39,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 }
 
 impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
-  fn public_io(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+  fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
     // compute the SHA-256 hash of the preimage
     let mut hasher = Sha256::new();
     hasher.update(&self.preimage);

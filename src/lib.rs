@@ -49,7 +49,7 @@ use polys::{
   eq::EqPolynomial,
   multilinear::{MultilinearPolynomial, SparsePolynomial},
 };
-use r1cs::{R1CSInstance, R1CSShape, SparseMatrix};
+use r1cs::{SparseMatrix, SplitR1CSInstance, SplitR1CSShape};
 use sumcheck::SumcheckProof;
 use traits::{
   Engine,
@@ -83,7 +83,7 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
   num_challenges: usize, // number of challenges in the circuit
-  S: R1CSShape<E>,
+  S: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -93,7 +93,7 @@ pub struct SpartanProverKey<E: Engine> {
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   num_challenges: usize, // number of challenges in the circuit
-  S: R1CSShape<E>,
+  S: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -118,7 +118,7 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
 
 /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
 fn compute_eval_table_sparse<E: Engine>(
-  S: &R1CSShape<E>,
+  S: &SplitR1CSShape<E>,
   rx: &[E::Scalar],
 ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
   assert_eq!(rx.len(), S.num_cons);
@@ -132,7 +132,6 @@ fn compute_eval_table_sparse<E: Engine>(
   };
 
   let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-
   let (A_evals, (B_evals, C_evals)) = rayon::join(
     || {
       let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
@@ -164,10 +163,7 @@ fn compute_eval_table_sparse<E: Engine>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
-  comm_W_shared: Option<PartialCommitment<E>>,
-  comm_W_precommitted: Option<PartialCommitment<E>>,
-  comm_W_rest: PartialCommitment<E>,
-  public_io: Vec<E::Scalar>,
+  U: SplitR1CSInstance<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
@@ -209,26 +205,31 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    let public_io = circuit
-      .public_io()
+    let public_values = circuit
+      .public_values()
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Circuit does not provide public IO: {e}"),
       })?;
 
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_io", &public_io.as_slice());
+    // absorb the public values into the transcript
+    transcript.absorb(b"public_values", &public_values.as_slice());
 
-    let (partial_comms, U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
+    let (U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
       &pk.S,
       &pk.ck,
       &circuit,
       is_small,
-      pk.num_challenges,
       &mut transcript,
     )?;
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
-    let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
+    let mut z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (
@@ -341,15 +342,19 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let (eval_W, eval_arg) =
-      E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &W.r_W, &r_y[1..])?;
+    let U_regular = U.to_regular_instance()?;
+    let (eval_W, eval_arg) = E::PCS::prove(
+      &pk.ck,
+      &mut transcript,
+      &U_regular.comm_W,
+      &W.W,
+      &W.r_W,
+      &r_y[1..],
+    )?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
-      comm_W_shared: partial_comms[0].clone(),
-      comm_W_precommitted: partial_comms[1].clone(),
-      comm_W_rest: partial_comms[2].clone().unwrap(),
-      public_io,
+      U,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -366,53 +371,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
 
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_io", &self.public_io.as_slice());
-
-    if vk.S.num_shared > 0 {
-      if let Some(comm) = &self.comm_W_shared {
-        E::PCS::check_partial(comm, vk.S.num_shared)?;
-        transcript.absorb(b"comm_W_shared", comm);
-      } else {
-        return Err(SpartanError::ProofVerifyError {
-          reason: "comm_W_shared is missing".to_string(),
-        });
-      }
-    }
-
-    if vk.S.num_precommitted > 0 {
-      if let Some(comm) = &self.comm_W_precommitted {
-        E::PCS::check_partial(comm, vk.S.num_precommitted)?;
-        transcript.absorb(b"comm_W_precommitted", comm);
-      } else {
-        return Err(SpartanError::ProofVerifyError {
-          reason: "comm_W_precommitted is missing".to_string(),
-        });
-      }
-    }
-
-    E::PCS::check_partial(&self.comm_W_rest, vk.S.num_rest)?;
-    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
-
-    // obtain challenges from the transcript
-    let challenges = (0..vk.num_challenges)
-      .map(|_| transcript.squeeze(b"challenge"))
-      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
-
-    // check that the public IO of the circuit matches the expected values
-    let X = [self.public_io.clone(), challenges].concat();
-
-    let partial_comms = [
-      self.comm_W_shared.clone(),
-      self.comm_W_precommitted.clone(),
-      Some(self.comm_W_rest.clone()),
-    ]
-    .iter()
-    .filter_map(|comm| comm.clone())
-    .collect::<Vec<PartialCommitment<E>>>();
-    let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
-
-    let U = R1CSInstance::<E>::new_unchecked(comm_W, X)?;
+    // validate the provided split R1CS instance and convert to regular instance
+    self.U.validate(&vk.S, &mut transcript)?;
+    let U_regular = self.U.to_regular_instance()?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 
@@ -475,7 +436,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
-          .chain(U.X.iter().cloned())
+          .chain(U_regular.X.iter().cloned())
           .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
@@ -535,7 +496,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
-      &U.comm_W,
+      &U_regular.comm_W,
       &r_y[1..],
       &self.eval_W,
       &self.eval_arg,
@@ -543,7 +504,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
-    Ok(U.X.clone())
+    Ok(self.U.public_values.clone())
   }
 }
 
@@ -557,7 +518,7 @@ mod tests {
   struct CubicCircuit {}
 
   impl<E: Engine> SpartanCircuit<E> for CubicCircuit {
-    fn public_io(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+    fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
       Ok(vec![E::Scalar::from(15u64)])
     }
 
