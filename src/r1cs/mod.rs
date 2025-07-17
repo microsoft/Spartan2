@@ -64,17 +64,16 @@ fn is_sparse_matrix_valid<E: Engine>(
   num_rows: usize,
   num_cols: usize,
   M: &SparseMatrix<E::Scalar>,
-) -> Result<Vec<()>, SpartanError> {
+) -> Result<(), SpartanError> {
   // Check if the indices and indptr are valid for the given number of rows and columns
   M.iter()
-    .map(|(row, col, _val)| {
+    .try_for_each(|(row, col, _val)| {
       if row >= num_rows || col >= num_cols {
         Err(SpartanError::InvalidIndex)
       } else {
         Ok(())
       }
     })
-    .collect::<Result<Vec<()>, SpartanError>>()
 }
 
 impl<E: Engine> R1CSShape<E> {
