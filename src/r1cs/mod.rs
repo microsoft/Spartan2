@@ -488,9 +488,6 @@ impl<E: Engine> SplitR1CSInstance<E> {
       }
     }
 
-    E::PCS::check_partial(&self.comm_W_rest, S.num_rest)?;
-    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
-
     // obtain challenges from the transcript
     let challenges = (0..S.num_challenges)
       .map(|_| transcript.squeeze(b"challenge"))
@@ -502,6 +499,9 @@ impl<E: Engine> SplitR1CSInstance<E> {
         reason: "Challenges do not match".to_string(),
       });
     }
+
+    E::PCS::check_partial(&self.comm_W_rest, S.num_rest)?;
+    transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
     Ok(())
   }
