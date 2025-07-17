@@ -12,7 +12,7 @@ use crate::{
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
 use ff::{Field, PrimeField};
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::{debug, info, info_span};
 
 /// `SpartanShape` provides methods for acquiring `SplitR1CSShape` and `CommitmentKey` from implementers.
 pub trait SpartanShape<E: Engine> {

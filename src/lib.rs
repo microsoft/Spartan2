@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::{debug, info, info_span};
 
 // private modules
 mod math;
