@@ -71,8 +71,23 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Checks if the provided partial commitment commits to a vector of the specified length
   fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError>;
 
-  /// Combines the provided partial commitments into a single commitment
-  /// This method is used to finalize the commitment after multiple partial commitments have been made
+  /// Combines the provided partial commitments into a single commitment.
+  ///
+  /// # Parameters
+  /// - `partial_comms`: A slice of partial commitments to be combined. The order of the partial
+  ///   commitments in the slice must match the order in which they were generated using `commit_partial`.
+  ///
+  /// # Constraints
+  /// - All partial commitments in the slice must be valid and correspond to the same commitment key.
+  /// - The number of partial commitments must match the expected number for the final commitment.
+  ///
+  /// # Returns
+  /// - A single combined commitment if the operation is successful.
+  /// - An error of type `SpartanError` if the combination fails due to invalid inputs or mismatched constraints.
+  ///
+  /// # Usage
+  /// This method is used to finalize the commitment after multiple partial commitments have been made.
+  /// Ensure that the partial commitments are provided in the correct order and meet all constraints.
   fn combine_partial(
     partial_comms: &[Self::PartialCommitment],
   ) -> Result<Self::Commitment, SpartanError>;
