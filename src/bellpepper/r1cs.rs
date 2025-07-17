@@ -183,7 +183,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let mut cs = Self::new();
 
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-    info!("num_vars: {}", num_vars);
+    debug!("num_vars: {}", num_vars);
 
     // produce blinds for all commitments we will send
     let r_W = PCS::<E>::blind(ck);
