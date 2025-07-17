@@ -322,8 +322,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // inner sum-check
     let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
 
-    info!("Proving inner sum-check with {} rounds", num_rounds_y);
-    info!(
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
       "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
       poly_ABC.len(),
       poly_z.len()
