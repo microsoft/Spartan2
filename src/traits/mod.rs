@@ -4,6 +4,7 @@ use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
+pub mod circuit;
 pub mod pcs;
 pub mod snark;
 pub mod transcript;

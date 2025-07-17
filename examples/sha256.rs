@@ -1,21 +1,21 @@
 //! examples/sha256.rs
-//! Measure Spartan-2 {setup, gen_witness, prove, verify} times for a SHA-256
+//! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
 //! circuit with varying message lengths
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
 #![allow(non_snake_case)]
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
-  Circuit, ConstraintSystem, SynthesisError,
+  ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
-use ff::{PrimeField, PrimeFieldBits};
+use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
   R1CSSNARK,
   provider::T256HyraxEngine,
-  traits::{Engine, snark::R1CSSNARKTrait},
+  traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
 use std::{marker::PhantomData, time::Instant};
 use tracing::{info, info_span};
@@ -38,8 +38,57 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
   }
 }
 
-impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scalar> {
-  fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
+  fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+    // compute the SHA-256 hash of the preimage
+    let mut hasher = Sha256::new();
+    hasher.update(&self.preimage);
+    let hash = hasher.finalize();
+    // convert the hash to a vector of scalars
+    let hash_scalars: Vec<<E as Engine>::Scalar> = hash
+      .iter()
+      .flat_map(|&byte| {
+        (0..8).rev().map(move |i| {
+          if (byte >> i) & 1 == 1 {
+            E::Scalar::ONE
+          } else {
+            E::Scalar::ZERO
+          }
+        })
+      })
+      .collect();
+    Ok(hash_scalars)
+  }
+
+  fn shared<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    _: &mut CS,
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    // No shared variables in this circuit
+    Ok(vec![])
+  }
+
+  fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    _: &mut CS,
+    _: &[AllocatedNum<E::Scalar>], // shared variables, if any
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    // No precommitted variables in this circuit
+    Ok(vec![])
+  }
+
+  fn num_challenges(&self) -> usize {
+    // SHA-256 circuit does not expect any challenges
+    0
+  }
+
+  fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+    _: &[AllocatedNum<E::Scalar>],
+    _: &[AllocatedNum<E::Scalar>],
+    _: Option<&[E::Scalar]>,
+  ) -> Result<(), SynthesisError> {
     // 1. Preimage bits
     let bit_values: Vec<_> = self
       .preimage
@@ -82,9 +131,9 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       let n = AllocatedNum::alloc_input(cs.namespace(|| format!("public num {i}")), || {
         Ok(
           if bit.get_value().ok_or(SynthesisError::AssignmentMissing)? {
-            Scalar::ONE
+            E::Scalar::ONE
           } else {
-            Scalar::ZERO
+            E::Scalar::ZERO
           },
         )
       })?;
@@ -92,7 +141,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for Sha256Circuit<Scal
       // Single equality constraint is enough
       cs.enforce(
         || format!("bit == num {i}"),
-        |_| bit.lc(CS::one(), Scalar::ONE),
+        |_| bit.lc(CS::one(), E::Scalar::ONE),
         |lc| lc + CS::one(),
         |lc| lc + n.get_variable(),
       );
@@ -125,16 +174,9 @@ fn main() {
     let setup_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = setup_ms, "setup");
 
-    // GENERATE WITNESS
-    let t0 = Instant::now();
-    let (U, W) =
-      R1CSSNARK::<E>::gen_witness(&pk, circuit.clone(), true).expect("gen_witness failed");
-    let gw_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = gw_ms, "gen_witness");
-
     // PROVE
     let t0 = Instant::now();
-    let proof = R1CSSNARK::<E>::prove(&pk, &U, &W).expect("prove failed");
+    let proof = R1CSSNARK::<E>::prove(&pk, circuit.clone(), true).expect("prove failed");
     let prove_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prove_ms, "prove");
 
@@ -146,8 +188,8 @@ fn main() {
 
     // Summary
     info!(
-      "SUMMARY msg={}B, setup={} ms, gen_witness={} ms, prove={} ms, verify={} ms",
-      msg_len, setup_ms, gw_ms, prove_ms, verify_ms
+      "SUMMARY msg={}B, setup={} ms, prove={} ms, verify={} ms",
+      msg_len, setup_ms, prove_ms, verify_ms
     );
     drop(root_span);
   }

@@ -1,10 +1,8 @@
 //! This module defines a collection of traits that define the behavior of a zkSNARK for RelaxedR1CS
 use crate::{
   errors::SpartanError,
-  r1cs::{R1CSInstance, R1CSWitness},
-  traits::{Engine, Group, TranscriptReprTrait},
+  traits::{Engine, Group, TranscriptReprTrait, circuit::SpartanCircuit},
 };
-use bellpepper_core::Circuit;
 use serde::{Deserialize, Serialize};
 
 /// A trait that defines the behavior of a zkSNARK
@@ -18,22 +16,15 @@ pub trait R1CSSNARKTrait<E: Engine>:
   type VerifierKey: Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Produces the keys for the prover and the verifier
-  fn setup<C: Circuit<E::Scalar>>(
+  fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError>;
 
-  /// Produces witness and instance for a given circuit
-  fn gen_witness<C: Circuit<E::Scalar>>(
+  /// Produces witness and instance for a given circuit, and proves it
+  fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
     is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<(R1CSInstance<E>, R1CSWitness<E>), SpartanError>;
-
-  /// Produces a new SNARK for a relaxed R1CS
-  fn prove(
-    pk: &Self::ProverKey,
-    U: &R1CSInstance<E>,
-    W: &R1CSWitness<E>,
   ) -> Result<Self, SpartanError>;
 
   /// Verifies a SNARK for a relaxed R1CS and returns the public IO

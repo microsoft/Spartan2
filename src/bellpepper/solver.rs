@@ -35,10 +35,7 @@ impl<E: Engine> PartialEq for SatisfyingAssignment<E> {
   }
 }
 
-impl<E: Engine> ConstraintSystem<E::Scalar> for SatisfyingAssignment<E>
-where
-  E::Scalar: PrimeField,
-{
+impl<E: Engine> ConstraintSystem<E::Scalar> for SatisfyingAssignment<E> {
   type Root = Self;
 
   fn new() -> Self {

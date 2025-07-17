@@ -99,7 +99,7 @@ where
   }
 
   /// Proves the inner product argument
-  pub(crate) fn prove(
+  pub fn prove(
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
     U: &InnerProductInstance<E>,

@@ -1,21 +1,19 @@
-//! Support for generating R1CS from [Bellperson].
-//!
-//! [Bellperson]: https://github.com/filecoin-project/bellperson
-
+//! Support for generating R1CS from Bellpepper
 pub mod r1cs;
 pub mod shape_cs;
 pub mod solver;
+pub mod test_r1cs;
 pub mod test_shape_cs;
 
 #[cfg(test)]
 mod tests {
   use crate::{
     bellpepper::{
-      r1cs::{SpartanShape, SpartanWitness},
-      shape_cs::ShapeCS,
       solver::SatisfyingAssignment,
+      test_r1cs::{TestSpartanShape, TestSpartanWitness},
+      test_shape_cs::TestShapeCS,
     },
-    provider::PallasIPAEngine,
+    provider::PallasHyraxEngine,
     traits::Engine,
   };
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
@@ -44,19 +42,16 @@ mod tests {
     Ok(())
   }
 
-  fn test_alloc_bit_with<E>()
-  where
-    E: Engine,
-  {
+  fn test_alloc_bit_with<E: Engine>() {
     // First create the shape
-    let mut cs: ShapeCS<E> = ShapeCS::new();
+    let mut cs: TestShapeCS<E> = TestShapeCS::new();
     let _ = synthesize_alloc_bit(&mut cs);
-    let (shape, ck, _vk) = cs.r1cs_shape();
+    let (shape, ck, _vk) = cs.r1cs_shape().unwrap();
 
     // Now get the assignment
     let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
     let _ = synthesize_alloc_bit(&mut cs);
-    let (inst, witness) = cs.r1cs_instance_and_witness(&shape, &ck, false).unwrap();
+    let (inst, witness) = cs.r1cs_instance_and_witness(&shape, &ck, true).unwrap();
 
     // Make sure that this is satisfiable
     assert!(shape.is_sat(&ck, &inst, &witness).is_ok());
@@ -64,6 +59,6 @@ mod tests {
 
   #[test]
   fn test_alloc_bit() {
-    test_alloc_bit_with::<PallasIPAEngine>();
+    test_alloc_bit_with::<PallasHyraxEngine>();
   }
 }

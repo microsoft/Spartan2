@@ -14,13 +14,12 @@
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 
-use bellpepper_core::{Circuit, ConstraintSystem};
 use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::{debug, info, info_span};
 
 // private modules
 mod math;
@@ -50,10 +49,11 @@ use polys::{
   eq::EqPolynomial,
   multilinear::{MultilinearPolynomial, SparsePolynomial},
 };
-use r1cs::{R1CSInstance, R1CSShape, R1CSWitness, SparseMatrix};
+use r1cs::{SparseMatrix, SplitR1CSInstance, SplitR1CSShape};
 use sumcheck::SumcheckProof;
 use traits::{
   Engine,
+  circuit::SpartanCircuit,
   pcs::PCSEngineTrait,
   snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
   transcript::TranscriptEngineTrait,
@@ -73,6 +73,7 @@ pub(crate) use start_span;
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
 type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
+type PartialCommitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::PartialCommitment;
 type PCS<E> = <E as Engine>::PCS;
 type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 
@@ -81,7 +82,7 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  S: R1CSShape<E>,
+  S: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -90,7 +91,7 @@ pub struct SpartanProverKey<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  S: R1CSShape<E>,
+  S: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -115,7 +116,7 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
 
 /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
 fn compute_eval_table_sparse<E: Engine>(
-  S: &R1CSShape<E>,
+  S: &SplitR1CSShape<E>,
   rx: &[E::Scalar],
 ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
   assert_eq!(rx.len(), S.num_cons);
@@ -128,21 +129,22 @@ fn compute_eval_table_sparse<E: Engine>(
     }
   };
 
+  let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
   let (A_evals, (B_evals, C_evals)) = rayon::join(
     || {
-      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
       inner(&S.A, &mut A_evals);
       A_evals
     },
     || {
       rayon::join(
         || {
-          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.B, &mut B_evals);
           B_evals
         },
         || {
-          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * S.num_vars];
+          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.C, &mut C_evals);
           C_evals
         },
@@ -159,7 +161,7 @@ fn compute_eval_table_sparse<E: Engine>(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
-  U: R1CSInstance<E>,
+  U: SplitR1CSInstance<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
@@ -171,17 +173,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
 
-  fn setup<C: Circuit<E::Scalar>>(
+  fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let mut cs: ShapeCS<E> = ShapeCS::new();
-    circuit
-      .synthesize(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize circuit: {e}"),
-      })?;
+    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit)?;
 
-    let (S, ck, vk_ee) = cs.r1cs_shape();
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
@@ -196,49 +192,45 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     Ok((pk, vk))
   }
 
-  fn gen_witness<C: Circuit<E::Scalar>>(
+  /// produces a succinct proof of satisfiability of an R1CS instance
+  fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
     is_small: bool,
-  ) -> Result<(R1CSInstance<E>, r1cs::R1CSWitness<E>), SpartanError> {
-    let (_synth_span, synth_t) = start_span!("circuit_synthesize");
-    let mut cs: SatisfyingAssignment<E> = SatisfyingAssignment::new();
-    circuit
-      .synthesize(&mut cs)
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize witness: {e}"),
-      })?;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
-
-    let (_r1cs_span, r1cs_t) = start_span!("r1cs_instance_and_witness");
-    let (U, W) = cs
-      .r1cs_instance_and_witness(&pk.S, &pk.ck, is_small)
-      .map_err(|_e| SpartanError::UnSat {
-        reason: "Unable to synthesize witness".to_string(),
-      })?;
-    info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "r1cs_instance_and_witness");
-
-    Ok((U, W))
-  }
-
-  /// produces a succinct proof of satisfiability of an R1CS instance
-  fn prove(
-    pk: &Self::ProverKey,
-    U: &R1CSInstance<E>,
-    W: &R1CSWitness<E>,
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
-
-    // append the digest of vk (which includes R1CS matrices) and the RelaxedR1CSInstance to the transcript
     transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"U", U);
+
+    let public_values = circuit
+      .public_values()
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })?;
+
+    // absorb the public values into the transcript
+    transcript.absorb(b"public_values", &public_values.as_slice());
+
+    let (U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
+      &pk.S,
+      &pk.ck,
+      &circuit,
+      is_small,
+      &mut transcript,
+    )?;
 
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
-    let mut z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
+    let mut z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
 
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(pk.S.num_vars.ilog2()).unwrap() + 1),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
     // outer sum-check preparation
@@ -255,7 +247,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(
       elapsed_ms = %mv_t.elapsed().as_millis(),
       constraints = %pk.S.num_cons,
-      vars = %pk.S.num_vars,
+      vars = %num_vars,
       "matrix_vector_multiply"
     );
 
@@ -318,7 +310,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     let (_z_span, z_t) = start_span!("prepare_poly_z");
     let poly_z = {
-      z.resize(pk.S.num_vars * 2, E::Scalar::ZERO);
+      z.resize(num_vars * 2, E::Scalar::ZERO);
       z
     };
     info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
@@ -326,6 +318,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // inner sum-check
     let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
 
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
     };
@@ -340,12 +338,19 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let (eval_W, eval_arg) =
-      E::PCS::prove(&pk.ck, &mut transcript, &U.comm_W, &W.W, &W.r_W, &r_y[1..])?;
+    let U_regular = U.to_regular_instance()?;
+    let (eval_W, eval_arg) = E::PCS::prove(
+      &pk.ck,
+      &mut transcript,
+      &U_regular.comm_W,
+      &W.W,
+      &W.r_W,
+      &r_y[1..],
+    )?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
-      U: U.clone(),
+      U,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
@@ -359,13 +364,23 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
     let mut transcript = E::TE::new(b"R1CSSNARK");
 
-    // append the digest of R1CS matrices and the RelaxedR1CSInstance to the transcript
+    // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
-    transcript.absorb(b"U", &self.U);
+
+    // validate the provided split R1CS instance and convert to regular instance
+    self.U.validate(&vk.S, &mut transcript)?;
+    let U_regular = self.U.to_regular_instance()?;
+
+    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 
     let (num_rounds_x, num_rounds_y) = (
       usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(vk.S.num_vars.ilog2()).unwrap() + 1),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
+
+    info!(
+      "Verifying R1CS SNARK with {} rounds for outer sum-check and {} rounds for inner sum-check",
+      num_rounds_x, num_rounds_y
     );
 
     // outer sum-check
@@ -417,9 +432,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
-          .chain(self.U.X.iter().cloned())
+          .chain(U_regular.X.iter().cloned())
           .collect::<Vec<E::Scalar>>();
-        SparsePolynomial::new(vk.S.num_vars.log_2(), X).evaluate(&r_y[1..])
+        SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
       (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
     };
@@ -477,7 +492,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
-      &self.U.comm_W,
+      &U_regular.comm_W,
       &r_y[1..],
       &self.eval_W,
       &self.eval_arg,
@@ -485,7 +500,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
-    Ok(self.U.X.clone())
+    Ok(self.U.public_values.clone())
   }
 }
 
@@ -493,19 +508,51 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 mod tests {
   use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
-  use ff::PrimeField;
+  use tracing_subscriber::EnvFilter;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
-  impl<F: PrimeField> Circuit<F> for CubicCircuit {
-    fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+  impl<E: Engine> SpartanCircuit<E> for CubicCircuit {
+    fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+      Ok(vec![E::Scalar::from(15u64)])
+    }
+
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      // In this example, we do not have shared variables.
+      Ok(vec![])
+    }
+
+    fn precommitted<CS: ConstraintSystem<<E as Engine>::Scalar>>(
+      &self,
+      _: &mut CS,
+      _: &[AllocatedNum<E::Scalar>], // shared variables, if any
+    ) -> Result<Vec<AllocatedNum<<E as Engine>::Scalar>>, SynthesisError> {
+      // In this example, we do not have precommitted variables.
+      Ok(vec![])
+    }
+
+    fn num_challenges(&self) -> usize {
+      // In this example, we do not use challenges.
+      0
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      cs: &mut CS,
+      _: &[AllocatedNum<E::Scalar>],
+      _: &[AllocatedNum<E::Scalar>],
+      _: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
-      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(F::ONE + F::ONE))?;
+      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ONE + E::Scalar::ONE))?;
       let x_sq = x.square(cs.namespace(|| "x_sq"))?;
       let x_cu = x_sq.mul(cs.namespace(|| "x_cu"), &x)?;
       let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + F::from(5u64))
+        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + E::Scalar::from(5u64))
       })?;
 
       cs.enforce(
@@ -531,21 +578,19 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    type E = crate::provider::PallasIPAEngine;
+    tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)                // no bold colour codes
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+
+    type E = crate::provider::PallasHyraxEngine;
     type S = R1CSSNARK<E>;
     test_snark_with::<E, S>();
 
-    type E2 = crate::provider::T256IPAEngine;
+    type E2 = crate::provider::T256HyraxEngine;
     type S2 = crate::R1CSSNARK<E2>;
     test_snark_with::<E2, S2>();
-
-    type E3 = crate::provider::PallasHyraxEngine;
-    type S3 = R1CSSNARK<E3>;
-    test_snark_with::<E3, S3>();
-
-    type E4 = crate::provider::T256HyraxEngine;
-    type S4 = crate::R1CSSNARK<E4>;
-    test_snark_with::<E4, S4>();
   }
 
   fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
@@ -554,11 +599,8 @@ mod tests {
     // produce keys
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
-    // generate a witness
-    let (U, W) = S::gen_witness(&pk, circuit.clone(), false).unwrap();
-
-    // produce a SNARK
-    let res = S::prove(&pk, &U, &W);
+    // generate a witness and proof
+    let res = S::prove(&pk, circuit.clone(), false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 

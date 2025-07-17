@@ -14,14 +14,13 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::{CommitmentTrait, Len, PCSEngineTrait},
+    pcs::{CommitmentTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
 use core::marker::PhantomData;
-use ff::Field;
-use num_integer::{Integer, div_ceil};
-use num_traits::ToPrimitive;
+use ff::{Field, PrimeField};
+use num_integer::div_ceil;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -55,15 +54,6 @@ where
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
   ck_s: AffineGroupElement<E>,
-}
-
-impl<E: Engine> Len for HyraxCommitmentKey<E>
-where
-  E::GE: DlogGroup,
-{
-  fn length(&self) -> usize {
-    self.num_rows * self.num_cols
-  }
 }
 
 /// Structure that holds commitments
@@ -103,27 +93,21 @@ where
   type CommitmentKey = HyraxCommitmentKey<E>;
   type VerifierKey = HyraxVerifierKey<E>;
   type Commitment = HyraxCommitment<E>;
+  type PartialCommitment = HyraxCommitment<E>;
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
+
+  fn width() -> usize {
+    1024 // Hyrax PC is always 1024 columns wide
+  }
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
   fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let padded_n = n.next_power_of_two();
-    assert!(n >= 1024);
-
-    // we will have at least 1024 columns, and remain so up to 2^20 sized polynomials
-    let num_cols = if padded_n <= 1 << 20 {
-      1024
-    } else if padded_n <= 1 << 24 {
-      2048
-    } else if padded_n <= 1 << 28 {
-      4096
-    } else {
-      8192
-    };
 
     // we will have at least one row
-    let num_rows = div_ceil(padded_n, num_cols);
+    let num_cols = Self::width();
+    let num_rows = div_ceil(padded_n, Self::width());
 
     let gens = E::GE::from_label(label, num_cols + 2);
     let ck = gens[..num_cols].to_vec();
@@ -161,6 +145,7 @@ where
     ck: &Self::CommitmentKey,
     v: &[E::Scalar],
     r: &Self::Blind,
+    is_small: bool,
   ) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
@@ -183,7 +168,19 @@ where
         } else {
           &v[num_cols * i..num_cols * (i + 1)]
         };
-        let msm_result = E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?;
+        let msm_result = if !is_small {
+          E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
+        } else {
+          let scalars_small = scalars
+            .par_iter()
+            .map(|s| s.to_repr().as_ref()[0] as u64)
+            .collect::<Vec<_>>();
+          E::GE::vartime_multiscalar_mul_small(
+            &scalars_small,
+            &ck.ck[..scalars_small.len()],
+            false,
+          )?
+        };
         Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;
@@ -191,38 +188,49 @@ where
     Ok(HyraxCommitment { comm })
   }
 
-  fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
+  fn commit_partial(
     ck: &Self::CommitmentKey,
-    v: &[T],
+    v: &[E::Scalar],
     r: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError> {
-    let n = v.len();
+    is_small: bool,
+  ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError> {
+    // commit to the vector using the provided blinds
+    let partial = Self::commit(ck, v, r, is_small)?;
 
-    if n > ck.num_rows * ck.num_cols {
-      return Err(SpartanError::InvalidVectorSize {
-        actual: n,
-        max: ck.num_rows * ck.num_cols,
+    // check how many blinds were used
+    let r_remaining = HyraxBlind {
+      blind: r.blind[partial.comm.len()..].to_vec(),
+    };
+
+    // return the partial commitment and the remaining blinds
+    Ok((partial, r_remaining))
+  }
+
+  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {
+    let num_rows = div_ceil(n, Self::width());
+    if comm.comm.len() != num_rows {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: format!(
+          "InvalidCommitmentLength: actual: {}, expected: {}",
+          comm.comm.len(),
+          num_rows
+        ),
       });
     }
+    Ok(())
+  }
 
-    // compute the expected number of columns
-    let num_cols = ck.num_cols;
-    let num_rows = div_ceil(n, ck.num_cols);
-
-    let comm = (0..num_rows)
-      .into_par_iter()
-      .map(|i| {
-        let scalars = if v[num_cols * i..].len() < num_cols {
-          &v[num_cols * i..]
-        } else {
-          &v[num_cols * i..num_cols * (i + 1)]
-        };
-        let msm_result =
-          E::GE::vartime_multiscalar_mul_small(scalars, &ck.ck[..scalars.len()], false)?;
-        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
+  fn combine_partial(
+    partial_comms: &[Self::PartialCommitment],
+  ) -> Result<Self::Commitment, SpartanError> {
+    if partial_comms.is_empty() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+    // combine comm from each partial commitment
+    let comm = partial_comms
+      .iter()
+      .flat_map(|pc| pc.comm.clone())
+      .collect::<Vec<_>>();
     Ok(HyraxCommitment { comm })
   }
 
