@@ -82,7 +82,6 @@ type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  num_challenges: usize, // number of challenges in the circuit
   S: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -92,7 +91,6 @@ pub struct SpartanProverKey<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  num_challenges: usize, // number of challenges in the circuit
   S: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
@@ -181,14 +179,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit)?;
 
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
-      num_challenges: circuit.num_challenges(),
       S: S.clone(),
       vk_ee,
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
-      num_challenges: circuit.num_challenges(),
       S,
       vk_digest: vk.digest()?,
     };
