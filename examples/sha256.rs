@@ -13,7 +13,7 @@ use bellpepper_core::{
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
-  R1CSSNARK,
+  spartan::R1CSSNARK,
   provider::T256HyraxEngine,
   traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
