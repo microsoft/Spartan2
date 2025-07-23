@@ -23,6 +23,7 @@ pub(crate) use sparse::SparseMatrix;
 
 /// A type that holds the shape of the R1CS matrices
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct R1CSShape<E: Engine> {
   pub(crate) num_cons: usize,
   pub(crate) num_vars: usize,
@@ -38,10 +39,11 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct R1CSWitness<E: Engine> {
-  is_small: bool, // whether the witness elements fit in machine words
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
+  pub(crate) is_small: bool, // whether the witness elements fit in machine words
 }
 
 /// A type that holds an R1CS instance

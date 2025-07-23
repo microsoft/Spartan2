@@ -6,15 +6,88 @@
 //! This module implements a non-interactive folding scheme from NeutronNova
 #![allow(non_snake_case)]
 use crate::{
+  CommitmentKey,
   errors::SpartanError,
   math::Math,
   polys::{eq::EqPolynomial, univariate::UniPoly},
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness},
-  traits::{Engine, pcs::FoldingEngineTrait, transcript::TranscriptEngineTrait},
+  traits::{
+    Engine,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
+    transcript::TranscriptEngineTrait,
+  },
 };
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// A type that holds instance information for a zero-fold relation
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct FoldedInstance<E: Engine> {
+  left: usize,
+  right: usize,
+  E: Vec<E::Scalar>,
+  U: R1CSInstance<E>,
+  T: E::Scalar,
+}
+
+/// A type that holds a folded witness for a zero-fold relation
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct FoldedWitness<E: Engine> {
+  W: R1CSWitness<E>,
+}
+
+impl<E: Engine> FoldedWitness<E> {
+  /// Check if the folded witness satisfies the folded instance
+  pub fn is_sat(
+    &self,
+    ck: &CommitmentKey<E>,
+    S: &R1CSShape<E>,
+    U: &FoldedInstance<E>,
+  ) -> Result<(), SpartanError> {
+    let z = [self.W.W.clone(), vec![E::Scalar::ONE], U.U.X.clone()].concat();
+    let (Az, Bz, Cz) = S.multiply_vec(&z)?;
+
+    // full_E is the outer outer product of E1 and E2
+    // E1 and E2 are splits of E
+    let (E1, E2) = U.E.split_at(U.left);
+    let mut full_E = vec![E::Scalar::ONE; U.left * U.right];
+    for i in 0..U.right {
+      for j in 0..U.left {
+        full_E[i * U.left + j] = E2[i] * E1[j];
+      }
+    }
+
+    let sum = full_E
+      .par_iter()
+      .zip(Az.par_iter())
+      .zip(Bz.par_iter())
+      .zip(Cz.par_iter())
+      .map(|(((e, a), b), c)| *e * ((*a) * (*b) - *c))
+      .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
+
+    if sum != U.T {
+      println!("sum: {:?}", sum);
+      println!("U.T: {:?}", U.T);
+      return Err(SpartanError::UnSat {
+        reason: "sum != U.T".to_string(),
+      });
+    }
+
+    // check the validity of the commitments
+    let comm_W = E::PCS::commit(ck, &self.W.W, &self.W.r_W, self.W.is_small)?;
+
+    if comm_W != U.U.comm_W {
+      return Err(SpartanError::UnSat {
+        reason: "comm_W != U.comm_W || comm_E != U.comm_E".to_string(),
+      });
+    }
+
+    Ok(())
+  }
+}
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by Spartan SNARK
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,6 +264,7 @@ where
 
   /// Prove the folding of a batch of R1CS instances
   pub fn prove(
+    ck: &CommitmentKey<E>,
     pp_digest: &E::Scalar,
     S: &R1CSShape<E>,
     instances: &[R1CSInstance<E>],
@@ -275,12 +349,23 @@ where
 
     // compute the sum-check polynomial's evaluations at r_b
     let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let _T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
+    let T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
 
-    let _U = U1.fold(U2, &r_b)?;
-    let _W = W1.fold(W2, &r_b)?;
+    let U = U1.fold(U2, &r_b)?;
+    let W = W1.fold(W2, &r_b)?;
 
-    // TODO prove U using W as witness and T_out as target
+    let folded_U = FoldedInstance {
+      left,
+      right,
+      E,
+      U,
+      T: T_out,
+    };
+
+    let folded_W = FoldedWitness { W };
+
+    // check if the folded witness satisfies the folded instance
+    folded_W.is_sat(ck, S, &folded_U)?;
 
     Ok(Self { poly })
   }
