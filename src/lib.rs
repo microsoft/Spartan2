@@ -25,6 +25,7 @@ mod macros;
 pub mod bellpepper;
 pub mod digest;
 pub mod errors;
+pub mod neutron;
 pub mod polys;
 pub mod provider;
 pub mod spartan;

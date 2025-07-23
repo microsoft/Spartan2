@@ -6,7 +6,7 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::PCSEngineTrait,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -210,6 +210,30 @@ impl<E: Engine> R1CSWitness<E> {
   ) -> Result<R1CSWitness<E>, SpartanError> {
     Ok(Self { W, r_W, is_small })
   }
+
+  /// Fold the witness with another witness
+  pub fn fold(&self, W2: &R1CSWitness<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    // we need to compute the weighted sum using weights of (1-r_b) and r_b
+    let W = self
+      .W
+      .par_iter()
+      .zip(W2.W.par_iter())
+      .map(|(w1, w2)| *w1 + *r_b * (*w2 - *w1))
+      .collect::<Vec<_>>();
+    let r_W = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &[self.r_W.clone(), W2.r_W.clone()],
+      &[E::Scalar::ONE - r_b, *r_b],
+    )?;
+
+    Ok(Self {
+      W,
+      r_W,
+      is_small: false, // after folding, witnesses are not small
+    })
+  }
 }
 
 impl<E: Engine> R1CSInstance<E> {
@@ -235,6 +259,26 @@ impl<E: Engine> R1CSInstance<E> {
     X: Vec<E::Scalar>,
   ) -> Result<R1CSInstance<E>, SpartanError> {
     Ok(R1CSInstance { comm_W, X })
+  }
+
+  /// Fold the instance with another instance
+  pub fn fold(&self, U2: &R1CSInstance<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    // we need to compute the weighted sum using weights of (1-r_b) and r_b
+    let comm_W = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &[self.comm_W.clone(), U2.comm_W.clone()],
+      &[E::Scalar::ONE - r_b, *r_b],
+    )?;
+
+    let X = self
+      .X
+      .par_iter()
+      .zip(U2.X.par_iter())
+      .map(|(x1, x2)| (E::Scalar::ONE - r_b) * x1 + *r_b * x2)
+      .collect::<Vec<_>>();
+    Ok(Self { comm_W, X })
   }
 }
 
