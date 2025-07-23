@@ -9,7 +9,7 @@ use crate::{
   CommitmentKey,
   errors::SpartanError,
   math::Math,
-  polys::{eq::EqPolynomial, univariate::UniPoly},
+  polys::{power::PowPolynomial, univariate::UniPoly},
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness},
   traits::{
     Engine,
@@ -94,6 +94,8 @@ impl<E: Engine> FoldedWitness<E> {
 #[serde(bound = "")]
 pub struct NeutronSNARK<E: Engine> {
   poly: UniPoly<E::Scalar>,
+  T_out: E::Scalar,
+  folded_U: FoldedInstance<E>,
 }
 
 impl<E: Engine> NeutronSNARK<E>
@@ -269,8 +271,9 @@ where
     S: &R1CSShape<E>,
     instances: &[R1CSInstance<E>],
     witnesses: &[R1CSWitness<E>],
-    transcript: &mut E::TE,
   ) -> Result<Self, SpartanError> {
+    let mut transcript = E::TE::new(b"neutron_prove");
+
     let ell = S.num_cons.next_power_of_two().log_2();
     // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
     let ell1 = ell.div_ceil(2); // This ensures ell1 >= ell2
@@ -291,13 +294,9 @@ where
     transcript.absorb(b"U2", U2);
 
     // generate a challenge for the eq polynomial
-    let tau = (0..ell)
-      .map(|_| transcript.squeeze(b"tau"))
-      .collect::<Result<Vec<_>, _>>()?;
+    let tau = transcript.squeeze(b"tau")?;
 
-    let E1 = EqPolynomial::new(tau[..ell1].to_vec()).evals();
-    let E2 = EqPolynomial::new(tau[ell1..].to_vec()).evals();
-    let E = [E1, E2].concat();
+    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
 
     let rho = transcript.squeeze(b"rho")?;
 
@@ -367,7 +366,11 @@ where
     // check if the folded witness satisfies the folded instance
     folded_W.is_sat(ck, S, &folded_U)?;
 
-    Ok(Self { poly })
+    Ok(Self {
+      poly,
+      T_out,
+      folded_U,
+    })
   }
 
   /*pub fn verify(
@@ -378,4 +381,131 @@ where
   ) -> Result<(), SpartanError> {
     OK(())
   }*/
+}
+
+#[cfg(test)]
+mod benchmarks {
+  use super::*;
+  use crate::{
+    bellpepper::{
+      solver::SatisfyingAssignment,
+      test_r1cs::{TestSpartanShape, TestSpartanWitness},
+      test_shape_cs::TestShapeCS,
+    },
+    provider::T256HyraxEngine,
+    r1cs::R1CSShape,
+  };
+  use bellpepper::gadgets::{
+    boolean::{AllocatedBit, Boolean},
+    num::AllocatedNum,
+    sha256::sha256,
+  };
+  use bellpepper_core::{ConstraintSystem, SynthesisError};
+  use core::marker::PhantomData;
+  use criterion::Criterion;
+  struct Sha256Circuit<E: Engine> {
+    preimage: Vec<u8>,
+    _p: PhantomData<E>,
+  }
+
+  impl<E: Engine> Sha256Circuit<E> {
+    pub fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      cs: &mut CS,
+    ) -> Result<(), SynthesisError> {
+      // we write a circuit that checks if the input is a SHA256 preimage
+      let bit_values: Vec<_> = self
+        .preimage
+        .clone()
+        .into_iter()
+        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1u8 == 1u8))
+        .map(Some)
+        .collect();
+      assert_eq!(bit_values.len(), self.preimage.len() * 8);
+
+      let preimage_bits = bit_values
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("preimage bit {i}")), b))
+        .map(|b| b.map(Boolean::from))
+        .collect::<Result<Vec<_>, _>>()?;
+
+      let _ = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
+
+      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ZERO))?;
+      x.inputize(cs.namespace(|| "inputize x"))?;
+
+      Ok(())
+    }
+  }
+
+  fn generarate_sha_r1cs<E: Engine>(
+    len: usize,
+  ) -> (
+    CommitmentKey<E>,
+    R1CSShape<E>,
+    Vec<R1CSInstance<E>>,
+    Vec<R1CSWitness<E>>,
+  ) {
+    let circuit = Sha256Circuit::<E> {
+      preimage: vec![0u8; len],
+      _p: Default::default(),
+    };
+
+    let mut cs: TestShapeCS<E> = TestShapeCS::new();
+    let _ = circuit.synthesize(&mut cs);
+    let (S, ck, _vk) = cs.r1cs_shape().unwrap();
+    let S = S.pad();
+
+    let mut cs = SatisfyingAssignment::<E>::new();
+    let _ = circuit.synthesize(&mut cs);
+    let (U1, W1) = cs.r1cs_instance_and_witness(&S, &ck, true).unwrap();
+
+    let circuit2 = Sha256Circuit::<E> {
+      preimage: vec![1u8; len],
+      _p: Default::default(),
+    };
+    let mut cs = SatisfyingAssignment::<E>::new();
+    let _ = circuit2.synthesize(&mut cs);
+    let (U2, W2) = cs.r1cs_instance_and_witness(&S, &ck, true).unwrap();
+
+    let instances = vec![U1, U2];
+    let witnesses = vec![W1, W2];
+
+    (ck, S, instances, witnesses)
+  }
+
+  fn bench_nifs_inner<E: Engine>(
+    c: &mut Criterion,
+    name: &str,
+    ck: &CommitmentKey<E>,
+    S: &R1CSShape<E>,
+    instances: &[R1CSInstance<E>],
+    witnesses: &[R1CSWitness<E>],
+  ) where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    // generate default values
+    let pp_digest = E::Scalar::ZERO;
+
+    // produce an NIFS with (W, U) as the first incoming witness-instance pair
+    let num_cons = S.num_cons;
+    c.bench_function(&format!("neutron_nifs_{name}_{num_cons}"), |b| {
+      b.iter(|| {
+        let res = NeutronSNARK::prove(ck, &pp_digest, S, instances, witnesses);
+        assert!(res.is_ok());
+      })
+    });
+  }
+
+  #[test]
+  fn bench_nifs_sha256() {
+    type E = T256HyraxEngine;
+
+    let mut criterion = Criterion::default();
+    for len in [64, 128].iter() {
+      let (ck, S, instances, witnesses) = generarate_sha_r1cs::<E>(*len);
+      bench_nifs_inner(&mut criterion, &"sha256", &ck, &S, &instances, &witnesses);
+    }
+  }
 }

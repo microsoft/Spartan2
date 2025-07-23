@@ -157,6 +157,77 @@ impl<E: Engine> R1CSShape<E> {
     E::PCS::setup(b"ck", self.num_vars)
   }
 
+  // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
+  // Returns false if num_cons or num_vars are not powers of two, or if num_io > num_vars
+  #[inline]
+  pub(crate) fn is_regular_shape(&self) -> bool {
+    let cons_valid = self.num_cons.next_power_of_two() == self.num_cons;
+    let vars_valid = self.num_vars.next_power_of_two() == self.num_vars;
+    let io_lt_vars = self.num_io < self.num_vars;
+    cons_valid && vars_valid && io_lt_vars
+  }
+
+  /// Pads the `R1CSShape` so that the shape passes `is_regular_shape`
+  /// Renumbers variables to accommodate padded variables
+  pub fn pad(&self) -> Self {
+    // check if the provided R1CSShape is already as required
+    if self.is_regular_shape() {
+      return self.clone();
+    }
+
+    // equalize the number of variables and public IO
+    let m = max(self.num_vars, self.num_io).next_power_of_two();
+
+    // check if the number of variables are as expected, then
+    // we simply set the number of constraints to the next power of two
+    if self.num_vars == m {
+      return R1CSShape {
+        num_cons: self.num_cons.next_power_of_two(),
+        num_vars: m,
+        num_io: self.num_io,
+        A: self.A.clone(),
+        B: self.B.clone(),
+        C: self.C.clone(),
+        digest: OnceCell::new(),
+      };
+    }
+
+    // otherwise, we need to pad the number of variables and renumber variable accesses
+    let num_vars_padded = m;
+    let num_cons_padded = self.num_cons.next_power_of_two();
+
+    let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+      M.indices.par_iter_mut().for_each(|c| {
+        if *c >= self.num_vars {
+          *c += num_vars_padded - self.num_vars
+        }
+      });
+
+      M.cols += num_vars_padded - self.num_vars;
+
+      let ex = {
+        let nnz = M.indptr.last().unwrap();
+        vec![*nnz; num_cons_padded - self.num_cons]
+      };
+      M.indptr.extend(ex);
+      M
+    };
+
+    let A_padded = apply_pad(self.A.clone());
+    let B_padded = apply_pad(self.B.clone());
+    let C_padded = apply_pad(self.C.clone());
+
+    R1CSShape {
+      num_cons: num_cons_padded,
+      num_vars: num_vars_padded,
+      num_io: self.num_io,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
+      digest: OnceCell::new(),
+    }
+  }
+
   pub fn multiply_vec(
     &self,
     z: &[E::Scalar],
