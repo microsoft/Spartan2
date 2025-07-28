@@ -50,21 +50,19 @@ where
   fn prove_helper(
     rho: &E::Scalar,
     (left, right): (usize, usize),
-    e1: &[E::Scalar],
+    e: &[E::Scalar],
     Az1: &[E::Scalar],
     Bz1: &[E::Scalar],
     Cz1: &[E::Scalar],
-    e2: &[E::Scalar],
     Az2: &[E::Scalar],
     Bz2: &[E::Scalar],
     Cz2: &[E::Scalar],
   ) -> (E::Scalar, E::Scalar, E::Scalar, E::Scalar, E::Scalar) {
     // sanity check sizes
-    assert_eq!(e1.len(), left + right);
+    assert_eq!(e.len(), left + right);
     assert_eq!(Az1.len(), left * right);
     assert_eq!(Bz1.len(), left * right);
     assert_eq!(Cz1.len(), left * right);
-    assert_eq!(e2.len(), left + right);
     assert_eq!(Az2.len(), left * right);
     assert_eq!(Bz2.len(), left * right);
     assert_eq!(Cz2.len(), left * right);
@@ -80,12 +78,12 @@ where
           .map(|j| {
             // Turn the two dimensional (i, j) into a single dimension index
             let k = i * left + j;
+            let poly_e_bound_point = e[j];
 
             // eval 0: bound_func is A(low)
-            let eval_point_0 = comb_func(&e1[j], &Az1[k], &Bz1[k], &Cz1[k]);
+            let eval_point_0 = comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k]);
 
             // eval 2: bound_func is -A(low) + 2*A(high)
-            let poly_e_bound_point = e2[j] + e2[j] - e1[j];
             let poly_Az_bound_point = Az2[k] + Az2[k] - Az1[k];
             let poly_Bz_bound_point = Bz2[k] + Bz2[k] - Bz1[k];
             let poly_Cz_bound_point = Cz2[k] + Cz2[k] - Cz1[k];
@@ -97,7 +95,6 @@ where
             );
 
             // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-            let poly_e_bound_point = poly_e_bound_point + e2[j] - e1[j];
             let poly_Az_bound_point = poly_Az_bound_point + Az2[k] - Az1[k];
             let poly_Bz_bound_point = poly_Bz_bound_point + Bz2[k] - Bz1[k];
             let poly_Cz_bound_point = poly_Cz_bound_point + Cz2[k] - Cz1[k];
@@ -109,7 +106,6 @@ where
             );
 
             // eval 4: bound_func is -3A(low) + 4A(high); computed incrementally with bound_func applied to eval(3)
-            let poly_e_bound_point = poly_e_bound_point + e2[j] - e1[j];
             let poly_Az_bound_point = poly_Az_bound_point + Az2[k] - Az1[k];
             let poly_Bz_bound_point = poly_Bz_bound_point + Bz2[k] - Bz1[k];
             let poly_Cz_bound_point = poly_Cz_bound_point + Cz2[k] - Cz1[k];
@@ -121,7 +117,6 @@ where
             );
 
             // eval 5: bound_func is -4A(low) + 5A(high); computed incrementally with bound_func applied to eval(4)
-            let poly_e_bound_point = poly_e_bound_point + e2[j] - e1[j];
             let poly_Az_bound_point = poly_Az_bound_point + Az2[k] - Az1[k];
             let poly_Bz_bound_point = poly_Bz_bound_point + Bz2[k] - Bz1[k];
             let poly_Cz_bound_point = poly_Cz_bound_point + Cz2[k] - Cz1[k];
@@ -153,26 +148,23 @@ where
             |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3, a.4 + b.4),
           );
 
-        let f1 = &e1[left..];
-        let f2 = &e2[left..];
+        let f = &e[left..];
+
+        let poly_f_bound_point = f[i];
 
         // eval 0: bound_func is A(low)
-        let eval_at_0 = f1[i] * i_eval_at_0;
+        let eval_at_0 = poly_f_bound_point * i_eval_at_0;
 
         // eval 2: bound_func is -A(low) + 2*A(high)
-        let poly_f_bound_point = f2[i] + f2[i] - f1[i];
         let eval_at_2 = poly_f_bound_point * i_eval_at_2;
 
         // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-        let poly_f_bound_point = poly_f_bound_point + f2[i] - f1[i];
         let eval_at_3 = poly_f_bound_point * i_eval_at_3;
 
         // eval 4: bound_func is -3A(low) + 4A(high); computed incrementally with bound_func applied to eval(3)
-        let poly_f_bound_point = poly_f_bound_point + f2[i] - f1[i];
         let eval_at_4 = poly_f_bound_point * i_eval_at_4;
 
         // eval 5: bound_func is -4A(low) + 5A(high); computed incrementally with bound_func applied to eval(4)
-        let poly_f_bound_point = poly_f_bound_point + f2[i] - f1[i];
         let eval_at_5 = poly_f_bound_point * i_eval_at_5;
 
         (eval_at_0, eval_at_2, eval_at_3, eval_at_4, eval_at_5)
@@ -252,18 +244,8 @@ where
     let (Az2, Bz2, Cz2) = res2?;
 
     // compute the sum-check polynomial's evaluations at 0, 2, 3
-    let (eval_point_0, eval_point_2, eval_point_3, eval_point_4, eval_point_5) = Self::prove_helper(
-      &rho,
-      (left, right),
-      &E,
-      &Az1,
-      &Bz1,
-      &Cz1,
-      &E,
-      &Az2,
-      &Bz2,
-      &Cz2,
-    );
+    let (eval_point_0, eval_point_2, eval_point_3, eval_point_4, eval_point_5) =
+      Self::prove_helper(&rho, (left, right), &E, &Az1, &Bz1, &Cz1, &Az2, &Bz2, &Cz2);
 
     let evals = vec![
       eval_point_0,
