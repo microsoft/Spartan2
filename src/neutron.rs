@@ -21,72 +21,15 @@ use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A type that holds instance information for a zero-fold relation
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct FoldedInstance<E: Engine> {
-  left: usize,
-  right: usize,
-  E: Vec<E::Scalar>,
-  U: R1CSInstance<E>,
-  T: E::Scalar,
-}
+fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
+  let ell = n.next_power_of_two().log_2();
+  // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
+  let ell1 = ell.div_ceil(2); // This ensures ell1 >= ell2
+  let ell2 = ell / 2;
+  let left = 1 << ell1;
+  let right = 1 << ell2;
 
-/// A type that holds a folded witness for a zero-fold relation
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct FoldedWitness<E: Engine> {
-  W: R1CSWitness<E>,
-}
-
-impl<E: Engine> FoldedWitness<E> {
-  /// Check if the folded witness satisfies the folded instance
-  pub fn is_sat(
-    &self,
-    ck: &CommitmentKey<E>,
-    S: &R1CSShape<E>,
-    U: &FoldedInstance<E>,
-  ) -> Result<(), SpartanError> {
-    let z = [self.W.W.clone(), vec![E::Scalar::ONE], U.U.X.clone()].concat();
-    let (Az, Bz, Cz) = S.multiply_vec(&z)?;
-
-    // full_E is the outer outer product of E1 and E2
-    // E1 and E2 are splits of E
-    let (E1, E2) = U.E.split_at(U.left);
-    let mut full_E = vec![E::Scalar::ONE; U.left * U.right];
-    for i in 0..U.right {
-      for j in 0..U.left {
-        full_E[i * U.left + j] = E2[i] * E1[j];
-      }
-    }
-
-    let sum = full_E
-      .par_iter()
-      .zip(Az.par_iter())
-      .zip(Bz.par_iter())
-      .zip(Cz.par_iter())
-      .map(|(((e, a), b), c)| *e * ((*a) * (*b) - *c))
-      .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-
-    if sum != U.T {
-      println!("sum: {:?}", sum);
-      println!("U.T: {:?}", U.T);
-      return Err(SpartanError::UnSat {
-        reason: "sum != U.T".to_string(),
-      });
-    }
-
-    // check the validity of the commitments
-    let comm_W = E::PCS::commit(ck, &self.W.W, &self.W.r_W, self.W.is_small)?;
-
-    if comm_W != U.U.comm_W {
-      return Err(SpartanError::UnSat {
-        reason: "comm_W != U.comm_W || comm_E != U.comm_E".to_string(),
-      });
-    }
-
-    Ok(())
-  }
+  (ell, left, right)
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by Spartan SNARK
@@ -94,8 +37,7 @@ impl<E: Engine> FoldedWitness<E> {
 #[serde(bound = "")]
 pub struct NeutronSNARK<E: Engine> {
   poly: UniPoly<E::Scalar>,
-  T_out: E::Scalar,
-  folded_U: FoldedInstance<E>,
+  folded_W: R1CSWitness<E>,
 }
 
 impl<E: Engine> NeutronSNARK<E>
@@ -266,28 +208,21 @@ where
 
   /// Prove the folding of a batch of R1CS instances
   pub fn prove(
-    ck: &CommitmentKey<E>,
-    pp_digest: &E::Scalar,
+    _ck: &CommitmentKey<E>,
     S: &R1CSShape<E>,
     instances: &[R1CSInstance<E>],
     witnesses: &[R1CSWitness<E>],
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"neutron_prove");
 
-    let ell = S.num_cons.next_power_of_two().log_2();
-    // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
-    let ell1 = ell.div_ceil(2); // This ensures ell1 >= ell2
-    let ell2 = ell / 2;
-    let left = 1 << ell1;
-    let right = 1 << ell2;
+    let (ell, left, right) = compute_tensor_decomp(S.num_cons);
 
     let U1 = &instances[0];
     let W1 = &witnesses[0];
     let U2 = &instances[1];
     let W2 = &witnesses[1];
 
-    // append the digest of pp to the transcript
-    transcript.absorb(b"pp_digest", pp_digest);
+    // TODO: append digest of verifier key here
 
     // append U1 and U2 to transcript
     transcript.absorb(b"U1", U1);
@@ -348,39 +283,110 @@ where
 
     // compute the sum-check polynomial's evaluations at r_b
     let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
+    let _T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
 
-    let U = U1.fold(U2, &r_b)?;
-    let W = W1.fold(W2, &r_b)?;
+    let _folded_U = U1.fold(U2, &r_b)?;
+    let folded_W = W1.fold(W2, &r_b)?;
 
-    let folded_U = FoldedInstance {
-      left,
-      right,
-      E,
-      U,
-      T: T_out,
-    };
-
-    let folded_W = FoldedWitness { W };
-
-    // check if the folded witness satisfies the folded instance
-    folded_W.is_sat(ck, S, &folded_U)?;
-
-    Ok(Self {
-      poly,
-      T_out,
-      folded_U,
-    })
+    Ok(Self { poly, folded_W })
   }
 
-  /*pub fn verify(
+  /// Verifies the NeutronSNARK
+  pub fn verify(
     &self,
-    vk: &VerifierKey<E>,
+    ck: &CommitmentKey<E>,
+    S: &R1CSShape<E>,
     instances: &[R1CSInstance<E>],
-    transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    OK(())
-  }*/
+    let (ell, left, right) = compute_tensor_decomp(S.num_cons);
+
+    let mut transcript = E::TE::new(b"neutron_prove");
+
+    let U1 = &instances[0];
+    let U2 = &instances[1];
+
+    // append U1 and U2 to transcript
+    transcript.absorb(b"U1", U1);
+    transcript.absorb(b"U2", U2);
+
+    // generate a challenge for the eq polynomial
+    let tau = transcript.squeeze(b"tau")?;
+
+    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
+
+    let rho = transcript.squeeze(b"rho")?;
+
+    let _T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
+
+    // absorb poly in the RO
+    transcript.absorb(b"poly", &self.poly);
+
+    // squeeze a challenge
+    let r_b = transcript.squeeze(b"r_b")?;
+
+    // compute the sum-check polynomial's evaluations at r_b
+    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
+    let T_out = self.poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
+
+    let folded_U = U1.fold(U2, &r_b)?;
+
+    // check the satisfiability of folded instance using the provided witness
+    is_sat_with_target(ck, S, &folded_U, &self.folded_W, &E, T_out)?;
+
+    Ok(())
+  }
+}
+
+/// Check if the folded witness satisfies the folded instance
+fn is_sat_with_target<E: Engine>(
+  ck: &CommitmentKey<E>,
+  S: &R1CSShape<E>,
+  U: &R1CSInstance<E>,
+  W: &R1CSWitness<E>,
+  E: &[E::Scalar],
+  T: E::Scalar,
+) -> Result<(), SpartanError> {
+  let (_ell, left, right) = compute_tensor_decomp(S.num_cons);
+
+  let z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
+  let (Az, Bz, Cz) = S.multiply_vec(&z)?;
+
+  // full_E is the outer outer product of E1 and E2
+  // E1 and E2 are splits of E
+  let (E1, E2) = E.split_at(left);
+  let mut full_E = vec![E::Scalar::ONE; left * right];
+  for i in 0..right {
+    for j in 0..left {
+      full_E[i * left + j] = E2[i] * E1[j];
+    }
+  }
+
+  let sum = full_E
+    .par_iter()
+    .zip(Az.par_iter())
+    .zip(Bz.par_iter())
+    .zip(Cz.par_iter())
+    .map(|(((e, a), b), c)| *e * ((*a) * (*b) - *c))
+    .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
+
+  if sum != T {
+    println!("sum: {sum:?}");
+    println!("U.T: {T:?}");
+    return Err(SpartanError::UnSat {
+      reason: "sum != U.T".to_string(),
+    });
+  }
+
+  // check the validity of the commitments
+  let comm_W = E::PCS::commit(ck, &W.W, &W.r_W, W.is_small)?;
+
+  if comm_W != U.comm_W {
+    return Err(SpartanError::UnSat {
+      reason: "comm_W != U.comm_W".to_string(),
+    });
+  }
+
+  Ok(())
 }
 
 #[cfg(test)]
@@ -475,7 +481,7 @@ mod benchmarks {
     (ck, S, instances, witnesses)
   }
 
-  fn bench_nifs_inner<E: Engine>(
+  fn bench_neutron_inner<E: Engine>(
     c: &mut Criterion,
     name: &str,
     ck: &CommitmentKey<E>,
@@ -485,27 +491,31 @@ mod benchmarks {
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
-    // generate default values
-    let pp_digest = E::Scalar::ZERO;
+    // sanity check: prove and verify before benching
+    let res = NeutronSNARK::prove(ck, S, instances, witnesses);
+    assert!(res.is_ok());
 
-    // produce an NIFS with (W, U) as the first incoming witness-instance pair
+    let snark = res.unwrap();
+    let res = snark.verify(ck, S, instances);
+    assert!(res.is_ok());
+
     let num_cons = S.num_cons;
-    c.bench_function(&format!("neutron_nifs_{name}_{num_cons}"), |b| {
+    c.bench_function(&format!("neutron_snark_{name}_{num_cons}"), |b| {
       b.iter(|| {
-        let res = NeutronSNARK::prove(ck, &pp_digest, S, instances, witnesses);
+        let res = NeutronSNARK::prove(ck, S, instances, witnesses);
         assert!(res.is_ok());
       })
     });
   }
 
   #[test]
-  fn bench_nifs_sha256() {
+  fn bench_neutron_sha256() {
     type E = T256HyraxEngine;
 
     let mut criterion = Criterion::default();
     for len in [64, 128].iter() {
       let (ck, S, instances, witnesses) = generarate_sha_r1cs::<E>(*len);
-      bench_nifs_inner(&mut criterion, &"sha256", &ck, &S, &instances, &witnesses);
+      bench_neutron_inner(&mut criterion, "sha256", &ck, &S, &instances, &witnesses);
     }
   }
 }
