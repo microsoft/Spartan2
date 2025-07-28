@@ -255,6 +255,11 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitR1CSShape<E: Engine> {
   pub(crate) num_cons: usize,
+
+  pub(crate) num_shared_unpadded: usize, // shared variables before padding
+  pub(crate) num_precommitted_unpadded: usize, // precommitted variables before padding
+  pub(crate) num_rest_unpadded: usize,   // rest of the variables before padding
+
   pub(crate) num_shared: usize,       // shared variables
   pub(crate) num_precommitted: usize, // precommitted variables
   pub(crate) num_rest: usize,         // rest of the variables
@@ -365,6 +370,11 @@ impl<E: Engine> SplitR1CSShape<E> {
       num_shared: num_shared_padded,
       num_precommitted: num_precommitted_padded,
       num_rest: num_rest_padded,
+
+      num_shared_unpadded: num_shared,
+      num_precommitted_unpadded: num_precommitted,
+      num_rest_unpadded: num_rest,
+
       num_public,
       num_challenges,
       A: A_padded,

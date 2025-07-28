@@ -1,9 +1,7 @@
 //! Support for generating R1CS witness using bellpepper.
-
 use crate::traits::Engine;
-use ff::{Field, PrimeField};
-
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use ff::{Field, PrimeField};
 
 /// A `ConstraintSystem` which calculates witness values for a concrete instance of an R1CS circuit.
 pub struct SatisfyingAssignment<E: Engine>

@@ -48,6 +48,16 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
         reason: format!("Unable to allocate shared variables: {e}"),
       })?;
 
+    // determine the number of shared variables
+    let num_shared = cs.num_aux();
+    debug!("num_shared: {}", num_shared);
+    debug!("shared.len(): {}", shared.len());
+    if shared.len() > num_shared {
+      return Err(SpartanError::SynthesisError {
+        reason: "Shared variables are not allocated correctly".to_string(),
+      });
+    }
+
     // allocate precommitted variables
     let precommitted =
       circuit
@@ -56,15 +66,21 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
           reason: format!("Unable to allocate precommitted variables: {e}"),
         })?;
 
+    let num_precommitted = cs.num_aux() - num_shared;
+    debug!("num_precommitted: {}", num_precommitted);
+    debug!("precommitted.len(): {}", precommitted.len());
+    if precommitted.len() > num_precommitted {
+      return Err(SpartanError::SynthesisError {
+        reason: "Precommitted variables are not allocated correctly".to_string(),
+      });
+    }
+
     // synthesize the circuit
     circuit
       .synthesize(&mut cs, &shared, &precommitted, None)
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize circuit: {e}"),
       })?;
-
-    let num_shared = shared.len();
-    let num_precommitted = precommitted.len();
 
     let mut A = SparseMatrix::<E::Scalar>::empty();
     let mut B = SparseMatrix::<E::Scalar>::empty();
@@ -187,7 +203,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
 
     // produce blinds for all commitments we will send
     let r_W = PCS::<E>::blind(ck);
-    let mut W = vec![E::Scalar::ZERO; num_vars];
 
     // produce shared witness variables and commit to them
     let shared = circuit
@@ -196,17 +211,15 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to allocate shared variables: {e}"),
       })?;
 
-    for (i, s) in shared.iter().enumerate() {
-      W[i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
-        reason: "Shared variables are not allocated".to_string(),
-      })?;
-    }
-
     // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
-    let (comm_W_shared, r_W_remaining) = if S.num_shared > 0 {
-      let (comm_W_shared, r_remaining) =
-        PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W, is_small)?;
+    let (comm_W_shared, r_W_remaining) = if S.num_shared_unpadded > 0 {
+      let (comm_W_shared, r_remaining) = PCS::<E>::commit_partial(
+        ck,
+        &cs.aux_assignment[0..S.num_shared_unpadded],
+        &r_W,
+        is_small,
+      )?;
       transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
       (Some(comm_W_shared), r_remaining)
     } else {
@@ -222,19 +235,14 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
           reason: format!("Unable to allocate precommitted variables: {e}"),
         })?;
 
-    for (i, s) in precommitted.iter().enumerate() {
-      W[S.num_shared + i] = s.get_value().ok_or_else(|| SpartanError::SynthesisError {
-        reason: "Precommitted variables are not allocated".to_string(),
-      })?;
-    }
-
     // partial commitment to precommitted witness variables
     let (_commit_precommitted_span, commit_precommitted_t) =
       start_span!("commit_witness_precommitted");
-    let (comm_W_precommitted, r_W_remaining) = if S.num_precommitted > 0 {
+    let (comm_W_precommitted, r_W_remaining) = if S.num_precommitted_unpadded > 0 {
       let (comm_W_precommitted, r_W_remaining) = PCS::<E>::commit_partial(
         ck,
-        &W[S.num_shared..S.num_shared + S.num_precommitted],
+        &cs.aux_assignment
+          [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
         &r_W_remaining,
         is_small,
       )?;
@@ -256,18 +264,11 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       })?;
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
-    for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
-      .iter()
-      .enumerate()
-    {
-      W[S.num_shared + S.num_precommitted + i] = *s;
-    }
-
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
       ck,
-      &W[S.num_shared + S.num_precommitted..],
+      &cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..],
       &r_W_remaining,
       is_small,
     )?;
@@ -283,7 +284,11 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       public_values,
       challenges,
     )?;
-    let W = R1CSWitness::<E>::new_unchecked(W, r_W, is_small)?;
+
+    let mut aux = cs.aux_assignment.clone();
+    aux.extend(vec![E::Scalar::ZERO; num_vars - aux.len()]);
+
+    let W = R1CSWitness::<E>::new_unchecked(aux, r_W, is_small)?;
 
     Ok((U, W))
   }
