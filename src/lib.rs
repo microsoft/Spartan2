@@ -92,7 +92,7 @@ impl<E: Engine> SpartanProverKey<E> {
   /// [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
   ///  num_cons, num_shared, num_precommitted, num_rest,
   ///  num_public, num_challenges]
-  fn sizes(&self) -> [usize; 10] {
+  pub fn sizes(&self) -> [usize; 10] {
     self.S.sizes()
   }
 }
