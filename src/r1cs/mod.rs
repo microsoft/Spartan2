@@ -256,9 +256,10 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
 pub struct SplitR1CSShape<E: Engine> {
   pub(crate) num_cons: usize,
 
+  pub(crate) num_cons_unpadded: usize, // number of constraints before padding
   pub(crate) num_shared_unpadded: usize, // shared variables before padding
   pub(crate) num_precommitted_unpadded: usize, // precommitted variables before padding
-  pub(crate) num_rest_unpadded: usize,   // rest of the variables before padding
+  pub(crate) num_rest_unpadded: usize, // rest of the variables before padding
 
   pub(crate) num_shared: usize,       // shared variables
   pub(crate) num_precommitted: usize, // precommitted variables
@@ -371,6 +372,7 @@ impl<E: Engine> SplitR1CSShape<E> {
       num_precommitted: num_precommitted_padded,
       num_rest: num_rest_padded,
 
+      num_cons_unpadded: num_cons,
       num_shared_unpadded: num_shared,
       num_precommitted_unpadded: num_precommitted,
       num_rest_unpadded: num_rest,
@@ -394,6 +396,27 @@ impl<E: Engine> SplitR1CSShape<E> {
       C: self.C.clone(),
       digest: OnceCell::new(),
     }
+  }
+
+  /// Returns statistics about the shape of the R1CS matrices
+  /// It returns an array of 10 elements:
+  /// [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
+  ///  num_cons, num_shared, num_precommitted, num_rest,
+  ///  num_public, num_challenges]
+  ///
+  pub fn sizes(&self) -> [usize; 10] {
+    [
+      self.num_cons_unpadded,
+      self.num_shared_unpadded,
+      self.num_precommitted_unpadded,
+      self.num_rest_unpadded,
+      self.num_cons,
+      self.num_shared,
+      self.num_precommitted,
+      self.num_rest,
+      self.num_public,
+      self.num_challenges,
+    ]
   }
 
   /// Generates public parameters for a Rank-1 Constraint System (R1CS).
