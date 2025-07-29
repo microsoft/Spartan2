@@ -86,6 +86,13 @@ pub struct SpartanProverKey<E: Engine> {
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
+
+impl<E: Engine> SpartanProverKey<E> {
+  fn sizes(&self) -> [usize; 10] {
+    self.S.sizes()
+  }
+}
+
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
