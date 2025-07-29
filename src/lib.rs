@@ -86,8 +86,12 @@ pub struct SpartanProverKey<E: Engine> {
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
-
 impl<E: Engine> SpartanProverKey<E> {
+  /// Returns sizes associated with the SplitR1CSShape.
+  /// It returns an array of 10 elements containing:
+  /// [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
+  ///  num_cons, num_shared, num_precommitted, num_rest,
+  ///  num_public, num_challenges]
   fn sizes(&self) -> [usize; 10] {
     self.S.sizes()
   }
