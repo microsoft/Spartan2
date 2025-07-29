@@ -451,6 +451,17 @@ impl<E: Engine> SplitR1CSInstance<E> {
     }
 
     // check if the commitments commit to the right number of variables
+    if S.num_shared > 0 && comm_W_shared.is_none() {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: "comm_W_shared is missing".to_string(),
+      });
+    }
+    if S.num_precommitted > 0 && comm_W_precommitted.is_none() {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: "comm_W_precommitted is missing".to_string(),
+      });
+    }
+
     if let Some(ref comm) = comm_W_shared {
       E::PCS::check_partial(comm, S.num_shared)?;
     }
