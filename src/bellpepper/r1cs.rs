@@ -268,7 +268,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       })?;
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
-    for (i, s) in cs.aux_assignment[shared.len() + precommitted.len()..]
+    for (i, s) in cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..]
       .iter()
       .enumerate()
     {
