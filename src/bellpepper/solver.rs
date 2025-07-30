@@ -2,12 +2,12 @@
 use crate::traits::Engine;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 use ff::{Field, PrimeField};
+use serde::{Deserialize, Serialize};
 
 /// A `ConstraintSystem` which calculates witness values for a concrete instance of an R1CS circuit.
-pub struct SatisfyingAssignment<E: Engine>
-where
-  E::Scalar: PrimeField,
-{
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct SatisfyingAssignment<E: Engine> {
   // Assignments of variables
   pub(crate) input_assignment: Vec<E::Scalar>,
   pub(crate) aux_assignment: Vec<E::Scalar>,

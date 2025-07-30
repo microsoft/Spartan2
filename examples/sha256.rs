@@ -174,9 +174,17 @@ fn main() {
     let setup_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = setup_ms, "setup");
 
+    // PREPARE
+    let t0 = Instant::now();
+    let mut prep_snark =
+      R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
+    let prep_ms = t0.elapsed().as_millis();
+    info!(elapsed_ms = prep_ms, "prep_prove");
+
     // PROVE
     let t0 = Instant::now();
-    let proof = R1CSSNARK::<E>::prove(&pk, circuit.clone(), true).expect("prove failed");
+    let proof =
+      R1CSSNARK::<E>::prove(&pk, circuit.clone(), &mut prep_snark, true).expect("prove failed");
     let prove_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prove_ms, "prove");
 
@@ -188,8 +196,8 @@ fn main() {
 
     // Summary
     info!(
-      "SUMMARY msg={}B, setup={} ms, prove={} ms, verify={} ms",
-      msg_len, setup_ms, prove_ms, verify_ms
+      "SUMMARY msg={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
+      msg_len, setup_ms, prep_ms, prove_ms, verify_ms
     );
     drop(root_span);
   }

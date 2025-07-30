@@ -1,6 +1,6 @@
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  CommitmentKey, PCS, VerifierKey,
+  Blind, CommitmentKey, PCS, PartialCommitment, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
@@ -9,8 +9,10 @@ use crate::{
     Engine, circuit::SpartanCircuit, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait,
   },
 };
+use bellpepper::gadgets::num::AllocatedNum;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
 use ff::{Field, PrimeField};
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{debug, info, info_span};
 
@@ -24,8 +26,20 @@ pub trait SpartanShape<E: Engine> {
 
 /// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
+  /// Holds the state of the prover after committing to the precommitted portions of the witness.
+  type PrecommittedState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// Return partial commitments (to shared and precommitted variables) and the partial witness vector.
+  fn precommitted_witness<C: SpartanCircuit<E>>(
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<Self::PrecommittedState, SpartanError>;
+
   /// Return an instance and witness, given a shape and ck.
   fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
+    ps: &mut Self::PrecommittedState,
     S: &SplitR1CSShape<E>,
     ck: &CommitmentKey<E>,
     circuit: &C,
@@ -41,6 +55,7 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     let num_challenges = circuit.num_challenges();
 
     let mut cs: Self = Self::new();
+
     // allocate shared variables
     let shared = circuit
       .shared(&mut cs)
@@ -187,16 +202,31 @@ pub(crate) fn add_constraint<S: PrimeField>(
   **nn += 1;
 }
 
+/// A type that holds the pre-processed state for proving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct PrecommittedState<E: Engine> {
+  cs: SatisfyingAssignment<E>,
+  shared: Vec<AllocatedNum<E::Scalar>>,
+  precommitted: Vec<AllocatedNum<E::Scalar>>,
+  comm_W_shared: Option<PartialCommitment<E>>,
+  comm_W_precommitted: Option<PartialCommitment<E>>,
+  W: Vec<E::Scalar>,
+  r_W: Blind<E>,
+  r_W_remaining: Blind<E>,
+}
+
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
-  fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
+  type PrecommittedState = PrecommittedState<E>;
+
+  fn precommitted_witness<C: SpartanCircuit<E>>(
     S: &SplitR1CSShape<E>,
     ck: &CommitmentKey<E>,
     circuit: &C,
     is_small: bool,
-    transcript: &mut E::TE,
-  ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
-    let (_synth_span, synth_t) = start_span!("circuit_synthesize");
-    let mut cs = Self::new();
+  ) -> Result<Self::PrecommittedState, SpartanError> {
+    let (_synth_span, synth_t) = start_span!("precommitted_witness_synthesize");
+    let mut cs: Self = Self::new();
 
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
     debug!("num_vars: {}", num_vars);
@@ -221,7 +251,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (comm_W_shared, r_W_remaining) = if S.num_shared_unpadded > 0 {
       let (comm_W_shared, r_remaining) =
         PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W, is_small)?;
-      transcript.absorb(b"comm_W_shared", &comm_W_shared); // add commitment to transcript
       (Some(comm_W_shared), r_remaining)
     } else {
       (None, r_W.clone())
@@ -250,53 +279,84 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         &r_W_remaining,
         is_small,
       )?;
-      transcript.absorb(b"comm_W_precommitted", &comm_W_precommitted); // add commitment to transcript
       (Some(comm_W_precommitted), r_W_remaining)
     } else {
       (None, r_W_remaining)
     };
     info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
+
+    Ok(PrecommittedState {
+      cs,
+      shared,
+      precommitted,
+      comm_W_shared,
+      comm_W_precommitted,
+      W,
+      r_W,
+      r_W_remaining,
+    })
+  }
+
+  fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
+    ps: &mut Self::PrecommittedState,
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+    transcript: &mut E::TE,
+  ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest");
+
+    // partial commitment to precommitted witness variables
+    if let Some(comm_W_shared) = &ps.comm_W_shared {
+      transcript.absorb(b"comm_W_shared", comm_W_shared);
+    }
+    if let Some(comm_W_precommitted) = &ps.comm_W_precommitted {
+      transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
+    }
 
     let challenges = (0..S.num_challenges)
       .map(|_| transcript.squeeze(b"challenge"))
       .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
     circuit
-      .synthesize(&mut cs, &shared, &precommitted, Some(&challenges))
+      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize");
 
-    for (i, s) in cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..]
+    for (i, s) in ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..]
       .iter()
       .enumerate()
     {
-      W[S.num_shared + S.num_precommitted + i] = *s;
+      ps.W[S.num_shared + S.num_precommitted + i] = *s;
     }
 
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
       ck,
-      &W[S.num_shared + S.num_precommitted..],
-      &r_W_remaining,
+      &ps.W[S.num_shared + S.num_precommitted..],
+      &ps.r_W_remaining,
       is_small,
     )?;
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
 
-    let public_values = cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
+    let public_values = ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
     let U = SplitR1CSInstance::<E>::new(
       S,
-      comm_W_shared,
-      comm_W_precommitted,
+      ps.comm_W_shared.clone(),
+      ps.comm_W_precommitted.clone(),
       comm_W_rest,
       public_values,
       challenges,
     )?;
 
-    let W = R1CSWitness::<E>::new_unchecked(W, r_W, is_small)?;
+    let W = R1CSWitness::<E>::new_unchecked(ps.W.clone(), ps.r_W.clone(), is_small)?;
+
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
   }

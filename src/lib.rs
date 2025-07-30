@@ -38,7 +38,7 @@ pub mod sumcheck;
 pub mod traits;
 
 use bellpepper::{
-  r1cs::{SpartanShape, SpartanWitness},
+  r1cs::{PrecommittedState, SpartanShape, SpartanWitness},
   shape_cs::ShapeCS,
   solver::SatisfyingAssignment,
 };
@@ -166,6 +166,13 @@ fn compute_eval_table_sparse<E: Engine>(
   (A_evals, B_evals, C_evals)
 }
 
+/// A type that holds the pre-processed state for proving
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct PrepSNARK<E: Engine> {
+  ps: PrecommittedState<E>,
+}
+
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
 /// The proof is produced using Spartan's combination of the sum-check and
 /// the commitment to a vector viewed as a polynomial commitment
@@ -183,6 +190,7 @@ pub struct R1CSSNARK<E: Engine> {
 impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
+  type PrepSNARK = PrepSNARK<E>;
 
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
@@ -203,10 +211,22 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     Ok((pk, vk))
   }
 
+  /// Prepares the SNARK for proving
+  fn prep_prove<C: SpartanCircuit<E>>(
+    pk: &Self::ProverKey,
+    circuit: C,
+    is_small: bool, // do witness elements fit in machine words?
+  ) -> Result<Self::PrepSNARK, SpartanError> {
+    let ps = SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuit, is_small)?;
+
+    Ok(PrepSNARK { ps })
+  }
+
   /// produces a succinct proof of satisfiability of an R1CS instance
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
+    prep_snark: &mut Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"R1CSSNARK");
@@ -221,7 +241,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     // absorb the public values into the transcript
     transcript.absorb(b"public_values", &public_values.as_slice());
 
-    let (U, W) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
+    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps,
       &pk.S,
       &pk.ck,
       &circuit,
@@ -610,8 +631,11 @@ mod tests {
     // produce keys
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
+    // generate pre-processed state for proving
+    let mut prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
+
     // generate a witness and proof
-    let res = S::prove(&pk, circuit.clone(), false);
+    let res = S::prove(&pk, circuit.clone(), &mut prep_snark, false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 
