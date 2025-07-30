@@ -255,6 +255,12 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitR1CSShape<E: Engine> {
   pub(crate) num_cons: usize,
+
+  pub(crate) num_cons_unpadded: usize, // number of constraints before padding
+  pub(crate) num_shared_unpadded: usize, // shared variables before padding
+  pub(crate) num_precommitted_unpadded: usize, // precommitted variables before padding
+  pub(crate) num_rest_unpadded: usize, // rest of the variables before padding
+
   pub(crate) num_shared: usize,       // shared variables
   pub(crate) num_precommitted: usize, // precommitted variables
   pub(crate) num_rest: usize,         // rest of the variables
@@ -365,6 +371,12 @@ impl<E: Engine> SplitR1CSShape<E> {
       num_shared: num_shared_padded,
       num_precommitted: num_precommitted_padded,
       num_rest: num_rest_padded,
+
+      num_cons_unpadded: num_cons,
+      num_shared_unpadded: num_shared,
+      num_precommitted_unpadded: num_precommitted,
+      num_rest_unpadded: num_rest,
+
       num_public,
       num_challenges,
       A: A_padded,
@@ -384,6 +396,41 @@ impl<E: Engine> SplitR1CSShape<E> {
       C: self.C.clone(),
       digest: OnceCell::new(),
     }
+  }
+
+  /// Returns statistics about the shape of the R1CS matrices.
+  ///
+  /// This function returns an array of 10 elements, where each element represents a specific
+  /// statistic about the R1CS matrices. The elements are as follows:
+  /// - `num_cons_unpadded`: The number of constraints in the unpadded R1CS matrix.
+  /// - `num_shared_unpadded`: The number of shared variables in the unpadded R1CS matrix.
+  /// - `num_precommitted_unpadded`: The number of precommitted variables in the unpadded R1CS matrix.
+  /// - `num_rest_unpadded`: The number of remaining variables in the unpadded R1CS matrix.
+  /// - `num_cons`: The number of constraints in the padded R1CS matrix.
+  /// - `num_shared`: The number of shared variables in the padded R1CS matrix.
+  /// - `num_precommitted`: The number of precommitted variables in the padded R1CS matrix.
+  /// - `num_rest`: The number of remaining variables in the padded R1CS matrix.
+  /// - `num_public`: The number of public inputs/outputs in the R1CS matrix.
+  /// - `num_challenges`: The number of challenges in the R1CS matrix.
+  ///
+  /// The terms "unpadded" and "padded" refer to the state of the R1CS matrices:
+  /// - "Unpadded" values represent the original dimensions of the matrices before any padding
+  ///   is applied to meet alignment or size requirements.
+  /// - "Padded" values represent the dimensions of the matrices after padding has been applied.
+  ///
+  pub fn sizes(&self) -> [usize; 10] {
+    [
+      self.num_cons_unpadded,
+      self.num_shared_unpadded,
+      self.num_precommitted_unpadded,
+      self.num_rest_unpadded,
+      self.num_cons,
+      self.num_shared,
+      self.num_precommitted,
+      self.num_rest,
+      self.num_public,
+      self.num_challenges,
+    ]
   }
 
   /// Generates public parameters for a Rank-1 Constraint System (R1CS).
@@ -441,6 +488,17 @@ impl<E: Engine> SplitR1CSInstance<E> {
     }
 
     // check if the commitments commit to the right number of variables
+    if S.num_shared > 0 && comm_W_shared.is_none() {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: "comm_W_shared is missing".to_string(),
+      });
+    }
+    if S.num_precommitted > 0 && comm_W_precommitted.is_none() {
+      return Err(SpartanError::InvalidCommitmentLength {
+        reason: "comm_W_precommitted is missing".to_string(),
+      });
+    }
+
     if let Some(ref comm) = comm_W_shared {
       E::PCS::check_partial(comm, S.num_shared)?;
     }
