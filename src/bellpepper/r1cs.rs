@@ -242,6 +242,12 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to allocate shared variables: {e}"),
       })?;
 
+    // we know that W is large enough to hold all shared variables
+    if cs.aux_assignment.len() < S.num_shared_unpadded {
+      return Err(SpartanError::SynthesisError {
+        reason: "Shared variables are not allocated correctly".to_string(),
+      });
+    }
     W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
     // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
@@ -263,6 +269,11 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
           reason: format!("Unable to allocate precommitted variables: {e}"),
         })?;
 
+    if cs.aux_assignment[S.num_shared_unpadded..].len() < S.num_precommitted_unpadded {
+      return Err(SpartanError::SynthesisError {
+        reason: "Precommitted variables are not allocated correctly".to_string(),
+      });
+    }
     W[S.num_shared..S.num_shared + S.num_precommitted_unpadded]
       .copy_from_slice(&cs.aux_assignment[S.num_shared_unpadded..]);
 
