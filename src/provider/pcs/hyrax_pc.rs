@@ -98,7 +98,7 @@ where
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
   fn width() -> usize {
-    32768 // Hyrax PC is always 1024 columns wide
+    8192 // Hyrax PC is always 8192 columns wide
   }
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
