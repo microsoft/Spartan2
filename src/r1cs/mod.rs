@@ -398,11 +398,25 @@ impl<E: Engine> SplitR1CSShape<E> {
     }
   }
 
-  /// Returns statistics about the shape of the R1CS matrices
-  /// It returns an array of 10 elements:
-  /// [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
-  ///  num_cons, num_shared, num_precommitted, num_rest,
-  ///  num_public, num_challenges]
+  /// Returns statistics about the shape of the R1CS matrices.
+  ///
+  /// This function returns an array of 10 elements, where each element represents a specific
+  /// statistic about the R1CS matrices. The elements are as follows:
+  /// - `num_cons_unpadded`: The number of constraints in the unpadded R1CS matrix.
+  /// - `num_shared_unpadded`: The number of shared variables in the unpadded R1CS matrix.
+  /// - `num_precommitted_unpadded`: The number of precommitted variables in the unpadded R1CS matrix.
+  /// - `num_rest_unpadded`: The number of remaining variables in the unpadded R1CS matrix.
+  /// - `num_cons`: The number of constraints in the padded R1CS matrix.
+  /// - `num_shared`: The number of shared variables in the padded R1CS matrix.
+  /// - `num_precommitted`: The number of precommitted variables in the padded R1CS matrix.
+  /// - `num_rest`: The number of remaining variables in the padded R1CS matrix.
+  /// - `num_public`: The number of public inputs/outputs in the R1CS matrix.
+  /// - `num_challenges`: The number of challenges in the R1CS matrix.
+  ///
+  /// The terms "unpadded" and "padded" refer to the state of the R1CS matrices:
+  /// - "Unpadded" values represent the original dimensions of the matrices before any padding
+  ///   is applied to meet alignment or size requirements.
+  /// - "Padded" values represent the dimensions of the matrices after padding has been applied.
   ///
   pub fn sizes(&self) -> [usize; 10] {
     [
