@@ -242,9 +242,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to allocate shared variables: {e}"),
       })?;
 
-    for i in 0..S.num_shared_unpadded {
-      W[i] = cs.aux_assignment[i];
-    }
+    W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
     // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
@@ -265,9 +263,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
           reason: format!("Unable to allocate precommitted variables: {e}"),
         })?;
 
-    for i in 0..S.num_precommitted_unpadded {
-      W[S.num_shared + i] = cs.aux_assignment[S.num_shared_unpadded + i];
-    }
+    W[S.num_shared..S.num_shared + S.num_precommitted_unpadded]
+      .copy_from_slice(&cs.aux_assignment[S.num_shared_unpadded..]);
 
     // partial commitment to precommitted witness variables
     let (_commit_precommitted_span, commit_precommitted_t) =
