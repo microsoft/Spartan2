@@ -274,8 +274,10 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: "Precommitted variables are not allocated correctly".to_string(),
       });
     }
-    W[S.num_shared..S.num_shared + S.num_precommitted_unpadded]
-      .copy_from_slice(&cs.aux_assignment[S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded]);
+    W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
+      &cs.aux_assignment
+        [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
+    );
 
     // partial commitment to precommitted witness variables
     let (_commit_precommitted_span, commit_precommitted_t) =
