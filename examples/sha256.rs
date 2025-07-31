@@ -13,8 +13,8 @@ use bellpepper_core::{
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
-  R1CSSNARK,
   provider::T256HyraxEngine,
+  spartan::R1CSSNARK,
   traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
 use std::{marker::PhantomData, time::Instant};
