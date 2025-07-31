@@ -576,7 +576,7 @@ mod tests {
     test_snark_with::<E, S>();
 
     type E2 = crate::provider::T256HyraxEngine;
-    type S2 = crate::R1CSSNARK<E2>;
+    type S2 = R1CSSNARK<E2>;
     test_snark_with::<E2, S2>();
   }
 
