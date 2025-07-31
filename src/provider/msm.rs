@@ -39,6 +39,7 @@ impl<C: CurveAffine> Bucket<C> {
 ///
 /// * Scalars are assumed to be 256-bit (4 × u64 limbs).
 fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+  let (_msm_span, msm_t) = start_span!("msm_serial", size = coeffs.len());
   assert_eq!(coeffs.len(), bases.len());
 
   // Pick window size (in bits) – same heuristic as before
@@ -114,6 +115,8 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
       acc += &running;
     }
   }
+
+  info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm_serial");
 
   // Add the fast Boolean part back in and return
   acc + boolean_sum
