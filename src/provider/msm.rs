@@ -64,14 +64,22 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
     tmp as usize
   }
 
-  let boolean_sum = coeffs
-    .iter()
-    .zip(bases.iter())
-    .filter(|(scalar, _)| *scalar == &C::Scalar::ONE)
-    .fold(C::Curve::identity(), |mut acc, (_, base)| {
-      acc += *base;
-      acc
-    });
+  // Boolean scalars: accumulated and separated from non-Boolean scalars
+  let mut boolean_sum = C::Curve::identity();
+  let mut non_boolean = Vec::new();
+
+  for (s, b) in coeffs.iter().zip(bases) {
+    if *s == C::Scalar::ONE {
+      boolean_sum += b;
+    } else if *s != C::Scalar::ZERO {
+      non_boolean.push((*s, *b));
+    }
+  }
+
+  if non_boolean.is_empty() {
+    return boolean_sum;
+  }
+
   let non_boolean_sum = {
     let segments = (256 / c) + 1;
     (0..segments)
@@ -81,13 +89,10 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
 
         let mut buckets = vec![Bucket::None; (1 << c) - 1];
 
-        for (coeff, base) in coeffs.iter().zip(bases.iter()) {
-          // skip Booleans
-          if *coeff != C::Scalar::ZERO && *coeff != C::Scalar::ONE {
-            let coeff = get_at::<C::Scalar>(segment, c, &coeff.to_repr());
-            if coeff != 0 {
-              buckets[coeff - 1].add_assign(base);
-            }
+        for (coeff, base) in non_boolean.iter() {
+          let coeff = get_at::<C::Scalar>(segment, c, &coeff.to_repr());
+          if coeff != 0 {
+            buckets[coeff - 1].add_assign(base);
           }
         }
 
