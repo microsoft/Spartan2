@@ -64,14 +64,23 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
     tmp as usize
   }
 
-  let boolean_sum = coeffs
-    .iter()
-    .zip(bases.iter())
-    .filter(|(scalar, _)| *scalar == &C::Scalar::ONE)
-    .fold(C::Curve::identity(), |mut acc, (_, base)| {
-      acc += *base;
-      acc
-    });
+  // Boolean scalars: accumulated and separated from non-Boolean scalars
+  let mut boolean_sum = C::Curve::identity();
+  let mut non_boolean = Vec::with_capacity(coeffs.len());
+
+  for (s, b) in coeffs.iter().zip(bases) {
+    if *s == C::Scalar::ONE {
+      boolean_sum += b;
+    } else if *s != C::Scalar::ZERO {
+      non_boolean.push((*s, *b));
+    }
+  }
+
+  if non_boolean.is_empty() {
+    return boolean_sum;
+  }
+  let (coeffs, bases): (Vec<_>, Vec<_>) = non_boolean.into_iter().unzip();
+
   let non_boolean_sum = {
     let segments = (256 / c) + 1;
     (0..segments)
