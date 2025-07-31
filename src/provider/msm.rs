@@ -137,7 +137,7 @@ pub fn msm<C: CurveAffine>(
     return Err(SpartanError::InvalidInputLength);
   }
 
-  let num_threads = if coeffs.len() > 1024 {
+  let num_threads = if coeffs.len() >= 512 {
     // If the number of coefficients is large, we use parallelism.
     // Otherwise, we use a single thread.
     // This is a heuristic to avoid overhead from parallelism for small inputs.
