@@ -35,76 +35,88 @@ impl<C: CurveAffine> Bucket<C> {
   }
 }
 
+/// Single-threaded Pippenger MSM with scalar pre-processing.
+///
+/// * Scalars are assumed to be 256-bit (4 × u64 limbs).
 fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-  let c = if bases.len() < 4 {
-    1
-  } else if bases.len() < 32 {
-    3
-  } else {
-    (f64::from(bases.len() as u32)).ln().ceil() as usize
-  };
+  assert_eq!(coeffs.len(), bases.len());
 
-  fn get_at<F: PrimeField>(segment: usize, c: usize, bytes: &F::Repr) -> usize {
-    let skip_bits = segment * c;
-    let skip_bytes = skip_bits / 8;
+  // Pick window size (in bits) – same heuristic as before
+  let c: usize = if bases.len() < 4_000 { 8 } else { 16 };
+  let window_mask: u64 = (1u64 << c) - 1;
+  let segments: usize = (256 + c - 1) / c; // 256-bit scalars
 
-    if skip_bytes >= 32 {
-      return 0;
+  // Boolean scalars: accumulated and separated from non-Boolean scalars
+  let mut boolean_sum = C::Curve::identity();
+  let mut non_boolean = Vec::with_capacity(coeffs.len());
+
+  for (s, b) in coeffs.iter().zip(bases) {
+    if *s == C::Scalar::ONE {
+      boolean_sum += b;
+    } else if *s != C::Scalar::ZERO {
+      non_boolean.push((*s, *b));
     }
-
-    let mut v = [0; 8];
-    for (v, o) in v.iter_mut().zip(bytes.as_ref()[skip_bytes..].iter()) {
-      *v = *o;
-    }
-
-    let mut tmp = u64::from_le_bytes(v);
-    tmp >>= skip_bits - (skip_bytes * 8);
-    tmp %= 1 << c;
-
-    tmp as usize
   }
 
-  let boolean_sum = coeffs
+  if non_boolean.is_empty() {
+    return boolean_sum;
+  }
+  let (coeffs, bases): (Vec<_>, Vec<_>) = non_boolean.into_iter().unzip();
+
+  // Pre-split every scalar into 4 little-endian u64 limbs
+  let limbs: Vec<[u64; 4]> = coeffs
     .iter()
-    .zip(bases.iter())
-    .filter(|(scalar, _)| *scalar == &C::Scalar::ONE)
-    .fold(C::Curve::identity(), |mut acc, (_, base)| {
-      acc += *base;
-      acc
-    });
-  let non_boolean_sum = {
-    let segments = (256 / c) + 1;
-    (0..segments)
-      .rev()
-      .fold(C::Curve::identity(), |mut acc, segment| {
-        (0..c).for_each(|_| acc = acc.double());
+    .map(|s| {
+      let bytes = s.to_repr(); // little-endian bytes
+      let bytes = bytes.as_ref(); // &[u8; 32] → &[u8]
 
-        let mut buckets = vec![Bucket::None; (1 << c) - 1];
+      assert_eq!(bytes.len(), 32); // Ensure we only have 32 bytes
 
-        for (coeff, base) in coeffs.iter().zip(bases.iter()) {
-          // skip Booleans
-          if *coeff != C::Scalar::ZERO && *coeff != C::Scalar::ONE {
-            let coeff = get_at::<C::Scalar>(segment, c, &coeff.to_repr());
-            if coeff != 0 {
-              buckets[coeff - 1].add_assign(base);
-            }
-          }
-        }
+      let mut out = [0u64; 4];
+      for i in 0..4 {
+        let start = i * 8;
+        out[i] = u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap());
+      }
+      out // out[0] = 64 LSB, out[3] = 64 MSB
+    })
+    .collect();
 
-        // Summation by parts
-        // e.g. 3a + 2b + 1c = a +
-        //                    (a) + b +
-        //                    ((a) + b) + c
-        let mut running_sum = C::Curve::identity();
-        for exp in buckets.into_iter().rev() {
-          running_sum = exp.add(running_sum);
-          acc += &running_sum;
-        }
-        acc
-      })
-  };
+  // Scratch buffers reused for every segment
+  let mut buckets: Vec<C::Curve> = vec![C::Curve::identity(); (1 << c) - 1];
+  let mut acc = C::Curve::identity();
 
-  boolean_sum + non_boolean_sum
+  // Pippenger main loop – highest segment first
+  for seg in (0..segments).rev() {
+    // multiply accumulator by 2^c
+    for _ in 0..c {
+      acc = acc.double();
+    }
+
+    // reset the buckets
+    buckets.fill(C::Curve::identity());
+
+    // which 64-bit word / bit offset stores this window?
+    let word = (seg * c) / 64;
+    let shift = (seg * c) & 63;
+
+    // fill the buckets
+    for (limb, base) in limbs.iter().zip(&bases) {
+      let slice = ((limb[word] >> shift) & window_mask) as usize;
+      if slice != 0 {
+        buckets[slice - 1] += *base;
+      }
+    }
+
+    // summation-by-parts to fold the buckets into `acc`
+    let mut running = C::Curve::identity();
+    for b in buckets.iter().rev() {
+      running += b;
+      acc += &running;
+    }
+  }
+
+  // Add the fast Boolean part back in and return
+  acc + boolean_sum
 }
 
 /// Performs a multi-scalar-multiplication operation without GPU acceleration.
@@ -303,11 +315,7 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
     bases: &[C],
     max_num_bits: usize,
   ) -> C::Curve {
-    let c = if bases.len() < 32 {
-      3
-    } else {
-      compute_ln(bases.len()) + 2
-    };
+    let c = if bases.len() < 4_000 { 8 } else { 16 }; // divisor of 64
 
     let zero = C::Curve::identity();
 
@@ -406,16 +414,6 @@ fn msm_small_rest<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(
       .reduce(C::Curve::identity, |sum, evl| sum + evl)
   } else {
     msm_small_rest_serial(scalars, bases, max_num_bits)
-  }
-}
-
-#[inline(always)]
-fn compute_ln(a: usize) -> usize {
-  // log2(a) * ln(2)
-  if a == 0 {
-    0 // Handle edge case where log2 is undefined
-  } else {
-    a.ilog2() as usize * 69 / 100
   }
 }
 
