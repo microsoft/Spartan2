@@ -148,6 +148,8 @@ pub fn msm<C: CurveAffine>(
     1
   };
 
+  info!(num_threads = num_threads, "msm");
+
   let result = if coeffs.len() > num_threads {
     let chunk = coeffs.len() / num_threads;
     coeffs
