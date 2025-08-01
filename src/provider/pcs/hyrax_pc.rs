@@ -14,7 +14,7 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::{CommitmentTrait, PCSEngineTrait},
+    pcs::{CommitmentTrait, FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -378,3 +378,70 @@ where
 }
 
 impl<E: Engine> CommitmentTrait<E> for HyraxCommitment<E> where E::GE: DlogGroupExt {}
+
+impl<E: Engine> FoldingEngineTrait<E> for HyraxPCS<E>
+where
+  E::GE: DlogGroupExt,
+{
+  fn fold_commitments(
+    comms: &[Self::Commitment],
+    weights: &[E::Scalar],
+  ) -> Result<Self::Commitment, SpartanError> {
+    if comms.is_empty() || weights.is_empty() || comms.len() != weights.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    // scale ith commitment by the ith weight
+    let folded_comm = comms
+      .par_iter()
+      .zip(weights.par_iter())
+      .map(|(comm, weight)| {
+        // scale each commitment by the corresponding weight
+        comm
+          .comm
+          .par_iter()
+          .map(|c| *c * weight)
+          .collect::<Vec<_>>()
+      })
+      .reduce(
+        || vec![E::GE::zero(); comms[0].comm.len()],
+        |acc, x| {
+          acc
+            .par_iter()
+            .zip(x.par_iter())
+            .map(|(a, b)| *a + *b)
+            .collect::<Vec<_>>()
+        },
+      );
+
+    Ok(Self::Commitment { comm: folded_comm })
+  }
+
+  fn fold_blinds(
+    blinds: &[Self::Blind],
+    weights: &[<E as Engine>::Scalar],
+  ) -> Result<Self::Blind, SpartanError> {
+    if blinds.is_empty() || weights.is_empty() || blinds.len() != weights.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+    // scale ith blind by the ith weight
+    let folded_blind = blinds
+      .iter()
+      .zip(weights)
+      .map(|(blind, weight)| {
+        // compute a weighted sum of the blinds
+        blind.blind.iter().map(|b| *b * weight).collect::<Vec<_>>()
+      })
+      .reduce(|acc, x| {
+        acc
+          .iter()
+          .zip(x.iter())
+          .map(|(a, b)| *a + *b)
+          .collect::<Vec<_>>()
+      })
+      .ok_or(SpartanError::InvalidInputLength)?;
+    Ok(Self::Blind {
+      blind: folded_blind,
+    })
+  }
+}

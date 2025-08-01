@@ -6,7 +6,7 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::PCSEngineTrait,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -38,8 +38,9 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct R1CSWitness<E: Engine> {
-  is_small: bool, // whether the witness elements fit in machine words
+  pub(crate) is_small: bool, // whether the witness elements fit in machine words
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
 }
@@ -101,6 +102,77 @@ impl<E: Engine> R1CSShape<E> {
       C,
       digest: OnceCell::new(),
     })
+  }
+
+  /// Pads the `R1CSShape` so that the shape passes `is_regular_shape`
+  /// Renumbers variables to accommodate padded variables
+  pub fn pad(&self) -> Self {
+    // check if the provided R1CSShape is already as required
+    if self.is_regular_shape() {
+      return self.clone();
+    }
+
+    // equalize the number of variables and public IO
+    let m = max(self.num_vars, self.num_io).next_power_of_two();
+
+    // check if the number of variables are as expected, then
+    // we simply set the number of constraints to the next power of two
+    if self.num_vars == m {
+      return R1CSShape {
+        num_cons: self.num_cons.next_power_of_two(),
+        num_vars: m,
+        num_io: self.num_io,
+        A: self.A.clone(),
+        B: self.B.clone(),
+        C: self.C.clone(),
+        digest: OnceCell::new(),
+      };
+    }
+
+    // otherwise, we need to pad the number of variables and renumber variable accesses
+    let num_vars_padded = m;
+    let num_cons_padded = self.num_cons.next_power_of_two();
+
+    let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+      M.indices.par_iter_mut().for_each(|c| {
+        if *c >= self.num_vars {
+          *c += num_vars_padded - self.num_vars
+        }
+      });
+
+      M.cols += num_vars_padded - self.num_vars;
+
+      let ex = {
+        let nnz = M.indptr.last().unwrap();
+        vec![*nnz; num_cons_padded - self.num_cons]
+      };
+      M.indptr.extend(ex);
+      M
+    };
+
+    let A_padded = apply_pad(self.A.clone());
+    let B_padded = apply_pad(self.B.clone());
+    let C_padded = apply_pad(self.C.clone());
+
+    R1CSShape {
+      num_cons: num_cons_padded,
+      num_vars: num_vars_padded,
+      num_io: self.num_io,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
+      digest: OnceCell::new(),
+    }
+  }
+
+  // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
+  // Returns false if num_cons or num_vars are not powers of two, or if num_io > num_vars
+  #[inline]
+  pub(crate) fn is_regular_shape(&self) -> bool {
+    let cons_valid = self.num_cons.next_power_of_two() == self.num_cons;
+    let vars_valid = self.num_vars.next_power_of_two() == self.num_vars;
+    let io_lt_vars = self.num_io < self.num_vars;
+    cons_valid && vars_valid && io_lt_vars
   }
 
   /// Checks if the R1CS instance is satisfiable given a witness and its shape
@@ -210,6 +282,30 @@ impl<E: Engine> R1CSWitness<E> {
   ) -> Result<R1CSWitness<E>, SpartanError> {
     Ok(Self { W, r_W, is_small })
   }
+
+  /// Fold the witness with another witness
+  pub fn fold(&self, W2: &R1CSWitness<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    // we need to compute the weighted sum using weights of (1-r_b) and r_b
+    let W = self
+      .W
+      .par_iter()
+      .zip(W2.W.par_iter())
+      .map(|(w1, w2)| *w1 + *r_b * (*w2 - *w1))
+      .collect::<Vec<_>>();
+    let r_W = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &[self.r_W.clone(), W2.r_W.clone()],
+      &[E::Scalar::ONE - r_b, *r_b],
+    )?;
+
+    Ok(Self {
+      W,
+      r_W,
+      is_small: false, // after folding, witnesses are not small
+    })
+  }
 }
 
 impl<E: Engine> R1CSInstance<E> {
@@ -235,6 +331,26 @@ impl<E: Engine> R1CSInstance<E> {
     X: Vec<E::Scalar>,
   ) -> Result<R1CSInstance<E>, SpartanError> {
     Ok(R1CSInstance { comm_W, X })
+  }
+
+  /// Fold the instance with another instance
+  pub fn fold(&self, U2: &R1CSInstance<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    // we need to compute the weighted sum using weights of (1-r_b) and r_b
+    let comm_W = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &[self.comm_W.clone(), U2.comm_W.clone()],
+      &[E::Scalar::ONE - r_b, *r_b],
+    )?;
+
+    let X = self
+      .X
+      .par_iter()
+      .zip(U2.X.par_iter())
+      .map(|(x1, x2)| (E::Scalar::ONE - r_b) * x1 + *r_b * x2)
+      .collect::<Vec<_>>();
+    Ok(Self { comm_W, X })
   }
 }
 

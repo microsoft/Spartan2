@@ -122,7 +122,7 @@ fn compute_eval_table_sparse<E: Engine>(
 }
 
 /// A type that holds the pre-processed state for proving
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct PrepSNARK<E: Engine> {
   ps: PrecommittedState<E>,

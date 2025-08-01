@@ -46,6 +46,7 @@ hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = ["halo2curves/asm"]
