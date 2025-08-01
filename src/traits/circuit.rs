@@ -45,3 +45,39 @@ pub trait SpartanCircuit<E: Engine>: Send + Sync + Clone {
     challenges: Option<&[E::Scalar]>, // challenges from the verifier
   ) -> Result<(), SynthesisError>;
 }
+
+/// A helper trait for defining a multi-round randomized circuit that Spartan proves.
+/// Unlike the standard SpartanCircuit, this trait allows the circuit to be processed in multiple rounds,
+/// where each round can allocate different constraints and witness variables based on the round index.
+/// The public IO includes the challenges and other things made public by the circuit across all rounds.
+pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
+  /// Returns the public values of the circuit, which is the list of values that will be made public
+  /// The circuit must make public these values followed by the challenges generated via the transcript
+  fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError>;
+
+  /// Returns the number of challenges that the circuit expects from the verifier
+  /// for randomized checks added in the round `round_index`
+  fn num_challenges(&self, round_index: usize) -> usize;
+
+  /// Processes a specific round of the circuit.
+  /// The `round_index` determines which round is being processed, and the function branches
+  /// based on this index to allocate the appropriate constraints and witness variables for that round.
+  /// The `prior_round_vars` are variables allocated in rounds 0..round_index-1.
+  /// The `prev_challenges` are challenges allocated in rounds 0..round_index-1.
+  /// The `challenges` are the challenges for this round to be allocated by this round and returned.
+  /// The circuit should return an error if it cannot synthesize the specified round.
+  /// Returns a tuple of (round_vars, allocated_challenges) where:
+  /// - round_vars: variables allocated in this round (excluding challenges)
+  /// - allocated_challenges: challenge variables allocated in this round that will be passed to next round
+  fn rounds<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+    round_index: usize,
+    prior_round_vars: &[AllocatedNum<E::Scalar>], // variables allocated in rounds 0..round_index-1
+    prev_challenges: &[AllocatedNum<E::Scalar>],  // challenges allocated in rounds 0..round_index-1
+    challenges: Option<&[E::Scalar]>, // challenges for this round to be allocated by this round and returned
+  ) -> Result<(Vec<AllocatedNum<E::Scalar>>, Vec<AllocatedNum<E::Scalar>>), SynthesisError>;
+
+  /// Returns the number of rounds in the circuit
+  fn num_rounds(&self) -> usize;
+}
