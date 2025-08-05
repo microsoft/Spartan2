@@ -729,6 +729,36 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 }
 
+/// A type that holds a multi-round split R1CS shape
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitMultiRoundR1CSShape<E: Engine> {
+  pub(crate) num_cons: usize,
+  pub(crate) num_cons_unpadded: usize, // number of constraints before padding
+
+  pub(crate) num_rounds: usize,
+  pub(crate) num_vars_per_round_unpadded: Vec<usize>, // variables per round before padding
+  pub(crate) num_vars_per_round: Vec<usize>,          // variables per round after padding
+  pub(crate) num_challenges_per_round: Vec<usize>,    // challenges per round
+  pub(crate) num_public: usize,                       // number of public variables
+
+  pub(crate) A: SparseMatrix<E::Scalar>,
+  pub(crate) B: SparseMatrix<E::Scalar>,
+  pub(crate) C: SparseMatrix<E::Scalar>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) digest: OnceCell<E::Scalar>,
+}
+
+impl<E: Engine> SimpleDigestible for SplitMultiRoundR1CSShape<E> {}
+
+/// A type that holds a multi-round split R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct SplitMultiRoundR1CSInstance<E: Engine> {
+  pub(crate) comm_w_per_round: Vec<PartialCommitment<E>>,
+  pub(crate) public_values: Vec<E::Scalar>,
+  pub(crate) challenges_per_round: Vec<Vec<E::Scalar>>,
+}
+
 impl<E: Engine> SplitR1CSInstance<E> {
   /// A method to create a split R1CS instance object using constituent elements
   pub fn new(
@@ -849,6 +879,239 @@ impl<E: Engine> SplitR1CSInstance<E> {
     Ok(R1CSInstance {
       comm_W,
       X: [self.public_values.clone(), self.challenges.clone()].concat(),
+    })
+  }
+}
+
+impl<E: Engine> SplitMultiRoundR1CSShape<E> {
+  /// Create an object of type `SplitMultiRoundR1CSShape` from the explicitly specified R1CS matrices
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    width: usize,
+    num_cons: usize,
+    num_vars_per_round: Vec<usize>,
+    num_challenges_per_round: Vec<usize>,
+    num_public: usize,
+    a: SparseMatrix<E::Scalar>,
+    b: SparseMatrix<E::Scalar>,
+    c: SparseMatrix<E::Scalar>,
+  ) -> Result<SplitMultiRoundR1CSShape<E>, SpartanError> {
+    let num_rounds = num_vars_per_round.len();
+    if num_challenges_per_round.len() != num_rounds {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    let total_vars: usize = num_vars_per_round.iter().sum();
+    let total_challenges: usize = num_challenges_per_round.iter().sum();
+    let num_rows = num_cons;
+    let num_cols = total_vars + 1 + num_public + total_challenges; // +1 for the constant term
+
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &a)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &b)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &c)?;
+
+    // Pad each round's variables to be a multiple of width
+    let num_vars_per_round_padded: Vec<usize> = num_vars_per_round
+      .iter()
+      .map(|&n| pad_to_width(width, n))
+      .collect();
+
+    let total_vars_padded: usize = num_vars_per_round_padded.iter().sum();
+    let num_cons_padded = num_cons.next_power_of_two();
+
+    // Apply padding transformation to matrices
+    let apply_pad = |mut m: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+      m.indices.par_iter_mut().for_each(|c| {
+        // Find which round this variable belongs to and apply appropriate offset
+        let mut current_offset = 0;
+        let mut current_padded_offset = 0;
+
+        for round in 0..num_rounds {
+          if *c >= current_offset && *c < current_offset + num_vars_per_round[round] {
+            // Variable belongs to this round, apply the padded offset
+            *c = current_padded_offset + (*c - current_offset);
+            return;
+          }
+          current_offset += num_vars_per_round[round];
+          current_padded_offset += num_vars_per_round_padded[round];
+        }
+
+        // If we get here, it's a public/challenge variable, apply total padding offset
+        if *c >= total_vars {
+          *c += total_vars_padded - total_vars;
+        }
+      });
+
+      m.cols += total_vars_padded - total_vars;
+
+      let ex = {
+        let nnz = if m.indptr.is_empty() {
+          0
+        } else {
+          m.indptr[m.indptr.len() - 1]
+        };
+        vec![nnz; num_cons_padded - num_cons]
+      };
+      m.indptr.extend(ex);
+      m
+    };
+
+    let a_padded = apply_pad(a);
+    let b_padded = apply_pad(b);
+    let c_padded = apply_pad(c);
+
+    Ok(Self {
+      num_cons: num_cons_padded,
+      num_cons_unpadded: num_cons,
+      num_rounds,
+      num_vars_per_round_unpadded: num_vars_per_round,
+      num_vars_per_round: num_vars_per_round_padded,
+      num_challenges_per_round,
+      num_public,
+      A: a_padded,
+      B: b_padded,
+      C: c_padded,
+      digest: OnceCell::new(),
+    })
+  }
+
+  pub fn to_regular_shape(&self) -> R1CSShape<E> {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    let total_challenges: usize = self.num_challenges_per_round.iter().sum();
+
+    R1CSShape {
+      num_cons: self.num_cons,
+      num_vars: total_vars,
+      num_io: self.num_public + total_challenges,
+      A: self.A.clone(),
+      B: self.B.clone(),
+      C: self.C.clone(),
+      digest: OnceCell::new(),
+    }
+  }
+
+  /// Returns statistics about the shape of the multi-round R1CS matrices
+  pub fn sizes(&self) -> (usize, Vec<usize>, Vec<usize>, Vec<usize>, usize) {
+    (
+      self.num_cons_unpadded,
+      self.num_vars_per_round_unpadded.clone(),
+      self.num_vars_per_round.clone(),
+      self.num_challenges_per_round.clone(),
+      self.num_public,
+    )
+  }
+
+  /// Generates public parameters for a multi-round R1CS
+  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    E::PCS::setup(b"ck", total_vars)
+  }
+
+  pub fn multiply_vec(
+    &self,
+    z: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    let total_challenges: usize = self.num_challenges_per_round.iter().sum();
+
+    if z.len() != self.num_public + total_challenges + 1 + total_vars {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+
+    let (az, (bz, cz)) = rayon::join(
+      || self.A.multiply_vec(z),
+      || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
+    );
+
+    Ok((az?, bz?, cz?))
+  }
+}
+
+impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
+  /// A method to create a multi-round split R1CS instance object using constituent elements
+  pub fn new(
+    s: &SplitMultiRoundR1CSShape<E>,
+    comm_w_per_round: Vec<PartialCommitment<E>>,
+    public_values: Vec<E::Scalar>,
+    challenges_per_round: Vec<Vec<E::Scalar>>,
+  ) -> Result<SplitMultiRoundR1CSInstance<E>, SpartanError> {
+    if public_values.len() != s.num_public {
+      return Err(SpartanError::InvalidInputLength);
+    }
+    if challenges_per_round.len() != s.num_rounds {
+      return Err(SpartanError::InvalidInputLength);
+    }
+    if comm_w_per_round.len() != s.num_rounds {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    // Validate challenges per round
+    for (round, challenges) in challenges_per_round.iter().enumerate() {
+      if challenges.len() != s.num_challenges_per_round[round] {
+        return Err(SpartanError::InvalidInputLength);
+      }
+    }
+
+    // Validate commitments per round
+    for (round, comm) in comm_w_per_round.iter().enumerate() {
+      E::PCS::check_partial(comm, s.num_vars_per_round[round])?;
+    }
+
+    Ok(SplitMultiRoundR1CSInstance {
+      comm_w_per_round,
+      public_values,
+      challenges_per_round,
+    })
+  }
+
+  pub fn validate(
+    &self,
+    s: &SplitMultiRoundR1CSShape<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError> {
+    // absorb the public IO into the transcript
+    transcript.absorb(b"public_values", &self.public_values.as_slice());
+
+    // Process each round
+    for round in 0..s.num_rounds {
+      // Generate and validate challenges for this round BEFORE absorbing the current round's commitment.
+      // This mirrors the order used by the prover, where challenges for round `r` are derived
+      // after absorbing the commitment from the *previous* round (if any), but **before** the
+      // commitment of the current round is absorbed. This ensures that the commitment of round `r`
+      // cannot influence the challenges of the same round.
+      let expected_challenges = (0..s.num_challenges_per_round[round])
+        .map(|_| transcript.squeeze(b"challenge"))
+        .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+      if expected_challenges != self.challenges_per_round[round] {
+        return Err(SpartanError::ProofVerifyError {
+          reason: format!("Challenges for round {round} do not match"),
+        });
+      }
+
+      // After validating challenges, absorb the commitment for the current round so that it
+      // affects the transcript state for the *next* round's challenges.
+      E::PCS::check_partial(&self.comm_w_per_round[round], s.num_vars_per_round[round])?;
+      transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round]);
+    }
+
+    Ok(())
+  }
+
+  pub fn to_regular_instance(&self) -> Result<R1CSInstance<E>, SpartanError> {
+    let partial_comms = self.comm_w_per_round.clone();
+    let comm_w = PCS::<E>::combine_partial(&partial_comms)?;
+
+    let all_challenges: Vec<E::Scalar> = self
+      .challenges_per_round
+      .iter()
+      .flatten()
+      .cloned()
+      .collect();
+
+    Ok(R1CSInstance {
+      comm_W: comm_w,
+      X: [self.public_values.clone(), all_challenges].concat(),
     })
   }
 }

@@ -3,10 +3,16 @@ use crate::{
   Blind, CommitmentKey, PCS, PartialCommitment,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
-  r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
+  r1cs::{
+    R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
+    SplitR1CSInstance, SplitR1CSShape,
+  },
   start_span,
   traits::{
-    Engine, circuit::SpartanCircuit, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait,
+    Engine,
+    circuit::{MultiRoundCircuit, SpartanCircuit},
+    pcs::PCSEngineTrait,
+    transcript::TranscriptEngineTrait,
   },
 };
 use bellpepper::gadgets::num::AllocatedNum;
@@ -53,6 +59,55 @@ pub trait SpartanWitness<E: Engine> {
     is_small: bool,
     transcript: &mut E::TE,
   ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
+}
+
+/// `MultiRoundSpartanShape` provides methods for acquiring `SplitMultiRoundR1CSShape` and `CommitmentKey` from implementers.
+pub trait MultiRoundSpartanShape<E: Engine> {
+  /// Return an appropriate `SplitMultiRoundR1CSShape` and `CommitmentKey` structs.
+  fn multiround_r1cs_shape<C: MultiRoundCircuit<E>>(
+    circuit: &C,
+  ) -> Result<
+    (
+      SplitMultiRoundR1CSShape<E>,
+      CommitmentKey<E>,
+      VerifierKey<E>,
+    ),
+    SpartanError,
+  >;
+}
+
+/// `MultiRoundSpartanWitness` provide a method for acquiring an `SplitMultiRoundR1CSInstance` and `R1CSWitness` from implementers.
+pub trait MultiRoundSpartanWitness<E: Engine> {
+  /// Holds the state of the prover across multiple rounds.
+  type MultiRoundState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// Initialize the multi-round witness process and return the initial state.
+  fn initialize_multiround_witness<C: MultiRoundCircuit<E>>(
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<Self::MultiRoundState, SpartanError>;
+
+  /// Process a specific round and update the state.
+  fn process_round<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    round_index: usize,
+    is_small: bool,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError>;
+
+  /// Finalize the multi-round witness and return the instance and witness.
+  fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
 impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
@@ -225,6 +280,20 @@ pub struct PrecommittedState<E: Engine> {
   comm_W_precommitted: Option<PartialCommitment<E>>,
   r_W_precommitted: Option<Blind<E>>,
   W: Vec<E::Scalar>,
+}
+
+/// A type that holds the multi-round state for proving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct MultiRoundState<E: Engine> {
+  cs: SatisfyingAssignment<E>,
+  vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  comm_w_per_round: Vec<PartialCommitment<E>>,
+  w: Vec<E::Scalar>,
+  r_w: Blind<E>,
+  current_round: usize,
+  num_rounds: usize,
 }
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
@@ -409,5 +478,259 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
+  }
+}
+
+impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
+  fn multiround_r1cs_shape<C: MultiRoundCircuit<E>>(
+    circuit: &C,
+  ) -> Result<
+    (
+      SplitMultiRoundR1CSShape<E>,
+      CommitmentKey<E>,
+      VerifierKey<E>,
+    ),
+    SpartanError,
+  > {
+    let num_rounds = circuit.num_rounds();
+    let mut cs: Self = Self::new();
+
+    // Collect variables and challenges per round
+    let mut vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>> = Vec::new();
+    let mut challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>> = Vec::new();
+    let mut num_vars_per_round: Vec<usize> = Vec::new();
+    let mut num_challenges_per_round: Vec<usize> = Vec::new();
+
+    // Process each round to collect shape information
+    for round in 0..num_rounds {
+      let num_challenges =
+        circuit
+          .num_challenges(round)
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Unable to get num_challenges for round {round}: {e}"),
+          })?;
+      num_challenges_per_round.push(num_challenges);
+
+      // For shape generation, we don't need actual challenge values, so pass None
+      let prev_aux = cs.num_aux();
+      let (round_vars, round_challenges) = circuit
+        .rounds(&mut cs, round, &vars_per_round, &challenges_per_round, None)
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to synthesize round {round}: {e}"),
+        })?;
+
+      // Determine how many new auxiliary variables were allocated in this round.
+      let new_aux = cs.num_aux();
+      num_vars_per_round.push(new_aux - prev_aux);
+
+      // Record the high-level variables/challenges that the round chose to return so
+      // they can be fed into subsequent rounds.
+      vars_per_round.push(round_vars);
+      challenges_per_round.push(round_challenges);
+    }
+
+    let mut a = SparseMatrix::<E::Scalar>::empty();
+    let mut b = SparseMatrix::<E::Scalar>::empty();
+    let mut c = SparseMatrix::<E::Scalar>::empty();
+
+    let mut num_cons_added = 0;
+    let mut x = (&mut a, &mut b, &mut c, &mut num_cons_added);
+    let num_inputs = cs.num_inputs();
+    let num_constraints = cs.num_constraints();
+    let total_vars = cs.num_aux();
+
+    for constraint in cs.constraints.iter() {
+      add_constraint(
+        &mut x,
+        total_vars,
+        &constraint.0,
+        &constraint.1,
+        &constraint.2,
+      );
+    }
+    assert_eq!(num_cons_added, num_constraints);
+
+    let total_challenges: usize = num_challenges_per_round.iter().sum();
+    a.cols = total_vars + num_inputs;
+    b.cols = total_vars + num_inputs;
+    c.cols = total_vars + num_inputs;
+
+    let width = E::PCS::width();
+
+    // Don't count One as an input for shape's purposes.
+    let s = SplitMultiRoundR1CSShape::new(
+      width,
+      num_constraints,
+      num_vars_per_round,
+      num_challenges_per_round,
+      num_inputs - 1 - total_challenges, // public values
+      a,
+      b,
+      c,
+    )
+    .unwrap();
+    let (ck, vk) = s.commitment_key();
+
+    Ok((s, ck, vk))
+  }
+}
+
+impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
+  type MultiRoundState = MultiRoundState<E>;
+
+  fn initialize_multiround_witness<C: MultiRoundCircuit<E>>(
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    _circuit: &C,
+    _is_small: bool,
+  ) -> Result<Self::MultiRoundState, SpartanError> {
+    let cs = Self::new();
+    let total_vars: usize = s.num_vars_per_round.iter().sum();
+    let r_w = PCS::<E>::blind(ck);
+    let w = vec![E::Scalar::ZERO; total_vars];
+
+    Ok(MultiRoundState {
+      cs,
+      vars_per_round: Vec::new(),
+      challenges_per_round: Vec::new(),
+      comm_w_per_round: Vec::new(),
+      w,
+      r_w,
+      current_round: 0,
+      num_rounds: s.num_rounds,
+    })
+  }
+
+  fn process_round<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    round_index: usize,
+    is_small: bool,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError> {
+    if round_index != state.current_round {
+      return Err(SpartanError::SynthesisError {
+        reason: format!(
+          "Expected round {}, got {}",
+          state.current_round, round_index
+        ),
+      });
+    }
+
+    // If this is the first round, absorb the public values into the transcript.
+    if round_index == 0 {
+      let public_values = circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to get public values: {e}"),
+        })?;
+      transcript.absorb(b"public_values", &public_values.as_slice());
+    }
+
+    // Absorb commitment from the immediately preceding round (if any)
+    if let Some(comm) = state.comm_w_per_round.last() {
+      transcript.absorb(b"comm_w_round", comm);
+    }
+
+    // Generate challenges for this round
+    let challenges = (0..s.num_challenges_per_round[round_index])
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    // Process this round, supplying references to variables/challenges from previous rounds
+    let (round_vars, round_challenges) = circuit
+      .rounds(
+        &mut state.cs,
+        round_index,
+        &state.vars_per_round,
+        &state.challenges_per_round,
+        Some(&challenges),
+      )
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize round {round_index}: {e}"),
+      })?;
+
+    // Update witness with new variables
+    // We need to map the *unpadded* auxiliary variables produced by this round
+    // into the appropriate *padded* segment of the global witness vector.
+    // 1. `start_idx_unpadded` – offset within `aux_assignment` (contains only the
+    //    actual variables produced so far).
+    // 2. `start_idx_padded`   – offset within the global witness vector (which
+    //    has per-round padding applied).
+    let start_idx_unpadded: usize = s.num_vars_per_round_unpadded[..round_index].iter().sum();
+    let start_idx_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
+    let round_vars_unpadded = s.num_vars_per_round_unpadded[round_index];
+
+    // Copy only the actually-allocated variables; leave the padding slots as 0.
+    if state.cs.aux_assignment.len() >= start_idx_unpadded + round_vars_unpadded {
+      state.w[start_idx_padded..start_idx_padded + round_vars_unpadded].copy_from_slice(
+        &state.cs.aux_assignment[start_idx_unpadded..start_idx_unpadded + round_vars_unpadded],
+      );
+    }
+
+    // Commit to this round's variables
+    let start_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
+    let (comm_w_round, _) = PCS::<E>::commit_partial(
+      ck,
+      &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
+      &state.r_w,
+      is_small,
+    )?;
+
+    state.vars_per_round.push(round_vars);
+    state.challenges_per_round.push(round_challenges);
+    state.comm_w_per_round.push(comm_w_round);
+    state.current_round += 1;
+
+    Ok(())
+  }
+
+  fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    _ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    if state.current_round != state.num_rounds {
+      return Err(SpartanError::SynthesisError {
+        reason: format!(
+          "Expected {} rounds, processed {}",
+          state.num_rounds, state.current_round
+        ),
+      });
+    }
+
+    // Get public values
+    let public_values = circuit
+      .public_values()
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to get public values: {e}"),
+      })?;
+
+    // Collect all challenges
+    let challenges_per_round: Vec<Vec<E::Scalar>> = state
+      .challenges_per_round
+      .iter()
+      .map(|round_challenges| {
+        round_challenges
+          .iter()
+          .map(|c| c.get_value().unwrap_or(E::Scalar::ZERO))
+          .collect()
+      })
+      .collect();
+
+    let u = SplitMultiRoundR1CSInstance::<E>::new(
+      s,
+      state.comm_w_per_round.clone(),
+      public_values,
+      challenges_per_round,
+    )?;
+
+    let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), state.r_w.clone(), is_small)?;
+
+    Ok((u, w))
   }
 }

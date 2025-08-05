@@ -57,7 +57,7 @@ pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
 
   /// Returns the number of challenges that the circuit expects from the verifier
   /// for randomized checks added in the round `round_index`
-  fn num_challenges(&self, round_index: usize) -> usize;
+  fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError>;
 
   /// Processes a specific round of the circuit.
   /// The `round_index` determines which round is being processed, and the function branches
@@ -73,8 +73,8 @@ pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
     &self,
     cs: &mut CS,
     round_index: usize,
-    prior_round_vars: &[AllocatedNum<E::Scalar>], // variables allocated in rounds 0..round_index-1
-    prev_challenges: &[AllocatedNum<E::Scalar>],  // challenges allocated in rounds 0..round_index-1
+    prior_round_vars: &[Vec<AllocatedNum<E::Scalar>>], // variables allocated in rounds 0..round_index-1 grouped per round
+    prev_challenges: &[Vec<AllocatedNum<E::Scalar>>], // challenges allocated in rounds 0..round_index-1 grouped per round
     challenges: Option<&[E::Scalar]>, // challenges for this round to be allocated by this round and returned
   ) -> Result<(Vec<AllocatedNum<E::Scalar>>, Vec<AllocatedNum<E::Scalar>>), SynthesisError>;
 
