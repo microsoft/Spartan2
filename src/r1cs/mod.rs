@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
 
+mod folds;
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
 

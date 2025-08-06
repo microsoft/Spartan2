@@ -6,7 +6,8 @@ pub mod test_r1cs;
 pub mod test_shape_cs;
 
 #[cfg(test)]
-mod tests {
+#[allow(missing_docs)]
+pub mod tests {
   use crate::{
     bellpepper::{
       solver::SatisfyingAssignment,
@@ -71,7 +72,7 @@ mod tests {
   use crate::traits::transcript::TranscriptEngineTrait;
 
   #[derive(Clone)]
-  struct TwoRoundBitsCircuit;
+  pub struct TwoRoundBitsCircuit;
 
   impl<E: Engine> MultiRoundCircuit<E> for TwoRoundBitsCircuit {
     fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
@@ -165,7 +166,7 @@ mod tests {
   use ff::Field;
 
   #[derive(Clone)]
-  struct TwoRoundPermutationCircuit;
+  pub struct TwoRoundPermutationCircuit;
 
   impl<E: Engine> MultiRoundCircuit<E> for TwoRoundPermutationCircuit {
     fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
