@@ -73,6 +73,106 @@ pub struct R1CSInstance<E: Engine> {
   pub(crate) X: Vec<E::Scalar>,
 }
 
+/// A type that holds a witness for a given Relaxed R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelaxedR1CSWitness<E: Engine> {
+  pub(crate) W: Vec<E::Scalar>,
+  pub(crate) r_W: Blind<E>,
+  pub(crate) E: Vec<E::Scalar>,
+  pub(crate) r_E: Blind<E>,
+}
+
+/// A type that holds a Relaxed R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct RelaxedR1CSInstance<E: Engine> {
+  pub(crate) comm_W: Commitment<E>,
+  pub(crate) comm_E: Commitment<E>,
+  pub(crate) X: Vec<E::Scalar>,
+  pub(crate) u: E::Scalar,
+}
+
+impl<E: Engine> RelaxedR1CSWitness<E> {
+  /// Commits to the witness using the supplied generators
+  pub fn commit(
+    &self,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(Commitment<E>, Commitment<E>), SpartanError> {
+    Ok((
+      PCS::<E>::commit(ck, &self.W, &self.r_W, false)?,
+      PCS::<E>::commit(ck, &self.E, &self.r_E, false)?,
+    ))
+  }
+}
+
+#[cfg(test)]
+mod tests_relaxed_sample {
+  use super::*;
+  use crate::{provider::P256HyraxEngine, traits::Engine};
+  use ff::Field;
+
+  fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
+    let one = <E::Scalar as Field>::ONE;
+    let (num_cons, num_vars, num_io, a_entries, b_entries, c_entries) = {
+      let num_cons = 4;
+      let num_io = 2;
+
+      let mut A: Vec<(usize, usize, E::Scalar)> = Vec::new();
+      let mut B: Vec<(usize, usize, E::Scalar)> = Vec::new();
+      let mut C: Vec<(usize, usize, E::Scalar)> = Vec::new();
+
+      // constraint 0: I0 * I0 - Z0 = 0
+      A.push((0, num_vars + 1, one));
+      B.push((0, num_vars + 1, one));
+      C.push((0, 0, one));
+
+      // constraint 1: Z0 * I0 - Z1 = 0
+      A.push((1, 0, one));
+      B.push((1, num_vars + 1, one));
+      C.push((1, 1, one));
+
+      // constraint 2: (Z1 + I0) * 1 - Z2 = 0
+      A.push((2, 1, one));
+      A.push((2, num_vars + 1, one));
+      B.push((2, num_vars, one));
+      C.push((2, 2, one));
+
+      // constraint 3: (Z2 + 5) * 1 - I1 = 0
+      A.push((3, 2, one));
+      A.push((3, num_vars, one + one + one + one + one));
+      B.push((3, num_vars, one));
+      C.push((3, num_vars + 2, one));
+
+      (num_cons, num_vars, num_io, A, B, C)
+    };
+
+    let rows = num_cons;
+    let cols = num_vars + num_io + 1;
+
+    R1CSShape::new(
+      num_cons,
+      num_vars,
+      num_io,
+      SparseMatrix::new(&a_entries, rows, cols),
+      SparseMatrix::new(&b_entries, rows, cols),
+      SparseMatrix::new(&c_entries, rows, cols),
+    )
+    .unwrap()
+  }
+
+  fn test_random_sample_with<E: Engine>() {
+    let s = tiny_r1cs::<E>(4);
+    let (ck, _) = s.commitment_key();
+    let (inst, wit) = s.sample_random_instance_witness(&ck).unwrap();
+    assert!(s.is_sat_relaxed(&ck, &inst, &wit).is_ok());
+  }
+
+  #[test]
+  fn test_random_sample() {
+    test_random_sample_with::<P256HyraxEngine>();
+  }
+}
+
 /// Round `n` up to the next multiple of width.
 /// (If `n` is already a multiple and higher than zero, it is returned unchanged.)
 #[inline]
@@ -265,6 +365,92 @@ impl<E: Engine> R1CSShape<E> {
     );
 
     Ok((Az?, Bz?, Cz?))
+  }
+  /// Checks if the Relaxed R1CS instance is satisfiable given a witness and its shape
+  pub fn is_sat_relaxed(
+    &self,
+    ck: &CommitmentKey<E>,
+    U: &RelaxedR1CSInstance<E>,
+    W: &RelaxedR1CSWitness<E>,
+  ) -> Result<(), SpartanError> {
+    assert_eq!(W.W.len(), self.num_vars);
+    assert_eq!(W.E.len(), self.num_cons);
+    assert_eq!(U.X.len(), self.num_io);
+
+    // verify if Az * Bz = u*Cz + E
+    let res_eq = {
+      let z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
+      let (az, bz, cz) = self.multiply_vec(&z)?;
+      (0..self.num_cons).all(|i| az[i] * bz[i] == U.u * cz[i] + W.E[i])
+    };
+
+    // verify if comm_E and comm_W are commitments to E and W
+    let res_comm = {
+      let comm_W = PCS::<E>::commit(ck, &W.W, &W.r_W, false)?;
+      let comm_E = PCS::<E>::commit(ck, &W.E, &W.r_E, false)?;
+      U.comm_W == comm_W && U.comm_E == comm_E
+    };
+
+    if !res_eq {
+      return Err(SpartanError::UnSat {
+        reason: "Relaxed R1CS is unsatisfiable".to_string(),
+      });
+    }
+
+    if !res_comm {
+      return Err(SpartanError::UnSat {
+        reason: "Invalid commitments".to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  /// Samples a new random `RelaxedR1CSInstance`/`RelaxedR1CSWitness` pair
+  pub fn sample_random_instance_witness(
+    &self,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>), SpartanError> {
+    // sample Z = (W, u, X)
+    let Z = (0..self.num_vars + self.num_io + 1)
+      .into_par_iter()
+      .map(|_| E::Scalar::random(&mut rand_core::OsRng))
+      .collect::<Vec<E::Scalar>>();
+
+    let r_W = PCS::<E>::blind(ck);
+    let r_E = PCS::<E>::blind(ck);
+
+    let u = Z[self.num_vars];
+
+    // compute E <- AZ o BZ - u * CZ
+    let (az, bz, cz) = self.multiply_vec(&Z)?;
+    let E_vec = az
+      .par_iter()
+      .zip(bz.par_iter())
+      .zip(cz.par_iter())
+      .map(|((az_i, bz_i), cz_i)| *az_i * *bz_i - u * *cz_i)
+      .collect::<Vec<E::Scalar>>();
+
+    // compute commitments to W,E in parallel
+    let (comm_W_res, comm_E_res) = rayon::join(
+      || PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false),
+      || PCS::<E>::commit(ck, &E_vec, &r_E, false),
+    );
+
+    Ok((
+      RelaxedR1CSInstance {
+        comm_W: comm_W_res?,
+        comm_E: comm_E_res?,
+        u,
+        X: Z[self.num_vars + 1..].to_vec(),
+      },
+      RelaxedR1CSWitness {
+        W: Z[..self.num_vars].to_vec(),
+        r_W,
+        E: E_vec,
+        r_E,
+      },
+    ))
   }
 }
 
