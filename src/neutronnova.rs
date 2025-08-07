@@ -267,28 +267,26 @@ where
     witnesses: &[R1CSWitness<E>],
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"neutronnova_prove");
-
-    let (ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
+    transcript.absorb(b"vk", &pk.vk_digest);
 
     let U1 = &instances[0];
     let W1 = &witnesses[0];
     let U2 = &instances[1];
     let W2 = &witnesses[1];
 
-    // TODO: append digest of verifier key here
-
     // append U1 and U2 to transcript
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
 
+    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
+    transcript.absorb(b"T", &T);
+
     // generate a challenge for the eq polynomial
     let tau = transcript.squeeze(b"tau")?;
-
+    let (ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
     let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
 
     let rho = transcript.squeeze(b"rho")?;
-
-    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
 
     let (res1, res2) = rayon::join(
       || {
@@ -339,9 +337,8 @@ where
     vk: &NeutronNovaVerifierKey<E>,
     instances: &[R1CSInstance<E>],
   ) -> Result<(), SpartanError> {
-    let (ell, left, right) = compute_tensor_decomp(vk.S.num_cons);
-
     let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &vk.digest()?);
 
     let U1 = &instances[0];
     let U2 = &instances[1];
@@ -350,16 +347,21 @@ where
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
 
+    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
+    transcript.absorb(b"T", &T);
+
     // generate a challenge for the eq polynomial
     let tau = transcript.squeeze(b"tau")?;
-
+    let (ell, left, right) = compute_tensor_decomp(vk.S.num_cons);
     let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
 
     let rho = transcript.squeeze(b"rho")?;
 
-    let _T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
-
-    // TODO: check the degree of polynomial
+    if self.poly.degree() != 4 {
+      return Err(SpartanError::ProofVerifyError {
+        reason: "NeutronNovaSNARK poly must be of degree 4".to_string(),
+      });
+    }
 
     // absorb poly in the RO
     transcript.absorb(b"poly", &self.poly);
