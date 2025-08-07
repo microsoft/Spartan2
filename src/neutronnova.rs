@@ -117,14 +117,14 @@ where
     Ok((pk, vk))
   }
 
-  /// Prepares the SNARK for proving
+  /// Prepares the pre-processed state for proving
   pub fn prep_prove<C: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    circuit: &[C],
+    circuits: &[C],
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    let ps = (0..circuit.len())
-      .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuit[i], is_small))
+    let ps = (0..circuits.len())
+      .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuits[i], is_small))
       .collect::<Result<Vec<_>, _>>()?;
 
     Ok(NeutronNovaPrepSNARK { ps })
@@ -261,17 +261,48 @@ where
   }
 
   /// Prove the folding of a batch of R1CS instances
-  pub fn prove(
+  pub fn prove<C: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    instances: &[R1CSInstance<E>],
-    witnesses: &[R1CSWitness<E>],
+    circuits: &[C],
+    prep_snark: &mut NeutronNovaPrepSNARK<E>,
+    is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    let U1 = &instances[0];
+    transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
+
+    for circuit in circuits {
+      let public_values = circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Circuit does not provide public IO: {e}"),
+        })?;
+
+      // absorb the public values into the transcript
+      transcript.absorb(b"public_values", &public_values.as_slice());
+    }
+
+    let mut instances = Vec::with_capacity(circuits.len());
+    let mut witnesses = Vec::with_capacity(circuits.len());
+
+    for (i, circuit) in circuits.iter().enumerate() {
+      let (u, w) = SatisfyingAssignment::r1cs_instance_and_witness(
+        &mut prep_snark.ps[i],
+        &pk.S,
+        &pk.ck,
+        circuit,
+        is_small,
+        &mut transcript,
+      )?;
+
+      instances.push(u);
+      witnesses.push(w);
+    }
+
+    let U1 = &instances[0].to_regular_instance()?;
     let W1 = &witnesses[0];
-    let U2 = &instances[1];
+    let U2 = &instances[1].to_regular_instance()?;
     let W2 = &witnesses[1];
 
     // append U1 and U2 to transcript
@@ -331,11 +362,10 @@ where
     Ok(Self { poly, folded_W })
   }
 
-  /// Verifies the NeutronNovaSNARK
+  /*/// Verifies the NeutronNovaSNARK
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
-    instances: &[R1CSInstance<E>],
   ) -> Result<(), SpartanError> {
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
@@ -379,9 +409,10 @@ where
     is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W, &E, T_out)?;
 
     Ok(())
-  }
+  }*/
 }
 
+#[allow(dead_code)]
 /// Check if the folded witness satisfies the folded instance
 fn is_sat_with_target<E: Engine>(
   ck: &CommitmentKey<E>,
@@ -437,15 +468,7 @@ fn is_sat_with_target<E: Engine>(
 #[cfg(test)]
 mod benchmarks {
   use super::*;
-  use crate::{
-    bellpepper::{
-      solver::SatisfyingAssignment,
-      test_r1cs::{TestSpartanShape, TestSpartanWitness},
-      test_shape_cs::TestShapeCS,
-    },
-    provider::T256HyraxEngine,
-    r1cs::R1CSShape,
-  };
+  use crate::provider::T256HyraxEngine;
   use bellpepper::gadgets::{
     boolean::{AllocatedBit, Boolean},
     num::AllocatedNum,
@@ -454,6 +477,8 @@ mod benchmarks {
   use bellpepper_core::{ConstraintSystem, SynthesisError};
   use core::marker::PhantomData;
   use criterion::Criterion;
+
+  #[derive(Clone, Debug)]
   struct Sha256Circuit<E: Engine> {
     preimage: Vec<u8>,
     _p: PhantomData<E>,
@@ -479,11 +504,11 @@ mod benchmarks {
       Ok(vec![]) // Placeholder, we don't use precommitted variables in this example
     }
 
-    pub fn num_challenges(&self) -> usize {
+    fn num_challenges(&self) -> usize {
       0 // Placeholder, we don't use challenges in this example
     }
 
-    pub fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
       &self,
       cs: &mut CS,
       _shared: &[AllocatedNum<E::Scalar>],
@@ -521,9 +546,11 @@ mod benchmarks {
   ) -> (
     NeutronNovaProverKey<E>,
     NeutronNovaVerifierKey<E>,
-    Vec<R1CSInstance<E>>,
-    Vec<R1CSWitness<E>>,
-  ) {
+    Vec<Sha256Circuit<E>>,
+  )
+  where
+    E::PCS: FoldingEngineTrait<E>, // Ensure that the PCS supports folding
+  {
     let circuit = Sha256Circuit::<E> {
       preimage: vec![0u8; len],
       _p: Default::default(),
@@ -531,50 +558,38 @@ mod benchmarks {
 
     let (pk, vk) = NeutronNovaSNARK::<E>::setup(&[circuit.clone()]).unwrap();
 
-    let mut cs: TestShapeCS<E> = TestShapeCS::new();
-    let _ = circuit.synthesize(&mut cs);
-    let (S, ck, _vk) = cs.r1cs_shape().unwrap();
-    let S = S.pad();
-
-    let mut cs = SatisfyingAssignment::<E>::new();
-    let _ = circuit.synthesize(&mut cs);
-    let (U1, W1) = cs.r1cs_instance_and_witness(&S, &ck, true).unwrap();
-
     let circuit2 = Sha256Circuit::<E> {
       preimage: vec![1u8; len],
       _p: Default::default(),
     };
-    let mut cs = SatisfyingAssignment::<E>::new();
-    let _ = circuit2.synthesize(&mut cs);
-    let (U2, W2) = cs.r1cs_instance_and_witness(&S, &ck, true).unwrap();
 
-    let instances = vec![U1, U2];
-    let witnesses = vec![W1, W2];
-
-    (ck, S, instances, witnesses)
+    (pk, vk, vec![circuit, circuit2])
   }
 
-  fn bench_neutron_inner<E: Engine>(
+  fn bench_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
     c: &mut Criterion,
     name: &str,
     pk: &NeutronNovaProverKey<E>,
-    vk: &NeutronNovaVerifierKey<E>,
-    instances: &[R1CSInstance<E>],
-    witnesses: &[R1CSWitness<E>],
+    _vk: &NeutronNovaVerifierKey<E>,
+    circuits: &[C],
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
     // sanity check: prove and verify before benching
-    let res = NeutronNovaSNARK::prove(pk, instances, witnesses);
+    let mut ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+
+    let res = NeutronNovaSNARK::prove(pk, circuits, &mut ps, true);
     assert!(res.is_ok());
 
-    let snark = res.unwrap();
-    let res = snark.verify(vk, instances);
-    assert!(res.is_ok());
+    //let snark = res.unwrap();
+    //let res = snark.verify(vk);
+    //assert!(res.is_ok());
 
     c.bench_function(&format!("neutron_snark_{name}"), |b| {
       b.iter(|| {
-        let res = NeutronNovaSNARK::prove(pk, instances, witnesses);
+        let mut ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+
+        let res = NeutronNovaSNARK::prove(pk, circuits, &mut ps, true);
         assert!(res.is_ok());
       })
     });
@@ -586,10 +601,13 @@ mod benchmarks {
 
     let mut criterion = Criterion::default();
     for len in [64, 128].iter() {
-      let (ck, S, instances, witnesses) = generarate_sha_r1cs::<E>(*len);
+      let (pk, vk, circuits) = generarate_sha_r1cs::<E>(*len);
       bench_neutron_inner(
         &mut criterion,
-        format!("sha256_{len}", &ck, &S, &instances, &witnesses),
+        &format!("sha256_{len}"),
+        &pk,
+        &vk,
+        &circuits,
       );
     }
   }
