@@ -213,6 +213,43 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
   }
 }
 
+impl<E: Engine> SatisfyingAssignment<E> {
+  /// Helper to process a round and return the concrete challenges generated for that round.
+  /// This enables interleaving with external computations that need the verifier randomness.
+  pub fn process_round_returning_challenges<C: MultiRoundCircuit<E>>(
+    state: &mut MultiRoundState<E>,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    round_index: usize,
+    is_small: bool,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    // Capture how many challenge rounds we had before
+    let prev_len = state.challenges_per_round.len();
+    <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      state,
+      s,
+      ck,
+      circuit,
+      round_index,
+      is_small,
+      transcript,
+    )?;
+    // Extract newly appended challenges for this round
+    let new_len = state.challenges_per_round.len();
+    if new_len == prev_len {
+      return Ok(vec![]);
+    }
+    let last = &state.challenges_per_round[new_len - 1];
+    let chals = last
+      .iter()
+      .map(|a| a.get_value().unwrap_or(E::Scalar::ZERO))
+      .collect::<Vec<_>>();
+    Ok(chals)
+  }
+}
+
 pub(crate) fn add_constraint<S: PrimeField>(
   X: &mut (
     &mut SparseMatrix<S>,

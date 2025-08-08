@@ -1169,7 +1169,9 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     R1CSShape {
       num_cons: self.num_cons,
       num_vars: total_vars,
-      num_io: self.num_public + total_challenges,
+      // Keep IO order consistent with SplitMultiRoundR1CSInstance::to_regular_instance
+      // which concatenates [challenges, public_values]
+      num_io: total_challenges + self.num_public,
       A: self.A.clone(),
       B: self.B.clone(),
       C: self.C.clone(),
@@ -1298,7 +1300,9 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
 
     Ok(R1CSInstance {
       comm_W: comm_w,
-      X: [self.public_values.clone(), all_challenges].concat(),
+      // Multi-round circuits inputize challenges before public values during synthesis.
+      // The regular instance must reflect the same ordering for satisfiability checks.
+      X: [all_challenges, self.public_values.clone()].concat(),
     })
   }
 }
