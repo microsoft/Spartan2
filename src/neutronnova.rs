@@ -14,7 +14,7 @@ use crate::{
   errors::SpartanError,
   math::Math,
   polys::{power::PowPolynomial, univariate::UniPoly},
-  r1cs::{R1CSInstance, R1CSWitness, SplitR1CSShape},
+  r1cs::{R1CSInstance, R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
   traits::{
     Engine,
     circuit::SpartanCircuit,
@@ -88,6 +88,7 @@ pub struct NeutronNovaPrepSNARK<E: Engine> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaSNARK<E: Engine> {
+  instances: Vec<SplitR1CSInstance<E>>,
   poly: UniPoly<E::Scalar>,
   folded_W: R1CSWitness<E>,
 }
@@ -269,10 +270,12 @@ where
   ) -> Result<Self, SpartanError> {
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
-
     transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
 
-    for circuit in circuits {
+    let mut instances = Vec::with_capacity(circuits.len());
+    let mut witnesses = Vec::with_capacity(circuits.len());
+    for (i, circuit) in circuits.iter().enumerate() {
+      // absorb the public IO of each circuit into the transcript
       let public_values = circuit
         .public_values()
         .map_err(|e| SpartanError::SynthesisError {
@@ -281,12 +284,6 @@ where
 
       // absorb the public values into the transcript
       transcript.absorb(b"public_values", &public_values.as_slice());
-    }
-
-    let mut instances = Vec::with_capacity(circuits.len());
-    let mut witnesses = Vec::with_capacity(circuits.len());
-
-    for (i, circuit) in circuits.iter().enumerate() {
       let (u, w) = SatisfyingAssignment::r1cs_instance_and_witness(
         &mut prep_snark.ps[i],
         &pk.S,
@@ -359,19 +356,28 @@ where
     let _folded_U = U1.fold(U2, &r_b)?;
     let folded_W = W1.fold(W2, &r_b)?;
 
-    Ok(Self { poly, folded_W })
+    Ok(Self {
+      instances,
+      poly,
+      folded_W,
+    })
   }
 
-  /*/// Verifies the NeutronNovaSNARK
-  pub fn verify(
-    &self,
-    vk: &NeutronNovaVerifierKey<E>,
-  ) -> Result<(), SpartanError> {
+  /// Verifies the NeutronNovaSNARK
+  pub fn verify(&self, vk: &NeutronNovaVerifierKey<E>) -> Result<(), SpartanError> {
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
+    transcript.absorb(
+      b"num_circuits",
+      &E::Scalar::from(self.instances.len() as u64),
+    );
 
-    let U1 = &instances[0];
-    let U2 = &instances[1];
+    for instance in &self.instances {
+      instance.validate(&vk.S, &mut transcript)?;
+    }
+
+    let U1 = &self.instances[0].to_regular_instance()?;
+    let U2 = &self.instances[1].to_regular_instance()?;
 
     // append U1 and U2 to transcript
     transcript.absorb(b"U1", U1);
@@ -409,10 +415,9 @@ where
     is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W, &E, T_out)?;
 
     Ok(())
-  }*/
+  }
 }
 
-#[allow(dead_code)]
 /// Check if the folded witness satisfies the folded instance
 fn is_sat_with_target<E: Engine>(
   ck: &CommitmentKey<E>,
@@ -570,7 +575,7 @@ mod benchmarks {
     c: &mut Criterion,
     name: &str,
     pk: &NeutronNovaProverKey<E>,
-    _vk: &NeutronNovaVerifierKey<E>,
+    vk: &NeutronNovaVerifierKey<E>,
     circuits: &[C],
   ) where
     E::PCS: FoldingEngineTrait<E>,
@@ -581,9 +586,9 @@ mod benchmarks {
     let res = NeutronNovaSNARK::prove(pk, circuits, &mut ps, true);
     assert!(res.is_ok());
 
-    //let snark = res.unwrap();
-    //let res = snark.verify(vk);
-    //assert!(res.is_ok());
+    let snark = res.unwrap();
+    let res = snark.verify(vk);
+    assert!(res.is_ok());
 
     c.bench_function(&format!("neutron_snark_{name}"), |b| {
       b.iter(|| {
