@@ -28,44 +28,6 @@ use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A type that represents the prover's key
-#[derive(Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct NeutronNovaProverKey<E: Engine> {
-  ck: CommitmentKey<E>,
-  S: SplitR1CSShape<E>,
-  vk_digest: SpartanDigest, // digest of the verifier's key
-}
-
-/// A type that represents the verifier's key
-#[derive(Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct NeutronNovaVerifierKey<E: Engine> {
-  ck: CommitmentKey<E>,
-  vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  S: SplitR1CSShape<E>,
-  #[serde(skip, default = "OnceCell::new")]
-  digest: OnceCell<SpartanDigest>,
-}
-
-impl<E: Engine> SimpleDigestible for NeutronNovaVerifierKey<E> {}
-
-impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
-  /// Returns the digest of the verifier's key.
-  fn digest(&self) -> Result<SpartanDigest, SpartanError> {
-    self
-      .digest
-      .get_or_try_init(|| {
-        let dc = DigestComputer::<_>::new(self);
-        dc.digest()
-      })
-      .cloned()
-      .map_err(|_| SpartanError::DigestError {
-        reason: "Unable to compute digest for SpartanVerifierKey".to_string(),
-      })
-  }
-}
-
 fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
   let ell = n.next_power_of_two().log_2();
   // we split ell into ell1 and ell2 such that ell1 + ell2 = ell and ell1 >= ell2
@@ -77,60 +39,26 @@ fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
   (ell, left, right)
 }
 
-/// A type that holds the pre-processed state for proving
+/// A type that holds the folded instance produced by NeutronNova NIFS
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct NeutronNovaPrepSNARK<E: Engine> {
-  ps: Vec<PrecommittedState<E>>,
+pub struct FoldedR1CSInstance<E: Engine> {
+  U: R1CSInstance<E>,
+  tau: E::Scalar, // the challenge for the equality polynomial
+  T: E::Scalar,   // the target value for the folded instance
 }
 
-/// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
+/// A type that holds the NeutronNova NIFS (Non-Interactive Folding Scheme)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct NeutronNovaSNARK<E: Engine> {
-  instances: Vec<SplitR1CSInstance<E>>,
-  poly: UniPoly<E::Scalar>,
-  folded_W: R1CSWitness<E>,
+pub struct NeutronNovaNIFS<E: Engine> {
+  polys: Vec<UniPoly<E::Scalar>>,
 }
 
-impl<E: Engine> NeutronNovaSNARK<E>
+impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  /// Sets up the NeutronNova SNARK for a batch of circuits
-  pub fn setup<C: SpartanCircuit<E>>(
-    circuit: &[C], // uniform circuit
-  ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit[0])?;
-
-    let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
-      ck: ck.clone(),
-      S: S.clone(),
-      vk_ee,
-      digest: OnceCell::new(),
-    };
-    let pk = NeutronNovaProverKey {
-      ck,
-      S,
-      vk_digest: vk.digest()?,
-    };
-
-    Ok((pk, vk))
-  }
-
-  /// Prepares the pre-processed state for proving
-  pub fn prep_prove<C: SpartanCircuit<E>>(
-    pk: &NeutronNovaProverKey<E>,
-    circuits: &[C],
-    is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    let ps = (0..circuits.len())
-      .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuits[i], is_small))
-      .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(NeutronNovaPrepSNARK { ps })
-  }
-
   /// Computes the evaluations of the sum-check polynomial at 0, 2, 3, and 4
   #[inline]
   #[allow(clippy::too_many_arguments)]
@@ -261,6 +189,211 @@ where
     )
   }
 
+  fn prove(
+    S: &SplitR1CSShape<E>,
+    U1: &R1CSInstance<E>,
+    U2: &R1CSInstance<E>,
+    W1: &R1CSWitness<E>,
+    W2: &R1CSWitness<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
+    // append U1 and U2 to transcript
+    transcript.absorb(b"U1", U1);
+    transcript.absorb(b"U2", U2);
+
+    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
+    transcript.absorb(b"T", &T);
+
+    // generate a challenge for the eq polynomial
+    let tau = transcript.squeeze(b"tau")?;
+    let (ell, left, right) = compute_tensor_decomp(S.num_cons);
+    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
+
+    let rho = transcript.squeeze(b"rho")?;
+
+    let (res1, res2) = rayon::join(
+      || {
+        let z1 = [W1.W.clone(), vec![E::Scalar::ONE], U1.X.clone()].concat();
+        S.multiply_vec(&z1)
+      },
+      || {
+        let z2 = [W2.W.clone(), vec![E::Scalar::ONE], U2.X.clone()].concat();
+        S.multiply_vec(&z2)
+      },
+    );
+
+    let (Az1, Bz1, Cz1) = res1?;
+    let (Az2, Bz2, Cz2) = res2?;
+
+    // compute the sum-check polynomial's evaluations at 0, 2, 3
+    let (eval_point_0, eval_point_2, eval_point_3, eval_point_4) =
+      Self::prove_helper(&rho, (left, right), &E, &Az1, &Bz1, &Cz1, &Az2, &Bz2, &Cz2);
+
+    let evals = vec![
+      eval_point_0,
+      T - eval_point_0,
+      eval_point_2,
+      eval_point_3,
+      eval_point_4,
+    ];
+    let poly = UniPoly::<E::Scalar>::from_evals(&evals)?;
+
+    // absorb poly in the RO
+    transcript.absorb(b"poly", &poly);
+
+    // squeeze a challenge
+    let r_b = transcript.squeeze(b"r_b")?;
+
+    // compute the sum-check polynomial's evaluations at r_b
+    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
+    let T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
+
+    let _folded_U = FoldedR1CSInstance {
+      U: U1.fold(U2, &r_b)?,
+      tau,
+      T: T_out,
+    };
+    let folded_W = W1.fold(W2, &r_b)?;
+
+    Ok((Self { polys: vec![poly] }, folded_W))
+  }
+
+  /// verifies the NeutronNova NIFS
+  fn verify(
+    &self,
+    U1: &R1CSInstance<E>,
+    U2: &R1CSInstance<E>,
+    transcript: &mut E::TE,
+  ) -> Result<FoldedR1CSInstance<E>, SpartanError> {
+    // append U1 and U2 to transcript
+    transcript.absorb(b"U1", U1);
+    transcript.absorb(b"U2", U2);
+
+    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
+    transcript.absorb(b"T", &T);
+
+    // generate a challenge for the eq polynomial
+    let tau = transcript.squeeze(b"tau")?;
+    let rho = transcript.squeeze(b"rho")?;
+
+    if self.polys.len() != 1 || self.polys[0].degree() != 4 {
+      return Err(SpartanError::ProofVerifyError {
+        reason: "NeutronNovaSNARK poly must be of degree 4".to_string(),
+      });
+    }
+
+    // absorb poly in the RO
+    transcript.absorb(b"poly", &self.polys[0]);
+
+    // squeeze a challenge
+    let r_b = transcript.squeeze(b"r_b")?;
+
+    // compute the sum-check polynomial's evaluations at r_b
+    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
+    let T_out = self.polys[0].evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
+
+    let folded_U = FoldedR1CSInstance {
+      U: U1.fold(U2, &r_b)?,
+      tau,
+      T: T_out,
+    };
+
+    Ok(folded_U)
+  }
+}
+
+/// A type that represents the prover's key
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct NeutronNovaProverKey<E: Engine> {
+  ck: CommitmentKey<E>,
+  S: SplitR1CSShape<E>,
+  vk_digest: SpartanDigest, // digest of the verifier's key
+}
+
+/// A type that represents the verifier's key
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct NeutronNovaVerifierKey<E: Engine> {
+  ck: CommitmentKey<E>,
+  vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
+  S: SplitR1CSShape<E>,
+  #[serde(skip, default = "OnceCell::new")]
+  digest: OnceCell<SpartanDigest>,
+}
+
+impl<E: Engine> SimpleDigestible for NeutronNovaVerifierKey<E> {}
+
+impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
+  /// Returns the digest of the verifier's key.
+  fn digest(&self) -> Result<SpartanDigest, SpartanError> {
+    self
+      .digest
+      .get_or_try_init(|| {
+        let dc = DigestComputer::<_>::new(self);
+        dc.digest()
+      })
+      .cloned()
+      .map_err(|_| SpartanError::DigestError {
+        reason: "Unable to compute digest for SpartanVerifierKey".to_string(),
+      })
+  }
+}
+
+/// A type that holds the pre-processed state for proving
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct NeutronNovaPrepSNARK<E: Engine> {
+  ps: Vec<PrecommittedState<E>>,
+}
+
+/// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct NeutronNovaSNARK<E: Engine> {
+  instances: Vec<SplitR1CSInstance<E>>,
+  nifs: NeutronNovaNIFS<E>,
+  folded_W: R1CSWitness<E>,
+}
+
+impl<E: Engine> NeutronNovaSNARK<E>
+where
+  E::PCS: FoldingEngineTrait<E>,
+{
+  /// Sets up the NeutronNova SNARK for a batch of circuits
+  pub fn setup<C: SpartanCircuit<E>>(
+    circuit: &[C], // uniform circuit
+  ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
+    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit[0])?;
+
+    let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
+      ck: ck.clone(),
+      S: S.clone(),
+      vk_ee,
+      digest: OnceCell::new(),
+    };
+    let pk = NeutronNovaProverKey {
+      ck,
+      S,
+      vk_digest: vk.digest()?,
+    };
+
+    Ok((pk, vk))
+  }
+
+  /// Prepares the pre-processed state for proving
+  pub fn prep_prove<C: SpartanCircuit<E>>(
+    pk: &NeutronNovaProverKey<E>,
+    circuits: &[C],
+    is_small: bool, // do witness elements fit in machine words?
+  ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
+    let ps = (0..circuits.len())
+      .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuits[i], is_small))
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(NeutronNovaPrepSNARK { ps })
+  }
+
   /// Prove the folding of a batch of R1CS instances
   pub fn prove<C: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
@@ -302,63 +435,11 @@ where
     let U2 = &instances[1].to_regular_instance()?;
     let W2 = &witnesses[1];
 
-    // append U1 and U2 to transcript
-    transcript.absorb(b"U1", U1);
-    transcript.absorb(b"U2", U2);
-
-    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
-    transcript.absorb(b"T", &T);
-
-    // generate a challenge for the eq polynomial
-    let tau = transcript.squeeze(b"tau")?;
-    let (ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
-    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
-
-    let rho = transcript.squeeze(b"rho")?;
-
-    let (res1, res2) = rayon::join(
-      || {
-        let z1 = [W1.W.clone(), vec![E::Scalar::ONE], U1.X.clone()].concat();
-        pk.S.multiply_vec(&z1)
-      },
-      || {
-        let z2 = [W2.W.clone(), vec![E::Scalar::ONE], U2.X.clone()].concat();
-        pk.S.multiply_vec(&z2)
-      },
-    );
-
-    let (Az1, Bz1, Cz1) = res1?;
-    let (Az2, Bz2, Cz2) = res2?;
-
-    // compute the sum-check polynomial's evaluations at 0, 2, 3
-    let (eval_point_0, eval_point_2, eval_point_3, eval_point_4) =
-      Self::prove_helper(&rho, (left, right), &E, &Az1, &Bz1, &Cz1, &Az2, &Bz2, &Cz2);
-
-    let evals = vec![
-      eval_point_0,
-      T - eval_point_0,
-      eval_point_2,
-      eval_point_3,
-      eval_point_4,
-    ];
-    let poly = UniPoly::<E::Scalar>::from_evals(&evals)?;
-
-    // absorb poly in the RO
-    transcript.absorb(b"poly", &poly);
-
-    // squeeze a challenge
-    let r_b = transcript.squeeze(b"r_b")?;
-
-    // compute the sum-check polynomial's evaluations at r_b
-    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let _T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
-
-    let _folded_U = U1.fold(U2, &r_b)?;
-    let folded_W = W1.fold(W2, &r_b)?;
+    let (nifs, folded_W) = NeutronNovaNIFS::prove(&pk.S, U1, U2, W1, W2, &mut transcript)?;
 
     Ok(Self {
       instances,
-      poly,
+      nifs,
       folded_W,
     })
   }
@@ -379,40 +460,10 @@ where
     let U1 = &self.instances[0].to_regular_instance()?;
     let U2 = &self.instances[1].to_regular_instance()?;
 
-    // append U1 and U2 to transcript
-    transcript.absorb(b"U1", U1);
-    transcript.absorb(b"U2", U2);
-
-    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
-    transcript.absorb(b"T", &T);
-
-    // generate a challenge for the eq polynomial
-    let tau = transcript.squeeze(b"tau")?;
-    let (ell, left, right) = compute_tensor_decomp(vk.S.num_cons);
-    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
-
-    let rho = transcript.squeeze(b"rho")?;
-
-    if self.poly.degree() != 4 {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "NeutronNovaSNARK poly must be of degree 4".to_string(),
-      });
-    }
-
-    // absorb poly in the RO
-    transcript.absorb(b"poly", &self.poly);
-
-    // squeeze a challenge
-    let r_b = transcript.squeeze(b"r_b")?;
-
-    // compute the sum-check polynomial's evaluations at r_b
-    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let T_out = self.poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
-
-    let folded_U = U1.fold(U2, &r_b)?;
+    let folded_U = self.nifs.verify(U1, U2, &mut transcript)?;
 
     // check the satisfiability of folded instance using the provided witness
-    is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W, &E, T_out)?;
+    is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W)?;
 
     Ok(())
   }
@@ -422,14 +473,13 @@ where
 fn is_sat_with_target<E: Engine>(
   ck: &CommitmentKey<E>,
   S: &SplitR1CSShape<E>,
-  U: &R1CSInstance<E>,
+  U: &FoldedR1CSInstance<E>,
   W: &R1CSWitness<E>,
-  E: &[E::Scalar],
-  T: E::Scalar,
 ) -> Result<(), SpartanError> {
-  let (_ell, left, right) = compute_tensor_decomp(S.num_cons);
+  let (ell, left, right) = compute_tensor_decomp(S.num_cons);
+  let E = PowPolynomial::new(&U.tau, ell).split_evals(left, right);
 
-  let z = [W.W.clone(), vec![E::Scalar::ONE], U.X.clone()].concat();
+  let z = [W.W.clone(), vec![E::Scalar::ONE], U.U.X.clone()].concat();
   let (Az, Bz, Cz) = S.multiply_vec(&z)?;
 
   // full_E is the outer outer product of E1 and E2
@@ -450,9 +500,9 @@ fn is_sat_with_target<E: Engine>(
     .map(|(((e, a), b), c)| *e * ((*a) * (*b) - *c))
     .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
 
-  if sum != T {
+  if sum != U.T {
     println!("sum: {sum:?}");
-    println!("U.T: {T:?}");
+    println!("U.T: {:?}", U.T);
     return Err(SpartanError::UnSat {
       reason: "sum != U.T".to_string(),
     });
@@ -461,7 +511,7 @@ fn is_sat_with_target<E: Engine>(
   // check the validity of the commitments
   let comm_W = E::PCS::commit(ck, &W.W, &W.r_W, W.is_small)?;
 
-  if comm_W != U.comm_W {
+  if comm_W != U.U.comm_W {
     return Err(SpartanError::UnSat {
       reason: "comm_W != U.comm_W".to_string(),
     });
@@ -561,7 +611,7 @@ mod benchmarks {
       _p: Default::default(),
     };
 
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&[circuit.clone()]).unwrap();
+    let (pk, vk) = NeutronNovaSNARK::<E>::setup(std::slice::from_ref(&circuit)).unwrap();
 
     let circuit2 = Sha256Circuit::<E> {
       preimage: vec![1u8; len],
