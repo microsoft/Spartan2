@@ -13,7 +13,7 @@ use crate::{
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   math::Math,
-  polys::{eq::EqPolynomial, power::PowPolynomial, univariate::UniPoly},
+  polys::{power::PowPolynomial, univariate::UniPoly},
   r1cs::{R1CSInstance, R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
   traits::{
     Engine,
@@ -53,6 +53,27 @@ pub struct FoldedR1CSInstance<E: Engine> {
 #[serde(bound = "")]
 pub struct NeutronNovaNIFS<E: Engine> {
   polys: Vec<UniPoly<E::Scalar>>,
+}
+
+// eq for a Boolean bit `b ∈ {0,1}`: eq(b, rho) = (1-b)(1-ρ) + bρ
+#[inline]
+fn eq_bool<F: Field>(b: u8, rho: &F) -> F {
+  if b == 0 { F::ONE - *rho } else { *rho }
+}
+
+/// Weight for round `t` and `pair_idx`, assuming your pairing order is LSB-first:
+/// Round 0 pairs (0,1),(2,3),..., so suffix bits are the bits of pair_idx starting at bit 0.
+/// Round 1 pairs (0,1) on the next layer, suffix bits start at bit 0 of that layer’s index, etc.
+#[inline]
+fn suffix_weight<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &[F]) -> F {
+  let mut w = F::ONE;
+  let mut k = pair_idx;
+  for s in (t + 1)..ell_b {
+    let bit = (k & 1) as u8; // bit 0 of k corresponds to index bit s = t+1
+    w *= eq_bool(bit, &rhos[s]);
+    k >>= 1;
+  }
+  w
 }
 
 impl<E: Engine> NeutronNovaNIFS<E>
@@ -190,10 +211,10 @@ where
   }
 
   /// NeutronNova NIFS prove for a batch of R1CS instances
-  pub fn prove_many(
+  pub fn prove(
     S: &SplitR1CSShape<E>,
-    Us: &[&R1CSInstance<E>],
-    Ws: &[&R1CSWitness<E>],
+    Us: &[R1CSInstance<E>],
+    Ws: &[R1CSWitness<E>],
     transcript: &mut E::TE,
   ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
     assert!(!Us.is_empty() && Us.len() == Ws.len());
@@ -202,7 +223,7 @@ where
     let ell_b = n.next_power_of_two().log_2();
 
     for U in Us.iter() {
-      transcript.absorb(b"U", *U);
+      transcript.absorb(b"U", U);
     }
     let T = E::Scalar::ZERO;
     transcript.absorb(b"T", &T);
@@ -230,6 +251,7 @@ where
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
+    let mut acc_eq = E::Scalar::ONE;
     let mut m = n;
     for t in 0..ell_b {
       let rho_t = rhos[t];
@@ -240,7 +262,7 @@ where
         .map(|pair_idx| {
           let lo = 2 * pair_idx;
           let hi = lo + 1;
-          Self::prove_helper(
+          let (a0, a2, a3, a4) = Self::prove_helper(
             &rho_t,
             (left, right),
             &E_eq,
@@ -250,7 +272,11 @@ where
             &A_layers[hi],
             &B_layers[hi],
             &C_layers[hi],
-          )
+          );
+
+          let w = suffix_weight::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+
+          (a0 * w, a2 * w, a3 * w, a4 * w)
         })
         .reduce(
           || {
@@ -264,13 +290,18 @@ where
           |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
         );
 
-      let poly_t = UniPoly::<E::Scalar>::from_evals(&[e0, T_cur - e0, e2, e3, e4])?;
+      let se0 = acc_eq * e0;
+      let se2 = acc_eq * e2;
+      let se3 = acc_eq * e3;
+      let se4 = acc_eq * e4;
+      let poly_t = UniPoly::<E::Scalar>::from_evals(&[se0, T_cur - se0, se2, se3, se4])?;
       polys.push(poly_t.clone());
 
       // Commit poly_t, then draw r_t (Fiat–Shamir per round)
       transcript.absorb(b"poly", &poly_t);
       let r_b = transcript.squeeze(b"r_b")?;
 
+      acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rho_t) + r_b * rho_t; // update the accumulated equality polynomial
       T_cur = poly_t.evaluate(&r_b);
       r_bs.push(r_b);
 
@@ -320,23 +351,31 @@ where
     }
 
     // Fold witnesses with the same r_t sequence
-    let mut W_layer: Vec<R1CSWitness<E>> = Ws.iter().map(|&w| w.clone()).collect();
-    for r_t in &r_bs {
+    let mut W_layer: Vec<R1CSWitness<E>> = Ws.to_vec();
+    for r_b in &r_bs {
       let mut next = Vec::with_capacity(W_layer.len() / 2);
       for i in 0..(W_layer.len() / 2) {
         let lo = 2 * i;
         let hi = lo + 1;
-        next.push(W_layer[lo].fold(&W_layer[hi], r_t)?);
+        next.push(W_layer[lo].fold(&W_layer[hi], r_b)?);
       }
       W_layer = next;
     }
     debug_assert_eq!(W_layer.len(), 1);
 
+    // T_out = poly_last(r_last) / eq(r_b, rho)
+    let T_out = T_cur * acc_eq.invert().unwrap();
+
+    println!(
+      "NeutronNova NIFS: folded {} instances into one with T_out = {:?}",
+      n, T_out
+    );
+
     Ok((Self { polys }, W_layer.pop().unwrap()))
   }
 
   /// NeutronNova NIFS verify for a batch of R1CS instances
-  pub fn verify_many(
+  pub fn verify(
     &self,
     Us: &[R1CSInstance<E>],
     transcript: &mut E::TE,
@@ -371,9 +410,10 @@ where
       rhos.push(transcript.squeeze(b"rho")?);
     }
 
-    // Then, per round: absorb poly_t, squeeze r_t
+    // Then, per round: absorb poly_t, squeeze r_b
     let mut r_bs = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
+    let mut acc_eq = E::Scalar::ONE; // accumulated equality polynomial
     for t in 0..ell_b {
       if self.polys[t].degree() != 4
         || self.polys[t].eval_at_zero() + self.polys[t].eval_at_one() != T_cur
@@ -386,25 +426,22 @@ where
 
       let r_b = transcript.squeeze(b"r_b")?;
       T_cur = self.polys[t].evaluate(&r_b);
+      acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rhos[t]) + r_b * rhos[t]; // update the accumulated equality polynomial
 
       r_bs.push(r_b);
     }
 
     // T_out = poly_last(r_last) / eq(r_b, rho)
-    let denom_inv = EqPolynomial::new(r_bs.clone())
-      .evaluate(&rhos)
-      .invert()
-      .unwrap();
-    let T_out = T_cur * denom_inv;
+    let T_out = T_cur * acc_eq.invert().unwrap();
 
-    // Fold public instances with the same r_t sequence (unchanged)
+    // Fold public instances with the same r_b sequence
     let mut U_layer: Vec<R1CSInstance<E>> = Us.to_vec();
-    for r_t in &r_bs {
+    for r_b in &r_bs {
       let mut next = Vec::with_capacity(U_layer.len() / 2);
       for i in 0..(U_layer.len() / 2) {
         let lo = 2 * i;
         let hi = lo + 1;
-        next.push(U_layer[lo].fold(&U_layer[hi], r_t)?);
+        next.push(U_layer[lo].fold(&U_layer[hi], r_b)?);
       }
       U_layer = next;
     }
@@ -416,118 +453,6 @@ where
       T: T_out,
     })
   }
-
-  /*fn prove(
-    S: &SplitR1CSShape<E>,
-    U1: &R1CSInstance<E>,
-    U2: &R1CSInstance<E>,
-    W1: &R1CSWitness<E>,
-    W2: &R1CSWitness<E>,
-    transcript: &mut E::TE,
-  ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
-    // append U1 and U2 to transcript
-    transcript.absorb(b"U1", U1);
-    transcript.absorb(b"U2", U2);
-
-    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
-    transcript.absorb(b"T", &T);
-
-    // generate a challenge for the eq polynomial
-    let tau = transcript.squeeze(b"tau")?;
-    let (ell, left, right) = compute_tensor_decomp(S.num_cons);
-    let E = PowPolynomial::new(&tau, ell).split_evals(left, right);
-
-    let rho = transcript.squeeze(b"rho")?;
-
-    let (res1, res2) = rayon::join(
-      || {
-        let z1 = [W1.W.clone(), vec![E::Scalar::ONE], U1.X.clone()].concat();
-        S.multiply_vec(&z1)
-      },
-      || {
-        let z2 = [W2.W.clone(), vec![E::Scalar::ONE], U2.X.clone()].concat();
-        S.multiply_vec(&z2)
-      },
-    );
-
-    let (Az1, Bz1, Cz1) = res1?;
-    let (Az2, Bz2, Cz2) = res2?;
-
-    // compute the sum-check polynomial's evaluations at 0, 2, 3
-    let (eval_point_0, eval_point_2, eval_point_3, eval_point_4) =
-      Self::prove_helper(&rho, (left, right), &E, &Az1, &Bz1, &Cz1, &Az2, &Bz2, &Cz2);
-
-    let evals = vec![
-      eval_point_0,
-      T - eval_point_0,
-      eval_point_2,
-      eval_point_3,
-      eval_point_4,
-    ];
-    let poly = UniPoly::<E::Scalar>::from_evals(&evals)?;
-
-    // absorb poly in the RO
-    transcript.absorb(b"poly", &poly);
-
-    // squeeze a challenge
-    let r_b = transcript.squeeze(b"r_b")?;
-
-    // compute the sum-check polynomial's evaluations at r_b
-    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let T_out = poly.evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
-
-    let _folded_U = FoldedR1CSInstance {
-      U: U1.fold(U2, &r_b)?,
-      tau,
-      T: T_out,
-    };
-    let folded_W = W1.fold(W2, &r_b)?;
-
-    Ok((Self { polys: vec![poly] }, folded_W))
-  }
-
-  /// verifies the NeutronNova NIFS
-  fn verify(
-    &self,
-    U1: &R1CSInstance<E>,
-    U2: &R1CSInstance<E>,
-    transcript: &mut E::TE,
-  ) -> Result<FoldedR1CSInstance<E>, SpartanError> {
-    // append U1 and U2 to transcript
-    transcript.absorb(b"U1", U1);
-    transcript.absorb(b"U2", U2);
-
-    let T = E::Scalar::ZERO; // we need all instances to be satisfying, so T is zero
-    transcript.absorb(b"T", &T);
-
-    // generate a challenge for the eq polynomial
-    let tau = transcript.squeeze(b"tau")?;
-    let rho = transcript.squeeze(b"rho")?;
-
-    if self.polys.len() != 1 || self.polys[0].degree() != 4 {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "NeutronNovaSNARK poly must be of degree 4".to_string(),
-      });
-    }
-
-    // absorb poly in the RO
-    transcript.absorb(b"poly", &self.polys[0]);
-
-    // squeeze a challenge
-    let r_b = transcript.squeeze(b"r_b")?;
-
-    // compute the sum-check polynomial's evaluations at r_b
-    let eq_rho_r_b = (E::Scalar::ONE - rho) * (E::Scalar::ONE - r_b) + rho * r_b;
-    let T_out = self.polys[0].evaluate(&r_b) * eq_rho_r_b.invert().unwrap(); // TODO: remove unwrap
-
-    let folded_U = FoldedR1CSInstance {
-      U: U1.fold(U2, &r_b)?,
-      tau,
-      T: T_out,
-    };
-
-    Ok(folded_U)
-  }*/
 }
 
 /// A type that represents the prover's key
@@ -658,13 +583,13 @@ where
       witnesses.push(w);
     }
 
-    let U1 = &instances[0].to_regular_instance()?;
-    let W1 = &witnesses[0];
-    let U2 = &instances[1].to_regular_instance()?;
-    let W2 = &witnesses[1];
+    let instances_regular = instances
+      .iter()
+      .map(|u| u.to_regular_instance())
+      .collect::<Result<Vec<_>, _>>()?;
 
     let (nifs, folded_W) =
-      NeutronNovaNIFS::prove_many(&pk.S, &[U1, U2], &[W1, W2], &mut transcript)?;
+      NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
 
     Ok(Self {
       instances,
@@ -686,12 +611,12 @@ where
       instance.validate(&vk.S, &mut transcript)?;
     }
 
-    let U1 = &self.instances[0].to_regular_instance()?;
-    let U2 = &self.instances[1].to_regular_instance()?;
-
-    let folded_U = self
-      .nifs
-      .verify_many(&[U1.clone(), U2.clone()], &mut transcript)?;
+    let instances = self
+      .instances
+      .iter()
+      .map(|u| u.to_regular_instance())
+      .collect::<Result<Vec<_>, _>>()?;
+    let folded_U = self.nifs.verify(&instances, &mut transcript)?;
 
     // check the satisfiability of folded instance using the provided witness
     is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W)?;
@@ -828,6 +753,7 @@ mod benchmarks {
   }
 
   fn generarate_sha_r1cs<E: Engine>(
+    num_circuits: usize,
     len: usize,
   ) -> (
     NeutronNovaProverKey<E>,
@@ -844,12 +770,14 @@ mod benchmarks {
 
     let (pk, vk) = NeutronNovaSNARK::<E>::setup(std::slice::from_ref(&circuit)).unwrap();
 
-    let circuit2 = Sha256Circuit::<E> {
-      preimage: vec![1u8; len],
-      _p: Default::default(),
-    };
+    let circuits = (0..num_circuits)
+      .map(|i| Sha256Circuit::<E> {
+        preimage: vec![i as u8; len],
+        _p: Default::default(),
+      })
+      .collect::<Vec<_>>();
 
-    (pk, vk, vec![circuit, circuit2])
+    (pk, vk, circuits)
   }
 
   fn bench_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
@@ -885,9 +813,11 @@ mod benchmarks {
   fn bench_neutron_sha256() {
     type E = T256HyraxEngine;
 
+    let num_circuits = 8;
+
     let mut criterion = Criterion::default();
     for len in [64, 128].iter() {
-      let (pk, vk, circuits) = generarate_sha_r1cs::<E>(*len);
+      let (pk, vk, circuits) = generarate_sha_r1cs::<E>(num_circuits, *len);
       bench_neutron_inner(
         &mut criterion,
         &format!("sha256_{len}"),
