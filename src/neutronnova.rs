@@ -13,7 +13,7 @@ use crate::{
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   math::Math,
-  polys::{power::PowPolynomial, univariate::UniPoly},
+  polys::{eq::EqPolynomial, power::PowPolynomial, univariate::UniPoly},
   r1cs::{R1CSInstance, R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
   traits::{
     Engine,
@@ -189,7 +189,235 @@ where
     )
   }
 
-  fn prove(
+  /// NeutronNova NIFS prove for a batch of R1CS instances
+  pub fn prove_many(
+    S: &SplitR1CSShape<E>,
+    Us: &[&R1CSInstance<E>],
+    Ws: &[&R1CSWitness<E>],
+    transcript: &mut E::TE,
+  ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
+    assert!(!Us.is_empty() && Us.len() == Ws.len());
+    let n = Us.len();
+    assert!(n.is_power_of_two());
+    let ell_b = n.next_power_of_two().log_2();
+
+    for U in Us.iter() {
+      transcript.absorb(b"U", *U);
+    }
+    let T = E::Scalar::ZERO;
+    transcript.absorb(b"T", &T);
+
+    let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
+    let tau = transcript.squeeze(b"tau")?;
+    let E_eq = PowPolynomial::new(&tau, ell_cons).split_evals(left, right);
+
+    let mut rhos = Vec::with_capacity(ell_b);
+    for _ in 0..ell_b {
+      rhos.push(transcript.squeeze(b"rho")?);
+    }
+
+    let triples: Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)> = (0..n)
+      .into_par_iter()
+      .map(|i| {
+        let z = [Ws[i].W.clone(), vec![E::Scalar::ONE], Us[i].X.clone()].concat();
+        S.multiply_vec(&z)
+      })
+      .collect::<Result<_, _>>()?;
+    let mut A_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.0.clone()).collect();
+    let mut B_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.1.clone()).collect();
+    let mut C_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.2.clone()).collect();
+
+    let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
+    let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
+    let mut m = n;
+    for t in 0..ell_b {
+      let rho_t = rhos[t];
+
+      // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
+      let (e0, e2, e3, e4) = (0..(m / 2))
+        .into_par_iter()
+        .map(|pair_idx| {
+          let lo = 2 * pair_idx;
+          let hi = lo + 1;
+          Self::prove_helper(
+            &rho_t,
+            (left, right),
+            &E_eq,
+            &A_layers[lo],
+            &B_layers[lo],
+            &C_layers[lo],
+            &A_layers[hi],
+            &B_layers[hi],
+            &C_layers[hi],
+          )
+        })
+        .reduce(
+          || {
+            (
+              E::Scalar::ZERO,
+              E::Scalar::ZERO,
+              E::Scalar::ZERO,
+              E::Scalar::ZERO,
+            )
+          },
+          |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+        );
+
+      let poly_t = UniPoly::<E::Scalar>::from_evals(&[e0, T_cur - e0, e2, e3, e4])?;
+      polys.push(poly_t.clone());
+
+      // Commit poly_t, then draw r_t (Fiat–Shamir per round)
+      transcript.absorb(b"poly", &poly_t);
+      let r_b = transcript.squeeze(b"r_b")?;
+
+      T_cur = poly_t.evaluate(&r_b);
+      r_bs.push(r_b);
+
+      // Fold A/B/C for next round (weights 1-r_b, r_b)
+      let one_minus_r = E::Scalar::ONE - r_b;
+      let next_A: Vec<Vec<E::Scalar>> = (0..(m / 2))
+        .into_par_iter()
+        .map(|i| {
+          let lo = 2 * i;
+          let hi = lo + 1;
+          let mut v = vec![E::Scalar::ZERO; A_layers[lo].len()];
+          for k in 0..v.len() {
+            v[k] = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
+          }
+          v
+        })
+        .collect();
+      let next_B: Vec<Vec<E::Scalar>> = (0..(m / 2))
+        .into_par_iter()
+        .map(|i| {
+          let lo = 2 * i;
+          let hi = lo + 1;
+          let mut v = vec![E::Scalar::ZERO; B_layers[lo].len()];
+          for k in 0..v.len() {
+            v[k] = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
+          }
+          v
+        })
+        .collect();
+      let next_C: Vec<Vec<E::Scalar>> = (0..(m / 2))
+        .into_par_iter()
+        .map(|i| {
+          let lo = 2 * i;
+          let hi = lo + 1;
+          let mut v = vec![E::Scalar::ZERO; C_layers[lo].len()];
+          for k in 0..v.len() {
+            v[k] = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
+          }
+          v
+        })
+        .collect();
+
+      A_layers = next_A;
+      B_layers = next_B;
+      C_layers = next_C;
+      m /= 2;
+    }
+
+    // Fold witnesses with the same r_t sequence
+    let mut W_layer: Vec<R1CSWitness<E>> = Ws.iter().map(|&w| w.clone()).collect();
+    for r_t in &r_bs {
+      let mut next = Vec::with_capacity(W_layer.len() / 2);
+      for i in 0..(W_layer.len() / 2) {
+        let lo = 2 * i;
+        let hi = lo + 1;
+        next.push(W_layer[lo].fold(&W_layer[hi], r_t)?);
+      }
+      W_layer = next;
+    }
+    debug_assert_eq!(W_layer.len(), 1);
+
+    Ok((Self { polys }, W_layer.pop().unwrap()))
+  }
+
+  /// NeutronNova NIFS verify for a batch of R1CS instances
+  pub fn verify_many(
+    &self,
+    Us: &[R1CSInstance<E>],
+    transcript: &mut E::TE,
+  ) -> Result<FoldedR1CSInstance<E>, SpartanError> {
+    let n = Us.len();
+    assert!(n.is_power_of_two());
+    let ell_b = n.next_power_of_two().log_2();
+
+    if self.polys.len() != ell_b {
+      return Err(SpartanError::ProofVerifyError {
+        reason: format!("Expected {} polys, got {}", ell_b, self.polys.len()),
+      });
+    }
+    for (i, p) in self.polys.iter().enumerate() {
+      if p.degree() != 4 {
+        return Err(SpartanError::ProofVerifyError {
+          reason: format!("poly {} must be degree 4", i),
+        });
+      }
+    }
+
+    for U in Us.iter() {
+      transcript.absorb(b"U", U);
+    }
+    let T = E::Scalar::ZERO;
+    transcript.absorb(b"T", &T);
+
+    let tau = transcript.squeeze(b"tau")?;
+
+    let mut rhos = Vec::with_capacity(ell_b);
+    for _ in 0..ell_b {
+      rhos.push(transcript.squeeze(b"rho")?);
+    }
+
+    // Then, per round: absorb poly_t, squeeze r_t
+    let mut r_bs = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
+    for t in 0..ell_b {
+      if self.polys[t].degree() != 4
+        || self.polys[t].eval_at_zero() + self.polys[t].eval_at_one() != T_cur
+      {
+        return Err(SpartanError::ProofVerifyError {
+          reason: format!("poly {} is not valid", t),
+        });
+      }
+      transcript.absorb(b"poly", &self.polys[t]);
+
+      let r_b = transcript.squeeze(b"r_b")?;
+      T_cur = self.polys[t].evaluate(&r_b);
+
+      r_bs.push(r_b);
+    }
+
+    // T_out = poly_last(r_last) / eq(r_b, rho)
+    let denom_inv = EqPolynomial::new(r_bs.clone())
+      .evaluate(&rhos)
+      .invert()
+      .unwrap();
+    let T_out = T_cur * denom_inv;
+
+    // Fold public instances with the same r_t sequence (unchanged)
+    let mut U_layer: Vec<R1CSInstance<E>> = Us.to_vec();
+    for r_t in &r_bs {
+      let mut next = Vec::with_capacity(U_layer.len() / 2);
+      for i in 0..(U_layer.len() / 2) {
+        let lo = 2 * i;
+        let hi = lo + 1;
+        next.push(U_layer[lo].fold(&U_layer[hi], r_t)?);
+      }
+      U_layer = next;
+    }
+    debug_assert_eq!(U_layer.len(), 1);
+
+    Ok(FoldedR1CSInstance {
+      U: U_layer.pop().unwrap(),
+      tau,
+      T: T_out,
+    })
+  }
+
+  /*fn prove(
     S: &SplitR1CSShape<E>,
     U1: &R1CSInstance<E>,
     U2: &R1CSInstance<E>,
@@ -299,7 +527,7 @@ where
     };
 
     Ok(folded_U)
-  }
+  }*/
 }
 
 /// A type that represents the prover's key
@@ -435,7 +663,8 @@ where
     let U2 = &instances[1].to_regular_instance()?;
     let W2 = &witnesses[1];
 
-    let (nifs, folded_W) = NeutronNovaNIFS::prove(&pk.S, U1, U2, W1, W2, &mut transcript)?;
+    let (nifs, folded_W) =
+      NeutronNovaNIFS::prove_many(&pk.S, &[U1, U2], &[W1, W2], &mut transcript)?;
 
     Ok(Self {
       instances,
@@ -460,7 +689,9 @@ where
     let U1 = &self.instances[0].to_regular_instance()?;
     let U2 = &self.instances[1].to_regular_instance()?;
 
-    let folded_U = self.nifs.verify(U1, U2, &mut transcript)?;
+    let folded_U = self
+      .nifs
+      .verify_many(&[U1.clone(), U2.clone()], &mut transcript)?;
 
     // check the satisfiability of folded instance using the provided witness
     is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W)?;
