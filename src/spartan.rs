@@ -206,6 +206,28 @@ where
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&spartan_verifier_circuit)?;
     let verifier_shape_reg = verifier_shape_mr.to_regular_shape();
 
+    // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
+    let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
+    let num_rounds_x = usize::try_from(S.num_cons.ilog2()).unwrap();
+    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+    let zero = E::Scalar::ZERO;
+    let spartan_verifier_circuit = SpartanVerifierCircuit::<E> {
+      outer_polys: vec![[zero; 4]; num_rounds_x],
+      claim_Az: zero,
+      claim_Bz: zero,
+      claim_Cz: zero,
+      tau_at_rx: zero,
+      inner_polys: vec![[zero; 3]; num_rounds_y],
+      eval_A: zero,
+      eval_B: zero,
+      eval_C: zero,
+      eval_W: zero,
+      eval_X: zero,
+    };
+    let (verifier_shape_mr, verifier_ck_mr, _vk_mr) =
+      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&spartan_verifier_circuit)?;
+    let verifier_shape_reg = verifier_shape_mr.to_regular_shape();
+
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
