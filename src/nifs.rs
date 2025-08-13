@@ -86,7 +86,7 @@ mod tests {
 
   fn multiround_fold_with() {
     // Build a trivial 1-constraint, 1-variable, 1-round shape.
-    let width = <<E as Engine>::PCS as PCSEngineTrait<E>>::width();
+    let width = 16usize;
     let num_cons = 1usize;
     let num_vars_per_round = vec![1usize];
     let num_challenges_per_round = vec![0usize];

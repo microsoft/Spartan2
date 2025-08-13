@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! Support for generating R1CS using bellpepper.
 use crate::{
   Blind, CommitmentKey, PCS, PartialCommitment,
@@ -555,7 +556,8 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
     b.cols = total_vars + num_inputs;
     c.cols = total_vars + num_inputs;
 
-    let width = E::PCS::width();
+    // Narrower width for per-round commitments
+    let width = 16usize;
 
     // Don't count One as an input for shape's purposes.
     let s = SplitMultiRoundR1CSShape::new(

@@ -1191,7 +1191,8 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   /// Generates public parameters for a multi-round R1CS
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let total_vars: usize = self.num_vars_per_round.iter().sum();
-    E::PCS::setup(b"ck", total_vars)
+    // Use a narrower commitment width for multi-round witnesses to reduce padding overhead.
+    E::PCS::setup_with_width(b"ck", total_vars, 16)
   }
 
   pub fn multiply_vec(

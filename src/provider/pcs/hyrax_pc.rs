@@ -1,5 +1,5 @@
 //! This module implements the Hyrax polynomial commitment scheme
-#[allow(unused)]
+#![allow(unused, non_snake_case)]
 use crate::{
   Blind, Commitment, CommitmentKey,
   errors::SpartanError,
@@ -97,7 +97,7 @@ where
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
   fn width() -> usize {
-    1024 // Hyrax PC is always 1024 columns wide
+    1024 // default (large) width used for monolithic witness commitments
   }
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
@@ -125,9 +125,18 @@ where
     (ck, vk)
   }
 
+<<<<<<< HEAD
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
     let num_rows = div_ceil(n, ck.num_cols);
 
+=======
+  /// Derives generators for Hyrax PC with the default large width.
+  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
+    Self::setup_with_width(label, n, Self::width())
+  }
+
+  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+>>>>>>> 8345be4 (opt: small padding (#8))
     HyraxBlind {
       blind: (0..num_rows)
         .map(|_| E::Scalar::random(&mut OsRng))
@@ -192,13 +201,13 @@ where
   }
 
   fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {
-    let num_rows = div_ceil(n, Self::width());
-    if comm.comm.len() != num_rows {
+    let min_rows = div_ceil(n, Self::width());
+    if comm.comm.len() < min_rows {
       return Err(SpartanError::InvalidCommitmentLength {
         reason: format!(
-          "InvalidCommitmentLength: actual: {}, expected: {}",
+          "InvalidCommitmentLength: actual: {}, expected at least: {}",
           comm.comm.len(),
-          num_rows
+          min_rows
         ),
       });
     }
