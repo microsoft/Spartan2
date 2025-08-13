@@ -76,6 +76,7 @@ pub struct R1CSInstance<E: Engine> {
 
 /// A type that holds a witness for a given Relaxed R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct RelaxedR1CSWitness<E: Engine> {
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
@@ -1009,9 +1010,6 @@ impl<E: Engine> SplitR1CSInstance<E> {
     S: &SplitR1CSShape<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_values", &self.public_values.as_slice());
-
     if S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
         E::PCS::check_partial(comm, S.num_shared)?;
@@ -1258,16 +1256,18 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
     s: &SplitMultiRoundR1CSShape<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_values", &self.public_values.as_slice());
-
-    // Process each round
+    // Process each round, absorbing the previous round's commitment before deriving this round's challenges
     for round in 0..s.num_rounds {
-      // Generate and validate challenges for this round BEFORE absorbing the current round's commitment.
-      // This mirrors the order used by the prover, where challenges for round `r` are derived
-      // after absorbing the commitment from the *previous* round (if any), but **before** the
-      // commitment of the current round is absorbed. This ensures that the commitment of round `r`
-      // cannot influence the challenges of the same round.
+      if round > 0 {
+        // Absorb commitment of previous round to influence current round's challenges
+        E::PCS::check_partial(
+          &self.comm_w_per_round[round - 1],
+          s.num_vars_per_round[round - 1],
+        )?;
+        transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round - 1]);
+      }
+
+      // Derive and validate challenges for this round
       let expected_challenges = (0..s.num_challenges_per_round[round])
         .map(|_| transcript.squeeze(b"challenge"))
         .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
@@ -1277,11 +1277,6 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
           reason: format!("Challenges for round {round} do not match"),
         });
       }
-
-      // After validating challenges, absorb the commitment for the current round so that it
-      // affects the transcript state for the *next* round's challenges.
-      E::PCS::check_partial(&self.comm_w_per_round[round], s.num_vars_per_round[round])?;
-      transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round]);
     }
 
     Ok(())

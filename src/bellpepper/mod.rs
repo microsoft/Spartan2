@@ -66,10 +66,13 @@ pub mod tests {
   // ------------------------------------------------------------
   // Multi-round circuit test
   // ------------------------------------------------------------
-  use crate::bellpepper::r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness};
-  use crate::bellpepper::shape_cs::ShapeCS;
-  use crate::traits::circuit::MultiRoundCircuit;
-  use crate::traits::transcript::TranscriptEngineTrait;
+  use crate::{
+    bellpepper::{
+      r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness},
+      shape_cs::ShapeCS,
+    },
+    traits::{circuit::MultiRoundCircuit, transcript::TranscriptEngineTrait},
+  };
 
   #[derive(Clone)]
   pub struct TwoRoundBitsCircuit;

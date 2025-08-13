@@ -89,7 +89,7 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
     is_small: bool,
   ) -> Result<Self::MultiRoundState, SpartanError>;
 
-  /// Process a specific round and update the state.
+  /// Process a specific round and update the state, returning the challenges generated.
   fn process_round<C: MultiRoundCircuit<E>>(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
@@ -98,7 +98,7 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
     round_index: usize,
     is_small: bool,
     transcript: &mut E::TE,
-  ) -> Result<(), SpartanError>;
+  ) -> Result<Vec<E::Scalar>, SpartanError>;
 
   /// Finalize the multi-round witness and return the instance and witness.
   fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
@@ -210,43 +210,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     .unwrap();
 
     Ok(S)
-  }
-}
-
-impl<E: Engine> SatisfyingAssignment<E> {
-  /// Helper to process a round and return the concrete challenges generated for that round.
-  /// This enables interleaving with external computations that need the verifier randomness.
-  pub fn process_round_returning_challenges<C: MultiRoundCircuit<E>>(
-    state: &mut MultiRoundState<E>,
-    s: &SplitMultiRoundR1CSShape<E>,
-    ck: &CommitmentKey<E>,
-    circuit: &C,
-    round_index: usize,
-    is_small: bool,
-    transcript: &mut E::TE,
-  ) -> Result<Vec<E::Scalar>, SpartanError> {
-    // Capture how many challenge rounds we had before
-    let prev_len = state.challenges_per_round.len();
-    <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
-      state,
-      s,
-      ck,
-      circuit,
-      round_index,
-      is_small,
-      transcript,
-    )?;
-    // Extract newly appended challenges for this round
-    let new_len = state.challenges_per_round.len();
-    if new_len == prev_len {
-      return Ok(vec![]);
-    }
-    let last = &state.challenges_per_round[new_len - 1];
-    let chals = last
-      .iter()
-      .map(|a| a.get_value().unwrap_or(E::Scalar::ZERO))
-      .collect::<Vec<_>>();
-    Ok(chals)
   }
 }
 
@@ -646,7 +609,7 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     round_index: usize,
     is_small: bool,
     transcript: &mut E::TE,
-  ) -> Result<(), SpartanError> {
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
     if round_index != state.current_round {
       return Err(SpartanError::SynthesisError {
         reason: format!(
@@ -654,16 +617,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
           state.current_round, round_index
         ),
       });
-    }
-
-    // If this is the first round, absorb the public values into the transcript.
-    if round_index == 0 {
-      let public_values = circuit
-        .public_values()
-        .map_err(|e| SpartanError::SynthesisError {
-          reason: format!("Unable to get public values: {e}"),
-        })?;
-      transcript.absorb(b"public_values", &public_values.as_slice());
     }
 
     // Absorb commitment from the immediately preceding round (if any)
@@ -721,7 +674,8 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     state.comm_w_per_round.push(comm_w_round);
     state.current_round += 1;
 
-    Ok(())
+    // Return the challenges that were generated for this round
+    Ok(challenges)
   }
 
   fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
@@ -740,7 +694,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       });
     }
 
-    // Get public values
     let public_values = circuit
       .public_values()
       .map_err(|e| SpartanError::SynthesisError {

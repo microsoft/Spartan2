@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 //! This module implements the sum-check protocol used in the Spartan SNARK.
 //!
 //! The sum-check protocol allows a prover to convince a verifier that a claimed sum
@@ -5,13 +7,20 @@
 //! needing to compute the sum directly.
 
 use crate::{
+  CommitmentKey,
+  bellpepper::{
+    r1cs::{MultiRoundSpartanWitness, MultiRoundState},
+    solver::SatisfyingAssignment,
+  },
   errors::SpartanError,
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
   },
+  r1cs::SplitMultiRoundR1CSShape,
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
+  zk::SpartanVerifierCircuit,
 };
 use ff::Field;
 use rayon::prelude::*;
@@ -618,5 +627,133 @@ impl<E: Engine> SumcheckProof<E> {
         poly_D_1[0],
       ],
     ))
+  }
+
+  /// Executes the **outer** cubic-with-additive-term sum-check in
+  /// Zero-knowledge outer sum-check for the cubic-with-additive-term case.
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_cubic_with_additive_term_zk(
+    num_rounds: usize,
+    poly_tau: &mut MultilinearPolynomial<E::Scalar>,
+    poly_Az: &mut MultilinearPolynomial<E::Scalar>,
+    poly_Bz: &mut MultilinearPolynomial<E::Scalar>,
+    poly_Cz: &mut MultilinearPolynomial<E::Scalar>,
+    verifier_circuit: &mut SpartanVerifierCircuit<E>,
+    state: &mut MultiRoundState<E>,
+    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
+    verifier_ck_mr: &CommitmentKey<E>,
+    is_small: bool,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+    let mut claim_outer_round = E::Scalar::ZERO;
+
+    for i in 0..num_rounds {
+      // -------- interpolate coefficients --------
+      let coeffs = {
+        let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
+          *a * (*b * *c - *d)
+        };
+        let (eval0, eval2, eval3) = Self::compute_eval_points_cubic_with_additive_term(
+          poly_tau, poly_Az, poly_Bz, poly_Cz, &comb,
+        );
+        let evals = vec![eval0, claim_outer_round - eval0, eval2, eval3];
+        let poly = UniPoly::from_evals(&evals)?;
+        [
+          poly.coeffs[0],
+          poly.coeffs[1],
+          poly.coeffs[2],
+          poly.coeffs[3],
+        ]
+      };
+      verifier_circuit.outer_polys[i] = coeffs;
+
+      // -------- transcript / witness handling --------
+      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+        state,
+        verifier_shape_mr,
+        verifier_ck_mr,
+        verifier_circuit,
+        i,
+        is_small,
+        transcript,
+      )?;
+      let r_i = chals[0];
+      r_x.push(r_i);
+
+      // -------- advance claim and bind polys --------
+      let r2 = r_i * r_i;
+      let r3 = r2 * r_i;
+      claim_outer_round = coeffs[0] + coeffs[1] * r_i + coeffs[2] * r2 + coeffs[3] * r3;
+
+      rayon::join(
+        || poly_tau.bind_poly_var_top(&r_i),
+        || {
+          rayon::join(
+            || poly_Az.bind_poly_var_top(&r_i),
+            || poly_Bz.bind_poly_var_top(&r_i),
+          );
+          poly_Cz.bind_poly_var_top(&r_i);
+        },
+      );
+    }
+
+    Ok(r_x)
+  }
+
+  /// Executes a **quadratic** sum-check in zero-knowledge mode and returns the
+  /// Zero-knowledge quadratic sum-check used for the inner round.
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_quad_zk(
+    claim: &E::Scalar,
+    num_rounds: usize,
+    poly_ABC: &mut MultilinearPolynomial<E::Scalar>,
+    poly_z: &mut MultilinearPolynomial<E::Scalar>,
+    verifier_circuit: &mut SpartanVerifierCircuit<E>,
+    state: &mut MultiRoundState<E>,
+    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
+    verifier_ck_mr: &CommitmentKey<E>,
+    is_small: bool,
+    transcript: &mut E::TE,
+    start_round: usize,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+    let mut claim_current_round = *claim;
+
+    for j in 0..num_rounds {
+      // -------- interpolate coeffs --------
+      let coeffs = {
+        let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
+        let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z, &comb);
+        let evals = vec![eval0, claim_current_round - eval0, eval2];
+        let poly = UniPoly::from_evals(&evals)?;
+        [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]]
+      };
+      verifier_circuit.inner_polys[j] = coeffs;
+
+      // -------- transcript / witness handling --------
+      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+        state,
+        verifier_shape_mr,
+        verifier_ck_mr,
+        verifier_circuit,
+        start_round + j,
+        is_small,
+        transcript,
+      )?;
+      let r_j = chals[0];
+      r_y.push(r_j);
+
+      // -------- bind polys --------
+      rayon::join(
+        || poly_ABC.bind_poly_var_top(&r_j),
+        || poly_z.bind_poly_var_top(&r_j),
+      );
+
+      // -------- advance claim for next round --------
+      claim_current_round = coeffs[0] + coeffs[1] * r_j + coeffs[2] * r_j * r_j;
+    }
+
+    Ok(r_y)
   }
 }

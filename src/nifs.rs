@@ -29,9 +29,9 @@ where
     W1: &RelaxedR1CSWitness<E>,
     U2: &R1CSInstance<E>,
     W2: &R1CSWitness<E>,
+    transcript: &mut E::TE,
   ) -> Result<(Self, (RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>)), SpartanError> {
-    // Initialize transcript and absorb both instances.
-    let mut transcript = E::TE::new(b"nifs");
+    // Use the caller-provided transcript and absorb both instances.
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
 
@@ -49,31 +49,21 @@ where
     Ok((Self { comm_T }, (U, W)))
   }
 
-  /// Verify folding when the second instance is supplied as a split multi-round
-  /// R1CS instance. The method first validates the commitments of the split
-  /// instance and then reproduces the prover’s transcript to derive `r`.
+  /// Verify folding given a regular instance `U2` that corresponds to the
+  /// prover's split multi-round instance after conversion.
   pub fn verify(
     &self,
+    transcript: &mut E::TE,
     U1: &RelaxedR1CSInstance<E>,
-    U2_split: &crate::r1cs::SplitMultiRoundR1CSInstance<E>,
-    S_split: &crate::r1cs::SplitMultiRoundR1CSShape<E>,
+    U2: &R1CSInstance<E>,
   ) -> Result<RelaxedR1CSInstance<E>, SpartanError> {
-    // 1. Validate the commitments / structure of the split instance.
-    let mut tmp = E::TE::new(b"nifs");
-    U2_split.validate(S_split, &mut tmp)?;
-
-    // 2. Convert to a regular instance (the form used by the prover).
-    let U2_reg = U2_split.to_regular_instance()?;
-
-    // 3. Re-run the prover’s transcript schedule to obtain `r`.
-    let mut transcript = E::TE::new(b"nifs");
+    // Re-run the prover’s transcript schedule to obtain `r` using caller transcript.
     transcript.absorb(b"U1", U1);
-    transcript.absorb(b"U2", &U2_reg);
+    transcript.absorb(b"U2", U2);
     transcript.absorb(b"comm_T", &self.comm_T);
     let r = transcript.squeeze(b"r")?;
 
-    // 4. Return the folded instance.
-    Ok(U1.fold(&U2_reg, &self.comm_T, &r))
+    Ok(U1.fold(U2, &self.comm_T, &r))
   }
 }
 
@@ -147,10 +137,22 @@ mod tests {
     let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
 
     // Prove & verify
-    let (proof, (folded_U, folded_W)) =
-      NIFS::<E>::prove(&ck, &S_reg, &running_U, &running_W, &inst_reg, &wit_reg).unwrap();
+    let mut transcript = <E as Engine>::TE::new(b"nifs");
+    let (proof, (folded_U, folded_W)) = NIFS::<E>::prove(
+      &ck,
+      &S_reg,
+      &running_U,
+      &running_W,
+      &inst_reg,
+      &wit_reg,
+      &mut transcript,
+    )
+    .unwrap();
 
-    let verified_U = proof.verify(&running_U, &inst_mr, &shape_mr).unwrap();
+    // Validation now happens at callsite; here we provide a regular U2 and transcript
+    let mut transcript = <E as Engine>::TE::new(b"nifs");
+    let U2_reg = inst_mr.to_regular_instance().unwrap();
+    let verified_U = proof.verify(&mut transcript, &running_U, &U2_reg).unwrap();
     assert_eq!(verified_U, folded_U);
     assert!(S_reg.is_sat_relaxed(&ck, &folded_U, &folded_W).is_ok());
   }
@@ -215,10 +217,21 @@ mod tests {
     let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
 
     // NIFS prove + verify
-    let (proof, (folded_U, folded_W)) =
-      NIFS::<E>::prove(&ck, &S_reg, &running_U, &running_W, &inst_reg, &wit_reg).unwrap();
+    let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
+    let (proof, (folded_U, folded_W)) = NIFS::<E>::prove(
+      &ck,
+      &S_reg,
+      &running_U,
+      &running_W,
+      &inst_reg,
+      &wit_reg,
+      &mut transcript_nifs,
+    )
+    .unwrap();
 
-    let verified_U = proof.verify(&running_U, &inst_split, &shape_mr).unwrap();
+    let mut transcript = <E as Engine>::TE::new(b"nifs");
+    let U2_reg = inst_split.to_regular_instance().unwrap();
+    let verified_U = proof.verify(&mut transcript, &running_U, &U2_reg).unwrap();
     assert_eq!(verified_U, folded_U);
     assert!(S_reg.is_sat_relaxed(&ck, &folded_U, &folded_W).is_ok());
   }
