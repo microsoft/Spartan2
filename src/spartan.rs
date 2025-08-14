@@ -289,6 +289,9 @@ where
       &mut transcript,
     )?;
 
+    // Multi-round witness may contain random field elements that are NOT small, so always commit full elements.
+    let mr_is_small = false;
+
     // Prepare vectors and polynomials for building the verifier-circuit trace
     let mut z = [
       W.W.clone(),
@@ -339,7 +342,7 @@ where
         &pk.verifier_shape_mr,
         &pk.verifier_ck_mr,
         &verifier_circuit,
-        is_small,
+        mr_is_small,
       )?;
 
     // Outer sum-check
@@ -353,7 +356,7 @@ where
       &mut state,
       &pk.verifier_shape_mr,
       &pk.verifier_ck_mr,
-      is_small,
+      mr_is_small,
       &mut transcript,
     )?;
 
@@ -369,7 +372,7 @@ where
       &pk.verifier_ck_mr,
       &verifier_circuit,
       num_rounds_x,
-      is_small,
+      mr_is_small,
       &mut transcript,
     )?;
 
@@ -381,7 +384,7 @@ where
       &pk.verifier_ck_mr,
       &verifier_circuit,
       inner_setup_round,
-      is_small,
+      mr_is_small,
       &mut transcript,
     )?;
     let r = chals[0];
@@ -410,7 +413,7 @@ where
       &mut state,
       &pk.verifier_shape_mr,
       &pk.verifier_ck_mr,
-      is_small,
+      mr_is_small,
       &mut transcript,
       num_rounds_x + 2,
     )?;
@@ -484,7 +487,7 @@ where
       &pk.verifier_ck_mr,
       &verifier_circuit,
       (num_rounds_x + 2) + num_rounds_y,
-      is_small,
+      mr_is_small,
       &mut transcript,
     )?;
 
@@ -495,7 +498,7 @@ where
         &pk.verifier_shape_mr,
         &pk.verifier_ck_mr,
         &verifier_circuit,
-        is_small,
+        mr_is_small,
       )?;
     // Use the instance as produced by witness finalization; its public values
     // are exactly those absorbed during round 0 by the prover.
