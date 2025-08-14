@@ -4,6 +4,13 @@
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
 #![allow(non_snake_case)]
+
+#[cfg(feature = "jem")]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "jem")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,

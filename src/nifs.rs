@@ -101,8 +101,8 @@ mod tests {
     let shape_mr = SplitMultiRoundR1CSShape::<E>::new(
       width,
       num_cons,
-      num_vars_per_round.clone(),
-      num_challenges_per_round.clone(),
+      num_vars_per_round,
+      num_challenges_per_round,
       num_public,
       make_sparse(num_cons, cols),
       make_sparse(num_cons, cols),
@@ -131,7 +131,7 @@ mod tests {
         .expect("instance construction");
 
     let inst_reg = inst_mr.to_regular_instance().unwrap();
-    let wit_reg = R1CSWitness::<E>::new_unchecked(W_vec.clone(), r_W.clone(), false).unwrap();
+    let wit_reg = R1CSWitness::<E>::new_unchecked(W_vec, r_W, false).unwrap();
 
     // Create a random relaxed instance/witness compatible with the same shape.
     let (random_U, random_W) = S_reg.sample_random_instance_witness(&ck).unwrap();

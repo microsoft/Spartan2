@@ -293,13 +293,10 @@ where
     let mr_is_small = false;
 
     // Prepare vectors and polynomials for building the verifier-circuit trace
-    let mut z = [
-      W.W.clone(),
-      vec![E::Scalar::ONE],
-      U.public_values.clone(),
-      U.challenges.clone(),
-    ]
-    .concat();
+    let mut z = W.W.clone();
+    z.push(E::Scalar::ONE);
+    z.extend_from_slice(&U.public_values);
+    z.extend_from_slice(&U.challenges);
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (
@@ -398,7 +395,7 @@ where
       .collect();
     z.resize(num_vars * 2, E::Scalar::ZERO);
     let mut poly_ABC = MultilinearPolynomial::new(poly_ABC);
-    let mut poly_z = MultilinearPolynomial::new(z.clone());
+    let mut poly_z = MultilinearPolynomial::new(z);
 
     // Inner sum-check
     let claim_inner_joint =
@@ -713,6 +710,13 @@ mod tests {
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
 
+  #[cfg(feature = "jem")]
+  use tikv_jemallocator::Jemalloc;
+
+  #[cfg(feature = "jem")]
+  #[global_allocator]
+  static GLOBAL: Jemalloc = Jemalloc;
+
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
@@ -806,7 +810,7 @@ mod tests {
     let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
 
     // generate a witness and proof
-    let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
+    let res = S::prove(&pk, circuit, &mut prep_snark, false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 

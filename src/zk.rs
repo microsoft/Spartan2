@@ -267,9 +267,9 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       let r = AllocatedNum::alloc_input(cs.namespace(|| "r"), || Ok(r_val))?;
 
       let prev_outer_vars = &prior_round_vars[self.idx_outer_final()];
-      let claim_Az = prev_outer_vars[1].clone();
-      let claim_Bz = prev_outer_vars[2].clone();
-      let claim_Cz = prev_outer_vars[3].clone();
+      let claim_Az = &prev_outer_vars[1];
+      let claim_Bz = &prev_outer_vars[2];
+      let claim_Cz = &prev_outer_vars[3];
 
       // r^2
       let r_sq = AllocatedNum::alloc(cs.namespace(|| "r_sq"), || {
@@ -375,7 +375,7 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       // Final inner equality
       let prev_e = &prior_round_vars.last().expect("prev inner round")[0];
 
-      let r = prev_challenges[self.idx_inner_setup()][0].clone();
+      let r = &prev_challenges[self.idx_inner_setup()][0];
 
       // Public inputs for eval_A, eval_B, eval_C, tau_at_rx, and eval_X are inputized here when known
       let eval_A = AllocatedNum::alloc(cs.namespace(|| "eval_A"), || Ok(self.eval_A))?;
@@ -390,7 +390,7 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
       eval_X.inputize(cs.namespace(|| "eval_X_input"))?;
 
-      let r_y0 = prev_challenges[self.idx_inner_start()][0].clone();
+      let r_y0 = &prev_challenges[self.idx_inner_start()][0];
       let one_minus_ry0 = AllocatedNum::alloc(cs.namespace(|| "one_minus_ry0"), || {
         let rv = r_y0.get_value().unwrap_or(E::Scalar::ZERO);
         Ok(E::Scalar::ONE - rv)
