@@ -208,11 +208,10 @@ where
     Ws: &[R1CSWitness<E>],
     transcript: &mut E::TE,
   ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
-    assert!(!Us.is_empty() && Us.len() == Ws.len());
     let n = Us.len().next_power_of_two();
     let ell_b = n.log_2();
 
-    if Us.len() != Ws.len() {
+    if Us.is_empty() || Us.len() != Ws.len() {
       return Err(SpartanError::IncorrectWitness {
         reason: "Us and Ws must have the same length".to_string(),
       });
@@ -357,11 +356,6 @@ where
 
     // Fold witnesses with the same r_t sequence
     let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
-
-    // T_out = poly_last(r_last) / eq(r_b, rho)
-    let _T_out = T_cur * acc_eq.invert().unwrap();
-
-    println!("[NeutronNovaNIFS::prove] T_out: {:?}", _T_out);
 
     Ok((Self { polys }, folded_W))
   }
