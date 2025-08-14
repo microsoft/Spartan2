@@ -444,33 +444,8 @@ where
 
     // Evaluate A, B, C at (r_x, r_y)
     let (eval_A, eval_B, eval_C) = {
-      let T_x = EqPolynomial::evals_from_points(&r_x);
       let T_y = EqPolynomial::evals_from_points(&r_y);
-      let multi_eval = |M: &SparseMatrix<E::Scalar>| -> E::Scalar {
-        M.indptr
-          .par_windows(2)
-          .enumerate()
-          .map(|(row_idx, ptrs)| {
-            M.get_row_unchecked(ptrs.try_into().unwrap())
-              .map(|(val, col_idx)| {
-                let prod = T_x[row_idx] * T_y[*col_idx];
-                if *val == E::Scalar::ONE {
-                  prod
-                } else if *val == -E::Scalar::ONE {
-                  -prod
-                } else {
-                  prod * val
-                }
-              })
-              .sum::<E::Scalar>()
-          })
-          .sum()
-      };
-      (
-        multi_eval(&pk.S.A),
-        multi_eval(&pk.S.B),
-        multi_eval(&pk.S.C),
-      )
+      multi_inner_product(&T_y, &evals_A, &evals_B, &evals_C)
     };
 
     // Set verifier circuit public values before processing inner-final round
@@ -713,6 +688,24 @@ where
     // Return original circuit public IO carried in the proof
     Ok(self.U.public_values.clone())
   }
+}
+
+/// computes an inner products <t, a>, <t, b>, and <t,c>
+fn multi_inner_product<T: Field + Send + Sync>(t: &[T], a: &[T], b: &[T], c: &[T]) -> (T, T, T) {
+  assert_eq!(t.len(), a.len());
+  assert_eq!(a.len(), b.len());
+  assert_eq!(b.len(), c.len());
+
+  (0..t.len())
+    .into_par_iter()
+    .map(|i| {
+      let ti = t[i]; // read t[i] once
+      (ti * a[i], ti * b[i], ti * c[i])
+    })
+    .reduce(
+      || (T::ZERO, T::ZERO, T::ZERO),
+      |(sa, sb, sc), (xa, xb, xc)| (sa + xa, sb + xb, sc + xc),
+    )
 }
 
 #[cfg(test)]
