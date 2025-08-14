@@ -244,6 +244,27 @@ impl<E: Engine> R1CSShape<E> {
   }
 }
 
+#[inline]
+fn eq01<F: Field>(bit: u8, r: &F) -> F {
+  if bit == 0 { F::ONE - *r } else { *r }
+}
+
+#[inline]
+fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+  let ell = r_bs.len();
+  (0..n)
+    .map(|i| {
+      let mut wi = F::ONE;
+      let mut k = i;
+      for t in 0..ell {
+        wi *= eq01((k & 1) as u8, &r_bs[t]);
+        k >>= 1;
+      }
+      wi
+    })
+    .collect()
+}
+
 impl<E: Engine> R1CSWitness<E> {
   /// A method to create a witness object using a vector of scalars
   pub fn new(
@@ -283,27 +304,36 @@ impl<E: Engine> R1CSWitness<E> {
     Ok(Self { W, r_W, is_small })
   }
 
-  /// Fold the witness with another witness
-  pub fn fold(&self, W2: &R1CSWitness<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  /// Fold multiple witnesses with a sequence of r_b values
+  pub fn fold_multiple(
+    r_bs: &[E::Scalar],
+    Ws: &[R1CSWitness<E>],
+  ) -> Result<R1CSWitness<E>, SpartanError>
   where
     E::PCS: FoldingEngineTrait<E>,
   {
-    // we need to compute the weighted sum using weights of (1-r_b) and r_b
-    let W = self
-      .W
-      .par_iter()
-      .zip(W2.W.par_iter())
-      .map(|(w1, w2)| *w1 + *r_b * (*w2 - *w1))
-      .collect::<Vec<_>>();
-    let r_W = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
-      &[self.r_W.clone(), W2.r_W.clone()],
-      &[E::Scalar::ONE - r_b, *r_b],
+    let n = Ws.len();
+    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let dim = Ws[0].W.len();
+
+    let mut acc_W = vec![E::Scalar::ZERO; dim];
+    for (i, wz) in Ws.iter().enumerate() {
+      let wi = w[i];
+      // W
+      for k in 0..dim {
+        acc_W[k] = acc_W[k] + wi * wz.W[k];
+      }
+    }
+
+    let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
+      &w,
     )?;
 
-    Ok(Self {
-      W,
-      r_W,
-      is_small: false, // after folding, witnesses are not small
+    Ok(R1CSWitness::<E> {
+      W: acc_W,
+      r_W: acc_r,
+      is_small: false,
     })
   }
 }
@@ -333,24 +363,35 @@ impl<E: Engine> R1CSInstance<E> {
     Ok(R1CSInstance { comm_W, X })
   }
 
-  /// Fold the instance with another instance
-  pub fn fold(&self, U2: &R1CSInstance<E>, r_b: &E::Scalar) -> Result<Self, SpartanError>
+  /// Fold multiple instances with a sequence of r_b values
+  pub fn fold_multiple(r_bs: &[E::Scalar], Us: &[R1CSInstance<E>]) -> R1CSInstance<E>
   where
     E::PCS: FoldingEngineTrait<E>,
   {
-    // we need to compute the weighted sum using weights of (1-r_b) and r_b
-    let comm_W = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      &[self.comm_W.clone(), U2.comm_W.clone()],
-      &[E::Scalar::ONE - r_b, *r_b],
-    )?;
+    let n = Us.len();
+    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let d = Us[0].X.len();
 
-    let X = self
-      .X
-      .par_iter()
-      .zip(U2.X.par_iter())
-      .map(|(x1, x2)| (E::Scalar::ONE - r_b) * x1 + *r_b * x2)
-      .collect::<Vec<_>>();
-    Ok(Self { comm_W, X })
+    // X
+    let mut X_acc = vec![E::Scalar::ZERO; d];
+    for (i, Ui) in Us.iter().enumerate() {
+      let wi = w[i];
+      for j in 0..d {
+        X_acc[j] = X_acc[j] + wi * Ui.X[j];
+      }
+    }
+
+    // commitment (group lin. comb)
+    let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &Us.iter().map(|U| U.comm_W.clone()).collect::<Vec<_>>(),
+      &w,
+    )
+    .expect("fold_commitments");
+
+    R1CSInstance::<E> {
+      X: X_acc,
+      comm_W: comm_acc,
+    }
   }
 }
 

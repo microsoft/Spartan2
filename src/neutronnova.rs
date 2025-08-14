@@ -55,22 +55,13 @@ pub struct NeutronNovaNIFS<E: Engine> {
   polys: Vec<UniPoly<E::Scalar>>,
 }
 
-// eq for a Boolean bit `b ∈ {0,1}`: eq(b, rho) = (1-b)(1-ρ) + bρ
 #[inline]
-fn eq_bool<F: Field>(b: u8, rho: &F) -> F {
-  if b == 0 { F::ONE - *rho } else { *rho }
-}
-
-/// Weight for round `t` and `pair_idx`, assuming your pairing order is LSB-first:
-/// Round 0 pairs (0,1),(2,3),..., so suffix bits are the bits of pair_idx starting at bit 0.
-/// Round 1 pairs (0,1) on the next layer, suffix bits start at bit 0 of that layer’s index, etc.
-#[inline]
-fn suffix_weight<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &[F]) -> F {
+fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &[F]) -> F {
   let mut w = F::ONE;
   let mut k = pair_idx;
   for s in (t + 1)..ell_b {
-    let bit = (k & 1) as u8; // bit 0 of k corresponds to index bit s = t+1
-    w *= eq_bool(bit, &rhos[s]);
+    let bit = (k & 1) as u8; // LSB-first
+    w *= if bit == 0 { F::ONE - rhos[s] } else { rhos[s] };
     k >>= 1;
   }
   w
@@ -218,9 +209,21 @@ where
     transcript: &mut E::TE,
   ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
     assert!(!Us.is_empty() && Us.len() == Ws.len());
-    let n = Us.len();
-    assert!(n.is_power_of_two());
-    let ell_b = n.next_power_of_two().log_2();
+    let n = Us.len().next_power_of_two();
+    let ell_b = n.log_2();
+
+    if Us.len() != Ws.len() {
+      return Err(SpartanError::IncorrectWitness {
+        reason: "Us and Ws must have the same length".to_string(),
+      });
+    }
+
+    let mut Us = Us.to_vec();
+    let mut Ws = Ws.to_vec();
+    if Us.len() < n {
+      Us.extend(vec![Us[0].clone(); n - Us.len()]);
+      Ws.extend(vec![Ws[0].clone(); n - Ws.len()]);
+    }
 
     for U in Us.iter() {
       transcript.absorb(b"U", U);
@@ -231,6 +234,9 @@ where
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
     let tau = transcript.squeeze(b"tau")?;
     let E_eq = PowPolynomial::new(&tau, ell_cons).split_evals(left, right);
+
+    // length of chunk
+    let chunk_len = left * right;
 
     let mut rhos = Vec::with_capacity(ell_b);
     for _ in 0..ell_b {
@@ -257,7 +263,9 @@ where
       let rho_t = rhos[t];
 
       // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
-      let (e0, e2, e3, e4) = (0..(m / 2))
+      let pairs = m / 2;
+
+      let (e0, e2, e3, e4) = (0..pairs)
         .into_par_iter()
         .map(|pair_idx| {
           let lo = 2 * pair_idx;
@@ -274,7 +282,7 @@ where
             &C_layers[hi],
           );
 
-          let w = suffix_weight::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+          let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
 
           (a0 * w, a2 * w, a3 * w, a4 * w)
         })
@@ -307,71 +315,55 @@ where
 
       // Fold A/B/C for next round (weights 1-r_b, r_b)
       let one_minus_r = E::Scalar::ONE - r_b;
-      let next_A: Vec<Vec<E::Scalar>> = (0..(m / 2))
-        .into_par_iter()
-        .map(|i| {
-          let lo = 2 * i;
-          let hi = lo + 1;
-          let mut v = vec![E::Scalar::ZERO; A_layers[lo].len()];
-          for k in 0..v.len() {
-            v[k] = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
-          }
-          v
-        })
-        .collect();
-      let next_B: Vec<Vec<E::Scalar>> = (0..(m / 2))
-        .into_par_iter()
-        .map(|i| {
-          let lo = 2 * i;
-          let hi = lo + 1;
-          let mut v = vec![E::Scalar::ZERO; B_layers[lo].len()];
-          for k in 0..v.len() {
-            v[k] = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
-          }
-          v
-        })
-        .collect();
-      let next_C: Vec<Vec<E::Scalar>> = (0..(m / 2))
-        .into_par_iter()
-        .map(|i| {
-          let lo = 2 * i;
-          let hi = lo + 1;
-          let mut v = vec![E::Scalar::ZERO; C_layers[lo].len()];
-          for k in 0..v.len() {
-            v[k] = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
-          }
-          v
-        })
-        .collect();
+      let mut next_A: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
+      let mut next_B: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
+      let mut next_C: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
+
+      next_A.par_extend((0..pairs).into_par_iter().map(|i| {
+        let lo = 2 * i;
+        let hi = lo + 1;
+        let mut v = vec![E::Scalar::ZERO; chunk_len];
+        for k in 0..chunk_len {
+          v[k] = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
+        }
+        v
+      }));
+      next_B.par_extend((0..pairs).into_par_iter().map(|i| {
+        let lo = 2 * i;
+        let hi = lo + 1;
+        let mut v = vec![E::Scalar::ZERO; chunk_len];
+        for k in 0..chunk_len {
+          v[k] = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
+        }
+        v
+      }));
+      next_C.par_extend((0..pairs).into_par_iter().map(|i| {
+        let lo = 2 * i;
+        let hi = lo + 1;
+        let mut v = vec![E::Scalar::ZERO; chunk_len];
+        for k in 0..chunk_len {
+          v[k] = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
+        }
+        v
+      }));
 
       A_layers = next_A;
       B_layers = next_B;
       C_layers = next_C;
-      m /= 2;
+
+      // m becomes ceil(m/2)
+      m = pairs;
     }
 
     // Fold witnesses with the same r_t sequence
-    let mut W_layer: Vec<R1CSWitness<E>> = Ws.to_vec();
-    for r_b in &r_bs {
-      let mut next = Vec::with_capacity(W_layer.len() / 2);
-      for i in 0..(W_layer.len() / 2) {
-        let lo = 2 * i;
-        let hi = lo + 1;
-        next.push(W_layer[lo].fold(&W_layer[hi], r_b)?);
-      }
-      W_layer = next;
-    }
-    debug_assert_eq!(W_layer.len(), 1);
+    let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
 
     // T_out = poly_last(r_last) / eq(r_b, rho)
-    let T_out = T_cur * acc_eq.invert().unwrap();
+    let _T_out = T_cur * acc_eq.invert().unwrap();
 
-    println!(
-      "NeutronNova NIFS: folded {} instances into one with T_out = {:?}",
-      n, T_out
-    );
+    println!("[NeutronNovaNIFS::prove] T_out: {:?}", _T_out);
 
-    Ok((Self { polys }, W_layer.pop().unwrap()))
+    Ok((Self { polys }, folded_W))
   }
 
   /// NeutronNova NIFS verify for a batch of R1CS instances
@@ -380,21 +372,12 @@ where
     Us: &[R1CSInstance<E>],
     transcript: &mut E::TE,
   ) -> Result<FoldedR1CSInstance<E>, SpartanError> {
-    let n = Us.len();
-    assert!(n.is_power_of_two());
-    let ell_b = n.next_power_of_two().log_2();
+    let n = Us.len().next_power_of_two();
+    let ell_b = n.log_2();
 
-    if self.polys.len() != ell_b {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!("Expected {} polys, got {}", ell_b, self.polys.len()),
-      });
-    }
-    for (i, p) in self.polys.iter().enumerate() {
-      if p.degree() != 4 {
-        return Err(SpartanError::ProofVerifyError {
-          reason: format!("poly {} must be degree 4", i),
-        });
-      }
+    let mut Us = Us.to_vec();
+    if Us.len() < n {
+      Us.extend(vec![Us[0].clone(); n - Us.len()]);
     }
 
     for U in Us.iter() {
@@ -408,6 +391,12 @@ where
     let mut rhos = Vec::with_capacity(ell_b);
     for _ in 0..ell_b {
       rhos.push(transcript.squeeze(b"rho")?);
+    }
+
+    if self.polys.len() != ell_b {
+      return Err(SpartanError::ProofVerifyError {
+        reason: format!("Expected {} polys, got {}", ell_b, self.polys.len()),
+      });
     }
 
     // Then, per round: absorb poly_t, squeeze r_b
@@ -431,24 +420,14 @@ where
       r_bs.push(r_b);
     }
 
+    // Fold public instances with the same r_b sequence
+    let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
+
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let T_out = T_cur * acc_eq.invert().unwrap();
 
-    // Fold public instances with the same r_b sequence
-    let mut U_layer: Vec<R1CSInstance<E>> = Us.to_vec();
-    for r_b in &r_bs {
-      let mut next = Vec::with_capacity(U_layer.len() / 2);
-      for i in 0..(U_layer.len() / 2) {
-        let lo = 2 * i;
-        let hi = lo + 1;
-        next.push(U_layer[lo].fold(&U_layer[hi], r_b)?);
-      }
-      U_layer = next;
-    }
-    debug_assert_eq!(U_layer.len(), 1);
-
     Ok(FoldedR1CSInstance {
-      U: U_layer.pop().unwrap(),
+      U: folded_U,
       tau,
       T: T_out,
     })
@@ -583,13 +562,17 @@ where
       witnesses.push(w);
     }
 
-    let instances_regular = instances
+    let mut instances_regular = instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
-    let (nifs, folded_W) =
-      NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
+    let (nifs, folded_W) = NeutronNovaNIFS::prove(
+      &pk.S,
+      &mut instances_regular,
+      &mut witnesses,
+      &mut transcript,
+    )?;
 
     Ok(Self {
       instances,
@@ -789,6 +772,10 @@ mod benchmarks {
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
+    println!(
+      "[bench_neutron_inner] name: {name}, num_circuits: {}",
+      circuits.len()
+    );
     // sanity check: prove and verify before benching
     let mut ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
 
@@ -813,18 +800,18 @@ mod benchmarks {
   fn bench_neutron_sha256() {
     type E = T256HyraxEngine;
 
-    let num_circuits = 8;
-
     let mut criterion = Criterion::default();
-    for len in [64, 128].iter() {
-      let (pk, vk, circuits) = generarate_sha_r1cs::<E>(num_circuits, *len);
-      bench_neutron_inner(
-        &mut criterion,
-        &format!("sha256_{len}"),
-        &pk,
-        &vk,
-        &circuits,
-      );
+    for num_circuits in [2, 4, 7, 12] {
+      for len in [64, 128].iter() {
+        let (pk, vk, circuits) = generarate_sha_r1cs::<E>(num_circuits, *len);
+        bench_neutron_inner(
+          &mut criterion,
+          &format!("sha256_num_circuits={num_circuits}_len={len}"),
+          &pk,
+          &vk,
+          &circuits,
+        );
+      }
     }
   }
 }
