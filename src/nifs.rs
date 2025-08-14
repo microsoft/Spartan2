@@ -22,6 +22,7 @@ where
   E::PCS: FoldingEngineTrait<E>,
 {
   /// Fold a relaxed instance/witness `(U1, W1)` with a regular instance/witness `(U2, W2)`.
+  /// Returns only the folded witness to avoid unnecessary computation on the prover side.
   pub fn prove(
     ck: &CommitmentKey<E>,
     S: &R1CSShape<E>,
@@ -30,7 +31,7 @@ where
     U2: &R1CSInstance<E>,
     W2: &R1CSWitness<E>,
     transcript: &mut E::TE,
-  ) -> Result<(Self, (RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>)), SpartanError> {
+  ) -> Result<(Self, RelaxedR1CSWitness<E>), SpartanError> {
     // Use the caller-provided transcript and absorb both instances.
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
@@ -43,10 +44,9 @@ where
     transcript.absorb(b"comm_T", &comm_T);
     let r = transcript.squeeze(b"r")?;
 
-    let U = U1.fold(U2, &comm_T, &r);
     let W = W1.fold(W2, &T, &r_T, &r)?;
 
-    Ok((Self { comm_T }, (U, W)))
+    Ok((Self { comm_T }, W))
   }
 
   /// Verify folding given a regular instance `U2` that corresponds to the
@@ -134,15 +134,15 @@ mod tests {
     let wit_reg = R1CSWitness::<E>::new_unchecked(W_vec.clone(), r_W.clone(), false).unwrap();
 
     // Create a random relaxed instance/witness compatible with the same shape.
-    let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
+    let (random_U, random_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
 
     // Prove & verify
     let mut transcript = <E as Engine>::TE::new(b"nifs");
-    let (proof, (folded_U, folded_W)) = NIFS::<E>::prove(
+    let (proof, folded_W) = NIFS::<E>::prove(
       &ck,
       &S_reg,
-      &running_U,
-      &running_W,
+      &random_U,
+      &random_W,
       &inst_reg,
       &wit_reg,
       &mut transcript,
@@ -152,9 +152,8 @@ mod tests {
     // Validation now happens at callsite; here we provide a regular U2 and transcript
     let mut transcript = <E as Engine>::TE::new(b"nifs");
     let U2_reg = inst_mr.to_regular_instance().unwrap();
-    let verified_U = proof.verify(&mut transcript, &running_U, &U2_reg).unwrap();
-    assert_eq!(verified_U, folded_U);
-    assert!(S_reg.is_sat_relaxed(&ck, &folded_U, &folded_W).is_ok());
+    let verified_U = proof.verify(&mut transcript, &random_U, &U2_reg).unwrap();
+    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
   }
 
   #[test]
@@ -214,15 +213,15 @@ mod tests {
     let S_reg = shape_mr.to_regular_shape();
 
     // Random relaxed instance
-    let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
+    let (random_U, random_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
 
     // NIFS prove + verify
     let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
-    let (proof, (folded_U, folded_W)) = NIFS::<E>::prove(
+    let (proof, folded_W) = NIFS::<E>::prove(
       &ck,
       &S_reg,
-      &running_U,
-      &running_W,
+      &random_U,
+      &random_W,
       &inst_reg,
       &wit_reg,
       &mut transcript_nifs,
@@ -231,9 +230,8 @@ mod tests {
 
     let mut transcript = <E as Engine>::TE::new(b"nifs");
     let U2_reg = inst_split.to_regular_instance().unwrap();
-    let verified_U = proof.verify(&mut transcript, &running_U, &U2_reg).unwrap();
-    assert_eq!(verified_U, folded_U);
-    assert!(S_reg.is_sat_relaxed(&ck, &folded_U, &folded_W).is_ok());
+    let verified_U = proof.verify(&mut transcript, &random_U, &U2_reg).unwrap();
+    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
   }
 
   #[test]

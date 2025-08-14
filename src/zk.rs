@@ -618,7 +618,7 @@ mod tests {
 
     // NIFS prove & verify
     let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
-    let (proof, (folded_U, folded_W)) = NIFS::<E>::prove(
+    let (proof, folded_W) = NIFS::<E>::prove(
       &ck,
       &S_reg,
       &running_U,
@@ -634,7 +634,6 @@ mod tests {
     let verified_U = proof
       .verify(&mut transcript_verify, &running_U, &U2_reg)
       .unwrap();
-    assert_eq!(verified_U, folded_U);
-    assert!(S_reg.is_sat_relaxed(&ck, &folded_U, &folded_W).is_ok());
+    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
   }
 }

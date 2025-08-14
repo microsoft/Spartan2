@@ -155,13 +155,13 @@ pub struct PrepSNARK<E: Engine> {
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
   // Multi-round verifier instance capturing the non-ZK verification trace
-  U_mr: SplitMultiRoundR1CSInstance<E>,
+  U_verifier: SplitMultiRoundR1CSInstance<E>,
   // Original single-round R1CS instance
   U: SplitR1CSInstance<E>,
   // NIFS proof for folding a random relaxed instance with the verifier instance
   nifs_proof: NIFS<E>,
   // The random relaxed instance used for folding
-  running_U: RelaxedR1CSInstance<E>,
+  random_U: RelaxedR1CSInstance<E>,
   // Folded relaxed witness produced during NIFS proving
   folded_W: RelaxedR1CSWitness<E>,
   // PCS opening for the original witness commitment
@@ -467,7 +467,7 @@ where
     )?;
 
     // Finalize multi-round witness and construct NIFS proof
-    let (U_verifier_raw, W_verifier) =
+    let (U_verifier, W_verifier) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
         &mut state,
         &pk.verifier_shape_mr,
@@ -477,24 +477,23 @@ where
       )?;
     // Use the instance as produced by witness finalization; its public values
     // are exactly those absorbed during round 0 by the prover.
-    let U_verifier = U_verifier_raw;
     let U_verifier_regular = U_verifier.to_regular_instance()?;
     let S_verifier = &pk.verifier_shape_reg;
-    let (running_U, running_W) = S_verifier.sample_random_instance_witness(&pk.verifier_ck_mr)?;
-    let (nifs_proof, (_folded_U, folded_W)) = NIFS::<E>::prove(
+    let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.verifier_ck_mr)?;
+    let (nifs_proof, folded_W) = NIFS::<E>::prove(
       &pk.verifier_ck_mr,
       S_verifier,
-      &running_U,
-      &running_W,
+      &random_U,
+      &random_W,
       &U_verifier_regular,
       &W_verifier,
       &mut transcript,
     )?;
 
     Ok(R1CSSNARK {
-      U_mr: U_verifier,
+      U_verifier,
       nifs_proof,
-      running_U,
+      random_U,
       folded_W,
       eval_W,
       eval_arg,
@@ -523,7 +522,7 @@ where
     // Reproduce the multi-round transcript schedule up to (but excluding) the final round
     // so that PCS occurs at the same transcript state as in the prover.
     let S_verifier = &vk.verifier_shape_mr;
-    let U_verifier = &self.U_mr;
+    let U_verifier = &self.U_verifier;
     if S_verifier.num_rounds == 0 {
       return Err(SpartanError::ProofVerifyError {
         reason: "Verifier shape has zero rounds".to_string(),
@@ -551,7 +550,7 @@ where
       }
     }
 
-    let U_verifier_regular = self.U_mr.to_regular_instance()?;
+    let U_verifier_regular = self.U_verifier.to_regular_instance()?;
 
     // Verify PCS opening at r_y[1..] using challenges extracted from the multi-round instance
     // Derive expected challenge counts from the original shape sizes
@@ -675,7 +674,7 @@ where
     // Finally, run NIFS verification using the same transcript
     let folded_U = self
       .nifs_proof
-      .verify(&mut transcript, &self.running_U, &U_verifier_regular)?;
+      .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
 
     // Check satisfiability of the folded relaxed instance with the folded witness
     let S_verifier = &vk.verifier_shape_reg;
