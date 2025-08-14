@@ -557,7 +557,7 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
     c.cols = total_vars + num_inputs;
 
     // Narrower width for per-round commitments
-    let width = 16usize;
+    let width = 4usize;
 
     // Don't count One as an input for shape's purposes.
     let s = SplitMultiRoundR1CSShape::new(
