@@ -125,18 +125,9 @@ where
     (ck, vk)
   }
 
-<<<<<<< HEAD
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
     let num_rows = div_ceil(n, ck.num_cols);
 
-=======
-  /// Derives generators for Hyrax PC with the default large width.
-  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    Self::setup_with_width(label, n, Self::width())
-  }
-
-  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
->>>>>>> 8345be4 (opt: small padding (#8))
     HyraxBlind {
       blind: (0..num_rows)
         .map(|_| E::Scalar::random(&mut OsRng))
