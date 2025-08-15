@@ -133,7 +133,7 @@ impl<E: Engine> R1CSShape<E> {
     }
 
     // equalize the number of variables and public IO
-    let m = max(self.num_vars, self.num_io).next_power_of_two();
+    let m = self.num_vars.max(self.num_io).next_power_of_two();
 
     // check if the number of variables are as expected, then
     // we simply set the number of constraints to the next power of two
