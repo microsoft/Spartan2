@@ -256,7 +256,7 @@ where
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
-    let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
+    let mut T_cur = E::Scalar::ZERO; // the current target value, starts at 0
     let mut acc_eq = E::Scalar::ONE;
     let mut m = n;
     for t in 0..ell_b {
