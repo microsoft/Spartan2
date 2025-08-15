@@ -645,6 +645,14 @@ where
       instance.validate(&vk.S, &mut transcript)?;
     }
 
+    for u in &self.instances {
+      if u.comm_W_shared != self.instances[0].comm_W_shared {
+        return Err(SpartanError::ProofVerifyError {
+          reason: "All instances must have the same shared commitment".to_string(),
+        });
+      }
+    }
+
     let instances = self
       .instances
       .par_iter()
