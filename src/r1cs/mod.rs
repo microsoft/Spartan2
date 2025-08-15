@@ -6,7 +6,7 @@ use crate::{
   start_span,
   traits::{
     Engine,
-    pcs::PCSEngineTrait,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
@@ -20,6 +20,26 @@ use tracing::{info, info_span};
 
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
+
+fn eq01<F: Field>(bit: u8, r: &F) -> F {
+  if bit == 0 { F::ONE - *r } else { *r }
+}
+
+#[inline]
+fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+  let ell = r_bs.len();
+  (0..n)
+    .map(|i| {
+      let mut wi = F::ONE;
+      let mut k = i;
+      for r_bs_t in r_bs.iter().take(ell) {
+        wi *= eq01((k & 1) as u8, r_bs_t);
+        k >>= 1;
+      }
+      wi
+    })
+    .collect()
+}
 
 /// A type that holds the shape of the R1CS matrices
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,8 +58,9 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 
 /// A type that holds a witness for a given R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct R1CSWitness<E: Engine> {
-  is_small: bool, // whether the witness elements fit in machine words
+  pub(crate) is_small: bool, // whether the witness elements fit in machine words
   pub(crate) W: Vec<E::Scalar>,
   pub(crate) r_W: Blind<E>,
 }
@@ -101,6 +122,77 @@ impl<E: Engine> R1CSShape<E> {
       C,
       digest: OnceCell::new(),
     })
+  }
+
+  /// Pads the `R1CSShape` so that the shape passes `is_regular_shape`
+  /// Renumbers variables to accommodate padded variables
+  pub fn pad(&self) -> Self {
+    // check if the provided R1CSShape is already as required
+    if self.is_regular_shape() {
+      return self.clone();
+    }
+
+    // equalize the number of variables and public IO
+    let m = self.num_vars.max(self.num_io).next_power_of_two();
+
+    // check if the number of variables are as expected, then
+    // we simply set the number of constraints to the next power of two
+    if self.num_vars == m {
+      return R1CSShape {
+        num_cons: self.num_cons.next_power_of_two(),
+        num_vars: m,
+        num_io: self.num_io,
+        A: self.A.clone(),
+        B: self.B.clone(),
+        C: self.C.clone(),
+        digest: OnceCell::new(),
+      };
+    }
+
+    // otherwise, we need to pad the number of variables and renumber variable accesses
+    let num_vars_padded = m;
+    let num_cons_padded = self.num_cons.next_power_of_two();
+
+    let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+      M.indices.par_iter_mut().for_each(|c| {
+        if *c >= self.num_vars {
+          *c += num_vars_padded - self.num_vars
+        }
+      });
+
+      M.cols += num_vars_padded - self.num_vars;
+
+      let ex = {
+        let nnz = M.indptr.last().unwrap();
+        vec![*nnz; num_cons_padded - self.num_cons]
+      };
+      M.indptr.extend(ex);
+      M
+    };
+
+    let A_padded = apply_pad(self.A.clone());
+    let B_padded = apply_pad(self.B.clone());
+    let C_padded = apply_pad(self.C.clone());
+
+    R1CSShape {
+      num_cons: num_cons_padded,
+      num_vars: num_vars_padded,
+      num_io: self.num_io,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
+      digest: OnceCell::new(),
+    }
+  }
+
+  // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
+  // Returns false if num_cons or num_vars are not powers of two, or if num_io > num_vars
+  #[inline]
+  pub(crate) fn is_regular_shape(&self) -> bool {
+    let cons_valid = self.num_cons.next_power_of_two() == self.num_cons;
+    let vars_valid = self.num_vars.next_power_of_two() == self.num_vars;
+    let io_lt_vars = self.num_io < self.num_vars;
+    cons_valid && vars_valid && io_lt_vars
   }
 
   /// Checks if the R1CS instance is satisfiable given a witness and its shape
@@ -210,6 +302,57 @@ impl<E: Engine> R1CSWitness<E> {
   ) -> Result<R1CSWitness<E>, SpartanError> {
     Ok(Self { W, r_W, is_small })
   }
+
+  /// Fold multiple witnesses with a sequence of r_b values
+  pub fn fold_multiple(
+    r_bs: &[E::Scalar],
+    Ws: &[R1CSWitness<E>],
+  ) -> Result<R1CSWitness<E>, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    let n = Ws.len();
+    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let dim = Ws[0].W.len();
+
+    // Parallelize across witness vectors (not across individual coordinates).
+    // Uses rayon's fold/reduce so only one accumulator per worker thread is allocated.
+    use rayon::prelude::*;
+
+    let acc_W = (0..n)
+      .into_par_iter()
+      .fold(
+        || vec![E::Scalar::ZERO; dim],
+        |mut acc, i| {
+          let wi = w[i];
+          let Wi = &Ws[i].W;
+          for k in 0..dim {
+            acc[k] += wi * Wi[k];
+          }
+          acc
+        },
+      )
+      .reduce(
+        || vec![E::Scalar::ZERO; dim],
+        |mut a, b| {
+          for (ai, bi) in a.iter_mut().zip(b.iter()) {
+            *ai += *bi;
+          }
+          a
+        },
+      );
+
+    let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
+      &w,
+    )?;
+
+    Ok(R1CSWitness::<E> {
+      W: acc_W,
+      r_W: acc_r,
+      is_small: false,
+    })
+  }
 }
 
 impl<E: Engine> R1CSInstance<E> {
@@ -235,6 +378,37 @@ impl<E: Engine> R1CSInstance<E> {
     X: Vec<E::Scalar>,
   ) -> Result<R1CSInstance<E>, SpartanError> {
     Ok(R1CSInstance { comm_W, X })
+  }
+
+  /// Fold multiple instances with a sequence of r_b values
+  pub fn fold_multiple(r_bs: &[E::Scalar], Us: &[R1CSInstance<E>]) -> R1CSInstance<E>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    let n = Us.len();
+    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let d = Us[0].X.len();
+
+    // X
+    let mut X_acc = vec![E::Scalar::ZERO; d];
+    for (i, Ui) in Us.iter().enumerate() {
+      let wi = w[i];
+      for (j, Uij) in Ui.X.iter().enumerate() {
+        X_acc[j] += wi * Uij;
+      }
+    }
+
+    // commitment (group lin. comb)
+    let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &Us.iter().map(|U| U.comm_W.clone()).collect::<Vec<_>>(),
+      &w,
+    )
+    .expect("fold_commitments");
+
+    R1CSInstance::<E> {
+      X: X_acc,
+      comm_W: comm_acc,
+    }
   }
 }
 

@@ -62,7 +62,10 @@ pub enum SpartanError {
   InvalidProductProof,
   /// returned when the consistency with public IO and assignment used fails
   #[error("IncorrectWitness")]
-  IncorrectWitness,
+  IncorrectWitness {
+    /// The reason for the incorrect witness error
+    reason: String,
+  },
   /// return when error during synthesis
   #[error("SynthesisError: {reason}")]
   SynthesisError {

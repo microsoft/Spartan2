@@ -112,3 +112,21 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError>;
 }
+
+/// A trait that extends the PCSEngineTrait to include folding capabilities
+/// This trait allows for folding multiple commitments (and blinds) into a single commitment (a single blind) using specified weights
+pub trait FoldingEngineTrait<E: Engine>: PCSEngineTrait<E> {
+  /// A method to fold the provided commitments into a single commitment using the provided weights
+  /// The weights should be the same length as the number of commitments
+  fn fold_commitments(
+    comms: &[Self::Commitment],
+    weights: &[E::Scalar],
+  ) -> Result<Self::Commitment, SpartanError>;
+
+  /// A method to fold the provided blinds into a single blind using the provided weights
+  /// The weights should be the same length as the number of blinds
+  fn fold_blinds(
+    blinds: &[Self::Blind],
+    weights: &[E::Scalar],
+  ) -> Result<Self::Blind, SpartanError>;
+}

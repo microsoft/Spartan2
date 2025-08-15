@@ -122,7 +122,7 @@ fn compute_eval_table_sparse<E: Engine>(
 }
 
 /// A type that holds the pre-processed state for proving
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct PrepSNARK<E: Engine> {
   ps: PrecommittedState<E>,
@@ -172,7 +172,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self::PrepSNARK, SpartanError> {
-    let ps = SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuit, is_small)?;
+    let mut ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuit, is_small)?;
+    SatisfyingAssignment::precommitted_witness(&mut ps, &pk.S, &pk.ck, &circuit, is_small)?;
 
     Ok(PrepSNARK { ps })
   }
