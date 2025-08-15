@@ -792,7 +792,7 @@ mod benchmarks {
     let mut criterion = Criterion::default();
     for num_circuits in [2, 4, 7, 12] {
       for len in [64, 128].iter() {
-        let (pk, vk, circuits) = generarate_sha_r1cs::<E>(num_circuits, *len);
+        let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
         bench_neutron_inner(
           &mut criterion,
           &format!("sha256_num_circuits={num_circuits}_len={len}"),
