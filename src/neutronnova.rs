@@ -619,7 +619,21 @@ where
   }
 
   /// Verifies the NeutronNovaSNARK
-  pub fn verify(&self, vk: &NeutronNovaVerifierKey<E>) -> Result<(), SpartanError> {
+  pub fn verify(
+    &self,
+    vk: &NeutronNovaVerifierKey<E>,
+    num_instances: usize,
+  ) -> Result<Vec<Vec<E::Scalar>>, SpartanError> {
+    if num_instances != self.instances.len() {
+      return Err(SpartanError::ProofVerifyError {
+        reason: format!(
+          "Expected {} instances, got {}",
+          num_instances,
+          self.instances.len()
+        ),
+      });
+    }
+
     for instance in &self.instances {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
@@ -646,7 +660,14 @@ where
     // check the satisfiability of folded instance using the provided witness
     is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W)?;
 
-    Ok(())
+    // return a vector of public values
+    Ok(
+      self
+        .instances
+        .iter()
+        .map(|u| u.public_values.clone())
+        .collect::<Vec<Vec<_>>>(),
+    )
   }
 }
 
@@ -825,7 +846,7 @@ mod benchmarks {
     assert!(res.is_ok());
 
     let snark = res.unwrap();
-    let res = snark.verify(vk);
+    let res = snark.verify(vk, circuits.len());
     assert!(res.is_ok());
 
     c.bench_function(&format!("neutron_snark_{name}"), |b| {
