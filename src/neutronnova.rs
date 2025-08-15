@@ -247,14 +247,14 @@ where
     let triples = (0..n)
       .into_par_iter()
       .map(|i| {
-      // Build z = [W || 1 || X] without intermediate temporary concat vectors
-      let w = &Ws[i].W;
-      let x = &Us[i].X;
-      let mut z = Vec::with_capacity(w.len() + 1 + x.len());
-      z.extend_from_slice(w);
-      z.push(E::Scalar::ONE);
-      z.extend_from_slice(x);
-      S.multiply_vec(&z)
+        // Build z = [W || 1 || X] without intermediate temporary concat vectors
+        let w = &Ws[i].W;
+        let x = &Us[i].X;
+        let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+        z.extend_from_slice(w);
+        z.push(E::Scalar::ONE);
+        z.extend_from_slice(x);
+        S.multiply_vec(&z)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
@@ -526,6 +526,7 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
     let ps = (0..circuits.len())
+      .into_par_iter()
       .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuits[i], is_small))
       .collect::<Result<Vec<_>, _>>()?;
 
@@ -539,39 +540,60 @@ where
     prep_snark: &mut NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
+    // Parallel generation of instances and witnesses
+    // Build instances and witnesses in one parallel pass (avoid intermediate Vec + unzip)
+    let (instances, witnesses) = prep_snark
+      .ps
+      .par_iter_mut()
+      .zip(circuits.par_iter().enumerate())
+      .map(|(pre_state, (i, circuit))| {
+        let mut transcript = E::TE::new(b"neutronnova_prove");
+        transcript.absorb(b"vk", &pk.vk_digest);
+        transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
+        transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
 
-    let mut instances = Vec::with_capacity(circuits.len());
-    let mut witnesses = Vec::with_capacity(circuits.len());
-    for (i, circuit) in circuits.iter().enumerate() {
-      // absorb the public IO of each circuit into the transcript
-      let public_values = circuit
-        .public_values()
-        .map_err(|e| SpartanError::SynthesisError {
-          reason: format!("Circuit does not provide public IO: {e}"),
-        })?;
+        let public_values = circuit
+          .public_values()
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Circuit does not provide public IO: {e}"),
+          })?;
+        transcript.absorb(b"public_values", &public_values.as_slice());
 
-      // absorb the public values into the transcript
-      transcript.absorb(b"public_values", &public_values.as_slice());
-      let (u, w) = SatisfyingAssignment::r1cs_instance_and_witness(
-        &mut prep_snark.ps[i],
-        &pk.S,
-        &pk.ck,
-        circuit,
-        is_small,
-        &mut transcript,
+        SatisfyingAssignment::r1cs_instance_and_witness(
+          pre_state,
+          &pk.S,
+          &pk.ck,
+          circuit,
+          is_small,
+          &mut transcript,
+        )
+      })
+      .try_fold(
+        || (Vec::new(), Vec::new()),
+        |mut acc, res: Result<_, SpartanError>| {
+          let (u, w) = res?;
+          acc.0.push(u);
+          acc.1.push(w);
+          Ok(acc)
+        },
+      )
+      .try_reduce(
+        || (Vec::new(), Vec::new()),
+        |mut a, mut b| {
+          a.0.append(&mut b.0);
+          a.1.append(&mut b.1);
+          Ok(a)
+        },
       )?;
-
-      instances.push(u);
-      witnesses.push(w);
-    }
 
     let instances_regular = instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
+
+    // We start a new transcript for the NeutronNova NIFS proof
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &pk.vk_digest);
 
     let (nifs, folded_W) =
       NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
@@ -585,22 +607,27 @@ where
 
   /// Verifies the NeutronNovaSNARK
   pub fn verify(&self, vk: &NeutronNovaVerifierKey<E>) -> Result<(), SpartanError> {
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &vk.digest()?);
-    transcript.absorb(
-      b"num_circuits",
-      &E::Scalar::from(self.instances.len() as u64),
-    );
-
     for instance in &self.instances {
+      let mut transcript = E::TE::new(b"neutronnova_prove");
+      transcript.absorb(b"vk", &vk.digest()?);
+      transcript.absorb(
+        b"num_circuits",
+        &E::Scalar::from(self.instances.len() as u64),
+      );
+
       instance.validate(&vk.S, &mut transcript)?;
     }
 
     let instances = self
       .instances
-      .iter()
+      .par_iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
+
+    // We start a new transcript for the NeutronNova NIFS proof
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &vk.digest()?);
+
     let folded_U = self.nifs.verify(&instances, &mut transcript)?;
 
     // check the satisfiability of folded instance using the provided witness
@@ -803,8 +830,8 @@ mod benchmarks {
     type E = T256HyraxEngine;
 
     let mut criterion = Criterion::default();
-    for num_circuits in [2, 4, 7, 12] {
-      for len in [64, 128].iter() {
+    for num_circuits in [7, 32, 64] {
+      for len in [64].iter() {
         let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
         bench_neutron_inner(
           &mut criterion,
