@@ -724,7 +724,7 @@ mod benchmarks {
     }
   }
 
-  fn generarate_sha_r1cs<E: Engine>(
+  fn generate_sha_r1cs<E: Engine>(
     num_circuits: usize,
     len: usize,
   ) -> (
