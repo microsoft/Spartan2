@@ -243,16 +243,30 @@ where
       rhos.push(transcript.squeeze(b"rho")?);
     }
 
-    let triples: Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)> = (0..n)
+    // Compute (A z, B z, C z) for each instance in parallel, minimizing clones
+    let triples = (0..n)
       .into_par_iter()
       .map(|i| {
-        let z = [Ws[i].W.clone(), vec![E::Scalar::ONE], Us[i].X.clone()].concat();
-        S.multiply_vec(&z)
+      // Build z = [W || 1 || X] without intermediate temporary concat vectors
+      let w = &Ws[i].W;
+      let x = &Us[i].X;
+      let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+      z.extend_from_slice(w);
+      z.push(E::Scalar::ONE);
+      z.extend_from_slice(x);
+      S.multiply_vec(&z)
       })
-      .collect::<Result<_, _>>()?;
-    let mut A_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.0.clone()).collect();
-    let mut B_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.1.clone()).collect();
-    let mut C_layers: Vec<Vec<E::Scalar>> = triples.iter().map(|t| t.2.clone()).collect();
+      .collect::<Result<Vec<_>, _>>()?;
+
+    // Split the triples without cloning inner vectors
+    let mut A_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n);
+    let mut B_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n);
+    let mut C_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n);
+    for (a, b, c) in triples {
+      A_layers.push(a);
+      B_layers.push(b);
+      C_layers.push(c);
+    }
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
@@ -314,7 +328,6 @@ where
       r_bs.push(r_b);
 
       // Fold A/B/C for next round (weights 1-r_b, r_b)
-      let one_minus_r = E::Scalar::ONE - r_b;
       let mut next_A: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
       let mut next_B: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
       let mut next_C: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
@@ -324,7 +337,7 @@ where
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
         v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
+          *val = A_layers[lo][k] + (A_layers[hi][k] - A_layers[lo][k]) * r_b;
         });
         v
       }));
@@ -333,7 +346,7 @@ where
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
         v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
+          *val = B_layers[lo][k] + (B_layers[hi][k] - B_layers[lo][k]) * r_b;
         });
         v
       }));
@@ -342,7 +355,7 @@ where
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
         v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
+          *val = C_layers[lo][k] + (C_layers[hi][k] - C_layers[lo][k]) * r_b;
         });
         v
       }));
