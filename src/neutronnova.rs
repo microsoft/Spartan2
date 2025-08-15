@@ -831,7 +831,7 @@ mod benchmarks {
 
     let mut criterion = Criterion::default();
     for num_circuits in [7, 32, 64] {
-      for len in [64].iter() {
+      for len in [32, 64].iter() {
         let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
         bench_neutron_inner(
           &mut criterion,
