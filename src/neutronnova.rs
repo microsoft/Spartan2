@@ -500,9 +500,9 @@ where
 {
   /// Sets up the NeutronNova SNARK for a batch of circuits
   pub fn setup<C: SpartanCircuit<E>>(
-    circuit: &[C], // uniform circuit
+    circuit: &C,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit[0])?;
+    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(circuit)?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
@@ -525,12 +525,25 @@ where
     circuits: &[C],
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    let ps = (0..circuits.len())
+    // we synthesize shared witness for the first circuit; every other circuit shares this witness
+    let ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuits[0], is_small)?;
+
+    let ps_vec = (0..circuits.len())
       .into_par_iter()
-      .map(|i| SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuits[i], is_small))
+      .map(|i| {
+        let mut ps_i = ps.clone();
+        SatisfyingAssignment::precommitted_witness(
+          &mut ps_i,
+          &pk.S,
+          &pk.ck,
+          &circuits[i],
+          is_small,
+        )?;
+        Ok(ps_i)
+      })
       .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(NeutronNovaPrepSNARK { ps })
+    Ok(NeutronNovaPrepSNARK { ps: ps_vec })
   }
 
   /// Prove the folding of a batch of R1CS instances
@@ -780,7 +793,7 @@ mod benchmarks {
       _p: Default::default(),
     };
 
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(std::slice::from_ref(&circuit)).unwrap();
+    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit).unwrap();
 
     let circuits = (0..num_circuits)
       .map(|i| Sha256Circuit::<E> {

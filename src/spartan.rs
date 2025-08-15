@@ -172,7 +172,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     circuit: C,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self::PrepSNARK, SpartanError> {
-    let ps = SatisfyingAssignment::precommitted_witness(&pk.S, &pk.ck, &circuit, is_small)?;
+    let mut ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuit, is_small)?;
+    SatisfyingAssignment::precommitted_witness(&mut ps, &pk.S, &pk.ck, &circuit, is_small)?;
 
     Ok(PrepSNARK { ps })
   }

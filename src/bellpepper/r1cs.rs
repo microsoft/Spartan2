@@ -29,13 +29,22 @@ pub trait SpartanWitness<E: Engine> {
   /// Holds the state of the prover after committing to the precommitted portions of the witness.
   type PrecommittedState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
-  /// Return partial commitments (to shared and precommitted variables) and the partial witness vector.
-  fn precommitted_witness<C: SpartanCircuit<E>>(
+  /// Return partial commitments (to shared variables) and the shared state
+  fn shared_witness<C: SpartanCircuit<E>>(
     S: &SplitR1CSShape<E>,
     ck: &CommitmentKey<E>,
     circuit: &C,
     is_small: bool,
   ) -> Result<Self::PrecommittedState, SpartanError>;
+
+  /// Return partial commitments (to shared and precommitted variables) and the partial witness vector.
+  fn precommitted_witness<C: SpartanCircuit<E>>(
+    ps: &mut Self::PrecommittedState,
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<(), SpartanError>;
 
   /// Return an instance and witness, given a shape and ck.
   fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
@@ -219,13 +228,13 @@ pub struct PrecommittedState<E: Engine> {
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   type PrecommittedState = PrecommittedState<E>;
 
-  fn precommitted_witness<C: SpartanCircuit<E>>(
+  fn shared_witness<C: SpartanCircuit<E>>(
     S: &SplitR1CSShape<E>,
     ck: &CommitmentKey<E>,
     circuit: &C,
     is_small: bool,
   ) -> Result<Self::PrecommittedState, SpartanError> {
-    let (_synth_span, synth_t) = start_span!("precommitted_witness_synthesize");
+    let (_synth_span, synth_t) = start_span!("shared_witness_synthesize");
     let mut cs: Self = Self::new();
 
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
@@ -250,7 +259,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     }
     W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
-    // partial commitment to shared witness variables; we send None for full commitment as we don't have the full commitment yet
+    // partial commitment to shared witness variables
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_remaining) = if S.num_shared_unpadded > 0 {
       let (comm_W_shared, r_remaining) =
@@ -260,22 +269,43 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       (None, r_W.clone())
     };
     info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "shared_witness_synthesize");
 
+    Ok(PrecommittedState {
+      cs,
+      shared,
+      precommitted: vec![],
+      comm_W_shared,
+      comm_W_precommitted: None,
+      W,
+      r_W,
+      r_W_remaining,
+    })
+  }
+
+  fn precommitted_witness<C: SpartanCircuit<E>>(
+    ps: &mut Self::PrecommittedState,
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    is_small: bool,
+  ) -> Result<(), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("precommitted_witness_synthesize");
     // produce precommitted witness variables
     let precommitted =
       circuit
-        .precommitted(&mut cs, &shared)
+        .precommitted(&mut ps.cs, &ps.shared)
         .map_err(|e| SpartanError::SynthesisError {
           reason: format!("Unable to allocate precommitted variables: {e}"),
         })?;
 
-    if cs.aux_assignment[S.num_shared_unpadded..].len() < S.num_precommitted_unpadded {
+    if ps.cs.aux_assignment[S.num_shared_unpadded..].len() < S.num_precommitted_unpadded {
       return Err(SpartanError::SynthesisError {
         reason: "Precommitted variables are not allocated correctly".to_string(),
       });
     }
-    W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
-      &cs.aux_assignment
+    ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
+      &ps.cs.aux_assignment
         [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
     );
 
@@ -285,27 +315,23 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (comm_W_precommitted, r_W_remaining) = if S.num_precommitted_unpadded > 0 {
       let (comm_W_precommitted, r_W_remaining) = PCS::<E>::commit_partial(
         ck,
-        &W[S.num_shared..S.num_shared + S.num_precommitted],
-        &r_W_remaining,
+        &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
+        &ps.r_W_remaining,
         is_small,
       )?;
       (Some(comm_W_precommitted), r_W_remaining)
     } else {
-      (None, r_W_remaining)
+      (None, ps.r_W_remaining.clone())
     };
     info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
+
+    // update the preprocessed state
+    ps.comm_W_precommitted = comm_W_precommitted;
+    ps.r_W_remaining = r_W_remaining;
+    ps.precommitted = precommitted;
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
 
-    Ok(PrecommittedState {
-      cs,
-      shared,
-      precommitted,
-      comm_W_shared,
-      comm_W_precommitted,
-      W,
-      r_W,
-      r_W_remaining,
-    })
+    Ok(())
   }
 
   fn r1cs_instance_and_witness<C: SpartanCircuit<E>>(
