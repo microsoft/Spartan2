@@ -56,6 +56,7 @@ pub struct NeutronNovaNIFS<E: Engine> {
 }
 
 #[inline]
+#[allow(clippy::needless_range_loop)]
 fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &[F]) -> F {
   let mut w = F::ONE;
   let mut k = pair_idx;
@@ -322,27 +323,27 @@ where
         let lo = 2 * i;
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
-        for k in 0..chunk_len {
-          v[k] = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
-        }
+        v.iter_mut().enumerate().for_each(|(k, val)| {
+          *val = A_layers[lo][k] * one_minus_r + A_layers[hi][k] * r_b;
+        });
         v
       }));
       next_B.par_extend((0..pairs).into_par_iter().map(|i| {
         let lo = 2 * i;
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
-        for k in 0..chunk_len {
-          v[k] = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
-        }
+        v.iter_mut().enumerate().for_each(|(k, val)| {
+          *val = B_layers[lo][k] * one_minus_r + B_layers[hi][k] * r_b;
+        });
         v
       }));
       next_C.par_extend((0..pairs).into_par_iter().map(|i| {
         let lo = 2 * i;
         let hi = lo + 1;
         let mut v = vec![E::Scalar::ZERO; chunk_len];
-        for k in 0..chunk_len {
-          v[k] = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
-        }
+        v.iter_mut().enumerate().for_each(|(k, val)| {
+          *val = C_layers[lo][k] * one_minus_r + C_layers[hi][k] * r_b;
+        });
         v
       }));
 
@@ -397,18 +398,16 @@ where
     let mut r_bs = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
     let mut acc_eq = E::Scalar::ONE; // accumulated equality polynomial
-    for t in 0..ell_b {
-      if self.polys[t].degree() != 4
-        || self.polys[t].eval_at_zero() + self.polys[t].eval_at_one() != T_cur
-      {
+    for (t, poly_t) in self.polys.iter().enumerate() {
+      if poly_t.degree() != 4 || poly_t.eval_at_zero() + poly_t.eval_at_one() != T_cur {
         return Err(SpartanError::ProofVerifyError {
-          reason: format!("poly {} is not valid", t),
+          reason: format!("poly {t} is not valid"),
         });
       }
-      transcript.absorb(b"poly", &self.polys[t]);
+      transcript.absorb(b"poly", poly_t);
 
       let r_b = transcript.squeeze(b"r_b")?;
-      T_cur = self.polys[t].evaluate(&r_b);
+      T_cur = poly_t.evaluate(&r_b);
       acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rhos[t]) + r_b * rhos[t]; // update the accumulated equality polynomial
 
       r_bs.push(r_b);
@@ -556,17 +555,13 @@ where
       witnesses.push(w);
     }
 
-    let mut instances_regular = instances
+    let instances_regular = instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
-    let (nifs, folded_W) = NeutronNovaNIFS::prove(
-      &pk.S,
-      &mut instances_regular,
-      &mut witnesses,
-      &mut transcript,
-    )?;
+    let (nifs, folded_W) =
+      NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
 
     Ok(Self {
       instances,

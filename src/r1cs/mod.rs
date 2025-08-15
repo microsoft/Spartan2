@@ -21,6 +21,26 @@ use tracing::{info, info_span};
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
 
+fn eq01<F: Field>(bit: u8, r: &F) -> F {
+  if bit == 0 { F::ONE - *r } else { *r }
+}
+
+#[inline]
+fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+  let ell = r_bs.len();
+  (0..n)
+    .map(|i| {
+      let mut wi = F::ONE;
+      let mut k = i;
+      for r_bs_t in r_bs.iter().take(ell) {
+        wi *= eq01((k & 1) as u8, r_bs_t);
+        k >>= 1;
+      }
+      wi
+    })
+    .collect()
+}
+
 /// A type that holds the shape of the R1CS matrices
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R1CSShape<E: Engine> {
@@ -244,27 +264,6 @@ impl<E: Engine> R1CSShape<E> {
   }
 }
 
-#[inline]
-fn eq01<F: Field>(bit: u8, r: &F) -> F {
-  if bit == 0 { F::ONE - *r } else { *r }
-}
-
-#[inline]
-fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
-  let ell = r_bs.len();
-  (0..n)
-    .map(|i| {
-      let mut wi = F::ONE;
-      let mut k = i;
-      for t in 0..ell {
-        wi *= eq01((k & 1) as u8, &r_bs[t]);
-        k >>= 1;
-      }
-      wi
-    })
-    .collect()
-}
-
 impl<E: Engine> R1CSWitness<E> {
   /// A method to create a witness object using a vector of scalars
   pub fn new(
@@ -316,14 +315,32 @@ impl<E: Engine> R1CSWitness<E> {
     let w = weights_from_r::<E::Scalar>(r_bs, n);
     let dim = Ws[0].W.len();
 
-    let mut acc_W = vec![E::Scalar::ZERO; dim];
-    for (i, wz) in Ws.iter().enumerate() {
-      let wi = w[i];
-      // W
-      for k in 0..dim {
-        acc_W[k] = acc_W[k] + wi * wz.W[k];
-      }
-    }
+    // Parallelize across witness vectors (not across individual coordinates).
+    // Uses rayon's fold/reduce so only one accumulator per worker thread is allocated.
+    use rayon::prelude::*;
+
+    let acc_W = (0..n)
+      .into_par_iter()
+      .fold(
+        || vec![E::Scalar::ZERO; dim],
+        |mut acc, i| {
+          let wi = w[i];
+          let Wi = &Ws[i].W;
+          for k in 0..dim {
+            acc[k] += wi * Wi[k];
+          }
+          acc
+        },
+      )
+      .reduce(
+        || vec![E::Scalar::ZERO; dim],
+        |mut a, b| {
+          for (ai, bi) in a.iter_mut().zip(b.iter()) {
+            *ai += *bi;
+          }
+          a
+        },
+      );
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
@@ -376,8 +393,8 @@ impl<E: Engine> R1CSInstance<E> {
     let mut X_acc = vec![E::Scalar::ZERO; d];
     for (i, Ui) in Us.iter().enumerate() {
       let wi = w[i];
-      for j in 0..d {
-        X_acc[j] = X_acc[j] + wi * Ui.X[j];
+      for (j, Uij) in Ui.X.iter().enumerate() {
+        X_acc[j] += wi * Uij;
       }
     }
 
