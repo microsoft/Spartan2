@@ -556,7 +556,7 @@ where
     let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
 
     // Parallel generation of instances and witnesses
-    // Build instances and witnesses in one parallel pass (avoid intermediate Vec + unzip)
+    // Build instances and witnesses in one parallel pass
     let (instances, witnesses) = prep_snark
       .ps
       .par_iter_mut()
@@ -607,11 +607,14 @@ where
       .collect::<Result<Vec<_>, _>>()?;
 
     // We start a new transcript for the NeutronNova NIFS proof
+    // All instances will be absorbed into the transcript
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
     let (nifs, folded_W) =
       NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
+
+    // we now prove the validity of folded witness
 
     Ok(Self {
       instances,
