@@ -550,9 +550,11 @@ where
   pub fn prove<C: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
     circuits: &[C],
-    prep_snark: &mut NeutronNovaPrepSNARK<E>,
+    prep_snark: &NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
+    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
+
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass (avoid intermediate Vec + unzip)
     let (instances, witnesses) = prep_snark
@@ -848,9 +850,9 @@ mod benchmarks {
       circuits.len()
     );
     // sanity check: prove and verify before benching
-    let mut ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
 
-    let res = NeutronNovaSNARK::prove(pk, circuits, &mut ps, true);
+    let res = NeutronNovaSNARK::prove(pk, circuits, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
@@ -859,9 +861,8 @@ mod benchmarks {
 
     c.bench_function(&format!("neutron_snark_{name}"), |b| {
       b.iter(|| {
-        let mut ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
-
-        let res = NeutronNovaSNARK::prove(pk, circuits, &mut ps, true);
+        let ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+        let res = NeutronNovaSNARK::prove(pk, circuits, &ps, true);
         assert!(res.is_ok());
       })
     });
