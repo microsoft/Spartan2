@@ -81,7 +81,7 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
 }
 
 /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-fn compute_eval_table_sparse<E: Engine>(
+pub(crate) fn compute_eval_table_sparse<E: Engine>(
   S: &SplitR1CSShape<E>,
   rx: &[E::Scalar],
 ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {

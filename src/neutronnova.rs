@@ -13,8 +13,16 @@ use crate::{
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   math::Math,
-  polys::{power::PowPolynomial, univariate::UniPoly},
-  r1cs::{R1CSInstance, R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
+  polys::{
+    eq::EqPolynomial,
+    multilinear::{MultilinearPolynomial, SparsePolynomial},
+    power::PowPolynomial,
+    univariate::UniPoly,
+  },
+  r1cs::{R1CSInstance, R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
+  spartan::compute_eval_table_sparse,
+  start_span,
+  sumcheck::SumcheckProof,
   traits::{
     Engine,
     circuit::SpartanCircuit,
@@ -27,6 +35,8 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::{debug, info, info_span};
 
 fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
   let ell = n.next_power_of_two().log_2();
@@ -208,7 +218,19 @@ where
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
     transcript: &mut E::TE,
-  ) -> Result<(Self, R1CSWitness<E>), SpartanError> {
+  ) -> Result<
+    (
+      Self,
+      R1CSInstance<E>,
+      R1CSWitness<E>,
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+      E::Scalar,
+    ),
+    SpartanError,
+  > {
     let n = Us.len().next_power_of_two();
     let ell_b = n.log_2();
 
@@ -368,10 +390,22 @@ where
       m = pairs;
     }
 
-    // Fold witnesses with the same r_t sequence
-    let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
+    // T_out = poly_last(r_last) / eq(r_b, rho)
+    let T_out = T_cur * acc_eq.invert().unwrap();
 
-    Ok((Self { polys }, folded_W))
+    let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
+    let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
+
+    Ok((
+      Self { polys },
+      folded_U,
+      folded_W,
+      E_eq,
+      A_layers[0].clone(),
+      B_layers[0].clone(),
+      C_layers[0].clone(),
+      T_out,
+    ))
   }
 
   /// NeutronNova NIFS verify for a batch of R1CS instances
@@ -491,7 +525,11 @@ pub struct NeutronNovaPrepSNARK<E: Engine> {
 pub struct NeutronNovaSNARK<E: Engine> {
   instances: Vec<SplitR1CSInstance<E>>,
   nifs: NeutronNovaNIFS<E>,
-  folded_W: R1CSWitness<E>,
+  sc_proof_outer: SumcheckProof<E>,
+  claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+  sc_proof_inner: SumcheckProof<E>,
+  eval_W: E::Scalar,
+  eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
 impl<E: Engine> NeutronNovaSNARK<E>
@@ -611,15 +649,145 @@ where
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    let (nifs, folded_W) =
+    let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) =
       NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
 
     // we now prove the validity of folded witness
+    let (_ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
+    let (E1, E2) = E.split_at(left);
+    let mut full_E = vec![E::Scalar::ONE; left * right];
+    full_E
+      .par_chunks_mut(left)
+      .enumerate()
+      .for_each(|(i, row)| {
+        let e2 = E2[i];
+        row.iter_mut().zip(E1.iter()).for_each(|(val, e1)| {
+          *val = e2 * *e1;
+        });
+      });
+    let mut poly_tau = MultilinearPolynomial::new(full_E);
+
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
+
+    // outer sum-check preparation
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+      MultilinearPolynomial::new(Az),
+      MultilinearPolynomial::new(Bz),
+      MultilinearPolynomial::new(Cz),
+    );
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
+
+    // outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+
+    let comb_func_outer =
+      |poly_A_comp: &E::Scalar,
+       poly_B_comp: &E::Scalar,
+       poly_C_comp: &E::Scalar,
+       poly_D_comp: &E::Scalar|
+       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
+    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::<E>::prove_cubic_with_additive_term(
+      &T_out,
+      num_rounds_x,
+      &mut poly_tau,
+      &mut poly_Az,
+      &mut poly_Bz,
+      &mut poly_Cz,
+      comb_func_outer,
+      &mut transcript,
+    )?;
+
+    // claims from the end of sum-check
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[1], claims_outer[2], claims_outer[3]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+
+    // inner sum-check preparation
+    let (_r_span, r_t) = start_span!("prepare_inner_claims");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
+
+    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
+    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
+    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
+
+    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
+    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
+
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
+    assert_eq!(evals_A.len(), evals_B.len());
+    assert_eq!(evals_A.len(), evals_C.len());
+    let poly_ABC = (0..evals_A.len())
+      .into_par_iter()
+      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .collect::<Vec<E::Scalar>>();
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
+
+    let (_z_span, z_t) = start_span!("prepare_poly_z");
+    let poly_z = {
+      // z = [W || 1 || X], then already zero-padded to length 2 * num_vars
+      let mut v = vec![E::Scalar::ZERO; num_vars * 2];
+
+      let w_len = folded_W.W.len();
+      v[..w_len].copy_from_slice(&folded_W.W);
+
+      v[w_len] = E::Scalar::ONE;
+
+      let x_len = folded_U.X.len();
+      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&folded_U.X);
+      v
+    };
+    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
+
+    // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
+    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad(
+      &claim_inner_joint,
+      num_rounds_y,
+      &mut MultilinearPolynomial::new(poly_ABC),
+      &mut MultilinearPolynomial::new(poly_z),
+      comb_func,
+      &mut transcript,
+    )?;
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
+
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    let (eval_W, eval_arg) = E::PCS::prove(
+      &pk.ck,
+      &mut transcript,
+      &folded_U.comm_W,
+      &folded_W.W,
+      &folded_W.r_W,
+      &r_y[1..],
+    )?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(Self {
       instances,
       nifs,
-      folded_W,
+      sc_proof_outer,
+      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_inner,
+      eval_W,
+      eval_arg,
     })
   }
 
@@ -629,6 +797,7 @@ where
     vk: &NeutronNovaVerifierKey<E>,
     num_instances: usize,
   ) -> Result<Vec<Vec<E::Scalar>>, SpartanError> {
+    let (_verify_span, verify_t) = start_span!("neutronnova_verify");
     if num_instances != self.instances.len() {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
@@ -670,8 +839,129 @@ where
 
     let folded_U = self.nifs.verify(&instances, &mut transcript)?;
 
-    // check the satisfiability of folded instance using the provided witness
-    is_sat_with_target(&vk.ck, &vk.S, &folded_U, &self.folded_W)?;
+    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
+
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
+
+    info!(
+      "Verifying R1CS SNARK with {} rounds for outer sum-check and {} rounds for inner sum-check",
+      num_rounds_x, num_rounds_y
+    );
+
+    // outer sum-check
+    let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
+    let (claim_outer_final, r_x) =
+      self
+        .sc_proof_outer
+        .verify(folded_U.T, num_rounds_x, 3, &mut transcript)?;
+
+    // verify claim_outer_final
+    let (claim_Az, claim_Bz, claim_Cz) = self.claims_outer;
+    let e_bound_rx = PowPolynomial::new(&folded_U.tau, r_x.len()).evaluate(&r_x)?;
+    let claim_outer_final_expected = e_bound_rx * (claim_Az * claim_Bz - claim_Cz);
+    if claim_outer_final != claim_outer_final_expected {
+      return Err(SpartanError::InvalidSumcheckProof);
+    }
+    info!(elapsed_ms = %outer_sumcheck_t.elapsed().as_millis(), "outer_sumcheck_verify");
+
+    transcript.absorb(
+      b"claims_outer",
+      &[
+        self.claims_outer.0,
+        self.claims_outer.1,
+        self.claims_outer.2,
+      ]
+      .as_slice(),
+    );
+
+    // inner sum-check
+    let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint =
+      self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
+
+    let (claim_inner_final, r_y) =
+      self
+        .sc_proof_inner
+        .verify(claim_inner_joint, num_rounds_y, 2, &mut transcript)?;
+
+    // verify claim_inner_final
+    let eval_Z = {
+      let eval_X = {
+        // public IO is (1, X)
+        let X = vec![E::Scalar::ONE]
+          .into_iter()
+          .chain(folded_U.U.X.iter().cloned())
+          .collect::<Vec<E::Scalar>>();
+        SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
+      };
+      (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
+    };
+
+    // compute evaluations of R1CS matrices
+    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
+    let multi_evaluate = |M_vec: &[&SparseMatrix<E::Scalar>],
+                          r_x: &[E::Scalar],
+                          r_y: &[E::Scalar]|
+     -> Vec<E::Scalar> {
+      let evaluate_with_table =
+        |M: &SparseMatrix<E::Scalar>, T_x: &[E::Scalar], T_y: &[E::Scalar]| -> E::Scalar {
+          M.indptr
+            .par_windows(2)
+            .enumerate()
+            .map(|(row_idx, ptrs)| {
+              M.get_row_unchecked(ptrs.try_into().unwrap())
+                .map(|(val, col_idx)| {
+                  let prod = T_x[row_idx] * T_y[*col_idx];
+                  if *val == E::Scalar::ONE {
+                    prod
+                  } else if *val == -E::Scalar::ONE {
+                    -prod
+                  } else {
+                    prod * val
+                  }
+                })
+                .sum::<E::Scalar>()
+            })
+            .sum()
+        };
+
+      let (T_x, T_y) = rayon::join(
+        || EqPolynomial::evals_from_points(r_x),
+        || EqPolynomial::evals_from_points(r_y),
+      );
+
+      (0..M_vec.len())
+        .into_par_iter()
+        .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
+        .collect()
+    };
+
+    let evals = multi_evaluate(&[&vk.S.A, &vk.S.B, &vk.S.C], &r_x, &r_y);
+
+    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
+    if claim_inner_final != claim_inner_final_expected {
+      return Err(SpartanError::InvalidSumcheckProof);
+    }
+    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
+    info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
+
+    // verify
+    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
+    E::PCS::verify(
+      &vk.vk_ee,
+      &mut transcript,
+      &folded_U.U.comm_W,
+      &r_y[1..],
+      &self.eval_W,
+      &self.eval_arg,
+    )?;
+    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
+
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "neutronnova_verify");
 
     // return a vector of public values
     Ok(
@@ -682,57 +972,6 @@ where
         .collect::<Vec<Vec<_>>>(),
     )
   }
-}
-
-/// Check if the folded witness satisfies the folded instance
-fn is_sat_with_target<E: Engine>(
-  ck: &CommitmentKey<E>,
-  S: &SplitR1CSShape<E>,
-  U: &FoldedR1CSInstance<E>,
-  W: &R1CSWitness<E>,
-) -> Result<(), SpartanError> {
-  let (ell, left, right) = compute_tensor_decomp(S.num_cons);
-  let E = PowPolynomial::new(&U.tau, ell).split_evals(left, right);
-
-  let z = [W.W.clone(), vec![E::Scalar::ONE], U.U.X.clone()].concat();
-  let (Az, Bz, Cz) = S.multiply_vec(&z)?;
-
-  // full_E is the outer outer product of E1 and E2
-  // E1 and E2 are splits of E
-  let (E1, E2) = E.split_at(left);
-  let mut full_E = vec![E::Scalar::ONE; left * right];
-  for i in 0..right {
-    for j in 0..left {
-      full_E[i * left + j] = E2[i] * E1[j];
-    }
-  }
-
-  let sum = full_E
-    .par_iter()
-    .zip(Az.par_iter())
-    .zip(Bz.par_iter())
-    .zip(Cz.par_iter())
-    .map(|(((e, a), b), c)| *e * ((*a) * (*b) - *c))
-    .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-
-  if sum != U.T {
-    println!("sum: {sum:?}");
-    println!("U.T: {:?}", U.T);
-    return Err(SpartanError::UnSat {
-      reason: "sum != U.T".to_string(),
-    });
-  }
-
-  // check the validity of the commitments
-  let comm_W = E::PCS::commit(ck, &W.W, &W.r_W, W.is_small)?;
-
-  if comm_W != U.U.comm_W {
-    return Err(SpartanError::UnSat {
-      reason: "comm_W != U.comm_W".to_string(),
-    });
-  }
-
-  Ok(())
 }
 
 #[cfg(test)]
@@ -746,7 +985,6 @@ mod benchmarks {
   };
   use bellpepper_core::{ConstraintSystem, SynthesisError};
   use core::marker::PhantomData;
-  use criterion::Criterion;
 
   #[derive(Clone, Debug)]
   struct Sha256Circuit<E: Engine> {
@@ -839,8 +1077,7 @@ mod benchmarks {
     (pk, vk, circuits)
   }
 
-  fn bench_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
-    c: &mut Criterion,
+  fn test_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
     name: &str,
     pk: &NeutronNovaProverKey<E>,
     vk: &NeutronNovaVerifierKey<E>,
@@ -861,26 +1098,16 @@ mod benchmarks {
     let snark = res.unwrap();
     let res = snark.verify(vk, circuits.len());
     assert!(res.is_ok());
-
-    c.bench_function(&format!("neutron_snark_{name}"), |b| {
-      b.iter(|| {
-        let ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
-        let res = NeutronNovaSNARK::prove(pk, circuits, &ps, true);
-        assert!(res.is_ok());
-      })
-    });
   }
 
   #[test]
-  fn bench_neutron_sha256() {
+  fn test_neutron_sha256() {
     type E = T256HyraxEngine;
 
-    let mut criterion = Criterion::default();
-    for num_circuits in [7, 32, 64] {
+    for num_circuits in [2, 7, 32, 64] {
       for len in [32, 64].iter() {
         let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
-        bench_neutron_inner(
-          &mut criterion,
+        test_neutron_inner(
           &format!("sha256_num_circuits={num_circuits}_len={len}"),
           &pk,
           &vk,
