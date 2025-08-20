@@ -480,7 +480,8 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaPrepSNARK<E: Engine> {
-  ps: Vec<PrecommittedState<E>>,
+  ps_uniform: Vec<PrecommittedState<E>>,
+  ps_nonuniform: PrecommittedState<E>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
@@ -528,36 +529,52 @@ where
   }
 
   /// Prepares the pre-processed state for proving
-  pub fn prep_prove<C: SpartanCircuit<E>>(
+  pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    circuits: &[C],
+    uniform_circuits: &[C1],
+    nonuniform_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    // we synthesize shared witness for the first circuit; every other circuit shares this witness
-    let ps = SatisfyingAssignment::shared_witness(&pk.S_uniform, &pk.ck, &circuits[0], is_small)?;
+    // we synthesize shared witness for the first circuit; every other circuit including the non-uniform circuit shares this witness
+    let mut ps =
+      SatisfyingAssignment::shared_witness(&pk.S_uniform, &pk.ck, &uniform_circuits[0], is_small)?;
 
-    let ps_vec = (0..circuits.len())
+    let ps_uniform = (0..uniform_circuits.len())
       .into_par_iter()
       .map(|i| {
+        // copy ps to avoid mutating the original shared witness
         let mut ps_i = ps.clone();
         SatisfyingAssignment::precommitted_witness(
           &mut ps_i,
           &pk.S_uniform,
           &pk.ck,
-          &circuits[i],
+          &uniform_circuits[i],
           is_small,
         )?;
         Ok(ps_i)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(NeutronNovaPrepSNARK { ps: ps_vec })
+    // we don't need to make a copy of ps for the non-uniform circuit, as it will be used only once
+    SatisfyingAssignment::precommitted_witness(
+      &mut ps,
+      &pk.S_nonuniform,
+      &pk.ck,
+      nonuniform_circuit,
+      is_small,
+    )?;
+
+    Ok(NeutronNovaPrepSNARK {
+      ps_uniform,
+      ps_nonuniform: ps,
+    })
   }
 
   /// Prove the folding of a batch of R1CS instances
-  pub fn prove<C: SpartanCircuit<E>>(
+  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    circuits: &[C],
+    uniform_circuits: &[C1],
+    _nonuniform_circuit: &C2,
     prep_snark: &NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
@@ -566,13 +583,16 @@ where
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
     let (instances, witnesses) = prep_snark
-      .ps
+      .ps_uniform
       .par_iter_mut()
-      .zip(circuits.par_iter().enumerate())
+      .zip(uniform_circuits.par_iter().enumerate())
       .map(|(pre_state, (i, circuit))| {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
+        transcript.absorb(
+          b"num_circuits",
+          &E::Scalar::from(uniform_circuits.len() as u64),
+        );
         transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
 
         let public_values = circuit
@@ -1043,7 +1063,7 @@ mod benchmarks {
       _p: Default::default(),
     };
 
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit).unwrap();
+    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit, &circuit).unwrap();
 
     let circuits = (0..num_circuits)
       .map(|i| Sha256Circuit::<E> {
