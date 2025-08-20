@@ -132,6 +132,13 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     let width = E::PCS::width();
 
+    info!("num_constraints: {}", num_constraints);
+    info!("num_vars: {}", num_vars);
+    info!("num_inputs: {}", num_inputs);
+    info!("num_shared: {}", num_shared);
+    info!("num_precommitted: {}", num_precommitted);
+    info!("num_rest: {}", num_rest);
+
     // Don't count One as an input for shape's purposes.
     let S = SplitR1CSShape::new(
       width,
@@ -357,18 +364,17 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
 
-    for (i, s) in ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..]
-      .iter()
-      .enumerate()
-    {
-      ps.W[S.num_shared + S.num_precommitted + i] = *s;
-    }
+    ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+      .copy_from_slice(
+        &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+          ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+      );
 
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
       ck,
-      &ps.W[S.num_shared + S.num_precommitted..],
+      &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &ps.r_W_remaining,
       is_small,
     )?;
