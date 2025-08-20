@@ -1,5 +1,6 @@
 //! `PowPolynomial`: Represents multilinear extension of power polynomials
 
+use crate::errors::SpartanError;
 use core::iter::successors;
 use ff::PrimeField;
 
@@ -14,7 +15,6 @@ pub struct PowPolynomial<Scalar: PrimeField> {
   t_pow: Vec<Scalar>,
 }
 
-#[allow(dead_code)]
 impl<Scalar: PrimeField> PowPolynomial<Scalar> {
   /// Creates a new `PowPolynomial` from a Scalars `t`.
   pub fn new(t: &Scalar, ell: usize) -> Self {
@@ -24,6 +24,19 @@ impl<Scalar: PrimeField> PowPolynomial<Scalar> {
       .collect::<Vec<_>>();
 
     PowPolynomial { t_pow }
+  }
+
+  /// Evaluates the polynomial at a given point `r`.
+  pub fn evaluate(&self, r: &[Scalar]) -> Result<Scalar, SpartanError> {
+    if r.len() != self.t_pow.len() {
+      return Err(SpartanError::InvalidInputLength);
+    }
+
+    let mut acc = Scalar::ONE;
+    for (i, &r_i) in r.iter().rev().enumerate() {
+      acc *= Scalar::ONE + (self.t_pow[i] - Scalar::ONE) * r_i;
+    }
+    Ok(acc)
   }
 
   /// Evaluates the `PowPolynomial` at all the `2^|t_pow|` points in its domain.

@@ -81,7 +81,7 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
 }
 
 /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-fn compute_eval_table_sparse<E: Engine>(
+pub(crate) fn compute_eval_table_sparse<E: Engine>(
   S: &SplitR1CSShape<E>,
   rx: &[E::Scalar],
 ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
@@ -182,9 +182,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
-    prep_snark: &mut Self::PrepSNARK,
+    prep_snark: &Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
+    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
+
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
 
@@ -588,10 +590,10 @@ mod tests {
     let (pk, vk) = S::setup(circuit.clone()).unwrap();
 
     // generate pre-processed state for proving
-    let mut prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
+    let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
 
     // generate a witness and proof
-    let res = S::prove(&pk, circuit.clone(), &mut prep_snark, false);
+    let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 

@@ -16,7 +16,7 @@ pub trait R1CSSNARKTrait<E: Engine>:
   type VerifierKey: Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// A type that holds the prep work for producing the SNARK
-  type PrepSNARK: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type PrepSNARK: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Produces the keys for the prover and the verifier
   fn setup<C: SpartanCircuit<E>>(
@@ -34,7 +34,7 @@ pub trait R1CSSNARKTrait<E: Engine>:
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
-    prep_snark: &mut Self::PrepSNARK,
+    prep_snark: &Self::PrepSNARK,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError>;
 
