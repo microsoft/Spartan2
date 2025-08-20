@@ -539,6 +539,12 @@ where
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
+    let ps_core =
+      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, core_circuit, is_small)?;
+
+    if ps.comm_W_shared != ps_core.comm_W_shared {
+      return Err(SpartanError::InternalError);
+    }
 
     let ps_step = (0..step_circuits.len())
       .into_par_iter()

@@ -213,7 +213,7 @@ pub struct PrecommittedState<E: Engine> {
   cs: SatisfyingAssignment<E>,
   shared: Vec<AllocatedNum<E::Scalar>>,
   precommitted: Vec<AllocatedNum<E::Scalar>>,
-  comm_W_shared: Option<PartialCommitment<E>>,
+  pub(crate) comm_W_shared: Option<PartialCommitment<E>>,
   comm_W_precommitted: Option<PartialCommitment<E>>,
   W: Vec<E::Scalar>,
   r_W: Blind<E>,
