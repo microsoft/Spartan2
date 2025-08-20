@@ -364,7 +364,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
 
-    ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+    ps.W
+      [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
       .copy_from_slice(
         &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
           ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],

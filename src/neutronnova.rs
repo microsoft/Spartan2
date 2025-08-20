@@ -210,7 +210,11 @@ where
       });
     }
 
-    info!("NeutronNova NIFS prove for {} instances and padded to {} instances", Us.len(), n);
+    info!(
+      "NeutronNova NIFS prove for {} instances and padded to {} instances",
+      Us.len(),
+      n
+    );
 
     let mut Us = Us.to_vec();
     let mut Ws = Ws.to_vec();
@@ -585,76 +589,83 @@ where
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
-    let (step_instances, step_witnesses) = prep_snark
-      .ps_step
-      .par_iter_mut()
-      .zip(step_circuits.par_iter().enumerate())
-      .map(|(pre_state, (i, circuit))| {
+    let ((step_instances, step_witnesses), (core_instance, core_witness)) = rayon::join(
+      || {
+        prep_snark
+          .ps_step
+          .par_iter_mut()
+          .zip(step_circuits.par_iter().enumerate())
+          .map(|(pre_state, (i, circuit))| {
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &pk.vk_digest);
+            transcript.absorb(
+              b"num_circuits",
+              &E::Scalar::from(step_circuits.len() as u64),
+            );
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+
+            let public_values =
+              circuit
+                .public_values()
+                .map_err(|e| SpartanError::SynthesisError {
+                  reason: format!("Circuit does not provide public IO: {e}"),
+                })?;
+            transcript.absorb(b"public_values", &public_values.as_slice());
+
+            SatisfyingAssignment::r1cs_instance_and_witness(
+              pre_state,
+              &pk.S_step,
+              &pk.ck,
+              circuit,
+              is_small,
+              &mut transcript,
+            )
+          })
+          .try_fold(
+            || (Vec::new(), Vec::new()),
+            |mut acc, res: Result<_, SpartanError>| {
+              let (u, w) = res?;
+              acc.0.push(u);
+              acc.1.push(w);
+              Ok(acc)
+            },
+          )
+          .try_reduce(
+            || (Vec::new(), Vec::new()),
+            |mut a, mut b| {
+              a.0.append(&mut b.0);
+              a.1.append(&mut b.1);
+              Ok(a)
+            },
+          )?
+      },
+      || {
+        // synthesize the core instance
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        transcript.absorb(
-          b"num_circuits",
-          &E::Scalar::from(step_circuits.len() as u64),
-        );
-        transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-        let public_values = circuit
-          .public_values()
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Circuit does not provide public IO: {e}"),
-          })?;
-        transcript.absorb(b"public_values", &public_values.as_slice());
-
-        SatisfyingAssignment::r1cs_instance_and_witness(
-          pre_state,
-          &pk.S_step,
+        let public_values_core =
+          core_circuit
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Core circuit does not provide public IO: {e}"),
+            })?;
+        transcript.absorb(b"public_values", &public_values_core.as_slice());
+        let (core_instance, _core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+          &mut prep_snark.ps_core,
+          &pk.S_core,
           &pk.ck,
-          circuit,
+          core_circuit,
           is_small,
           &mut transcript,
-        )
-      })
-      .try_fold(
-        || (Vec::new(), Vec::new()),
-        |mut acc, res: Result<_, SpartanError>| {
-          let (u, w) = res?;
-          acc.0.push(u);
-          acc.1.push(w);
-          Ok(acc)
-        },
-      )
-      .try_reduce(
-        || (Vec::new(), Vec::new()),
-        |mut a, mut b| {
-          a.0.append(&mut b.0);
-          a.1.append(&mut b.1);
-          Ok(a)
-        },
-      )?;
+        )?;
+      },
+    );
 
     let step_instances_regular = step_instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
-    // synthesize the core instance
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &pk.vk_digest);
-    let public_values_core =
-      core_circuit
-        .public_values()
-        .map_err(|e| SpartanError::SynthesisError {
-          reason: format!("Core circuit does not provide public IO: {e}"),
-        })?;
-    transcript.absorb(b"public_values", &public_values_core.as_slice());
-    let (core_instance, _core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
-      &mut prep_snark.ps_core,
-      &pk.S_core,
-      &pk.ck,
-      core_circuit,
-      is_small,
-      &mut transcript,
-    )?;
     let core_instance_regular = core_instance.to_regular_instance()?;
 
     // We start a new transcript for the NeutronNova NIFS proof
