@@ -176,8 +176,12 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
     return Err(SpartanError::InvalidInputLength);
   }
 
-  let max_scalar = scalars.iter().max().ok_or(SpartanError::InternalError)?;
-  let max_scalar_usize = max_scalar.to_usize().ok_or(SpartanError::InternalError)?;
+  let max_scalar = scalars.iter().max().ok_or(SpartanError::InternalError {
+    reason: "Unable to find maximum value".to_string(),
+  })?;
+  let max_scalar_usize = max_scalar.to_usize().ok_or(SpartanError::InternalError {
+    reason: "Unable to convert maximum value to usize".to_string(),
+  })?;
   let max_num_bits = num_bits(max_scalar_usize);
   let result = match max_num_bits {
     0 => C::identity().into(),

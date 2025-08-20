@@ -292,7 +292,11 @@ where
       // return error if acc is zero
       acc = match Option::from(acc.invert()) {
         Some(inv) => inv,
-        None => return Err(SpartanError::InternalError),
+        None => {
+          return Err(SpartanError::InternalError {
+            reason: "Division by zero during inversion".to_string(),
+          });
+        }
       };
 
       // compute the inverse once for all entries
