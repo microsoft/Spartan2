@@ -666,12 +666,14 @@ where
     transcript.absorb(b"core_instance", &core_instance_regular);
 
     // NIFS absorbs and folds the step instances
+    let (_nifs_span, nifs_t) = start_span!("NIFS");
     let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) = NeutronNovaNIFS::prove(
       &pk.S_step,
       &step_instances_regular,
       &step_witnesses,
       &mut transcript,
     )?;
+    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
     // we now prove the validity of folded witness
     let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
