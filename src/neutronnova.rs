@@ -822,13 +822,14 @@ where
     }
 
     // validate the step instances
-    for u in &self.step_instances {
+    for (i, u) in self.step_instances.iter().enumerate() {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
       transcript.absorb(
         b"num_circuits",
         &E::Scalar::from(self.step_instances.len() as u64),
       );
+      transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
       u.validate(&vk.S_step, &mut transcript)?;
     }
 
