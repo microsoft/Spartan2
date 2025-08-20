@@ -589,7 +589,7 @@ where
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
-    let ((step_instances, step_witnesses), (core_instance, core_witness)) = rayon::join(
+    let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
           .ps_step
@@ -637,7 +637,7 @@ where
               a.1.append(&mut b.1);
               Ok(a)
             },
-          )?
+          )
       },
       || {
         // synthesize the core instance
@@ -650,16 +650,19 @@ where
               reason: format!("Core circuit does not provide public IO: {e}"),
             })?;
         transcript.absorb(b"public_values", &public_values_core.as_slice());
-        let (core_instance, _core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+        SatisfyingAssignment::r1cs_instance_and_witness(
           &mut prep_snark.ps_core,
           &pk.S_core,
           &pk.ck,
           core_circuit,
           is_small,
           &mut transcript,
-        )?;
+        )
       },
     );
+
+    let ((step_instances, step_witnesses), (core_instance, _core_witness)) =
+      (res_steps?, res_core?);
 
     let step_instances_regular = step_instances
       .iter()
