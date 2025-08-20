@@ -539,12 +539,6 @@ where
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
-    let ps_core =
-      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, core_circuit, is_small)?;
-
-    if ps.comm_W_shared != ps_core.comm_W_shared {
-      return Err(SpartanError::InternalError);
-    }
 
     let ps_step = (0..step_circuits.len())
       .into_par_iter()
@@ -644,6 +638,13 @@ where
     // synthesize the core instance
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
+    let public_values_core =
+      core_circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Core circuit does not provide public IO: {e}"),
+        })?;
+    transcript.absorb(b"public_values", &public_values_core.as_slice());
     let (core_instance, _core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
       &mut prep_snark.ps_core,
       &pk.S_core,
