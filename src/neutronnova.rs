@@ -441,8 +441,8 @@ where
 #[serde(bound = "")]
 pub struct NeutronNovaProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  S_uniform: SplitR1CSShape<E>,
-  S_nonuniform: SplitR1CSShape<E>,
+  S_step: SplitR1CSShape<E>,
+  S_core: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -452,8 +452,8 @@ pub struct NeutronNovaProverKey<E: Engine> {
 pub struct NeutronNovaVerifierKey<E: Engine> {
   ck: CommitmentKey<E>,
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  S_uniform: SplitR1CSShape<E>,
-  S_nonuniform: SplitR1CSShape<E>,
+  S_step: SplitR1CSShape<E>,
+  S_core: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -480,15 +480,16 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaPrepSNARK<E: Engine> {
-  ps_uniform: Vec<PrecommittedState<E>>,
-  ps_nonuniform: PrecommittedState<E>,
+  ps_step: Vec<PrecommittedState<E>>,
+  ps_core: PrecommittedState<E>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaSNARK<E: Engine> {
-  instances: Vec<SplitR1CSInstance<E>>,
+  step_instances: Vec<SplitR1CSInstance<E>>,
+  core_instance: SplitR1CSInstance<E>,
   nifs: NeutronNovaNIFS<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
@@ -503,25 +504,25 @@ where
 {
   /// Sets up the NeutronNova SNARK for a batch of circuits of type `C1` and a single circuit of type `C2`
   pub fn setup<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
-    uniform_circuit: &C1,
-    nonuniform_circuit: &C2,
+    step_circuit: &C1,
+    core_circuit: &C2,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let S_uniform = ShapeCS::r1cs_shape(uniform_circuit)?;
-    let S_nonuniform = ShapeCS::r1cs_shape(nonuniform_circuit)?;
+    let S_step = ShapeCS::r1cs_shape(step_circuit)?;
+    let S_core = ShapeCS::r1cs_shape(core_circuit)?;
 
-    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_uniform, &S_nonuniform])?;
+    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
-      S_uniform: S_uniform.clone(),
-      S_nonuniform: S_nonuniform.clone(),
+      S_step: S_step.clone(),
+      S_core: S_core.clone(),
       vk_ee,
       digest: OnceCell::new(),
     };
     let pk = NeutronNovaProverKey {
       ck,
-      S_uniform,
-      S_nonuniform,
+      S_step,
+      S_core,
       vk_digest: vk.digest()?,
     };
 
@@ -531,50 +532,50 @@ where
   /// Prepares the pre-processed state for proving
   pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    uniform_circuits: &[C1],
-    nonuniform_circuit: &C2,
+    step_circuits: &[C1],
+    core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    // we synthesize shared witness for the first circuit; every other circuit including the non-uniform circuit shares this witness
+    // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
     let mut ps =
-      SatisfyingAssignment::shared_witness(&pk.S_uniform, &pk.ck, &uniform_circuits[0], is_small)?;
+      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
 
-    let ps_uniform = (0..uniform_circuits.len())
+    let ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
         // copy ps to avoid mutating the original shared witness
         let mut ps_i = ps.clone();
         SatisfyingAssignment::precommitted_witness(
           &mut ps_i,
-          &pk.S_uniform,
+          &pk.S_step,
           &pk.ck,
-          &uniform_circuits[i],
+          &step_circuits[i],
           is_small,
         )?;
         Ok(ps_i)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
-    // we don't need to make a copy of ps for the non-uniform circuit, as it will be used only once
+    // we don't need to make a copy of ps for the core circuit, as it will be used only once
     SatisfyingAssignment::precommitted_witness(
       &mut ps,
-      &pk.S_nonuniform,
+      &pk.S_core,
       &pk.ck,
-      nonuniform_circuit,
+      core_circuit,
       is_small,
     )?;
 
     Ok(NeutronNovaPrepSNARK {
-      ps_uniform,
-      ps_nonuniform: ps,
+      ps_step,
+      ps_core: ps,
     })
   }
 
-  /// Prove the folding of a batch of R1CS instances
+  /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together
   pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    uniform_circuits: &[C1],
-    _nonuniform_circuit: &C2,
+    step_circuits: &[C1],
+    core_circuit: &C2,
     prep_snark: &NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
@@ -582,16 +583,16 @@ where
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
-    let (instances, witnesses) = prep_snark
-      .ps_uniform
+    let (step_instances, step_witnesses) = prep_snark
+      .ps_step
       .par_iter_mut()
-      .zip(uniform_circuits.par_iter().enumerate())
+      .zip(step_circuits.par_iter().enumerate())
       .map(|(pre_state, (i, circuit))| {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
         transcript.absorb(
           b"num_circuits",
-          &E::Scalar::from(uniform_circuits.len() as u64),
+          &E::Scalar::from(step_circuits.len() as u64),
         );
         transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
 
@@ -604,7 +605,7 @@ where
 
         SatisfyingAssignment::r1cs_instance_and_witness(
           pre_state,
-          &pk.S_uniform,
+          &pk.S_step,
           &pk.ck,
           circuit,
           is_small,
@@ -629,25 +630,42 @@ where
         },
       )?;
 
-    let instances_regular = instances
+    let step_instances_regular = step_instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
+
+    // synthesize the core instance
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &pk.vk_digest);
+    let (core_instance, _core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps_core,
+      &pk.S_core,
+      &pk.ck,
+      core_circuit,
+      is_small,
+      &mut transcript,
+    )?;
+    let core_instance_regular = core_instance.to_regular_instance()?;
 
     // We start a new transcript for the NeutronNova NIFS proof
     // All instances will be absorbed into the transcript
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
+    // absorb the core instance
+    transcript.absorb(b"core_instance", &core_instance_regular);
+
+    // NIFS absorbs and folds the step instances
     let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) = NeutronNovaNIFS::prove(
-      &pk.S_uniform,
-      &instances_regular,
-      &witnesses,
+      &pk.S_step,
+      &step_instances_regular,
+      &step_witnesses,
       &mut transcript,
     )?;
 
     // we now prove the validity of folded witness
-    let (_ell, left, right) = compute_tensor_decomp(pk.S_uniform.num_cons);
+    let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
     let (E1, E2) = E.split_at(left);
     let mut full_E = vec![E::Scalar::ONE; left * right];
     full_E
@@ -661,9 +679,9 @@ where
       });
     let mut poly_tau = MultilinearPolynomial::new(full_E);
 
-    let num_vars = pk.S_uniform.num_shared + pk.S_uniform.num_precommitted + pk.S_uniform.num_rest;
+    let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S_uniform.num_cons.ilog2()).unwrap(),
+      usize::try_from(pk.S_step.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
@@ -713,7 +731,7 @@ where
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S_uniform, &evals_rx);
+    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S_step, &evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
@@ -775,7 +793,8 @@ where
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(Self {
-      instances,
+      step_instances,
+      core_instance,
       nifs,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
@@ -792,51 +811,61 @@ where
     num_instances: usize,
   ) -> Result<(Vec<Vec<E::Scalar>>, Vec<E::Scalar>), SpartanError> {
     let (_verify_span, verify_t) = start_span!("neutronnova_verify");
-    if num_instances != self.instances.len() {
+    if num_instances != self.step_instances.len() {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
           "Expected {} instances, got {}",
           num_instances,
-          self.instances.len()
+          self.step_instances.len()
         ),
       });
     }
 
-    for instance in &self.instances {
+    // validate the step instances
+    for u in &self.step_instances {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
       transcript.absorb(
         b"num_circuits",
-        &E::Scalar::from(self.instances.len() as u64),
+        &E::Scalar::from(self.step_instances.len() as u64),
       );
-
-      instance.validate(&vk.S_uniform, &mut transcript)?;
+      u.validate(&vk.S_step, &mut transcript)?;
     }
 
-    for u in &self.instances {
-      if u.comm_W_shared != self.instances[0].comm_W_shared {
+    // validate the core instance
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &vk.digest()?);
+    self.core_instance.validate(&vk.S_core, &mut transcript)?;
+
+    // we require all step instances to have the same shared commitment and match the shared commitment of the core instance
+    for u in &self.step_instances {
+      if u.comm_W_shared != self.core_instance.comm_W_shared {
         return Err(SpartanError::ProofVerifyError {
           reason: "All instances must have the same shared commitment".to_string(),
         });
       }
     }
 
-    let instances = self
-      .instances
+    let step_instances_regular = self
+      .step_instances
       .par_iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
+    let core_instance_regular = self.core_instance.to_regular_instance()?;
+
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
+    transcript.absorb(b"core_instance", &core_instance_regular);
 
-    let folded_U = self.nifs.verify(&instances, &mut transcript)?;
+    // absorb the step instances and fold them
+    let folded_U = self.nifs.verify(&step_instances_regular, &mut transcript)?;
 
-    let num_vars = vk.S_uniform.num_shared + vk.S_uniform.num_precommitted + vk.S_uniform.num_rest;
+    let num_vars = vk.S_step.num_shared + vk.S_step.num_precommitted + vk.S_step.num_rest;
 
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(vk.S_uniform.num_cons.ilog2()).unwrap(),
+      usize::try_from(vk.S_step.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
@@ -934,11 +963,7 @@ where
         .collect()
     };
 
-    let evals = multi_evaluate(
-      &[&vk.S_uniform.A, &vk.S_uniform.B, &vk.S_uniform.C],
-      &r_x,
-      &r_y,
-    );
+    let evals = multi_evaluate(&[&vk.S_step.A, &vk.S_step.B, &vk.S_step.C], &r_x, &r_y);
 
     let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
     if claim_inner_final != claim_inner_final_expected {
@@ -961,17 +986,17 @@ where
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "neutronnova_verify");
 
-    let public_values_uniform = self
-      .instances
+    let public_values_step = self
+      .step_instances
       .iter()
       .take(num_instances)
       .map(|u| u.public_values.clone())
       .collect::<Vec<Vec<_>>>();
 
-    let public_values_nonuniform = vec![];
+    let public_values_core = self.core_instance.public_values.clone();
 
     // return a vector of public values
-    Ok((public_values_uniform, public_values_nonuniform))
+    Ok((public_values_step, public_values_core))
   }
 }
 
@@ -1082,28 +1107,27 @@ mod benchmarks {
     name: &str,
     pk: &NeutronNovaProverKey<E>,
     vk: &NeutronNovaVerifierKey<E>,
-    uniform_circuits: &[C1],
-    nonuniform_circuit: &C2,
+    step_circuits: &[C1],
+    core_circuit: &C2,
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}",
-      uniform_circuits.len()
+      step_circuits.len()
     );
     // sanity check: prove and verify before benching
-    let ps =
-      NeutronNovaSNARK::<E>::prep_prove(pk, uniform_circuits, nonuniform_circuit, true).unwrap();
+    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
 
-    let res = NeutronNovaSNARK::prove(pk, uniform_circuits, nonuniform_circuit, &ps, true);
+    let res = NeutronNovaSNARK::prove(pk, step_circuits, core_circuit, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
-    let res = snark.verify(vk, uniform_circuits.len());
+    let res = snark.verify(vk, step_circuits.len());
     assert!(res.is_ok());
 
-    let (public_values_uniform, _public_values_nonuniform) = res.unwrap();
-    assert_eq!(public_values_uniform.len(), uniform_circuits.len());
+    let (public_values_step, _public_values_core) = res.unwrap();
+    assert_eq!(public_values_step.len(), step_circuits.len());
   }
 
   #[test]
@@ -1118,7 +1142,7 @@ mod benchmarks {
           &pk,
           &vk,
           &circuits,
-          &circuits[0], // non-uniform circuit is the first one
+          &circuits[0], // core circuit is the first one, for test purposes
         );
       }
     }
