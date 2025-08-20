@@ -785,12 +785,12 @@ where
     })
   }
 
-  /// Verifies the NeutronNovaSNARK
+  /// Verifies the NeutronNovaSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
     num_instances: usize,
-  ) -> Result<Vec<Vec<E::Scalar>>, SpartanError> {
+  ) -> Result<(Vec<Vec<E::Scalar>>, Vec<E::Scalar>), SpartanError> {
     let (_verify_span, verify_t) = start_span!("neutronnova_verify");
     if num_instances != self.instances.len() {
       return Err(SpartanError::ProofVerifyError {
@@ -961,14 +961,17 @@ where
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "neutronnova_verify");
 
+    let public_values_uniform = self
+      .instances
+      .iter()
+      .take(num_instances)
+      .map(|u| u.public_values.clone())
+      .collect::<Vec<Vec<_>>>();
+
+    let public_values_nonuniform = vec![];
+
     // return a vector of public values
-    Ok(
-      self
-        .instances
-        .iter()
-        .map(|u| u.public_values.clone())
-        .collect::<Vec<Vec<_>>>(),
-    )
+    Ok((public_values_uniform, public_values_nonuniform))
   }
 }
 
@@ -1075,27 +1078,32 @@ mod benchmarks {
     (pk, vk, circuits)
   }
 
-  fn test_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
+  fn test_neutron_inner<E: Engine, C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     name: &str,
     pk: &NeutronNovaProverKey<E>,
     vk: &NeutronNovaVerifierKey<E>,
-    circuits: &[C],
+    uniform_circuits: &[C1],
+    nonuniform_circuit: &C2,
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}",
-      circuits.len()
+      uniform_circuits.len()
     );
     // sanity check: prove and verify before benching
-    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+    let ps =
+      NeutronNovaSNARK::<E>::prep_prove(pk, uniform_circuits, nonuniform_circuit, true).unwrap();
 
-    let res = NeutronNovaSNARK::prove(pk, circuits, &ps, true);
+    let res = NeutronNovaSNARK::prove(pk, uniform_circuits, nonuniform_circuit, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
-    let res = snark.verify(vk, circuits.len());
+    let res = snark.verify(vk, uniform_circuits.len());
     assert!(res.is_ok());
+
+    let (public_values_uniform, _public_values_nonuniform) = res.unwrap();
+    assert_eq!(public_values_uniform.len(), uniform_circuits.len());
   }
 
   #[test]
@@ -1110,6 +1118,7 @@ mod benchmarks {
           &pk,
           &vk,
           &circuits,
+          &circuits[0], // non-uniform circuit is the first one
         );
       }
     }
