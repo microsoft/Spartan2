@@ -441,7 +441,8 @@ where
 #[serde(bound = "")]
 pub struct NeutronNovaProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  S: SplitR1CSShape<E>,
+  S_uniform: SplitR1CSShape<E>,
+  S_nonuniform: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -451,7 +452,8 @@ pub struct NeutronNovaProverKey<E: Engine> {
 pub struct NeutronNovaVerifierKey<E: Engine> {
   ck: CommitmentKey<E>,
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  S: SplitR1CSShape<E>,
+  S_uniform: SplitR1CSShape<E>,
+  S_nonuniform: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -498,21 +500,27 @@ impl<E: Engine> NeutronNovaSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  /// Sets up the NeutronNova SNARK for a batch of circuits
-  pub fn setup<C: SpartanCircuit<E>>(
-    circuit: &C,
+  /// Sets up the NeutronNova SNARK for a batch of circuits of type `C1` and a single circuit of type `C2`
+  pub fn setup<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+    uniform_circuit: &C1,
+    nonuniform_circuit: &C2,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(circuit)?;
+    let S_uniform = ShapeCS::r1cs_shape(uniform_circuit)?;
+    let S_nonuniform = ShapeCS::r1cs_shape(nonuniform_circuit)?;
+
+    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_uniform, &S_nonuniform])?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
-      S: S.clone(),
+      S_uniform: S_uniform.clone(),
+      S_nonuniform: S_nonuniform.clone(),
       vk_ee,
       digest: OnceCell::new(),
     };
     let pk = NeutronNovaProverKey {
       ck,
-      S,
+      S_uniform,
+      S_nonuniform,
       vk_digest: vk.digest()?,
     };
 
@@ -526,7 +534,7 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
     // we synthesize shared witness for the first circuit; every other circuit shares this witness
-    let ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuits[0], is_small)?;
+    let ps = SatisfyingAssignment::shared_witness(&pk.S_uniform, &pk.ck, &circuits[0], is_small)?;
 
     let ps_vec = (0..circuits.len())
       .into_par_iter()
@@ -534,7 +542,7 @@ where
         let mut ps_i = ps.clone();
         SatisfyingAssignment::precommitted_witness(
           &mut ps_i,
-          &pk.S,
+          &pk.S_uniform,
           &pk.ck,
           &circuits[i],
           is_small,
@@ -576,7 +584,7 @@ where
 
         SatisfyingAssignment::r1cs_instance_and_witness(
           pre_state,
-          &pk.S,
+          &pk.S_uniform,
           &pk.ck,
           circuit,
           is_small,
@@ -611,11 +619,15 @@ where
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) =
-      NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
+    let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) = NeutronNovaNIFS::prove(
+      &pk.S_uniform,
+      &instances_regular,
+      &witnesses,
+      &mut transcript,
+    )?;
 
     // we now prove the validity of folded witness
-    let (_ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
+    let (_ell, left, right) = compute_tensor_decomp(pk.S_uniform.num_cons);
     let (E1, E2) = E.split_at(left);
     let mut full_E = vec![E::Scalar::ONE; left * right];
     full_E
@@ -629,9 +641,9 @@ where
       });
     let mut poly_tau = MultilinearPolynomial::new(full_E);
 
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let num_vars = pk.S_uniform.num_shared + pk.S_uniform.num_precommitted + pk.S_uniform.num_rest;
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      usize::try_from(pk.S_uniform.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
@@ -681,7 +693,7 @@ where
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S_uniform, &evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
@@ -778,7 +790,7 @@ where
         &E::Scalar::from(self.instances.len() as u64),
       );
 
-      instance.validate(&vk.S, &mut transcript)?;
+      instance.validate(&vk.S_uniform, &mut transcript)?;
     }
 
     for u in &self.instances {
@@ -801,10 +813,10 @@ where
 
     let folded_U = self.nifs.verify(&instances, &mut transcript)?;
 
-    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
+    let num_vars = vk.S_uniform.num_shared + vk.S_uniform.num_precommitted + vk.S_uniform.num_rest;
 
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
+      usize::try_from(vk.S_uniform.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
@@ -902,7 +914,11 @@ where
         .collect()
     };
 
-    let evals = multi_evaluate(&[&vk.S.A, &vk.S.B, &vk.S.C], &r_x, &r_y);
+    let evals = multi_evaluate(
+      &[&vk.S_uniform.A, &vk.S_uniform.B, &vk.S_uniform.C],
+      &r_x,
+      &r_y,
+    );
 
     let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
     if claim_inner_final != claim_inner_final_expected {

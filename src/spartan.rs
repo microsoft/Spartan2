@@ -150,7 +150,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(&circuit)?;
+    let S = ShapeCS::r1cs_shape(&circuit)?;
+    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
 
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),

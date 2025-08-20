@@ -615,9 +615,16 @@ impl<E: Engine> SplitR1CSShape<E> {
   ///
   /// * `S`: The shape of the R1CS matrices.
   ///
-  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
-    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
-    E::PCS::setup(b"ck", num_vars)
+  pub fn commitment_key(
+    shapes: &[&SplitR1CSShape<E>],
+  ) -> Result<(CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+    let max = shapes
+      .iter()
+      .map(|s| s.num_shared + s.num_precommitted + s.num_rest)
+      .max()
+      .ok_or(SpartanError::InvalidInputLength)?;
+
+    Ok(E::PCS::setup(b"ck", max))
   }
 
   pub fn multiply_vec(

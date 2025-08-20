@@ -1,6 +1,6 @@
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  Blind, CommitmentKey, PCS, PartialCommitment, VerifierKey,
+  Blind, CommitmentKey, PCS, PartialCommitment,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
@@ -16,12 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{debug, info, info_span};
 
-/// `SpartanShape` provides methods for acquiring `SplitR1CSShape` and `CommitmentKey` from implementers.
+/// `SpartanShape` provides methods for acquiring `SplitR1CSShape` from implementers.
 pub trait SpartanShape<E: Engine> {
-  /// Return an appropriate `SplitR1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape<C: SpartanCircuit<E>>(
-    circuit: &C,
-  ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError>;
+  /// Return an appropriate `SplitR1CSShape`
+  fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError>;
 }
 
 /// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
@@ -58,9 +56,7 @@ pub trait SpartanWitness<E: Engine> {
 }
 
 impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
-  fn r1cs_shape<C: SpartanCircuit<E>>(
-    circuit: &C,
-  ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+  fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError> {
     let num_challenges = circuit.num_challenges();
 
     let mut cs: Self = Self::new();
@@ -150,9 +146,8 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
       C,
     )
     .unwrap();
-    let (ck, vk) = S.commitment_key();
 
-    Ok((S, ck, vk))
+    Ok(S)
   }
 }
 
