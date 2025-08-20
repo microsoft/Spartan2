@@ -210,6 +210,8 @@ where
       });
     }
 
+    info!("NeutronNova NIFS prove for {} instances and padded to {} instances", Us.len(), n);
+
     let mut Us = Us.to_vec();
     let mut Ws = Ws.to_vec();
     if Us.len() < n {
