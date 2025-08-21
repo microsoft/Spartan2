@@ -7,7 +7,10 @@
 //! Note: This circuit only encodes the algebraic checks of the verifier. It does **not**
 //! encode the Fiat-Shamir challenge generation, so no proof composition is performed here.
 
-use crate::traits::{Engine, circuit::MultiRoundCircuit};
+use crate::{
+  MULTIROUND_COMMITMENT_WIDTH,
+  traits::{Engine, circuit::MultiRoundCircuit},
+};
 use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::Field;
 
@@ -50,6 +53,22 @@ fn eval_poly_horner<E: Engine, CS: ConstraintSystem<E::Scalar>>(
     acc = new_acc;
   }
   Ok(acc)
+}
+
+/// Allocates a new variable fixed to zero and enforces the constraint `z = 0`.
+fn alloc_zero<E: Engine, CS: ConstraintSystem<E::Scalar>>(
+  mut cs: CS,
+) -> Result<AllocatedNum<E::Scalar>, SynthesisError> {
+  // Allocate with value 0
+  let z = AllocatedNum::alloc(cs.namespace(|| "zero"), || Ok(E::Scalar::ZERO))?;
+  // Enforce z * 1 = 0
+  cs.enforce(
+    || "z_is_zero",
+    |lc| lc + z.get_variable(),
+    |lc| lc + CS::one(),
+    |lc| lc, // constant 0
+  );
+  Ok(z)
 }
 
 /// Circuit constraining Spartan verifier computation across multiple rounds.
@@ -387,6 +406,12 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       let tau_at_rx = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx"), || Ok(self.tau_at_rx))?;
       tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_input"))?;
       let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W"), || Ok(self.eval_W))?;
+      // Padding for per-round commitment width
+      let padding_width = MULTIROUND_COMMITMENT_WIDTH - 1; // width minus the already-allocated `eval_W`
+      for j in 0..padding_width {
+        // Allocate a variable fixed to zero
+        alloc_zero::<E, _>(cs.namespace(|| format!("eval_W_pad_{j}")))?;
+      }
       let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
       eval_X.inputize(cs.namespace(|| "eval_X_input"))?;
 
@@ -580,7 +605,7 @@ mod tests {
     let (shape_mr, ck, _vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
     // Check number of R1CS constraints (unpadded)
-    assert_eq!(shape_mr.num_cons_unpadded, 37);
+    assert_eq!(shape_mr.num_cons_unpadded, 40);
 
     // Witness generation across rounds
     let mut state =

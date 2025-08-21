@@ -1,4 +1,5 @@
 //! This module defines R1CS related types
+use crate::MULTIROUND_COMMITMENT_WIDTH;
 use crate::{
   Blind, Commitment, CommitmentKey, PCS, PartialCommitment, VerifierKey,
   digest::SimpleDigestible,
@@ -1192,7 +1193,7 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let total_vars: usize = self.num_vars_per_round.iter().sum();
     // Use a narrower commitment width for multi-round witnesses to reduce padding overhead.
-    E::PCS::setup_with_width(b"ck", total_vars, 4)
+    E::PCS::setup_with_width(b"ck", total_vars, MULTIROUND_COMMITMENT_WIDTH)
   }
 
   pub fn multiply_vec(

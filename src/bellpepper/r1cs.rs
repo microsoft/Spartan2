@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  Blind, CommitmentKey, PCS, PartialCommitment,
+  Blind, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, PartialCommitment, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{
@@ -556,8 +556,8 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
     b.cols = total_vars + num_inputs;
     c.cols = total_vars + num_inputs;
 
-    // Narrower width for per-round commitments
-    let width = 4usize;
+    // Width for per-round commitments
+    let width = MULTIROUND_COMMITMENT_WIDTH;
 
     // Don't count One as an input for shape's purposes.
     let s = SplitMultiRoundR1CSShape::new(

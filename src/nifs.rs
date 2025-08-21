@@ -74,7 +74,7 @@ where
 mod tests {
   use super::*;
   use crate::{
-    CommitmentKey,
+    CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
     bellpepper::tests::TwoRoundPermutationCircuit,
     provider::P256HyraxEngine,
     r1cs::{R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape},
@@ -86,7 +86,7 @@ mod tests {
 
   fn multiround_fold_with() {
     // Build a trivial 1-constraint, 1-variable, 1-round shape.
-    let width = 4usize;
+    let width = MULTIROUND_COMMITMENT_WIDTH;
     let num_cons = 1usize;
     let num_vars_per_round = vec![1usize];
     let num_challenges_per_round = vec![0usize];

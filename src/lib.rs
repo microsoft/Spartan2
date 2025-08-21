@@ -45,6 +45,10 @@ macro_rules! start_span {
 }
 pub(crate) use start_span;
 
+/// The width used for per-round commitments in the multiround protocol.
+/// This affects the commitment scheme structure and padding calculations.
+pub const MULTIROUND_COMMITMENT_WIDTH: usize = 4;
+
 use traits::{Engine, pcs::PCSEngineTrait};
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
