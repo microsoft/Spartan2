@@ -673,8 +673,7 @@ where
       },
     );
 
-    let ((step_instances, step_witnesses), (core_instance, _core_witness)) =
-      (res_steps?, res_core?);
+    let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
 
     let step_instances_regular = step_instances
       .iter()
@@ -701,7 +700,7 @@ where
     )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
-    // we now prove the validity of folded witness
+    // we now prove the validity of folded witness and the core circuit's witness
     let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
     let (E1, E2) = E.split_at(left);
     let mut full_E = vec![E::Scalar::ONE; left * right];
@@ -724,15 +723,26 @@ where
 
     // outer sum-check preparation
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+    let (mut poly_Az_step, mut poly_Bz_step, mut poly_Cz_step) = (
       MultilinearPolynomial::new(Az),
       MultilinearPolynomial::new(Bz),
       MultilinearPolynomial::new(Cz),
     );
+
+    let mut z = [
+      core_witness.W.clone(),
+      vec![E::Scalar::ONE],
+      core_instance_regular.public_values.clone(),
+      core_instance_regular.challenges.clone(),
+    ]
+    .concat();
+
+    let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = pk.S_core.multiply_vec(&z)?;
+
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
 
-    // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+    // outer sum-check (batched)
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck (batched)");
 
     let comb_func_outer =
       |poly_A_comp: &E::Scalar,
@@ -740,27 +750,46 @@ where
        poly_C_comp: &E::Scalar,
        poly_D_comp: &E::Scalar|
        -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::<E>::prove_cubic_with_additive_term(
-      &T_out,
-      num_rounds_x,
-      &mut poly_tau,
-      &mut poly_Az,
-      &mut poly_Bz,
-      &mut poly_Cz,
-      comb_func_outer,
-      &mut transcript,
-    )?;
+    transcript.absorb(b"claim_outer", T_out);
+    let c = transcript.squeeze(b"c")?;
+    let (sc_proof_outer, r_x, claims_outer) =
+      SumcheckProof::<E>::prove_cubic_with_additive_term_batched(
+        c,
+        &T_out,
+        num_rounds_x,
+        &mut poly_tau,
+        [&mut poly_Az_step, &mut poly_Az_core],
+        [&mut poly_Bz_step, &mut poly_Bz_core],
+        [&mut poly_Cz_step, &mut poly_Cz_core],
+        comb_func_outer,
+        &mut transcript,
+      )?;
 
     // claims from the end of sum-check
-    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+    let (claim_Az_step, claim_Bz_step, claim_Cz_step): (E::Scalar, E::Scalar, E::Scalar) =
       (claims_outer[1], claims_outer[2], claims_outer[3]);
-    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+    let (claim_Az_core, claim_Bz_core, claim_Cz_core): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[4], claims_outer[5], claims_outer[6]);
+
+    transcript.absorb(
+      b"claims_outer",
+      &[
+        claim_Az_step,
+        claim_Bz_step,
+        claim_Cz_step,
+        claim_Az_core,
+        claim_Bz_core,
+        claim_Cz_core,
+      ]
+      .as_slice(),
+    );
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck (batched)");
 
     // inner sum-check preparation
     let (_r_span, r_t) = start_span!("prepare_inner_claims");
     let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    let claim_inner_joint_step = claim_Az_step + r * claim_Bz_step + r * r * claim_Cz_step;
+    let claim_inner_joint_core = claim_Az_core + r * claim_Bz_core + r * r * claim_Cz_core;
     info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
     let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
@@ -768,20 +797,27 @@ where
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S_step, &evals_rx);
+    let (evals_A_step, evals_B_step, evals_C_step) =
+      compute_eval_table_sparse(&pk.S_step, &evals_rx);
+    let (evals_A_core, evals_B_core, evals_C_core) =
+      compute_eval_table_sparse(&pk.S_core, &evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
-    assert_eq!(evals_A.len(), evals_B.len());
-    assert_eq!(evals_A.len(), evals_C.len());
-    let poly_ABC = (0..evals_A.len())
+    assert_eq!(evals_A_step.len(), evals_B_step.len());
+    assert_eq!(evals_A_step.len(), evals_C_step.len());
+    let poly_ABC_step = (0..evals_A_step.len())
       .into_par_iter()
-      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .map(|i| evals_A_step[i] + r * evals_B_step[i] + r * r * evals_C_step[i])
+      .collect::<Vec<E::Scalar>>();
+    let poly_ABC_core = (0..evals_A_core.len())
+      .into_par_iter()
+      .map(|i| evals_A_core[i] + r * evals_B_core[i] + r * r * evals_C_core[i])
       .collect::<Vec<E::Scalar>>();
     info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
     let (_z_span, z_t) = start_span!("prepare_poly_z");
-    let poly_z = {
+    let poly_z_step = {
       // z = [W || 1 || X], then already zero-padded to length 2 * num_vars
       let mut v = vec![E::Scalar::ZERO; num_vars * 2];
 
@@ -794,37 +830,75 @@ where
       v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&folded_U.X);
       v
     };
+    let poly_z_core = {
+      // z = [W || 1 || X], then already zero-padded to length 2 * num_vars
+      let mut v = vec![E::Scalar::ZERO; num_vars * 2];
+
+      let w_len = core_witness.W.len();
+      v[..w_len].copy_from_slice(&core_witness.W);
+
+      v[w_len] = E::Scalar::ONE;
+
+      let x_len = core_instance_regular.public_values.len();
+      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.public_values);
+      v
+    };
+
     info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
 
     // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck (batched)");
 
     debug!("Proving inner sum-check with {} rounds", num_rounds_y);
     debug!(
-      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
-      poly_ABC.len(),
-      poly_z.len()
+      "Inner sum-check sizes - poly_ABC_step: {}, poly_z_step: {}",
+      poly_ABC_step.len(),
+      poly_z_step.len()
     );
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
     };
-    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad(
-      &claim_inner_joint,
+    transcript.absorb(
+      b"claims_inner_batch",
+      &[claim_inner_joint_step, claim_inner_joint_core],
+    );
+    let c = transcript.squeeze(b"c")?;
+    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad_batched(
+      c,
+      &[claim_inner_joint_step, claim_inner_joint_core],
       num_rounds_y,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
+      [
+        &mut MultilinearPolynomial::new(poly_ABC_step),
+        &mut MultilinearPolynomial::new(poly_ABC_core),
+      ],
+      [
+        &mut MultilinearPolynomial::new(poly_z_step),
+        &mut MultilinearPolynomial::new(poly_z_core),
+      ],
       comb_func,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
+
+    // fold evaluation claims into one
+    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      [&folded_U.comm_W, &core_instance_regular.comm_W],
+      [E::Scalar::ONE, r]
+    )?;
+    let blind = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      [&folded_U.r_W, &core_instance_regular.r_W],
+      [E::Scalar::ONE, r]
+    )?;
+    let W = folded_W.W.par_iter().zip(core_witness.W.par_iter()).map(|(w1, w2)| *w1 + r * *w2).collect::<Vec<_>>();
+    
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let (eval_W, eval_arg) = E::PCS::prove(
       &pk.ck,
       &mut transcript,
-      &folded_U.comm_W,
-      &folded_W.W,
-      &folded_W.r_W,
+      comm,
+      &W,
+      &blind,
       &r_y[1..],
     )?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
@@ -834,7 +908,14 @@ where
       core_instance,
       nifs,
       sc_proof_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      claims_outer: (
+        claim_Az_step,
+        claim_Bz_step,
+        claim_Cz_step,
+        claim_Az_core,
+        claim_Bz_core,
+        claim_Cz_core,
+      ),
       sc_proof_inner,
       eval_W,
       eval_arg,
