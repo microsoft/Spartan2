@@ -564,6 +564,29 @@ impl<E: Engine> SplitR1CSShape<E> {
     })
   }
 
+  pub fn equalize(S_A: &mut Self, S_B: &mut Self) {
+    let num_cons = max(S_A.num_cons, S_B.num_cons);
+    let num_vars = max(
+      S_A.num_shared + S_A.num_precommitted + S_A.num_rest,
+      S_B.num_shared + S_B.num_precommitted + S_B.num_rest,
+    );
+
+    S_A.num_cons = num_cons;
+    S_B.num_cons = num_cons;
+
+    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest
+      != num_vars
+    {
+      S_A.num_shared = num_vars - (S_A.num_precommitted + S_A.num_rest);
+    }
+
+    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest
+      != num_vars
+    {
+      S_B.num_shared = num_vars - (S_B.num_precommitted + S_B.num_rest);
+    }
+  }
+
   pub fn to_regular_shape(&self) -> R1CSShape<E> {
     R1CSShape {
       num_cons: self.num_cons,

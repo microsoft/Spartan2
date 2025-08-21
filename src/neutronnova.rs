@@ -516,29 +516,18 @@ where
     core_circuit: &C2,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
     debug!("Synthesizing step circuit");
-    let S_step = ShapeCS::r1cs_shape(step_circuit)?;
+    let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
 
     debug!("Synthesizing core circuit");
-    let S_core = ShapeCS::r1cs_shape(core_circuit)?;
+    let mut S_core = ShapeCS::r1cs_shape(core_circuit)?;
     debug!("Finished synthesizing core circuit");
 
-    // we currently only support the case where the step and core circuits have the same number of constraints and variables
-    let num_vars_step = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
-    let num_vars_core = S_core.num_shared + S_core.num_precommitted + S_core.num_rest;
-    
+    SplitR1CSShape::equalize(&mut S_step, &mut S_core);
+
     info!("Step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_step.num_shared, S_step.num_precommitted, S_step.num_rest);
     info!("Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_core.num_shared, S_core.num_precommitted, S_core.num_rest);
     
-    if S_step.num_cons != S_core.num_cons || num_vars_step != num_vars_core {
-      return Err(SpartanError::InternalError {
-        reason: format!(
-          "Step and core circuits must have the same number of constraints and variables: step ({}, {}), core ({}, {})",
-          S_step.num_cons, num_vars_step, S_core.num_cons, num_vars_core
-        ),
-      });
-    }
-
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
