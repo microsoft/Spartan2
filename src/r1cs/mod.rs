@@ -77,6 +77,10 @@ pub struct R1CSInstance<E: Engine> {
 /// (If `n` is already a multiple and higher than zero, it is returned unchanged.)
 #[inline]
 pub fn pad_to_width(width: usize, n: usize) -> usize {
+  if n == 0 {
+    return 0;
+  }
+  
   // width == 1024 == 1 << 10, so the mask is width-1 == 0b111_1111_1111 (10 bits set).
   n.saturating_add(width - 1) & !(width - 1)
 }
