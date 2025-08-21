@@ -132,12 +132,12 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     let width = E::PCS::width();
 
-    info!("num_constraints: {}", num_constraints);
-    info!("num_vars: {}", num_vars);
-    info!("num_inputs: {}", num_inputs);
-    info!("num_shared: {}", num_shared);
-    info!("num_precommitted: {}", num_precommitted);
-    info!("num_rest: {}", num_rest);
+    debug!("num_constraints: {}", num_constraints);
+    debug!("num_vars: {}", num_vars);
+    debug!("num_inputs: {}", num_inputs);
+    debug!("num_shared: {}", num_shared);
+    debug!("num_precommitted: {}", num_precommitted);
+    debug!("num_rest: {}", num_rest);
 
     // Don't count One as an input for shape's purposes.
     let S = SplitR1CSShape::new(
