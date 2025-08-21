@@ -577,13 +577,13 @@ impl<E: Engine> SplitR1CSShape<E> {
     if S_A.num_shared + S_A.num_precommitted + S_A.num_rest
       != num_vars
     {
-      S_A.num_shared = num_vars - (S_A.num_precommitted + S_A.num_rest);
+      S_A.num_rest = num_vars - (S_A.num_shared + S_A.num_precommitted);
     }
 
     if S_B.num_shared + S_B.num_precommitted + S_B.num_rest
       != num_vars
     {
-      S_B.num_shared = num_vars - (S_B.num_precommitted + S_B.num_rest);
+      S_B.num_rest = num_vars - (S_B.num_shared + S_B.num_precommitted);
     }
   }
 
