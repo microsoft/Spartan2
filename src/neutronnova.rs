@@ -498,7 +498,8 @@ pub struct NeutronNovaSNARK<E: Engine> {
   core_instance: SplitR1CSInstance<E>,
   nifs: NeutronNovaNIFS<E>,
   sc_proof_outer: SumcheckProof<E>,
-  claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+  claims_outer_step: (E::Scalar, E::Scalar, E::Scalar),
+  claims_outer_core: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
@@ -732,12 +733,19 @@ where
     let mut z = [
       core_witness.W.clone(),
       vec![E::Scalar::ONE],
-      core_instance_regular.public_values.clone(),
-      core_instance_regular.challenges.clone(),
+      core_instance.public_values.clone(),
+      core_instance.challenges.clone(),
     ]
     .concat();
 
-    let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = pk.S_core.multiply_vec(&z)?;
+    let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
+      let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
+      (
+        MultilinearPolynomial::new(Az),
+        MultilinearPolynomial::new(Bz),
+        MultilinearPolynomial::new(Cz),
+      )
+    };
 
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
 
@@ -750,11 +758,11 @@ where
        poly_C_comp: &E::Scalar,
        poly_D_comp: &E::Scalar|
        -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-    transcript.absorb(b"claim_outer", T_out);
-    let c = transcript.squeeze(b"c")?;
+    transcript.absorb(b"claim_outer", &T_out);
+    let c_outer = transcript.squeeze(b"c_outer")?;
     let (sc_proof_outer, r_x, claims_outer) =
       SumcheckProof::<E>::prove_cubic_with_additive_term_batched(
-        c,
+        c_outer,
         &T_out,
         num_rounds_x,
         &mut poly_tau,
@@ -839,8 +847,8 @@ where
 
       v[w_len] = E::Scalar::ONE;
 
-      let x_len = core_instance_regular.public_values.len();
-      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.public_values);
+      let x_len = core_instance_regular.X.len();
+      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.X);
       v
     };
 
@@ -860,11 +868,11 @@ where
     };
     transcript.absorb(
       b"claims_inner_batch",
-      &[claim_inner_joint_step, claim_inner_joint_core],
+      &vec![claim_inner_joint_step, claim_inner_joint_core].as_slice(),
     );
-    let c = transcript.squeeze(b"c")?;
+    let c_inner = transcript.squeeze(b"c_inner")?;
     let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad_batched(
-      c,
+      c_inner,
       &[claim_inner_joint_step, claim_inner_joint_core],
       num_rounds_y,
       [
@@ -882,25 +890,22 @@ where
 
     // fold evaluation claims into one
     let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      [&folded_U.comm_W, &core_instance_regular.comm_W],
-      [E::Scalar::ONE, r]
+      &[folded_U.comm_W, core_instance_regular.comm_W],
+      &[E::Scalar::ONE, c_inner],
     )?;
     let blind = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
-      [&folded_U.r_W, &core_instance_regular.r_W],
-      [E::Scalar::ONE, r]
+      &[folded_W.r_W.clone(), core_witness.r_W.clone()],
+      &[E::Scalar::ONE, c_inner],
     )?;
-    let W = folded_W.W.par_iter().zip(core_witness.W.par_iter()).map(|(w1, w2)| *w1 + r * *w2).collect::<Vec<_>>();
-    
+    let W = folded_W
+      .W
+      .par_iter()
+      .zip(core_witness.W.par_iter())
+      .map(|(w1, w2)| *w1 + r * *w2)
+      .collect::<Vec<_>>();
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let (eval_W, eval_arg) = E::PCS::prove(
-      &pk.ck,
-      &mut transcript,
-      comm,
-      &W,
-      &blind,
-      &r_y[1..],
-    )?;
+    let (eval_W, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(Self {
@@ -908,21 +913,15 @@ where
       core_instance,
       nifs,
       sc_proof_outer,
-      claims_outer: (
-        claim_Az_step,
-        claim_Bz_step,
-        claim_Cz_step,
-        claim_Az_core,
-        claim_Bz_core,
-        claim_Cz_core,
-      ),
+      claims_outer_step: (claim_Az_step, claim_Bz_step, claim_Cz_step),
+      claims_outer_core: (claim_Az_core, claim_Bz_core, claim_Cz_core),
       sc_proof_inner,
       eval_W,
       eval_arg,
     })
   }
 
-  /// Verifies the NeutronNovaSNARK and returns the public IO from the instances
+  /*/// Verifies the NeutronNovaSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
@@ -1116,7 +1115,7 @@ where
 
     // return a vector of public values
     Ok((public_values_step, public_values_core))
-  }
+  }*/
 }
 
 #[cfg(test)]
