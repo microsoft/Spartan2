@@ -571,22 +571,53 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 
   pub fn equalize(S_A: &mut Self, S_B: &mut Self) {
-    let num_cons = max(S_A.num_cons, S_B.num_cons);
-    let num_vars = max(
+    let num_cons_padded = max(S_A.num_cons, S_B.num_cons);
+    let num_vars_padded = max(
       S_A.num_shared + S_A.num_precommitted + S_A.num_rest,
       S_B.num_shared + S_B.num_precommitted + S_B.num_rest,
     );
 
-    S_A.num_cons = num_cons;
-    S_B.num_cons = num_cons;
+    S_A.num_cons = num_cons_padded;
+    S_B.num_cons = num_cons_padded;
 
-    // get the total number of variables to `num_vars` by increasing rest variables
-    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars {
-      S_A.num_rest = num_vars - (S_A.num_shared + S_A.num_precommitted);
+    let move_public_vars = |M: &mut SparseMatrix<E::Scalar>, num_cons: usize, num_vars: usize| {
+      M.indices.par_iter_mut().for_each(|c| {
+        if *c >= num_vars {
+          // public and challenge variables
+          *c += num_vars_padded - num_vars;
+        }
+      });
+
+      M.cols += num_vars_padded - num_vars;
+
+      let ex = {
+        let nnz = if M.indptr.is_empty() {
+          0
+        } else {
+          M.indptr[M.indptr.len() - 1]
+        };
+        vec![nnz; num_cons_padded - num_cons]
+      };
+      M.indptr.extend(ex);
+    };
+
+    // get the total number of variables to `num_vars_padded` by increasing rest variables
+    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars_padded {
+      let num_cons = S_A.num_cons;
+      let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
+      S_A.num_rest = num_vars_padded - (S_A.num_shared + S_A.num_precommitted);
+      move_public_vars(&mut S_A.A, num_cons, num_vars);
+      move_public_vars(&mut S_A.B, num_cons, num_vars);
+      move_public_vars(&mut S_A.C, num_cons, num_vars);
     }
 
-    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars {
-      S_B.num_rest = num_vars - (S_B.num_shared + S_B.num_precommitted);
+    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars_padded {
+      let num_cons = S_B.num_cons;
+      let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
+      S_B.num_rest = num_vars_padded - (S_B.num_shared + S_B.num_precommitted);
+      move_public_vars(&mut S_B.A, num_cons, num_vars);
+      move_public_vars(&mut S_B.B, num_cons, num_vars);
+      move_public_vars(&mut S_B.C, num_cons, num_vars);
     }
   }
 
