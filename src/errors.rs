@@ -14,7 +14,10 @@ pub enum SpartanError {
   InvalidStepCircuitIO,
   /// returned if the supplied input is not of the right length
   #[error("InvalidInputLength")]
-  InvalidInputLength,
+  InvalidInputLength {
+    /// The reason for the invalid input check failure
+    reason: String,
+  },
   /// returned if the supplied witness is not of the right length
   #[error("InvalidWitnessLength")]
   InvalidWitnessLength,
@@ -80,7 +83,10 @@ pub enum SpartanError {
   },
   /// returned when the prover cannot prove the provided statement due to completeness error
   #[error("InternalError")]
-  InternalError,
+  InternalError {
+    /// The reason for the internal error
+    reason: String,
+  },
   /// returned when attempting to divide by zero
   #[error("DivisionByZero")]
   DivisionByZero,

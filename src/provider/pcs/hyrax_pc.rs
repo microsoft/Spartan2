@@ -224,7 +224,9 @@ where
     partial_comms: &[Self::PartialCommitment],
   ) -> Result<Self::Commitment, SpartanError> {
     if partial_comms.is_empty() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: "combine_partial: No partial commitments provided".to_string(),
+      });
     }
     // combine comm from each partial commitment
     let comm = partial_comms
@@ -245,7 +247,13 @@ where
     let n = poly.len();
     let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if n != (2usize).pow(point.len() as u32) {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "Hyrax prove: Expected {} elements in poly, got {}",
+          (2_usize).pow(point.len() as u32),
+          n
+        ),
+      });
     }
 
     transcript.absorb(b"poly_com", comm);
@@ -388,7 +396,9 @@ where
     weights: &[E::Scalar],
   ) -> Result<Self::Commitment, SpartanError> {
     if comms.is_empty() || weights.is_empty() || comms.len() != weights.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_commitments: Commitments and weights must have the same length".to_string(),
+      });
     }
 
     // scale ith commitment by the ith weight
@@ -422,7 +432,9 @@ where
     weights: &[<E as Engine>::Scalar],
   ) -> Result<Self::Blind, SpartanError> {
     if blinds.is_empty() || weights.is_empty() || blinds.len() != weights.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_blinds: Blinds and weights must have the same length".to_string(),
+      });
     }
     // scale ith blind by the ith weight
     let folded_blind = blinds
@@ -439,7 +451,9 @@ where
           .map(|(a, b)| *a + *b)
           .collect::<Vec<_>>()
       })
-      .ok_or(SpartanError::InvalidInputLength)?;
+      .ok_or(SpartanError::InvalidInputLength {
+        reason: "fold_blinds: Blinds and weights must have the same length".to_string(),
+      })?;
     Ok(Self::Blind {
       blind: folded_blind,
     })

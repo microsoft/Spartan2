@@ -111,7 +111,13 @@ where
     let (ck, _) = ck.split_at(U.b_vec.len());
 
     if U.b_vec.len() != W.a_vec.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "IPA prove: Expected {} elements in U.b_vec, got {}",
+          W.a_vec.len(),
+          U.b_vec.len()
+        ),
+      });
     }
 
     // absorb the instance in the transcript
@@ -265,7 +271,13 @@ where
       || self.L_vec.len() != self.R_vec.len()
       || self.L_vec.len() >= 32
     {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "IPA verify: Expected {} elements in U.b_vec, got {}",
+          n,
+          U.b_vec.len()
+        ),
+      });
     }
 
     // absorb the instance in the transcript
@@ -292,7 +304,11 @@ where
       // return error if acc is zero
       acc = match Option::from(acc.invert()) {
         Some(inv) => inv,
-        None => return Err(SpartanError::InternalError),
+        None => {
+          return Err(SpartanError::InternalError {
+            reason: "Division by zero during inversion".to_string(),
+          });
+        }
       };
 
       // compute the inverse once for all entries
@@ -484,7 +500,13 @@ where
     let r = transcript.squeeze(b"r")?;
 
     if self.z_vec.len() != n || ck.len() < self.z_vec.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "Inner product argument verify: Expected {} elements in z_vec, got {}",
+          n,
+          self.z_vec.len()
+        ),
+      });
     }
 
     if U.comm_a_vec * r + self.delta

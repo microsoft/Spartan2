@@ -1,6 +1,6 @@
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  Blind, CommitmentKey, PCS, PartialCommitment, VerifierKey,
+  Blind, CommitmentKey, PCS, PartialCommitment,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
@@ -16,12 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{debug, info, info_span};
 
-/// `SpartanShape` provides methods for acquiring `SplitR1CSShape` and `CommitmentKey` from implementers.
+/// `SpartanShape` provides methods for acquiring `SplitR1CSShape` from implementers.
 pub trait SpartanShape<E: Engine> {
-  /// Return an appropriate `SplitR1CSShape` and `CommitmentKey` structs.
-  fn r1cs_shape<C: SpartanCircuit<E>>(
-    circuit: &C,
-  ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError>;
+  /// Return an appropriate `SplitR1CSShape`
+  fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError>;
 }
 
 /// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
@@ -58,9 +56,7 @@ pub trait SpartanWitness<E: Engine> {
 }
 
 impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
-  fn r1cs_shape<C: SpartanCircuit<E>>(
-    circuit: &C,
-  ) -> Result<(SplitR1CSShape<E>, CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+  fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError> {
     let num_challenges = circuit.num_challenges();
 
     let mut cs: Self = Self::new();
@@ -136,6 +132,13 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     let width = E::PCS::width();
 
+    debug!("num_constraints: {}", num_constraints);
+    debug!("num_vars: {}", num_vars);
+    debug!("num_inputs: {}", num_inputs);
+    debug!("num_shared: {}", num_shared);
+    debug!("num_precommitted: {}", num_precommitted);
+    debug!("num_rest: {}", num_rest);
+
     // Don't count One as an input for shape's purposes.
     let S = SplitR1CSShape::new(
       width,
@@ -150,9 +153,8 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
       C,
     )
     .unwrap();
-    let (ck, vk) = S.commitment_key();
 
-    Ok((S, ck, vk))
+    Ok(S)
   }
 }
 
@@ -362,18 +364,18 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
 
-    for (i, s) in ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded..]
-      .iter()
-      .enumerate()
-    {
-      ps.W[S.num_shared + S.num_precommitted + i] = *s;
-    }
+    ps.W
+      [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+      .copy_from_slice(
+        &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+          ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+      );
 
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
       ck,
-      &ps.W[S.num_shared + S.num_precommitted..],
+      &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &ps.r_W_remaining,
       is_small,
     )?;

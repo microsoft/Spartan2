@@ -77,6 +77,10 @@ pub struct R1CSInstance<E: Engine> {
 /// (If `n` is already a multiple and higher than zero, it is returned unchanged.)
 #[inline]
 pub fn pad_to_width(width: usize, n: usize) -> usize {
+  if n == 0 {
+    return 0;
+  }
+
   // width == 1024 == 1 << 10, so the mask is width-1 == 0b111_1111_1111 (10 bits set).
   n.saturating_add(width - 1) & !(width - 1)
 }
@@ -363,7 +367,13 @@ impl<E: Engine> R1CSInstance<E> {
     X: &[E::Scalar],
   ) -> Result<R1CSInstance<E>, SpartanError> {
     if S.num_io != X.len() {
-      Err(SpartanError::InvalidInputLength)
+      Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "R1CS instance: Expected {} elements in X, got {}",
+          S.num_io,
+          X.len()
+        ),
+      })
     } else {
       Ok(R1CSInstance {
         comm_W: comm_W.clone(),
@@ -560,6 +570,57 @@ impl<E: Engine> SplitR1CSShape<E> {
     })
   }
 
+  pub fn equalize(S_A: &mut Self, S_B: &mut Self) {
+    let num_cons_padded = max(S_A.num_cons, S_B.num_cons);
+    let num_vars_padded = max(
+      S_A.num_shared + S_A.num_precommitted + S_A.num_rest,
+      S_B.num_shared + S_B.num_precommitted + S_B.num_rest,
+    );
+
+    S_A.num_cons = num_cons_padded;
+    S_B.num_cons = num_cons_padded;
+
+    let move_public_vars = |M: &mut SparseMatrix<E::Scalar>, num_cons: usize, num_vars: usize| {
+      M.indices.par_iter_mut().for_each(|c| {
+        if *c >= num_vars {
+          // public and challenge variables
+          *c += num_vars_padded - num_vars;
+        }
+      });
+
+      M.cols += num_vars_padded - num_vars;
+
+      let ex = {
+        let nnz = if M.indptr.is_empty() {
+          0
+        } else {
+          M.indptr[M.indptr.len() - 1]
+        };
+        vec![nnz; num_cons_padded - num_cons]
+      };
+      M.indptr.extend(ex);
+    };
+
+    // get the total number of variables to `num_vars_padded` by increasing rest variables
+    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars_padded {
+      let num_cons = S_A.num_cons;
+      let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
+      S_A.num_rest = num_vars_padded - (S_A.num_shared + S_A.num_precommitted);
+      move_public_vars(&mut S_A.A, num_cons, num_vars);
+      move_public_vars(&mut S_A.B, num_cons, num_vars);
+      move_public_vars(&mut S_A.C, num_cons, num_vars);
+    }
+
+    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars_padded {
+      let num_cons = S_B.num_cons;
+      let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
+      S_B.num_rest = num_vars_padded - (S_B.num_shared + S_B.num_precommitted);
+      move_public_vars(&mut S_B.A, num_cons, num_vars);
+      move_public_vars(&mut S_B.B, num_cons, num_vars);
+      move_public_vars(&mut S_B.C, num_cons, num_vars);
+    }
+  }
+
   pub fn to_regular_shape(&self) -> R1CSShape<E> {
     R1CSShape {
       num_cons: self.num_cons,
@@ -615,9 +676,18 @@ impl<E: Engine> SplitR1CSShape<E> {
   ///
   /// * `S`: The shape of the R1CS matrices.
   ///
-  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
-    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
-    E::PCS::setup(b"ck", num_vars)
+  pub fn commitment_key(
+    shapes: &[&SplitR1CSShape<E>],
+  ) -> Result<(CommitmentKey<E>, VerifierKey<E>), SpartanError> {
+    let max = shapes
+      .iter()
+      .map(|s| s.num_shared + s.num_precommitted + s.num_rest)
+      .max()
+      .ok_or(SpartanError::InvalidInputLength {
+        reason: "commitment_key: unable to find max number of variables".to_string(),
+      })?;
+
+    Ok(E::PCS::setup(b"ck", max))
   }
 
   pub fn multiply_vec(
@@ -655,10 +725,22 @@ impl<E: Engine> SplitR1CSInstance<E> {
     challenges: Vec<E::Scalar>,
   ) -> Result<SplitR1CSInstance<E>, SpartanError> {
     if public_values.len() != S.num_public {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitR1CS instance: Expected {} public values, got {}",
+          S.num_public,
+          public_values.len()
+        ),
+      });
     }
     if challenges.len() != S.num_challenges {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitR1CS instance: Expected {} challenges, got {}",
+          S.num_challenges,
+          challenges.len()
+        ),
+      });
     }
 
     // check if the commitments commit to the right number of variables

@@ -210,6 +210,12 @@ where
       });
     }
 
+    info!(
+      "NeutronNova NIFS prove for {} instances and padded to {} instances",
+      Us.len(),
+      n
+    );
+
     let mut Us = Us.to_vec();
     let mut Ws = Ws.to_vec();
     if Us.len() < n {
@@ -441,7 +447,8 @@ where
 #[serde(bound = "")]
 pub struct NeutronNovaProverKey<E: Engine> {
   ck: CommitmentKey<E>,
-  S: SplitR1CSShape<E>,
+  S_step: SplitR1CSShape<E>,
+  S_core: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -451,7 +458,8 @@ pub struct NeutronNovaProverKey<E: Engine> {
 pub struct NeutronNovaVerifierKey<E: Engine> {
   ck: CommitmentKey<E>,
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
-  S: SplitR1CSShape<E>,
+  S_step: SplitR1CSShape<E>,
+  S_core: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -478,19 +486,23 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaPrepSNARK<E: Engine> {
-  ps: Vec<PrecommittedState<E>>,
+  ps_step: Vec<PrecommittedState<E>>,
+  ps_core: PrecommittedState<E>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaSNARK<E: Engine> {
-  instances: Vec<SplitR1CSInstance<E>>,
+  step_instances: Vec<SplitR1CSInstance<E>>,
+  core_instance: SplitR1CSInstance<E>,
   nifs: NeutronNovaNIFS<E>,
   sc_proof_outer: SumcheckProof<E>,
-  claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+  claims_outer_step: (E::Scalar, E::Scalar, E::Scalar),
+  claims_outer_core: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
-  eval_W: E::Scalar,
+  eval_W_step: E::Scalar,
+  eval_W_core: E::Scalar,
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
@@ -498,21 +510,43 @@ impl<E: Engine> NeutronNovaSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  /// Sets up the NeutronNova SNARK for a batch of circuits
-  pub fn setup<C: SpartanCircuit<E>>(
-    circuit: &C,
+  /// Sets up the NeutronNova SNARK for a batch of circuits of type `C1` and a single circuit of type `C2`
+  pub fn setup<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+    step_circuit: &C1,
+    core_circuit: &C2,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let (S, ck, vk_ee) = ShapeCS::r1cs_shape(circuit)?;
+    debug!("Synthesizing step circuit");
+    let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
+    debug!("Finished synthesizing step circuit");
+
+    debug!("Synthesizing core circuit");
+    let mut S_core = ShapeCS::r1cs_shape(core_circuit)?;
+    debug!("Finished synthesizing core circuit");
+
+    SplitR1CSShape::equalize(&mut S_step, &mut S_core);
+
+    info!(
+      "Step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_step.num_shared, S_step.num_precommitted, S_step.num_rest
+    );
+    info!(
+      "Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_core.num_shared, S_core.num_precommitted, S_core.num_rest
+    );
+
+    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
-      S: S.clone(),
+      S_step: S_step.clone(),
+      S_core: S_core.clone(),
       vk_ee,
       digest: OnceCell::new(),
     };
     let pk = NeutronNovaProverKey {
       ck,
-      S,
+      S_step,
+      S_core,
       vk_digest: vk.digest()?,
     };
 
@@ -520,36 +554,52 @@ where
   }
 
   /// Prepares the pre-processed state for proving
-  pub fn prep_prove<C: SpartanCircuit<E>>(
+  pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    circuits: &[C],
+    step_circuits: &[C1],
+    core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
-    // we synthesize shared witness for the first circuit; every other circuit shares this witness
-    let ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuits[0], is_small)?;
+    // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
+    let mut ps =
+      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
 
-    let ps_vec = (0..circuits.len())
+    let ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
+        // copy ps to avoid mutating the original shared witness
         let mut ps_i = ps.clone();
         SatisfyingAssignment::precommitted_witness(
           &mut ps_i,
-          &pk.S,
+          &pk.S_step,
           &pk.ck,
-          &circuits[i],
+          &step_circuits[i],
           is_small,
         )?;
         Ok(ps_i)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(NeutronNovaPrepSNARK { ps: ps_vec })
+    // we don't need to make a copy of ps for the core circuit, as it will be used only once
+    SatisfyingAssignment::precommitted_witness(
+      &mut ps,
+      &pk.S_core,
+      &pk.ck,
+      core_circuit,
+      is_small,
+    )?;
+
+    Ok(NeutronNovaPrepSNARK {
+      ps_step,
+      ps_core: ps,
+    })
   }
 
-  /// Prove the folding of a batch of R1CS instances
-  pub fn prove<C: SpartanCircuit<E>>(
+  /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together
+  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
-    circuits: &[C],
+    step_circuits: &[C1],
+    core_circuit: &C2,
     prep_snark: &NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
@@ -557,65 +607,107 @@ where
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
-    let (instances, witnesses) = prep_snark
-      .ps
-      .par_iter_mut()
-      .zip(circuits.par_iter().enumerate())
-      .map(|(pre_state, (i, circuit))| {
+    let (res_steps, res_core) = rayon::join(
+      || {
+        prep_snark
+          .ps_step
+          .par_iter_mut()
+          .zip(step_circuits.par_iter().enumerate())
+          .map(|(pre_state, (i, circuit))| {
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &pk.vk_digest);
+            transcript.absorb(
+              b"num_circuits",
+              &E::Scalar::from(step_circuits.len() as u64),
+            );
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+
+            let public_values =
+              circuit
+                .public_values()
+                .map_err(|e| SpartanError::SynthesisError {
+                  reason: format!("Circuit does not provide public IO: {e}"),
+                })?;
+            transcript.absorb(b"public_values", &public_values.as_slice());
+
+            SatisfyingAssignment::r1cs_instance_and_witness(
+              pre_state,
+              &pk.S_step,
+              &pk.ck,
+              circuit,
+              is_small,
+              &mut transcript,
+            )
+          })
+          .try_fold(
+            || (Vec::new(), Vec::new()),
+            |mut acc, res: Result<_, SpartanError>| {
+              let (u, w) = res?;
+              acc.0.push(u);
+              acc.1.push(w);
+              Ok(acc)
+            },
+          )
+          .try_reduce(
+            || (Vec::new(), Vec::new()),
+            |mut a, mut b| {
+              a.0.append(&mut b.0);
+              a.1.append(&mut b.1);
+              Ok(a)
+            },
+          )
+      },
+      || {
+        // synthesize the core instance
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        transcript.absorb(b"num_circuits", &E::Scalar::from(circuits.len() as u64));
-        transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-        let public_values = circuit
-          .public_values()
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Circuit does not provide public IO: {e}"),
-          })?;
-        transcript.absorb(b"public_values", &public_values.as_slice());
-
+        let public_values_core =
+          core_circuit
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Core circuit does not provide public IO: {e}"),
+            })?;
+        transcript.absorb(b"public_values", &public_values_core.as_slice());
         SatisfyingAssignment::r1cs_instance_and_witness(
-          pre_state,
-          &pk.S,
+          &mut prep_snark.ps_core,
+          &pk.S_core,
           &pk.ck,
-          circuit,
+          core_circuit,
           is_small,
           &mut transcript,
         )
-      })
-      .try_fold(
-        || (Vec::new(), Vec::new()),
-        |mut acc, res: Result<_, SpartanError>| {
-          let (u, w) = res?;
-          acc.0.push(u);
-          acc.1.push(w);
-          Ok(acc)
-        },
-      )
-      .try_reduce(
-        || (Vec::new(), Vec::new()),
-        |mut a, mut b| {
-          a.0.append(&mut b.0);
-          a.1.append(&mut b.1);
-          Ok(a)
-        },
-      )?;
+      },
+    );
 
-    let instances_regular = instances
+    let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
+
+    let step_instances_regular = step_instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
+
+    let core_instance_regular = core_instance.to_regular_instance()?;
 
     // We start a new transcript for the NeutronNova NIFS proof
     // All instances will be absorbed into the transcript
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) =
-      NeutronNovaNIFS::prove(&pk.S, &instances_regular, &witnesses, &mut transcript)?;
+    // absorb the core instance
+    transcript.absorb(b"core_instance", &core_instance_regular);
 
-    // we now prove the validity of folded witness
-    let (_ell, left, right) = compute_tensor_decomp(pk.S.num_cons);
+    // NIFS absorbs and folds the step instances
+    let (_nifs_span, nifs_t) = start_span!("NIFS");
+    let (nifs, folded_U, folded_W, E, Az, Bz, Cz, T_out) = NeutronNovaNIFS::prove(
+      &pk.S_step,
+      &step_instances_regular,
+      &step_witnesses,
+      &mut transcript,
+    )?;
+    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
+
+    // we now prove the validity of folded witness and the core circuit's witness
+    let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
     let (E1, E2) = E.split_at(left);
     let mut full_E = vec![E::Scalar::ONE; left * right];
     full_E
@@ -629,23 +721,41 @@ where
       });
     let mut poly_tau = MultilinearPolynomial::new(full_E);
 
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      usize::try_from(pk.S_step.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
     // outer sum-check preparation
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+    let (mut poly_Az_step, mut poly_Bz_step, mut poly_Cz_step) = (
       MultilinearPolynomial::new(Az),
       MultilinearPolynomial::new(Bz),
       MultilinearPolynomial::new(Cz),
     );
+
+    let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
+      let z = [
+        core_witness.W.clone(),
+        vec![E::Scalar::ONE],
+        core_instance.public_values.clone(),
+        core_instance.challenges.clone(),
+      ]
+      .concat();
+
+      let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
+      (
+        MultilinearPolynomial::new(Az),
+        MultilinearPolynomial::new(Bz),
+        MultilinearPolynomial::new(Cz),
+      )
+    };
+
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
 
-    // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+    // outer sum-check (batched)
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck (batched)");
 
     let comb_func_outer =
       |poly_A_comp: &E::Scalar,
@@ -653,27 +763,49 @@ where
        poly_C_comp: &E::Scalar,
        poly_D_comp: &E::Scalar|
        -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::<E>::prove_cubic_with_additive_term(
-      &T_out,
-      num_rounds_x,
-      &mut poly_tau,
-      &mut poly_Az,
-      &mut poly_Bz,
-      &mut poly_Cz,
-      comb_func_outer,
-      &mut transcript,
-    )?;
+    transcript.absorb(b"claim_outer", &T_out);
+    let c_outer = transcript.squeeze(b"c_outer")?;
+    let (sc_proof_outer, r_x, claims_outer) =
+      SumcheckProof::<E>::prove_cubic_with_additive_term_batched(
+        &c_outer,
+        &[T_out, E::Scalar::ZERO],
+        num_rounds_x,
+        &mut poly_tau,
+        &mut poly_Az_step,
+        &mut poly_Az_core,
+        &mut poly_Bz_step,
+        &mut poly_Bz_core,
+        &mut poly_Cz_step,
+        &mut poly_Cz_core,
+        comb_func_outer,
+        &mut transcript,
+      )?;
 
     // claims from the end of sum-check
-    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[1], claims_outer[2], claims_outer[3]);
-    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+    let (claim_Az_step, claim_Bz_step, claim_Cz_step): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[1], claims_outer[3], claims_outer[5]);
+    let (claim_Az_core, claim_Bz_core, claim_Cz_core): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[2], claims_outer[4], claims_outer[6]);
+
+    transcript.absorb(
+      b"claims_outer",
+      &[
+        claim_Az_step,
+        claim_Bz_step,
+        claim_Cz_step,
+        claim_Az_core,
+        claim_Bz_core,
+        claim_Cz_core,
+      ]
+      .as_slice(),
+    );
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck (batched)");
 
     // inner sum-check preparation
     let (_r_span, r_t) = start_span!("prepare_inner_claims");
     let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    let claim_inner_joint_step = claim_Az_step + r * claim_Bz_step + r * r * claim_Cz_step;
+    let claim_inner_joint_core = claim_Az_core + r * claim_Bz_core + r * r * claim_Cz_core;
     info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
     let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
@@ -681,20 +813,27 @@ where
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    let (evals_A_step, evals_B_step, evals_C_step) =
+      compute_eval_table_sparse(&pk.S_step, &evals_rx);
+    let (evals_A_core, evals_B_core, evals_C_core) =
+      compute_eval_table_sparse(&pk.S_core, &evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
-    assert_eq!(evals_A.len(), evals_B.len());
-    assert_eq!(evals_A.len(), evals_C.len());
-    let poly_ABC = (0..evals_A.len())
+    assert_eq!(evals_A_step.len(), evals_B_step.len());
+    assert_eq!(evals_A_step.len(), evals_C_step.len());
+    let poly_ABC_step = (0..evals_A_step.len())
       .into_par_iter()
-      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .map(|i| evals_A_step[i] + r * evals_B_step[i] + r * r * evals_C_step[i])
+      .collect::<Vec<E::Scalar>>();
+    let poly_ABC_core = (0..evals_A_core.len())
+      .into_par_iter()
+      .map(|i| evals_A_core[i] + r * evals_B_core[i] + r * r * evals_C_core[i])
       .collect::<Vec<E::Scalar>>();
     info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
     let (_z_span, z_t) = start_span!("prepare_poly_z");
-    let poly_z = {
+    let poly_z_step = {
       // z = [W || 1 || X], then already zero-padded to length 2 * num_vars
       let mut v = vec![E::Scalar::ZERO; num_vars * 2];
 
@@ -707,104 +846,159 @@ where
       v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&folded_U.X);
       v
     };
+    let poly_z_core = {
+      // z = [W || 1 || X], then already zero-padded to length 2 * num_vars
+      let mut v = vec![E::Scalar::ZERO; num_vars * 2];
+
+      let w_len = core_witness.W.len();
+      v[..w_len].copy_from_slice(&core_witness.W);
+
+      v[w_len] = E::Scalar::ONE;
+
+      let x_len = core_instance_regular.X.len();
+      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.X);
+      v
+    };
+
     info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
 
     // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck (batched)");
 
     debug!("Proving inner sum-check with {} rounds", num_rounds_y);
     debug!(
-      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
-      poly_ABC.len(),
-      poly_z.len()
+      "Inner sum-check sizes - poly_ABC_step: {}, poly_z_step: {}",
+      poly_ABC_step.len(),
+      poly_z_step.len()
     );
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
     };
-    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad(
-      &claim_inner_joint,
+    transcript.absorb(
+      b"claims_inner_batch",
+      &vec![claim_inner_joint_step, claim_inner_joint_core].as_slice(),
+    );
+    let c_inner = transcript.squeeze(b"c_inner")?;
+    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad_batched(
+      &c_inner,
+      &[claim_inner_joint_step, claim_inner_joint_core],
       num_rounds_y,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
+      &mut MultilinearPolynomial::new(poly_ABC_step),
+      &mut MultilinearPolynomial::new(poly_ABC_core),
+      &mut MultilinearPolynomial::new(poly_z_step),
+      &mut MultilinearPolynomial::new(poly_z_core),
       comb_func,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
+
+    let (eval_W_step, eval_W_core) = rayon::join(
+      || MultilinearPolynomial::evaluate_with(&folded_W.W, &r_y[1..]),
+      || MultilinearPolynomial::evaluate_with(&core_witness.W, &r_y[1..]),
+    );
+
+    transcript.absorb(b"eval_W_step", &eval_W_step);
+    transcript.absorb(b"eval_W_core", &eval_W_core);
+
+    let c_eval = transcript.squeeze(b"c_eval")?;
+
+    // fold evaluation claims into one
+    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &[folded_U.comm_W, core_instance_regular.comm_W],
+      &[E::Scalar::ONE, c_eval],
+    )?;
+    let blind = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &[folded_W.r_W.clone(), core_witness.r_W.clone()],
+      &[E::Scalar::ONE, c_eval],
+    )?;
+    let W = folded_W
+      .W
+      .par_iter()
+      .zip(core_witness.W.par_iter())
+      .map(|(w1, w2)| *w1 + c_eval * *w2)
+      .collect::<Vec<_>>();
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let (eval_W, eval_arg) = E::PCS::prove(
-      &pk.ck,
-      &mut transcript,
-      &folded_U.comm_W,
-      &folded_W.W,
-      &folded_W.r_W,
-      &r_y[1..],
-    )?;
+    let (_, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(Self {
-      instances,
+      step_instances,
+      core_instance,
       nifs,
       sc_proof_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      claims_outer_step: (claim_Az_step, claim_Bz_step, claim_Cz_step),
+      claims_outer_core: (claim_Az_core, claim_Bz_core, claim_Cz_core),
       sc_proof_inner,
-      eval_W,
+      eval_W_step,
+      eval_W_core,
       eval_arg,
     })
   }
 
-  /// Verifies the NeutronNovaSNARK
+  /// Verifies the NeutronNovaSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
     num_instances: usize,
-  ) -> Result<Vec<Vec<E::Scalar>>, SpartanError> {
+  ) -> Result<(Vec<Vec<E::Scalar>>, Vec<E::Scalar>), SpartanError> {
     let (_verify_span, verify_t) = start_span!("neutronnova_verify");
-    if num_instances != self.instances.len() {
+    if num_instances != self.step_instances.len() {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
           "Expected {} instances, got {}",
           num_instances,
-          self.instances.len()
+          self.step_instances.len()
         ),
       });
     }
 
-    for instance in &self.instances {
+    // validate the step instances
+    for (i, u) in self.step_instances.iter().enumerate() {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
       transcript.absorb(
         b"num_circuits",
-        &E::Scalar::from(self.instances.len() as u64),
+        &E::Scalar::from(self.step_instances.len() as u64),
       );
-
-      instance.validate(&vk.S, &mut transcript)?;
+      transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+      u.validate(&vk.S_step, &mut transcript)?;
     }
 
-    for u in &self.instances {
-      if u.comm_W_shared != self.instances[0].comm_W_shared {
+    // validate the core instance
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &vk.digest()?);
+    self.core_instance.validate(&vk.S_core, &mut transcript)?;
+
+    // we require all step instances to have the same shared commitment and match the shared commitment of the core instance
+    for u in &self.step_instances {
+      if u.comm_W_shared != self.core_instance.comm_W_shared {
         return Err(SpartanError::ProofVerifyError {
           reason: "All instances must have the same shared commitment".to_string(),
         });
       }
     }
 
-    let instances = self
-      .instances
+    let step_instances_regular = self
+      .step_instances
       .par_iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
+    let core_instance_regular = self.core_instance.to_regular_instance()?;
+
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
+    transcript.absorb(b"core_instance", &core_instance_regular);
 
-    let folded_U = self.nifs.verify(&instances, &mut transcript)?;
+    // absorb the step instances and fold them
+    let folded_U = self.nifs.verify(&step_instances_regular, &mut transcript)?;
 
-    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
+    let num_vars = vk.S_step.num_shared + vk.S_step.num_precommitted + vk.S_step.num_rest;
 
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
+      usize::try_from(vk.S_step.num_cons.ilog2()).unwrap(),
       (usize::try_from(num_vars.ilog2()).unwrap() + 1),
     );
 
@@ -814,6 +1008,8 @@ where
     );
 
     // outer sum-check
+    transcript.absorb(b"claim_outer", &folded_U.T);
+    let c_outer = transcript.squeeze(b"c_outer")?;
     let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
       self
@@ -821,9 +1017,12 @@ where
         .verify(folded_U.T, num_rounds_x, 3, &mut transcript)?;
 
     // verify claim_outer_final
-    let (claim_Az, claim_Bz, claim_Cz) = self.claims_outer;
+    let (claim_Az_step, claim_Bz_step, claim_Cz_step) = self.claims_outer_step;
+    let (claim_Az_core, claim_Bz_core, claim_Cz_core) = self.claims_outer_core;
+
     let e_bound_rx = PowPolynomial::new(&folded_U.tau, r_x.len()).evaluate(&r_x)?;
-    let claim_outer_final_expected = e_bound_rx * (claim_Az * claim_Bz - claim_Cz);
+    let claim_outer_final_expected = e_bound_rx * (claim_Az_step * claim_Bz_step - claim_Cz_step)
+      + c_outer * e_bound_rx * (claim_Az_core * claim_Bz_core - claim_Cz_core);
     if claim_outer_final != claim_outer_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
@@ -832,9 +1031,12 @@ where
     transcript.absorb(
       b"claims_outer",
       &[
-        self.claims_outer.0,
-        self.claims_outer.1,
-        self.claims_outer.2,
+        self.claims_outer_step.0,
+        self.claims_outer_step.1,
+        self.claims_outer_step.2,
+        self.claims_outer_core.0,
+        self.claims_outer_core.1,
+        self.claims_outer_core.2,
       ]
       .as_slice(),
     );
@@ -842,17 +1044,24 @@ where
     // inner sum-check
     let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
     let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint =
-      self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
-
+    let claim_inner_joint_step =
+      self.claims_outer_step.0 + r * self.claims_outer_step.1 + r * r * self.claims_outer_step.2;
+    let claim_inner_joint_core =
+      self.claims_outer_core.0 + r * self.claims_outer_core.1 + r * r * self.claims_outer_core.2;
+    transcript.absorb(
+      b"claims_inner_batch",
+      &vec![claim_inner_joint_step, claim_inner_joint_core].as_slice(),
+    );
+    let c_inner = transcript.squeeze(b"c_inner")?;
+    let claim_inner_joint = claim_inner_joint_step + c_inner * claim_inner_joint_core;
     let (claim_inner_final, r_y) =
       self
         .sc_proof_inner
         .verify(claim_inner_joint, num_rounds_y, 2, &mut transcript)?;
 
     // verify claim_inner_final
-    let eval_Z = {
-      let eval_X = {
+    let eval_Z_step = {
+      let eval_X_step = {
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
@@ -860,7 +1069,19 @@ where
           .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
-      (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
+      (E::Scalar::ONE - r_y[0]) * self.eval_W_step + r_y[0] * eval_X_step
+    };
+    let eval_Z_core = {
+      let eval_X_core = {
+        // public IO is (1, X)
+        let X = vec![E::Scalar::ONE]
+          .into_iter()
+          .chain(core_instance_regular.X.iter().cloned())
+          .collect::<Vec<E::Scalar>>();
+        SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
+      };
+
+      (E::Scalar::ONE - r_y[0]) * self.eval_W_core + r_y[0] * eval_X_core
     };
 
     // compute evaluations of R1CS matrices
@@ -902,37 +1123,61 @@ where
         .collect()
     };
 
-    let evals = multi_evaluate(&[&vk.S.A, &vk.S.B, &vk.S.C], &r_x, &r_y);
+    let evals = multi_evaluate(
+      &[
+        &vk.S_step.A,
+        &vk.S_step.B,
+        &vk.S_step.C,
+        &vk.S_core.A,
+        &vk.S_core.B,
+        &vk.S_core.C,
+      ],
+      &r_x,
+      &r_y,
+    );
 
-    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
+    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z_step
+      + c_inner * (evals[3] + r * evals[4] + r * r * evals[5]) * eval_Z_core;
     if claim_inner_final != claim_inner_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
     info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
     info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
 
-    // verify
+    // verify PCS eval
+    transcript.absorb(b"eval_W_step", &self.eval_W_step);
+    transcript.absorb(b"eval_W_core", &self.eval_W_core);
+    let c_eval = transcript.squeeze(b"c_eval")?;
+    let eval = self.eval_W_step + c_eval * self.eval_W_core;
+    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &[folded_U.U.comm_W, core_instance_regular.comm_W],
+      &[E::Scalar::ONE, c_eval],
+    )?;
+
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
-      &folded_U.U.comm_W,
+      &comm,
       &r_y[1..],
-      &self.eval_W,
+      &eval,
       &self.eval_arg,
     )?;
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "neutronnova_verify");
 
+    let public_values_step = self
+      .step_instances
+      .iter()
+      .take(num_instances)
+      .map(|u| u.public_values.clone())
+      .collect::<Vec<Vec<_>>>();
+
+    let public_values_core = self.core_instance.public_values.clone();
+
     // return a vector of public values
-    Ok(
-      self
-        .instances
-        .iter()
-        .map(|u| u.public_values.clone())
-        .collect::<Vec<Vec<_>>>(),
-    )
+    Ok((public_values_step, public_values_core))
   }
 }
 
@@ -1027,7 +1272,7 @@ mod benchmarks {
       _p: Default::default(),
     };
 
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit).unwrap();
+    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit, &circuit).unwrap();
 
     let circuits = (0..num_circuits)
       .map(|i| Sha256Circuit::<E> {
@@ -1039,27 +1284,31 @@ mod benchmarks {
     (pk, vk, circuits)
   }
 
-  fn test_neutron_inner<E: Engine, C: SpartanCircuit<E>>(
+  fn test_neutron_inner<E: Engine, C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     name: &str,
     pk: &NeutronNovaProverKey<E>,
     vk: &NeutronNovaVerifierKey<E>,
-    circuits: &[C],
+    step_circuits: &[C1],
+    core_circuit: &C2,
   ) where
     E::PCS: FoldingEngineTrait<E>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}",
-      circuits.len()
+      step_circuits.len()
     );
     // sanity check: prove and verify before benching
-    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, circuits, true).unwrap();
+    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
 
-    let res = NeutronNovaSNARK::prove(pk, circuits, &ps, true);
+    let res = NeutronNovaSNARK::prove(pk, step_circuits, core_circuit, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
-    let res = snark.verify(vk, circuits.len());
+    let res = snark.verify(vk, step_circuits.len());
     assert!(res.is_ok());
+
+    let (public_values_step, _public_values_core) = res.unwrap();
+    assert_eq!(public_values_step.len(), step_circuits.len());
   }
 
   #[test]
@@ -1074,6 +1323,7 @@ mod benchmarks {
           &pk,
           &vk,
           &circuits,
+          &circuits[0], // core circuit is the first one, for test purposes
         );
       }
     }
