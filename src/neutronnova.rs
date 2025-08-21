@@ -501,7 +501,8 @@ pub struct NeutronNovaSNARK<E: Engine> {
   claims_outer_step: (E::Scalar, E::Scalar, E::Scalar),
   claims_outer_core: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
-  eval_W: E::Scalar,
+  eval_W_step: E::Scalar,
+  eval_W_core: E::Scalar,
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
@@ -887,24 +888,34 @@ where
     )?;
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
 
+    let (eval_W_step, eval_W_core) = rayon::join(
+      || MultilinearPolynomial::evaluate_with(&folded_W.W, &r_y[1..]),
+      || MultilinearPolynomial::evaluate_with(&core_witness.W, &r_y[1..]),
+    );
+
+    transcript.absorb(b"eval_W_step", &eval_W_step);
+    transcript.absorb(b"eval_W_core", &eval_W_core);
+
+    let c_eval = transcript.squeeze(b"c_eval")?;
+
     // fold evaluation claims into one
     let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &[folded_U.comm_W, core_instance_regular.comm_W],
-      &[E::Scalar::ONE, c_inner],
+      &[E::Scalar::ONE, c_eval],
     )?;
     let blind = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &[folded_W.r_W.clone(), core_witness.r_W.clone()],
-      &[E::Scalar::ONE, c_inner],
+      &[E::Scalar::ONE, c_eval],
     )?;
     let W = folded_W
       .W
       .par_iter()
       .zip(core_witness.W.par_iter())
-      .map(|(w1, w2)| *w1 + r * *w2)
+      .map(|(w1, w2)| *w1 + c_eval * *w2)
       .collect::<Vec<_>>();
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let (eval_W, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
+    let (_, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(Self {
@@ -915,12 +926,13 @@ where
       claims_outer_step: (claim_Az_step, claim_Bz_step, claim_Cz_step),
       claims_outer_core: (claim_Az_core, claim_Bz_core, claim_Cz_core),
       sc_proof_inner,
-      eval_W,
+      eval_W_step,
+      eval_W_core,
       eval_arg,
     })
   }
 
-  /*/// Verifies the NeutronNovaSNARK and returns the public IO from the instances
+  /// Verifies the NeutronNovaSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
@@ -992,6 +1004,8 @@ where
     );
 
     // outer sum-check
+    transcript.absorb(b"claim_outer", &folded_U.T);
+    let c_outer = transcript.squeeze(b"c_outer")?;
     let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
       self
@@ -999,9 +1013,12 @@ where
         .verify(folded_U.T, num_rounds_x, 3, &mut transcript)?;
 
     // verify claim_outer_final
-    let (claim_Az, claim_Bz, claim_Cz) = self.claims_outer;
+    let (claim_Az_step, claim_Bz_step, claim_Cz_step) = self.claims_outer_step;
+    let (claim_Az_core, claim_Bz_core, claim_Cz_core) = self.claims_outer_core;
+
     let e_bound_rx = PowPolynomial::new(&folded_U.tau, r_x.len()).evaluate(&r_x)?;
-    let claim_outer_final_expected = e_bound_rx * (claim_Az * claim_Bz - claim_Cz);
+    let claim_outer_final_expected = e_bound_rx * (claim_Az_step * claim_Bz_step - claim_Cz_step)
+      + c_outer * e_bound_rx * (claim_Az_core * claim_Bz_core - claim_Cz_core);
     if claim_outer_final != claim_outer_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
@@ -1010,9 +1027,12 @@ where
     transcript.absorb(
       b"claims_outer",
       &[
-        self.claims_outer.0,
-        self.claims_outer.1,
-        self.claims_outer.2,
+        self.claims_outer_step.0,
+        self.claims_outer_step.1,
+        self.claims_outer_step.2,
+        self.claims_outer_core.0,
+        self.claims_outer_core.1,
+        self.claims_outer_core.2,
       ]
       .as_slice(),
     );
@@ -1020,17 +1040,24 @@ where
     // inner sum-check
     let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
     let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint =
-      self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
-
+    let claim_inner_joint_step =
+      self.claims_outer_step.0 + r * self.claims_outer_step.1 + r * r * self.claims_outer_step.2;
+    let claim_inner_joint_core =
+      self.claims_outer_core.0 + r * self.claims_outer_core.1 + r * r * self.claims_outer_core.2;
+    transcript.absorb(
+      b"claims_inner_batch",
+      &vec![claim_inner_joint_step, claim_inner_joint_core].as_slice(),
+    );
+    let c_inner = transcript.squeeze(b"c_inner")?;
+    let claim_inner_joint = claim_inner_joint_step + c_inner * claim_inner_joint_core;
     let (claim_inner_final, r_y) =
       self
         .sc_proof_inner
         .verify(claim_inner_joint, num_rounds_y, 2, &mut transcript)?;
 
     // verify claim_inner_final
-    let eval_Z = {
-      let eval_X = {
+    let eval_Z_step = {
+      let eval_X_step = {
         // public IO is (1, X)
         let X = vec![E::Scalar::ONE]
           .into_iter()
@@ -1038,7 +1065,19 @@ where
           .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
-      (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
+      (E::Scalar::ONE - r_y[0]) * self.eval_W_step + r_y[0] * eval_X_step
+    };
+    let eval_Z_core = {
+      let eval_X_core = {
+        // public IO is (1, X)
+        let X = vec![E::Scalar::ONE]
+          .into_iter()
+          .chain(core_instance_regular.X.iter().cloned())
+          .collect::<Vec<E::Scalar>>();
+        SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
+      };
+
+      (E::Scalar::ONE - r_y[0]) * self.eval_W_core + r_y[0] * eval_X_core
     };
 
     // compute evaluations of R1CS matrices
@@ -1080,23 +1119,44 @@ where
         .collect()
     };
 
-    let evals = multi_evaluate(&[&vk.S_step.A, &vk.S_step.B, &vk.S_step.C], &r_x, &r_y);
+    let evals = multi_evaluate(
+      &[
+        &vk.S_step.A,
+        &vk.S_step.B,
+        &vk.S_step.C,
+        &vk.S_core.A,
+        &vk.S_core.B,
+        &vk.S_core.C,
+      ],
+      &r_x,
+      &r_y,
+    );
 
-    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
+    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z_step
+      + c_inner * (evals[3] + r * evals[4] + r * r * evals[5]) * eval_Z_core;
     if claim_inner_final != claim_inner_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
     info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
     info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
 
-    // verify
+    // verify PCS eval
+    transcript.absorb(b"eval_W_step", &self.eval_W_step);
+    transcript.absorb(b"eval_W_core", &self.eval_W_core);
+    let c_eval = transcript.squeeze(b"c_eval")?;
+    let eval = self.eval_W_step + c_eval * self.eval_W_core;
+    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+      &[folded_U.U.comm_W, core_instance_regular.comm_W],
+      &[E::Scalar::ONE, c_eval],
+    )?;
+
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
       &vk.vk_ee,
       &mut transcript,
-      &folded_U.U.comm_W,
+      &comm,
       &r_y[1..],
-      &self.eval_W,
+      &eval,
       &self.eval_arg,
     )?;
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
@@ -1114,7 +1174,7 @@ where
 
     // return a vector of public values
     Ok((public_values_step, public_values_core))
-  }*/
+  }
 }
 
 #[cfg(test)]

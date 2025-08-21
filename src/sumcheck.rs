@@ -246,6 +246,7 @@ impl<E: Engine> SumcheckProof<E> {
   }
 
   /// Proves a batch of quadratic combinations of two multilinear polynomials.
+  #[allow(clippy::too_many_arguments)]
   pub fn prove_quad_batched<F>(
     challenge: &E::Scalar,
     claims: &[E::Scalar; 2],
