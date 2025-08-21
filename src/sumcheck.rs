@@ -416,4 +416,111 @@ impl<E: Engine> SumcheckProof<E> {
       vec![poly_A[0], poly_B[0], poly_C[0], poly_D[0]],
     ))
   }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_cubic_with_additive_term_batched<F>(
+    challenge: &E::Scalar,
+    claims: &[E::Scalar, E::Scalar],
+    num_rounds: usize,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B: [&mut MultilinearPolynomial<E::Scalar>, &mut MultilinearPolynomial<E::Scalar>],
+    poly_C: [&mut MultilinearPolynomial<E::Scalar>, &mut MultilinearPolynomial<E::Scalar>],
+    poly_D: [&mut MultilinearPolynomial<E::Scalar>, &mut MultilinearPolynomial<E::Scalar>],
+    comb_func: F,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+  {
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
+
+    // compute the joint claim for both sum-check instances
+    let mut claim_per_round = claims[0] + challenge * claims[1];
+
+    for round in 0..num_rounds {
+      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+      let poly = {
+        // Make an iterator returning the contributions to the evaluations
+        let (_eval_span, eval_t) = start_span!("compute_eval_points");
+        let (eval_point_0_0, eval_point_2_0, eval_point_3_0) =
+          Self::compute_eval_points_cubic_with_additive_term(
+            poly_A, poly_B[0], poly_C[0], poly_D[0], &comb_func,
+          );
+        let (eval_point_0_1, eval_point_2_1, eval_point_3_1) =
+          Self::compute_eval_points_cubic_with_additive_term(
+            poly_A, poly_B[1], poly_C[1], poly_D[1], &comb_func,
+          );
+        
+        let eval_point_0 = eval_point_0_0 + challenge * eval_point_0_1;
+        let eval_point_2 = eval_point_2_0 + challenge * eval_point_2_1;
+        let eval_point_3 = eval_point_3_0 + challenge * eval_point_3_1;
+
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
+        let evals = vec![
+          eval_point_0,
+          claim_per_round - eval_point_0,
+          eval_point_2,
+          eval_point_3,
+        ];
+        UniPoly::from_evals(&evals)?
+      };
+
+      // append the prover's message to the transcript
+      transcript.absorb(b"p", &poly);
+
+      //derive the verifier's challenge for the next round
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // Set up next round
+      claim_per_round = poly.evaluate(&r_i);
+
+      // bound all tables to the verifier's challenge
+      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+      rayon::join(
+        || {rayon::join(
+        || {
+          rayon::join(
+            || poly_A.bind_poly_var_top(&r_i),
+            || poly_B[0].bind_poly_var_top(&r_i),
+          )
+        },
+        || {
+          rayon::join(
+            || poly_C[0].bind_poly_var_top(&r_i),
+            || poly_D[0].bind_poly_var_top(&r_i),
+          )
+        },
+      )},
+      || {
+          rayon::join(
+            || poly_B[1].bind_poly_var_top(&r_i),
+            || poly_C[1].bind_poly_var_top(&r_i),
+          )
+        },
+        || {
+          poly_D[1].bind_poly_var_top(&r_i),
+          
+        },
+      )}
+      }}
+    
+    };
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+    }
+
+    Ok((
+      SumcheckProof {
+        compressed_polys: polys,
+      },
+      r,
+      vec![poly_A[0], poly_B[0], poly_C[0], poly_D[0]],
+    ))
+  }
 }
