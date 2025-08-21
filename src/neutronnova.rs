@@ -730,15 +730,15 @@ where
       MultilinearPolynomial::new(Cz),
     );
 
-    let mut z = [
-      core_witness.W.clone(),
-      vec![E::Scalar::ONE],
-      core_instance.public_values.clone(),
-      core_instance.challenges.clone(),
-    ]
-    .concat();
-
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
+      let z = [
+        core_witness.W.clone(),
+        vec![E::Scalar::ONE],
+        core_instance.public_values.clone(),
+        core_instance.challenges.clone(),
+      ]
+      .concat();
+
       let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
       (
         MultilinearPolynomial::new(Az),
@@ -762,22 +762,25 @@ where
     let c_outer = transcript.squeeze(b"c_outer")?;
     let (sc_proof_outer, r_x, claims_outer) =
       SumcheckProof::<E>::prove_cubic_with_additive_term_batched(
-        c_outer,
-        &T_out,
+        &c_outer,
+        &[T_out, E::Scalar::ZERO],
         num_rounds_x,
         &mut poly_tau,
-        [&mut poly_Az_step, &mut poly_Az_core],
-        [&mut poly_Bz_step, &mut poly_Bz_core],
-        [&mut poly_Cz_step, &mut poly_Cz_core],
+        &mut poly_Az_step,
+        &mut poly_Az_core,
+        &mut poly_Bz_step,
+        &mut poly_Bz_core,
+        &mut poly_Cz_step,
+        &mut poly_Cz_core,
         comb_func_outer,
         &mut transcript,
       )?;
 
     // claims from the end of sum-check
     let (claim_Az_step, claim_Bz_step, claim_Cz_step): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[1], claims_outer[2], claims_outer[3]);
+      (claims_outer[1], claims_outer[3], claims_outer[5]);
     let (claim_Az_core, claim_Bz_core, claim_Cz_core): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[4], claims_outer[5], claims_outer[6]);
+      (claims_outer[2], claims_outer[4], claims_outer[6]);
 
     transcript.absorb(
       b"claims_outer",
@@ -872,17 +875,13 @@ where
     );
     let c_inner = transcript.squeeze(b"c_inner")?;
     let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::<E>::prove_quad_batched(
-      c_inner,
+      &c_inner,
       &[claim_inner_joint_step, claim_inner_joint_core],
       num_rounds_y,
-      [
-        &mut MultilinearPolynomial::new(poly_ABC_step),
-        &mut MultilinearPolynomial::new(poly_ABC_core),
-      ],
-      [
-        &mut MultilinearPolynomial::new(poly_z_step),
-        &mut MultilinearPolynomial::new(poly_z_core),
-      ],
+      &mut MultilinearPolynomial::new(poly_ABC_step),
+      &mut MultilinearPolynomial::new(poly_ABC_core),
+      &mut MultilinearPolynomial::new(poly_z_step),
+      &mut MultilinearPolynomial::new(poly_z_core),
       comb_func,
       &mut transcript,
     )?;
