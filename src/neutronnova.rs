@@ -521,6 +521,8 @@ where
     // we currently only support the case where the step and core circuits have the same number of constraints and variables
     let num_vars_step = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
     let num_vars_core = S_core.num_shared + S_core.num_precommitted + S_core.num_rest;
+    info!("Step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_step.num_shared, S_step.num_precommitted, S_step.num_rest);
+    info!("Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_core.num_shared, S_core.num_precommitted, S_core.num_rest);
     if S_step.num_cons != S_core.num_cons || num_vars_step != num_vars_core {
       return Err(SpartanError::InternalError {
         reason: format!(
