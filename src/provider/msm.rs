@@ -127,7 +127,9 @@ pub fn msm<C: CurveAffine>(
   let (_msm_span, msm_t) = start_span!("msm", size = coeffs.len());
 
   if coeffs.len() != bases.len() {
-    return Err(SpartanError::InvalidInputLength);
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM: Coefficients and bases must have the same length".to_string(),
+    });
   }
 
   let num_threads = if coeffs.len() > 1024 {
@@ -173,7 +175,9 @@ pub fn msm_small<C: CurveAffine, T: Integer + Into<u64> + Copy + Sync + ToPrimit
   let (_msm_small_span, msm_small_t) = start_span!("msm_small", size = scalars.len());
 
   if bases.len() != scalars.len() {
-    return Err(SpartanError::InvalidInputLength);
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM Small: Coefficients and bases must have the same length".to_string(),
+    });
   }
 
   let max_scalar = scalars.iter().max().ok_or(SpartanError::InternalError {

@@ -525,9 +525,15 @@ where
 
     SplitR1CSShape::equalize(&mut S_step, &mut S_core);
 
-    info!("Step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_step.num_shared, S_step.num_precommitted, S_step.num_rest);
-    info!("Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}", S_core.num_shared, S_core.num_precommitted, S_core.num_rest);
-    
+    info!(
+      "Step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_step.num_shared, S_step.num_precommitted, S_step.num_rest
+    );
+    info!(
+      "Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_core.num_shared, S_core.num_precommitted, S_core.num_rest
+    );
+
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {

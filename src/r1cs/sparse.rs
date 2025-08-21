@@ -82,7 +82,13 @@ impl<F: PrimeField> SparseMatrix<F> {
   /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't match the matrix dimensions.
   pub fn multiply_vec(&self, vector: &[F]) -> Result<Vec<F>, SpartanError> {
     if self.cols != vector.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SparseMatrix multiply_vec: Expected {} elements in vector, got {}",
+          self.cols,
+          vector.len()
+        ),
+      });
     }
 
     Ok(self.multiply_vec_unchecked(vector))

@@ -156,7 +156,13 @@ impl<G: Group> TranscriptReprTrait<G> for UniPoly<G::Scalar> {
 pub fn gaussian_elimination<F: PrimeField>(matrix: &mut [Vec<F>]) -> Result<Vec<F>, SpartanError> {
   let size = matrix.len();
   if size != matrix[0].len() - 1 {
-    return Err(SpartanError::InvalidInputLength);
+    return Err(SpartanError::InvalidInputLength {
+      reason: format!(
+        "Gaussian elimination: Expected a square matrix, got {} rows and {} columns",
+        size,
+        matrix[0].len()
+      ),
+    });
   }
 
   for i in 0..size - 1 {

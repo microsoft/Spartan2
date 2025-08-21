@@ -80,7 +80,7 @@ pub fn pad_to_width(width: usize, n: usize) -> usize {
   if n == 0 {
     return 0;
   }
-  
+
   // width == 1024 == 1 << 10, so the mask is width-1 == 0b111_1111_1111 (10 bits set).
   n.saturating_add(width - 1) & !(width - 1)
 }
@@ -367,7 +367,13 @@ impl<E: Engine> R1CSInstance<E> {
     X: &[E::Scalar],
   ) -> Result<R1CSInstance<E>, SpartanError> {
     if S.num_io != X.len() {
-      Err(SpartanError::InvalidInputLength)
+      Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "R1CS instance: Expected {} elements in X, got {}",
+          S.num_io,
+          X.len()
+        ),
+      })
     } else {
       Ok(R1CSInstance {
         comm_W: comm_W.clone(),
@@ -575,15 +581,11 @@ impl<E: Engine> SplitR1CSShape<E> {
     S_B.num_cons = num_cons;
 
     // get the total number of variables to `num_vars` by increasing rest variables
-    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest
-      != num_vars
-    {
+    if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars {
       S_A.num_rest = num_vars - (S_A.num_shared + S_A.num_precommitted);
     }
 
-    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest
-      != num_vars
-    {
+    if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars {
       S_B.num_rest = num_vars - (S_B.num_shared + S_B.num_precommitted);
     }
   }
@@ -650,7 +652,9 @@ impl<E: Engine> SplitR1CSShape<E> {
       .iter()
       .map(|s| s.num_shared + s.num_precommitted + s.num_rest)
       .max()
-      .ok_or(SpartanError::InvalidInputLength)?;
+      .ok_or(SpartanError::InvalidInputLength {
+        reason: "commitment_key: unable to find max number of variables".to_string(),
+      })?;
 
     Ok(E::PCS::setup(b"ck", max))
   }
@@ -690,10 +694,22 @@ impl<E: Engine> SplitR1CSInstance<E> {
     challenges: Vec<E::Scalar>,
   ) -> Result<SplitR1CSInstance<E>, SpartanError> {
     if public_values.len() != S.num_public {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitR1CS instance: Expected {} public values, got {}",
+          S.num_public,
+          public_values.len()
+        ),
+      });
     }
     if challenges.len() != S.num_challenges {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitR1CS instance: Expected {} challenges, got {}",
+          S.num_challenges,
+          challenges.len()
+        ),
+      });
     }
 
     // check if the commitments commit to the right number of variables

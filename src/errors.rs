@@ -14,7 +14,10 @@ pub enum SpartanError {
   InvalidStepCircuitIO,
   /// returned if the supplied input is not of the right length
   #[error("InvalidInputLength")]
-  InvalidInputLength,
+  InvalidInputLength {
+    /// The reason for the invalid input check failure
+    reason: String,
+  },
   /// returned if the supplied witness is not of the right length
   #[error("InvalidWitnessLength")]
   InvalidWitnessLength,

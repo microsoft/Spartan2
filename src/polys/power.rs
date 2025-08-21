@@ -29,7 +29,13 @@ impl<Scalar: PrimeField> PowPolynomial<Scalar> {
   /// Evaluates the polynomial at a given point `r`.
   pub fn evaluate(&self, r: &[Scalar]) -> Result<Scalar, SpartanError> {
     if r.len() != self.t_pow.len() {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "PowPolynomial: Expected {} elements in r, got {}",
+          self.t_pow.len(),
+          r.len()
+        ),
+      });
     }
 
     let mut acc = Scalar::ONE;
