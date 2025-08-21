@@ -82,7 +82,7 @@ impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  /// Computes the evaluations of the sum-check polynomial at 0, 2, 3, and 4
+  /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   #[inline]
   #[allow(clippy::too_many_arguments)]
   fn prove_helper(
@@ -95,7 +95,7 @@ where
     Az2: &[E::Scalar],
     Bz2: &[E::Scalar],
     Cz2: &[E::Scalar],
-  ) -> (E::Scalar, E::Scalar, E::Scalar, E::Scalar) {
+  ) -> (E::Scalar, E::Scalar, E::Scalar) {
     // sanity check sizes
     assert_eq!(e.len(), left + right);
     assert_eq!(Az1.len(), left * right);
@@ -108,10 +108,10 @@ where
     let comb_func = |c1: &E::Scalar, c2: &E::Scalar, c3: &E::Scalar, c4: &E::Scalar| -> E::Scalar {
       *c1 * (*c2 * *c3 - *c4)
     };
-    let (eval_at_0, eval_at_2, eval_at_3, eval_at_4) = (0..right)
+    let (eval_at_0, eval_at_2, eval_at_3) = (0..right)
       .into_par_iter()
       .map(|i| {
-        let (i_eval_at_0, i_eval_at_2, i_eval_at_3, i_eval_at_4) = (0..left)
+        let (i_eval_at_0, i_eval_at_2, i_eval_at_3) = (0..left)
           .into_par_iter()
           .map(|j| {
             // Turn the two dimensional (i, j) into a single dimension index
@@ -143,29 +143,11 @@ where
               &poly_Cz_bound_point,
             );
 
-            // eval 4: bound_func is -3A(low) + 4A(high); computed incrementally with bound_func applied to eval(3)
-            let poly_Az_bound_point = poly_Az_bound_point + Az2[k] - Az1[k];
-            let poly_Bz_bound_point = poly_Bz_bound_point + Bz2[k] - Bz1[k];
-            let poly_Cz_bound_point = poly_Cz_bound_point + Cz2[k] - Cz1[k];
-            let eval_point_4 = comb_func(
-              &poly_e_bound_point,
-              &poly_Az_bound_point,
-              &poly_Bz_bound_point,
-              &poly_Cz_bound_point,
-            );
-
-            (eval_point_0, eval_point_2, eval_point_3, eval_point_4)
+            (eval_point_0, eval_point_2, eval_point_3)
           })
           .reduce(
-            || {
-              (
-                E::Scalar::ZERO,
-                E::Scalar::ZERO,
-                E::Scalar::ZERO,
-                E::Scalar::ZERO,
-              )
-            },
-            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+            || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
           );
 
         let f = &e[left..];
@@ -181,34 +163,22 @@ where
         // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
         let eval_at_3 = poly_f_bound_point * i_eval_at_3;
 
-        // eval 4: bound_func is -3A(low) + 4A(high); computed incrementally with bound_func applied to eval(3)
-        let eval_at_4 = poly_f_bound_point * i_eval_at_4;
-
-        (eval_at_0, eval_at_2, eval_at_3, eval_at_4)
+        (eval_at_0, eval_at_2, eval_at_3)
       })
       .reduce(
-        || {
-          (
-            E::Scalar::ZERO,
-            E::Scalar::ZERO,
-            E::Scalar::ZERO,
-            E::Scalar::ZERO,
-          )
-        },
-        |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+        || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+        |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
       );
 
     // multiply by the common factors
     let one_minus_rho = E::Scalar::ONE - rho;
     let three_rho_minus_one = E::Scalar::from(3) * rho - E::Scalar::ONE;
     let five_rho_minus_two = E::Scalar::from(5) * rho - E::Scalar::from(2);
-    let seven_rho_minus_three = E::Scalar::from(7) * rho - E::Scalar::from(3);
 
     (
       eval_at_0 * one_minus_rho,
       eval_at_2 * three_rho_minus_one,
       eval_at_3 * five_rho_minus_two,
-      eval_at_4 * seven_rho_minus_three,
     )
   }
 
@@ -301,12 +271,12 @@ where
       // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
       let pairs = m / 2;
 
-      let (e0, e2, e3, e4) = (0..pairs)
+      let (e0, e2, e3) = (0..pairs)
         .into_par_iter()
         .map(|pair_idx| {
           let lo = 2 * pair_idx;
           let hi = lo + 1;
-          let (a0, a2, a3, a4) = Self::prove_helper(
+          let (a0, a2, a3) = Self::prove_helper(
             &rho_t,
             (left, right),
             &E_eq,
@@ -320,25 +290,17 @@ where
 
           let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
 
-          (a0 * w, a2 * w, a3 * w, a4 * w)
+          (a0 * w, a2 * w, a3 * w)
         })
         .reduce(
-          || {
-            (
-              E::Scalar::ZERO,
-              E::Scalar::ZERO,
-              E::Scalar::ZERO,
-              E::Scalar::ZERO,
-            )
-          },
-          |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+          || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+          |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
         );
 
       let se0 = acc_eq * e0;
       let se2 = acc_eq * e2;
       let se3 = acc_eq * e3;
-      let se4 = acc_eq * e4;
-      let poly_t = UniPoly::<E::Scalar>::from_evals(&[se0, T_cur - se0, se2, se3, se4])?;
+      let poly_t = UniPoly::<E::Scalar>::from_evals(&[se0, T_cur - se0, se2, se3])?;
       polys.push(poly_t.clone());
 
       // Commit poly_t, then draw r_t (Fiat–Shamir per round)
@@ -446,7 +408,7 @@ where
     let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
     let mut acc_eq = E::Scalar::ONE; // accumulated equality polynomial
     for (t, poly_t) in self.polys.iter().enumerate() {
-      if poly_t.degree() != 4 || poly_t.eval_at_zero() + poly_t.eval_at_one() != T_cur {
+      if poly_t.degree() != 3 || poly_t.eval_at_zero() + poly_t.eval_at_one() != T_cur {
         return Err(SpartanError::ProofVerifyError {
           reason: format!("poly {t} is not valid"),
         });
