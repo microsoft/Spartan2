@@ -300,7 +300,6 @@ where
       let se0 = acc_eq * e0;
       let se2 = acc_eq * e2;
       let se3 = acc_eq * e3;
-      //let poly_t = UniPoly::<E::Scalar>::from_evals(&[se0, T_cur - se0, se2, se3, se4])?;
       let poly_t = UniPoly::<E::Scalar>::from_evals(&[se0, T_cur - se0, se2, se3])?;
       polys.push(poly_t.clone());
 
