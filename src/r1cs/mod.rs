@@ -574,6 +574,7 @@ impl<E: Engine> SplitR1CSShape<E> {
     S_A.num_cons = num_cons;
     S_B.num_cons = num_cons;
 
+    // get the total number of variables to `num_vars` by increasing rest variables
     if S_A.num_shared + S_A.num_precommitted + S_A.num_rest
       != num_vars
     {
