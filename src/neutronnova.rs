@@ -628,7 +628,10 @@ where
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
-    let (_gen_span, gen_t) = start_span!("generate_instances_witnesses", step_circuits = step_circuits.len());
+    let (_gen_span, gen_t) = start_span!(
+      "generate_instances_witnesses",
+      step_circuits = step_circuits.len()
+    );
     let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
@@ -989,7 +992,8 @@ where
     }
 
     // validate the step instances
-    let (_validate_span, validate_t) = start_span!("validate_instances", instances = self.step_instances.len());
+    let (_validate_span, validate_t) =
+      start_span!("validate_instances", instances = self.step_instances.len());
     for (i, u) in self.step_instances.iter().enumerate() {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
