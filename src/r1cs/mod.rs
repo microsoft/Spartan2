@@ -1,7 +1,7 @@
 //! This module defines R1CS related types
-use crate::MULTIROUND_COMMITMENT_WIDTH;
 use crate::{
-  Blind, Commitment, CommitmentKey, PCS, PartialCommitment, VerifierKey,
+  Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, PartialCommitment,
+  VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   start_span,

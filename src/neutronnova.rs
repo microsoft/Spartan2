@@ -1001,12 +1001,21 @@ where
         &E::Scalar::from(self.step_instances.len() as u64),
       );
       transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+      // absorb the public IO into the transcript
+      transcript.absorb(b"public_values", &u.public_values.as_slice());
+
       u.validate(&vk.S_step, &mut transcript)?;
     }
 
     // validate the core instance
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
+    // absorb the public IO into the transcript
+    transcript.absorb(
+      b"public_values",
+      &self.core_instance.public_values.as_slice(),
+    );
+
     self.core_instance.validate(&vk.S_core, &mut transcript)?;
     info!(elapsed_ms = %validate_t.elapsed().as_millis(), instances = self.step_instances.len(), "validate_instances");
 
