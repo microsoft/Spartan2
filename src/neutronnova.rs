@@ -201,6 +201,7 @@ where
     ),
     SpartanError,
   > {
+    let (_prove_span, prove_t) = start_span!("neutronnova_nifs_prove");
     let n = Us.len().next_power_of_two();
     let ell_b = n.log_2();
 
@@ -242,6 +243,7 @@ where
     }
 
     // Compute (A z, B z, C z) for each instance in parallel, minimizing clones
+    let (_triples_span, triples_t) = start_span!("compute_triples", instances = n);
     let triples = (0..n)
       .into_par_iter()
       .map(|i| {
@@ -255,6 +257,7 @@ where
         S.multiply_vec(&z)
       })
       .collect::<Result<Vec<_>, _>>()?;
+    info!(elapsed_ms = %triples_t.elapsed().as_millis(), instances = n, "compute_triples");
 
     // Split the triples without cloning inner vectors
     let mut A_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n);
@@ -272,11 +275,13 @@ where
     let mut acc_eq = E::Scalar::ONE;
     let mut m = n;
     for t in 0..ell_b {
+      let (_round_span, round_t) = start_span!("nifs_round", round = t);
       let rho_t = rhos[t];
 
       // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
       let pairs = m / 2;
 
+      let (_eval_span, eval_t) = start_span!("compute_round_evals", pairs = pairs);
       let (e0, e2, e3) = (0..pairs)
         .into_par_iter()
         .map(|pair_idx| {
@@ -302,6 +307,7 @@ where
           || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
           |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
         );
+      info!(elapsed_ms = %eval_t.elapsed().as_millis(), pairs = pairs, "compute_round_evals");
 
       let se0 = acc_eq * e0;
       let se2 = acc_eq * e2;
@@ -318,6 +324,7 @@ where
       r_bs.push(r_b);
 
       // Fold A/B/C for next round (weights 1-r_b, r_b)
+      let (_fold_span, fold_t) = start_span!("fold_layers", pairs = pairs);
       let mut next_A: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
       let mut next_B: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
       let mut next_C: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
@@ -356,13 +363,19 @@ where
 
       // m becomes ceil(m/2)
       m = pairs;
+      info!(elapsed_ms = %fold_t.elapsed().as_millis(), pairs = pairs, "fold_layers");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = t, "nifs_round");
     }
 
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let T_out = T_cur * acc_eq.invert().unwrap();
 
+    let (_fold_final_span, fold_final_t) = start_span!("fold_instances_witnesses");
     let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
     let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
+    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances_witnesses");
+
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_nifs_prove");
 
     Ok((
       Self { polys },
@@ -382,6 +395,7 @@ where
     Us: &[R1CSInstance<E>],
     transcript: &mut E::TE,
   ) -> Result<FoldedR1CSInstance<E>, SpartanError> {
+    let (_verify_span, verify_t) = start_span!("neutronnova_nifs_verify");
     let n = Us.len().next_power_of_two();
     let ell_b = n.log_2();
 
@@ -414,6 +428,7 @@ where
     let mut T_cur = E::Scalar::ZERO; // current target value, starts at 0
     let mut acc_eq = E::Scalar::ONE; // accumulated equality polynomial
     for (t, poly_t) in self.polys.iter().enumerate() {
+      let (_verify_round_span, verify_round_t) = start_span!("nifs_verify_round", round = t);
       if poly_t.degree() != 3 || poly_t.eval_at_zero() + poly_t.eval_at_one() != T_cur {
         return Err(SpartanError::ProofVerifyError {
           reason: format!("poly {t} is not valid"),
@@ -426,13 +441,18 @@ where
       acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rhos[t]) + r_b * rhos[t]; // update the accumulated equality polynomial
 
       r_bs.push(r_b);
+      info!(elapsed_ms = %verify_round_t.elapsed().as_millis(), round = t, "nifs_verify_round");
     }
 
     // Fold public instances with the same r_b sequence
+    let (_fold_verify_span, fold_verify_t) = start_span!("fold_instances_verify");
     let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
+    info!(elapsed_ms = %fold_verify_t.elapsed().as_millis(), "fold_instances_verify");
 
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let T_out = T_cur * acc_eq.invert().unwrap();
+
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "neutronnova_nifs_verify");
 
     Ok(FoldedR1CSInstance {
       U: folded_U,
@@ -603,10 +623,12 @@ where
     prep_snark: &NeutronNovaPrepSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
+    let (_prove_span, prove_t) = start_span!("neutronnova_prove");
     let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
+    let (_gen_span, gen_t) = start_span!("generate_instances_witnesses", step_circuits = step_circuits.len());
     let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
@@ -680,13 +702,16 @@ where
     );
 
     let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
+    info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
 
+    let (_reg_span, reg_t) = start_span!("convert_to_regular_instances");
     let step_instances_regular = step_instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
     let core_instance_regular = core_instance.to_regular_instance()?;
+    info!(elapsed_ms = %reg_t.elapsed().as_millis(), "convert_to_regular_instances");
 
     // We start a new transcript for the NeutronNova NIFS proof
     // All instances will be absorbed into the transcript
@@ -707,6 +732,7 @@ where
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
     // we now prove the validity of folded witness and the core circuit's witness
+    let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
     let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
     let (E1, E2) = E.split_at(left);
     let mut full_E = vec![E::Scalar::ONE; left * right];
@@ -720,6 +746,7 @@ where
         });
       });
     let mut poly_tau = MultilinearPolynomial::new(full_E);
+    info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "compute_tensor_and_poly_tau");
 
     let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
     let (num_rounds_x, num_rounds_y) = (
@@ -736,6 +763,7 @@ where
     );
 
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
+      let (_core_span, core_t) = start_span!("compute_core_polys");
       let z = [
         core_witness.W.clone(),
         vec![E::Scalar::ONE],
@@ -745,6 +773,7 @@ where
       .concat();
 
       let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
+      info!(elapsed_ms = %core_t.elapsed().as_millis(), "compute_core_polys");
       (
         MultilinearPolynomial::new(Az),
         MultilinearPolynomial::new(Bz),
@@ -892,10 +921,12 @@ where
     )?;
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
 
+    let (_eval_w_span, eval_w_t) = start_span!("evaluate_witnesses");
     let (eval_W_step, eval_W_core) = rayon::join(
       || MultilinearPolynomial::evaluate_with(&folded_W.W, &r_y[1..]),
       || MultilinearPolynomial::evaluate_with(&core_witness.W, &r_y[1..]),
     );
+    info!(elapsed_ms = %eval_w_t.elapsed().as_millis(), "evaluate_witnesses");
 
     transcript.absorb(b"eval_W_step", &eval_W_step);
     transcript.absorb(b"eval_W_core", &eval_W_core);
@@ -903,6 +934,7 @@ where
     let c_eval = transcript.squeeze(b"c_eval")?;
 
     // fold evaluation claims into one
+    let (_fold_eval_span, fold_eval_t) = start_span!("fold_evaluation_claims");
     let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &[folded_U.comm_W, core_instance_regular.comm_W],
       &[E::Scalar::ONE, c_eval],
@@ -917,10 +949,13 @@ where
       .zip(core_witness.W.par_iter())
       .map(|(w1, w2)| *w1 + c_eval * *w2)
       .collect::<Vec<_>>();
+    info!(elapsed_ms = %fold_eval_t.elapsed().as_millis(), "fold_evaluation_claims");
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let (_, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
+
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_prove");
 
     Ok(Self {
       step_instances,
@@ -954,6 +989,7 @@ where
     }
 
     // validate the step instances
+    let (_validate_span, validate_t) = start_span!("validate_instances", instances = self.step_instances.len());
     for (i, u) in self.step_instances.iter().enumerate() {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
@@ -969,6 +1005,7 @@ where
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
     self.core_instance.validate(&vk.S_core, &mut transcript)?;
+    info!(elapsed_ms = %validate_t.elapsed().as_millis(), instances = self.step_instances.len(), "validate_instances");
 
     // we require all step instances to have the same shared commitment and match the shared commitment of the core instance
     for u in &self.step_instances {
@@ -979,6 +1016,7 @@ where
       }
     }
 
+    let (_convert_span, convert_t) = start_span!("convert_to_regular_verify");
     let step_instances_regular = self
       .step_instances
       .par_iter()
@@ -986,6 +1024,7 @@ where
       .collect::<Result<Vec<_>, _>>()?;
 
     let core_instance_regular = self.core_instance.to_regular_instance()?;
+    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_regular_verify");
 
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
