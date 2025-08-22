@@ -154,7 +154,9 @@ pub fn msm<C: CurveAffine>(
     cpu_msm_serial(coeffs, bases)
   };
 
-  info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
+  if msm_t.elapsed().as_millis() != 0 {
+    info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
+  }
   Ok(result)
 }
 
