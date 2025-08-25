@@ -153,7 +153,7 @@ where
         let scalars = if num_cols * (i + 1) > n {
           &v[num_cols * i..]
         } else {
-          &v[num_cols * i..num_cols * (i + 1)].to_vec()
+          &v[num_cols * i..num_cols * (i + 1)]
         };
 
         let msm_result = if !is_small {
