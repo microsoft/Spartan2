@@ -62,7 +62,15 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
 
   /// binds the polynomial's top variables using the given scalars.
   pub fn bind_with(poly: &[Scalar], L: &[Scalar], r_len: usize) -> Vec<Scalar> {
-    assert_eq!(poly.len(), L.len() * r_len, "poly must be L.len() * r_len");
+    assert_eq!(
+      poly.len(),
+      L.len() * r_len,
+      "poly length ({}) must equal L.len() * r_len ({} * {}) = {}",
+      poly.len(),
+      L.len(),
+      r_len,
+      L.len() * r_len
+    );
 
     (0..r_len)
       .into_par_iter()
