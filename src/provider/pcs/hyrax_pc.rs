@@ -21,6 +21,7 @@ use crate::{
 use core::marker::PhantomData;
 use ff::{Field, PrimeField};
 use num_integer::div_ceil;
+use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -35,7 +36,6 @@ pub struct HyraxCommitmentKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
-  num_rows: usize,
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
@@ -49,7 +49,6 @@ pub struct HyraxVerifierKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
-  num_rows: usize,
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
@@ -102,20 +101,14 @@ where
   }
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    let padded_n = n.next_power_of_two();
-
-    // we will have at least one row
+  fn setup(label: &'static [u8], _n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let num_cols = Self::width();
-    let num_rows = div_ceil(padded_n, Self::width());
-
     let gens = E::GE::from_label(label, num_cols + 2);
     let ck = gens[..num_cols].to_vec();
     let h = gens[num_cols];
     let ck_s = gens[num_cols + 1];
 
     let vk = Self::VerifierKey {
-      num_rows,
       num_cols,
       ck: ck.clone(),
       h,
@@ -123,7 +116,6 @@ where
     };
 
     let ck = Self::CommitmentKey {
-      num_rows,
       num_cols,
       ck,
       h,
@@ -133,10 +125,12 @@ where
     (ck, vk)
   }
 
-  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+  fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
+    let num_rows = div_ceil(n, ck.num_cols);
+
     HyraxBlind {
-      blind: (0..ck.num_rows)
-        .map(|_| E::Scalar::ZERO)
+      blind: (0..num_rows)
+        .map(|_| E::Scalar::random(&mut OsRng))
         .collect::<Vec<E::Scalar>>(),
     }
   }
@@ -149,13 +143,6 @@ where
   ) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
-    if n > ck.num_rows * ck.num_cols {
-      return Err(SpartanError::InvalidVectorSize {
-        actual: n,
-        max: ck.num_rows * ck.num_cols,
-      });
-    }
-
     // compute the expected number of columns
     let num_cols = ck.num_cols;
     let num_rows = div_ceil(n, num_cols);
@@ -163,11 +150,14 @@ where
     let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
-        let scalars = if v[num_cols * i..].len() < num_cols {
-          &v[num_cols * i..]
+        let upper = i.saturating_mul(num_cols).saturating_add(num_cols);
+        let lower = i.saturating_mul(num_cols);
+        let scalars = if upper > n {
+          &v[lower..]
         } else {
-          &v[num_cols * i..num_cols * (i + 1)]
+          &v[lower..upper]
         };
+
         let msm_result = if !is_small {
           E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
         } else {
@@ -236,6 +226,19 @@ where
     Ok(HyraxCommitment { comm })
   }
 
+  fn combine_blinds(blinds: &[Self::Blind]) -> Result<Self::Blind, SpartanError> {
+    if blinds.is_empty() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "combine_blinds: No blinds provided".to_string(),
+      });
+    }
+    let mut blinds_comb = Vec::new();
+    for b in blinds {
+      blinds_comb.extend_from_slice(&b.blind);
+    }
+    Ok(HyraxBlind { blind: blinds_comb })
+  }
+
   fn prove(
     ck: &Self::CommitmentKey,
     transcript: &mut E::TE,
@@ -285,17 +288,14 @@ where
       info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
 
       let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
-      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?;
-      let r_LZ = (0..LZ.len())
+
+      let r_LZ = (0..L.len())
         .into_par_iter()
-        .map(|i| {
-          if i >= blind.blind.len() {
-            E::Scalar::ZERO
-          } else {
-            LZ[i] * blind.blind[i]
-          }
-        })
+        .map(|i| L[i] * blind.blind[i])
         .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
+      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?
+        + <E::GE as DlogGroup>::group(&ck.h) * r_LZ;
+
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
       (comm_LZ, R, LZ, r_LZ)
@@ -431,31 +431,40 @@ where
     blinds: &[Self::Blind],
     weights: &[<E as Engine>::Scalar],
   ) -> Result<Self::Blind, SpartanError> {
-    if blinds.is_empty() || weights.is_empty() || blinds.len() != weights.len() {
+    if blinds.is_empty() || blinds.len() != weights.len() {
       return Err(SpartanError::InvalidInputLength {
-        reason: "fold_blinds: Blinds and weights must have the same length".to_string(),
+        reason: "fold_blinds: blinds and weights must be non-empty and same length".into(),
       });
     }
-    // scale ith blind by the ith weight
-    let folded_blind = blinds
-      .iter()
-      .zip(weights)
-      .map(|(blind, weight)| {
-        // compute a weighted sum of the blinds
-        blind.blind.iter().map(|b| *b * weight).collect::<Vec<_>>()
-      })
-      .reduce(|acc, x| {
-        acc
-          .iter()
-          .zip(x.iter())
-          .map(|(a, b)| *a + *b)
-          .collect::<Vec<_>>()
-      })
-      .ok_or(SpartanError::InvalidInputLength {
-        reason: "fold_blinds: Blinds and weights must have the same length".to_string(),
-      })?;
-    Ok(Self::Blind {
-      blind: folded_blind,
-    })
+    let n = blinds[0].blind.len();
+    if !blinds.iter().all(|b| b.blind.len() == n) {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_blinds: all inner blind vectors must have the same length".into(),
+      });
+    }
+
+    let acc = blinds
+      .par_iter()
+      .zip(weights.par_iter())
+      .fold(
+        || vec![<E as Engine>::Scalar::ZERO; n],
+        |mut local, (b, w)| {
+          for (a, &x) in local.iter_mut().zip(&b.blind) {
+            *a += x * *w;
+          }
+          local
+        },
+      )
+      .reduce(
+        || vec![E::Scalar::ZERO; n],
+        |mut a, b| {
+          for (ai, bi) in a.iter_mut().zip(b) {
+            *ai += bi;
+          }
+          a
+        },
+      );
+
+    Ok(Self::Blind { blind: acc })
   }
 }

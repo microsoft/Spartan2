@@ -48,8 +48,8 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Size of the polynomial committed with one unit
   fn width() -> usize;
 
-  /// Returns a blind to be used for commitment
-  fn blind(ck: &Self::CommitmentKey) -> Self::Blind;
+  /// Returns a blind to be used for commitment to a polynomial of size `n`
+  fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind;
 
   /// Commits to the provided vector using the provided ck and returns the commitment
   fn commit(
@@ -91,6 +91,11 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   fn combine_partial(
     partial_comms: &[Self::PartialCommitment],
   ) -> Result<Self::Commitment, SpartanError>;
+
+  /// Combines the provided blinds into a single blind.
+  /// The order of the blinds must match the order of the partial commitments used to generate them
+  /// Returns an error if the combination fails
+  fn combine_blinds(blinds: &[Self::Blind]) -> Result<Self::Blind, SpartanError>;
 
   /// A method to prove the evaluation of a multilinear polynomial
   fn prove(
