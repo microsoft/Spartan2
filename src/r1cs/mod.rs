@@ -276,7 +276,7 @@ impl<E: Engine> R1CSWitness<E> {
     W: &mut Vec<E::Scalar>,
     is_small: bool,
   ) -> Result<(R1CSWitness<E>, Commitment<E>), SpartanError> {
-    let r_W = PCS::<E>::blind(ck);
+    let r_W = PCS::<E>::blind(ck, W.len());
 
     // pad with zeros
     let (_pad_span, pad_t) = start_span!("pad_witness");

@@ -36,7 +36,6 @@ pub struct HyraxCommitmentKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
-  num_rows: usize,
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
@@ -50,7 +49,6 @@ pub struct HyraxVerifierKey<E: Engine>
 where
   E::GE: DlogGroup,
 {
-  num_rows: usize,
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
   h: AffineGroupElement<E>,
@@ -103,20 +101,14 @@ where
   }
 
   /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    let padded_n = n.next_power_of_two();
-
-    // we will have at least one row
+  fn setup(label: &'static [u8], _n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
     let num_cols = Self::width();
-    let num_rows = div_ceil(padded_n, Self::width());
-
     let gens = E::GE::from_label(label, num_cols + 2);
     let ck = gens[..num_cols].to_vec();
     let h = gens[num_cols];
     let ck_s = gens[num_cols + 1];
 
     let vk = Self::VerifierKey {
-      num_rows,
       num_cols,
       ck: ck.clone(),
       h,
@@ -124,7 +116,6 @@ where
     };
 
     let ck = Self::CommitmentKey {
-      num_rows,
       num_cols,
       ck,
       h,
@@ -134,9 +125,11 @@ where
     (ck, vk)
   }
 
-  fn blind(ck: &Self::CommitmentKey) -> Self::Blind {
+  fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
+    let num_rows = div_ceil(n, ck.num_cols);
+
     HyraxBlind {
-      blind: (0..ck.num_rows)
+      blind: (0..num_rows)
         .map(|_| E::Scalar::random(&mut OsRng))
         .collect::<Vec<E::Scalar>>(),
     }
@@ -150,13 +143,6 @@ where
   ) -> Result<Self::Commitment, SpartanError> {
     let n = v.len();
 
-    if n > ck.num_rows * ck.num_cols {
-      return Err(SpartanError::InvalidVectorSize {
-        actual: n,
-        max: ck.num_rows * ck.num_cols,
-      });
-    }
-
     // compute the expected number of columns
     let num_cols = ck.num_cols;
     let num_rows = div_ceil(n, num_cols);
@@ -164,7 +150,12 @@ where
     let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
-        let scalars = &v[num_cols * i..num_cols * (i + 1)];
+        let scalars = if num_cols * (i + 1) > n {
+          &v[num_cols * i..]
+        } else {
+          &v[num_cols * i..num_cols * (i + 1)].to_vec()
+        };
+
         let msm_result = if !is_small {
           E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
         } else {
@@ -231,6 +222,19 @@ where
       .flat_map(|pc| pc.comm.clone())
       .collect::<Vec<_>>();
     Ok(HyraxCommitment { comm })
+  }
+
+  fn combine_blinds(blinds: &[Self::Blind]) -> Result<Self::Blind, SpartanError> {
+    if blinds.is_empty() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "combine_blinds: No blinds provided".to_string(),
+      });
+    }
+    let mut blinds_comb = Vec::new();
+    for b in blinds {
+      blinds_comb.extend_from_slice(&b.blind);
+    }
+    Ok(HyraxBlind { blind: blinds_comb })
   }
 
   fn prove(
