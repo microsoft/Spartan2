@@ -957,7 +957,6 @@ where
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let (_, eval_arg) = E::PCS::prove(&pk.ck, &mut transcript, &comm, &W, &blind, &r_y[1..])?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
     info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_prove");
 
     Ok(Self {

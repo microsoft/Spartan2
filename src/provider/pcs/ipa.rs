@@ -2,19 +2,16 @@
 use crate::{
   errors::SpartanError,
   provider::traits::{DlogGroup, DlogGroupExt},
-  start_span,
   traits::{
     Engine,
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
-use core::{fmt::Debug, iter};
+use core::fmt::Debug;
 use ff::Field;
 use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
 
 /// computes the inner product of two vectors in parallel.
 pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
@@ -149,6 +146,7 @@ where
     let r = transcript.squeeze(b"r")?;
 
     let z_vec = (0..d_vec.len())
+      .into_par_iter()
       .map(|i| r * W.a_vec[i] + d_vec[i])
       .collect::<Vec<E::Scalar>>();
 

@@ -316,12 +316,27 @@ impl<E: Engine> R1CSWitness<E> {
     E::PCS: FoldingEngineTrait<E>,
   {
     let n = Ws.len();
+    if n == 0 {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple: empty witness list".into(),
+      });
+    }
+
     let w = weights_from_r::<E::Scalar>(r_bs, n);
+
+    if w.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple: weights length mismatch".into(),
+      });
+    }
+
     let dim = Ws[0].W.len();
 
-    // Parallelize across witness vectors (not across individual coordinates).
-    // Uses rayon's fold/reduce so only one accumulator per worker thread is allocated.
-    use rayon::prelude::*;
+    if !Ws.iter().all(|z| z.W.len() == dim) {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple: all W vectors must have the same length".into(),
+      });
+    }
 
     let acc_W = (0..n)
       .into_par_iter()
