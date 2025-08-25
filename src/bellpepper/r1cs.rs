@@ -394,7 +394,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       challenges,
     )?;
 
-    let mut blinds = Vec::new();
+    let mut blinds = Vec::with_capacity(3);
     if let Some(r_W_shared) = &ps.r_W_shared {
       blinds.push(r_W_shared.clone());
     }
