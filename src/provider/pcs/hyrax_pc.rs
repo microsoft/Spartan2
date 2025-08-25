@@ -150,10 +150,12 @@ where
     let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
-        let scalars = if num_cols * (i + 1) > n {
-          &v[num_cols * i..]
+        let upper = i.saturating_mul(num_cols).saturating_add(num_cols);
+        let lower = i.saturating_mul(num_cols);
+        let scalars = if upper > n {
+          &v[lower..]
         } else {
-          &v[num_cols * i..num_cols * (i + 1)]
+          &v[lower..upper]
         };
 
         let msm_result = if !is_small {
