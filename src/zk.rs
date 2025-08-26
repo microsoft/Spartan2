@@ -588,7 +588,8 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
   pub(crate) eval_C_core: E::Scalar,
   pub(crate) eval_W_core: E::Scalar,
 
-  pub(crate) eval_X: E::Scalar,
+  pub(crate) eval_X_step: E::Scalar,
+  pub(crate) eval_X_core: E::Scalar,
 
   pub(crate) t_out_step: E::Scalar,
   // NIFS cubic sum-check polynomials (4 coeffs per round)
@@ -907,7 +908,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
     // Public inputs used by NeutronNovaSNARK verifier instance:
     // [eval_A_step, eval_B_step, eval_C_step,
     //  eval_A_core, eval_B_core, eval_C_core,
-    //  tau_at_rx, eval_X, rho_acc_at_rb]
+    //  tau_at_rx, eval_X_step, eval_X_core, rho_acc_at_rb]
     Ok(vec![
       self.eval_A_step,
       self.eval_B_step,
@@ -916,7 +917,8 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
       self.eval_B_core,
       self.eval_C_core,
       self.tau_at_rx,
-      self.eval_X,
+      self.eval_X_step,
+      self.eval_X_core,
       self.rho_acc_at_rb,
     ])
   }
@@ -1546,8 +1548,12 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
       let tau_at_rx = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx"), || Ok(self.tau_at_rx))?;
       tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_inp"))?;
 
-      let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
-      eval_X.inputize(cs.namespace(|| "eval_X_inp"))?;
+      let eval_X_step =
+        AllocatedNum::alloc(cs.namespace(|| "eval_X_step"), || Ok(self.eval_X_step))?;
+      eval_X_step.inputize(cs.namespace(|| "eval_X_step_inp"))?;
+      let eval_X_core =
+        AllocatedNum::alloc(cs.namespace(|| "eval_X_core"), || Ok(self.eval_X_core))?;
+      eval_X_core.inputize(cs.namespace(|| "eval_X_core_inp"))?;
 
       let rho_acc_from_nifs = &prior_round_vars[self.idx_nifs_final()][1];
       rho_acc_from_nifs.inputize(cs.namespace(|| "rho_acc_at_rb_inp"))?;
@@ -1643,13 +1649,13 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
           |lc| lc + tmpw.get_variable(),
         );
         let tmpx = AllocatedNum::alloc(ns.namespace(|| "stepc_tmpx"), || {
-          let ex = eval_X.get_value().unwrap_or(E::Scalar::ZERO);
+          let ex = eval_X_step.get_value().unwrap_or(E::Scalar::ZERO);
           let ry = r_y0.get_value().unwrap_or(E::Scalar::ZERO);
           Ok(ex * ry)
         })?;
         ns.enforce(
           || "stepc_tmpx_enf",
-          |lc| lc + eval_X.get_variable(),
+          |lc| lc + eval_X_step.get_variable(),
           |lc| lc + r_y0.get_variable(),
           |lc| lc + tmpx.get_variable(),
         );
@@ -1733,13 +1739,13 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
           |lc| lc + tmpw.get_variable(),
         );
         let tmpx = AllocatedNum::alloc(ns.namespace(|| "corec_tmpx"), || {
-          let ex = eval_X.get_value().unwrap_or(E::Scalar::ZERO);
+          let ex = eval_X_core.get_value().unwrap_or(E::Scalar::ZERO);
           let ry = r_y0.get_value().unwrap_or(E::Scalar::ZERO);
           Ok(ex * ry)
         })?;
         ns.enforce(
           || "corec_tmpx_enf",
-          |lc| lc + eval_X.get_variable(),
+          |lc| lc + eval_X_core.get_variable(),
           |lc| lc + r_y0.get_variable(),
           |lc| lc + tmpx.get_variable(),
         );
@@ -1864,7 +1870,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
             eval_W: eval_W_step,
             prev_e: prev_e_step,
             r,
-            eval_X: &eval_X,
+            eval_X: &eval_X_step,
             one_minus_ry0: &one_minus_ry0,
             r_y0,
             label: "step",
@@ -1882,7 +1888,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
             eval_W: eval_W_core,
             prev_e: prev_e_core,
             r,
-            eval_X: &eval_X,
+            eval_X: &eval_X_core,
             one_minus_ry0: &one_minus_ry0,
             r_y0,
             label: "core",
@@ -2034,7 +2040,8 @@ mod tests {
       eval_C_core: <E as Engine>::Scalar::ZERO,
       eval_W_core: <E as Engine>::Scalar::ZERO,
 
-      eval_X: <E as Engine>::Scalar::ZERO,
+      eval_X_step: <E as Engine>::Scalar::ZERO,
+      eval_X_core: <E as Engine>::Scalar::ZERO,
 
       t_out_step: <E as Engine>::Scalar::ZERO,
       nifs_polys: vec![[<E as Engine>::Scalar::ZERO; 4]],

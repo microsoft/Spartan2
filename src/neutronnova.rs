@@ -473,11 +473,20 @@ where
   E::PCS: FoldingEngineTrait<E>,
 {
   /// Sets up the NeutronNova SNARK for a batch of circuits of type `C1` and a single circuit of type `C2`
+  ///
+  /// # Parameters
+  /// - `step_circuit`: The circuit to be folded in the batch
+  /// - `core_circuit`: The core circuit that connects the batch together
+  /// - `num_steps`: The number of step circuits in the batch (will be padded to next power of two internally)
   pub fn setup<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     step_circuit: &C1,
     core_circuit: &C2,
-    nifs_rounds: usize,
+    num_steps: usize,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
+    // Calculate nifs_rounds from num_steps by padding to next power of two
+    let n_padded = num_steps.next_power_of_two();
+    let nifs_rounds = n_padded.log_2();
+
     debug!("Synthesizing step circuit");
     let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
@@ -523,7 +532,8 @@ where
       eval_B_core: zero,
       eval_C_core: zero,
       eval_W_core: zero,
-      eval_X: zero,
+      eval_X_step: zero,
+      eval_X_core: zero,
       t_out_step: zero,
       nifs_polys: vec![[zero; 4]; nifs_rounds],
       rho_acc_at_rb: zero,
@@ -772,7 +782,8 @@ where
       eval_B_core: zero,
       eval_C_core: zero,
       eval_W_core: zero,
-      eval_X: zero,
+      eval_X_step: zero,
+      eval_X_core: zero,
       t_out_step: zero,
       nifs_polys: vec![[zero; 4]; ell_b],
       rho_acc_at_rb: zero,
@@ -1069,7 +1080,7 @@ where
     verifier_circuit.eval_B_core = evals[4];
     verifier_circuit.eval_C_core = evals[5];
 
-    let eval_X = {
+    let eval_X_step = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
         .chain(folded_U.X.iter().cloned())
@@ -1077,9 +1088,18 @@ where
       let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
+    let eval_X_core = {
+      let X = vec![E::Scalar::ONE]
+        .into_iter()
+        .chain(core_instance_regular.X.iter().cloned())
+        .collect::<Vec<E::Scalar>>();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
+    };
     verifier_circuit.eval_W_step = eval_W_step;
     verifier_circuit.eval_W_core = eval_W_core;
-    verifier_circuit.eval_X = eval_X;
+    verifier_circuit.eval_X_step = eval_X_step;
+    verifier_circuit.eval_X_core = eval_X_core;
 
     // Commit eval_W_step
     let _ = SatisfyingAssignment::<E>::process_round(
@@ -1444,7 +1464,7 @@ where
     );
 
     let U_verifier_regular = self.U_verifier.to_regular_instance()?;
-    let num_public_values = 9usize;
+    let num_public_values = 10usize;
     if U_verifier_regular.X.len() < num_public_values {
       return Err(SpartanError::ProofVerifyError {
         reason: "Verifier instance missing public values".to_string(),
@@ -1537,10 +1557,18 @@ where
     info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
     info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
 
-    let eval_X = {
+    let eval_X_step = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
         .chain(folded_U.X.iter().cloned())
+        .collect::<Vec<E::Scalar>>();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
+    };
+    let eval_X_core = {
+      let X = vec![E::Scalar::ONE]
+        .into_iter()
+        .chain(core_instance_regular.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
       let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
@@ -1557,14 +1585,16 @@ where
       || pub_vals[4] != eval_B_core
       || pub_vals[5] != eval_C_core
       || pub_vals[6] != tau_at_rx
-      || pub_vals[7] != eval_X
+      || pub_vals[7] != eval_X_step
+      || pub_vals[8] != eval_X_core
     {
       return Err(SpartanError::ProofVerifyError {
-        reason: "Verifier instance public ABC/tau_at_rx/X values do not match recomputation"
-          .to_string(),
+        reason:
+          "Verifier instance public ABC/tau_at_rx/X_step/X_core values do not match recomputation"
+            .to_string(),
       });
     }
-    let rho_acc_at_rb_pub = pub_vals[8];
+    let rho_acc_at_rb_pub = pub_vals[9];
     let n_padded = self.step_instances.len().next_power_of_two();
     let ell_b = n_padded.log_2();
     let mut t_re = E::TE::new(b"neutronnova_prove");
@@ -1719,9 +1749,7 @@ mod benchmarks {
       _p: Default::default(),
     };
 
-    let nifs_padded = num_circuits.next_power_of_two();
-    let nifs_rounds = usize::try_from(nifs_padded.ilog2()).unwrap();
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit, &circuit, nifs_rounds).unwrap();
+    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
 
     let circuits = (0..num_circuits)
       .map(|i| Sha256Circuit::<E> {
