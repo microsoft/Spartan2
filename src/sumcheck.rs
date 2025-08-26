@@ -20,13 +20,12 @@ use crate::{
   r1cs::SplitMultiRoundR1CSShape,
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
-  zk::SpartanVerifierCircuit,
+  zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
 };
 use ff::Field;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
 /// 4 k elements is a good cut-off on a 16-core machine.
 const PAR_THRESHOLD: usize = 4 << 10; // 4096
@@ -755,5 +754,331 @@ impl<E: Engine> SumcheckProof<E> {
     }
 
     Ok(r_y)
+  }
+
+  /// Generates a batched sum-check proof for a cubic combination with additive term of four multilinear polynomials.
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_cubic_with_additive_term_batched<F>(
+    challenge: &E::Scalar,
+    claims: &[E::Scalar; 2],
+    num_rounds: usize,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_1: &mut MultilinearPolynomial<E::Scalar>,
+    comb_func: F,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+  {
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
+
+    // compute the joint claim for both sum-check instances
+    let mut claim_per_round = claims[0] + *challenge * claims[1];
+
+    for round in 0..num_rounds {
+      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+      let poly = {
+        // Make an iterator returning the contributions to the evaluations
+        let (_eval_span, eval_t) = start_span!("compute_eval_points");
+        let (eval_point_0_0, eval_point_2_0, eval_point_3_0) =
+          Self::compute_eval_points_cubic_with_additive_term(
+            poly_A, poly_B_0, poly_C_0, poly_D_0, &comb_func,
+          );
+        let (eval_point_0_1, eval_point_2_1, eval_point_3_1) =
+          Self::compute_eval_points_cubic_with_additive_term(
+            poly_A, poly_B_1, poly_C_1, poly_D_1, &comb_func,
+          );
+
+        let eval_point_0 = eval_point_0_0 + *challenge * eval_point_0_1;
+        let eval_point_2 = eval_point_2_0 + *challenge * eval_point_2_1;
+        let eval_point_3 = eval_point_3_0 + *challenge * eval_point_3_1;
+
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
+        let evals = vec![
+          eval_point_0,
+          claim_per_round - eval_point_0,
+          eval_point_2,
+          eval_point_3,
+        ];
+        UniPoly::from_evals(&evals)?
+      };
+
+      // append the prover's message to the transcript
+      transcript.absorb(b"p", &poly);
+
+      //derive the verifier's challenge for the next round
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // Set up next round
+      claim_per_round = poly.evaluate(&r_i);
+
+      // bound all tables to the verifier's challenge
+      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+      rayon::join(
+        || {
+          rayon::join(
+            || poly_A.bind_poly_var_top(&r_i),
+            || poly_B_0.bind_poly_var_top(&r_i),
+          );
+        },
+        || {
+          rayon::join(
+            || {
+              rayon::join(
+                || poly_B_1.bind_poly_var_top(&r_i),
+                || poly_C_0.bind_poly_var_top(&r_i),
+              );
+            },
+            || {
+              rayon::join(
+                || poly_C_1.bind_poly_var_top(&r_i),
+                || {
+                  rayon::join(
+                    || poly_D_0.bind_poly_var_top(&r_i),
+                    || poly_D_1.bind_poly_var_top(&r_i),
+                  );
+                },
+              );
+            },
+          );
+        },
+      );
+
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+    }
+
+    Ok((
+      SumcheckProof {
+        compressed_polys: polys,
+      },
+      r,
+      vec![
+        poly_A[0],
+        poly_B_0[0],
+        poly_B_1[0],
+        poly_C_0[0],
+        poly_C_1[0],
+        poly_D_0[0],
+        poly_D_1[0],
+      ],
+    ))
+  }
+
+  /// Executes a **quadratic** batched sum-check in zero-knowledge mode and returns the
+  /// sequence of verifier challenges used for the inner round.
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_quad_batched_zk(
+    claims: &[E::Scalar; 2],
+    num_rounds: usize,
+    poly_A_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_A_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
+    verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
+    state: &mut MultiRoundState<E>,
+    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
+    verifier_ck_mr: &CommitmentKey<E>,
+    is_small: bool,
+    transcript: &mut E::TE,
+    start_round: usize,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+    // Maintain separate claims for step and core branches
+    let mut claim_step_round = claims[0];
+    let mut claim_core_round = claims[1];
+
+    for j in 0..num_rounds {
+      // -------- interpolate coeffs --------
+      let (coeffs_step, coeffs_core) = {
+        let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
+        // step branch
+        let (eval0_s, eval2_s) = Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb);
+        let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s];
+        let poly_s = UniPoly::from_evals(&evals_s)?;
+        let step = [poly_s.coeffs[0], poly_s.coeffs[1], poly_s.coeffs[2]];
+        // core branch
+        let (eval0_c, eval2_c) = Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb);
+        let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c];
+        let poly_c = UniPoly::from_evals(&evals_c)?;
+        let core = [poly_c.coeffs[0], poly_c.coeffs[1], poly_c.coeffs[2]];
+        (step, core)
+      };
+      verifier_circuit.inner_polys_step[j] = coeffs_step;
+      verifier_circuit.inner_polys_core[j] = coeffs_core;
+
+      // -------- transcript / witness handling --------
+      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+        state,
+        verifier_shape_mr,
+        verifier_ck_mr,
+        verifier_circuit,
+        start_round + j,
+        is_small,
+        transcript,
+      )?;
+      let r_j = chals[0];
+      r_y.push(r_j);
+
+      // -------- bind polys --------
+      rayon::join(
+        || {
+          rayon::join(
+            || poly_A_0.bind_poly_var_top(&r_j),
+            || poly_B_0.bind_poly_var_top(&r_j),
+          );
+        },
+        || {
+          rayon::join(
+            || poly_A_1.bind_poly_var_top(&r_j),
+            || poly_B_1.bind_poly_var_top(&r_j),
+          );
+        },
+      );
+
+      // -------- advance claim for next round --------
+      claim_step_round = coeffs_step[0] + coeffs_step[1] * r_j + coeffs_step[2] * r_j * r_j;
+      claim_core_round = coeffs_core[0] + coeffs_core[1] * r_j + coeffs_core[2] * r_j * r_j;
+    }
+
+    Ok(r_y)
+  }
+
+  /// Executes a **cubic-with-additive-term** batched outer sum-check in zero-knowledge mode
+  /// and returns the sequence of verifier challenges.
+  #[allow(clippy::too_many_arguments)]
+  pub fn prove_cubic_with_additive_term_batched_zk(
+    num_rounds: usize,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_step: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_core: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_step: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_core: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_step: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_core: &mut MultilinearPolynomial<E::Scalar>,
+    verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
+    state: &mut MultiRoundState<E>,
+    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
+    verifier_ck_mr: &CommitmentKey<E>,
+    is_small: bool,
+    transcript: &mut E::TE,
+    start_round: usize,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+    // Maintain separate claims for step and core branches
+    let mut claim_step_round = verifier_circuit.t_out_step;
+    let mut claim_core_round = E::Scalar::ZERO;
+
+    for i in 0..num_rounds {
+      // -------- interpolate coefficients --------
+      let (coeffs_step, coeffs_core) = {
+        let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
+          *a * (*b * *c - *d)
+        };
+
+        // step branch
+        let (eval0_s, eval2_s, eval3_s) = Self::compute_eval_points_cubic_with_additive_term(
+          poly_A,
+          poly_B_step,
+          poly_C_step,
+          poly_D_step,
+          &comb,
+        );
+        let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s, eval3_s];
+        let poly_s = UniPoly::from_evals(&evals_s)?;
+        let step = [
+          poly_s.coeffs[0],
+          poly_s.coeffs[1],
+          poly_s.coeffs[2],
+          poly_s.coeffs[3],
+        ];
+
+        // core branch
+        let (eval0_c, eval2_c, eval3_c) = Self::compute_eval_points_cubic_with_additive_term(
+          poly_A,
+          poly_B_core,
+          poly_C_core,
+          poly_D_core,
+          &comb,
+        );
+        let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c, eval3_c];
+        let poly_c = UniPoly::from_evals(&evals_c)?;
+        let core = [
+          poly_c.coeffs[0],
+          poly_c.coeffs[1],
+          poly_c.coeffs[2],
+          poly_c.coeffs[3],
+        ];
+
+        (step, core)
+      };
+      verifier_circuit.outer_polys_step[i] = coeffs_step;
+      verifier_circuit.outer_polys_core[i] = coeffs_core;
+
+      // -------- transcript / witness handling --------
+      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+        state,
+        verifier_shape_mr,
+        verifier_ck_mr,
+        verifier_circuit,
+        start_round + i,
+        is_small,
+        transcript,
+      )?;
+      let r_i = chals[0];
+      r_x.push(r_i);
+
+      // -------- advance claim and bind polys --------
+      let r2 = r_i * r_i;
+      let r3 = r2 * r_i;
+      claim_step_round =
+        coeffs_step[0] + coeffs_step[1] * r_i + coeffs_step[2] * r2 + coeffs_step[3] * r3;
+      claim_core_round =
+        coeffs_core[0] + coeffs_core[1] * r_i + coeffs_core[2] * r2 + coeffs_core[3] * r3;
+
+      // bind polynomials to the verifier's challenge
+      rayon::join(
+        || poly_A.bind_poly_var_top(&r_i),
+        || {
+          rayon::join(
+            || {
+              rayon::join(
+                || poly_B_step.bind_poly_var_top(&r_i),
+                || poly_B_core.bind_poly_var_top(&r_i),
+              );
+            },
+            || {
+              rayon::join(
+                || {
+                  rayon::join(
+                    || poly_C_step.bind_poly_var_top(&r_i),
+                    || poly_C_core.bind_poly_var_top(&r_i),
+                  );
+                },
+                || {
+                  rayon::join(
+                    || poly_D_step.bind_poly_var_top(&r_i),
+                    || poly_D_core.bind_poly_var_top(&r_i),
+                  );
+                },
+              );
+            },
+          );
+        },
+      );
+    }
+
+    Ok(r_x)
   }
 }

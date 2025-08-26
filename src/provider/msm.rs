@@ -7,8 +7,7 @@ use halo2curves::{CurveAffine, group::Group};
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
 #[derive(Clone, Copy)]
 enum Bucket<C: CurveAffine> {

@@ -37,10 +37,10 @@ pub mod zk;
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {
     ($name:expr $(, $($fmt:tt)+)?) => {{
-        let span       = info_span!($name $(, $($fmt)+)?);
+        let span       = tracing::info_span!($name $(, $($fmt)+)?);
         let span_clone = span.clone();    // lives as long as the guard
         let _guard      = span_clone.enter();
-        (span, Instant::now())
+        (span, std::time::Instant::now())
     }};
 }
 pub(crate) use start_span;

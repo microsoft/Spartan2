@@ -38,8 +38,6 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::info_span;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
