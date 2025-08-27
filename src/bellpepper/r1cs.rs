@@ -263,8 +263,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-      let comm_W_shared =
-        PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
+      let comm_W_shared = PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
       (Some(comm_W_shared), Some(r_W_shared))
     } else {
       (None, None)
