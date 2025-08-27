@@ -183,17 +183,12 @@ where
     v: &[E::Scalar],
     r: &Self::Blind,
     is_small: bool,
-  ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError> {
+  ) -> Result<Self::PartialCommitment, SpartanError> {
     // commit to the vector using the provided blinds
     let partial = Self::commit(ck, v, r, is_small)?;
 
-    // check how many blinds were used
-    let r_remaining = HyraxBlind {
-      blind: r.blind[partial.comm.len()..].to_vec(),
-    };
-
-    // return the partial commitment and the remaining blinds
-    Ok((partial, r_remaining))
+    // return the partial commitment
+    Ok(partial)
   }
 
   fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {

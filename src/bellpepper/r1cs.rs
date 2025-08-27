@@ -263,7 +263,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-      let (comm_W_shared, r_W_shared) =
+      let comm_W_shared =
         PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
       (Some(comm_W_shared), Some(r_W_shared))
     } else {
@@ -316,7 +316,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
 
-      let (comm_W_precommitted, r_W_precommitted) = PCS::<E>::commit_partial(
+      let comm_W_precommitted = PCS::<E>::commit_partial(
         ck,
         &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
         &r_W_precommitted,
@@ -375,7 +375,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
-    let (comm_W_rest, _r_W_remaining) = PCS::<E>::commit_partial(
+    let comm_W_rest = PCS::<E>::commit_partial(
       ck,
       &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &r_W_rest,
