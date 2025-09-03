@@ -384,7 +384,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
 
-    let public_values = ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
+    let public_values = ps.cs.input_assignment[1..1 + S.num_public].to_vec();
     let U = SplitR1CSInstance::<E>::new(
       S,
       ps.comm_W_shared.clone(),
