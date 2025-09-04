@@ -774,6 +774,9 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 
   pub fn equalize(S_A: &mut Self, S_B: &mut Self) {
+    let orig_cons_a = S_A.num_cons;
+    let orig_cons_b = S_B.num_cons;
+
     let num_cons_padded = max(S_A.num_cons, S_B.num_cons);
     let num_vars_padded = max(
       S_A.num_shared + S_A.num_precommitted + S_A.num_rest,
@@ -804,23 +807,32 @@ impl<E: Engine> SplitR1CSShape<E> {
       M.indptr.extend(ex);
     };
 
-    // get the total number of variables to `num_vars_padded` by increasing rest variables
+    // Grow variables (if needed) and pad rows using original constraint counts
     if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars_padded {
-      let num_cons = S_A.num_cons;
       let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
       S_A.num_rest = num_vars_padded - (S_A.num_shared + S_A.num_precommitted);
-      move_public_vars(&mut S_A.A, num_cons, num_vars);
-      move_public_vars(&mut S_A.B, num_cons, num_vars);
-      move_public_vars(&mut S_A.C, num_cons, num_vars);
+      move_public_vars(&mut S_A.A, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.B, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.C, orig_cons_a, num_vars);
+    } else {
+      // No var growth; still ensure row padding happens
+      let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
+      move_public_vars(&mut S_A.A, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.B, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.C, orig_cons_a, num_vars);
     }
 
     if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars_padded {
-      let num_cons = S_B.num_cons;
       let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
       S_B.num_rest = num_vars_padded - (S_B.num_shared + S_B.num_precommitted);
-      move_public_vars(&mut S_B.A, num_cons, num_vars);
-      move_public_vars(&mut S_B.B, num_cons, num_vars);
-      move_public_vars(&mut S_B.C, num_cons, num_vars);
+      move_public_vars(&mut S_B.A, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.B, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.C, orig_cons_b, num_vars);
+    } else {
+      let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
+      move_public_vars(&mut S_B.A, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.B, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.C, orig_cons_b, num_vars);
     }
   }
 
