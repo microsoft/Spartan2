@@ -60,6 +60,67 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     self.Z.truncate(n);
   }
 
+  /// Binds the polynomial's bottom variable using the given scalar.
+  ///
+  /// This operation modifies the polynomial in-place.
+  pub fn bind_poly_var_bot(&mut self, r: &Scalar) {
+    assert!(
+      self.Z.len() >= 2,
+      "Vector Z must have at least two elements to bind the top variable."
+    );
+
+    let n = self.Z.len() / 2;
+    // Compute updated first halves from immutable snapshots in parallel.
+    let new: Vec<Scalar> = (0..n)
+      .into_par_iter()
+      .map(|i| {
+        let a = self[2 * i];
+        let b = self[2 * i + 1];
+        a + *r * (b - a)
+      })
+      .collect();
+    self.Z[..n].copy_from_slice(&new);
+    self.Z.truncate(n);
+  }
+
+  /// Computes the values B[c, k] as c \in {0, 2, . . . , degree}
+  /// In the sum-check protocol in the middle of round m, the prover has to compute the values B[c, k] where B[c, k] = (1 − c) * B[0, k] + c * B[1, k]
+  ///
+  /// Here k is the index argument
+  #[inline]
+  pub fn sumcheck_evals(&self, index: usize, degree: usize, order: BindingOrder) -> Vec<Scalar> {
+    debug_assert!(degree > 0);
+    debug_assert!(index < self.len() / 2);
+    let mut evals = vec![Scalar::ZERO; degree];
+    match order {
+      BindingOrder::HighToLow => {
+        evals[0] = self[index];
+        if degree == 1 {
+          return evals;
+        }
+        let mut eval = self[index + self.len() / 2];
+        let m = eval - evals[0];
+        for eval_i in evals.iter_mut().take(degree).skip(1) {
+          eval += m;
+          *eval_i = eval;
+        }
+      }
+      BindingOrder::LowToHigh => {
+        evals[0] = self[2 * index];
+        if degree == 1 {
+          return evals;
+        }
+        let mut eval = self[2 * index + 1];
+        let m = eval - evals[0];
+        for eval_i in evals.iter_mut().take(degree).skip(1) {
+          eval += m;
+          *eval_i = eval;
+        }
+      }
+    };
+    evals
+  }
+
   /// binds the polynomial's top variables using the given scalars.
   pub fn bind_with(poly: &[Scalar], L: &[Scalar], r_len: usize) -> Vec<Scalar> {
     assert_eq!(
@@ -99,6 +160,16 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       |chi_i, Z_i| chi_i * Z_i
     )
     .sum()
+  }
+
+  /// Get the length of the coeffs
+  pub fn len(&self) -> usize {
+    self.Z.len()
+  }
+
+  /// Checks if Z is empty
+  pub fn is_empty(&self) -> bool {
+    self.Z.is_empty()
   }
 
   /// Evaluates the polynomial with the given evaluations and point.
@@ -161,6 +232,15 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 
     common * eval_partial
   }
+}
+
+/// The order in which polynomial variables are bound in sumcheck
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BindingOrder {
+  /// this variant states to bind the variables from low-to-high
+  LowToHigh,
+  /// this variant states to bind the variables from high-to-low
+  HighToLow,
 }
 
 #[cfg(test)]
