@@ -7,8 +7,8 @@ use crate::{
   CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
   bellpepper::{
     r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, SpartanShape,
-      SpartanWitness,
+      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, RerandomizationTrait,
+      SpartanShape, SpartanWitness,
     },
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
@@ -263,8 +263,7 @@ where
     if nifs_rounds_from_shape != ell_b {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
-          "NIFS rounds mismatch between setup ({}) and batch ({})",
-          nifs_rounds_from_shape, ell_b
+          "NIFS rounds mismatch between setup ({nifs_rounds_from_shape}) and batch ({ell_b})",
         ),
       });
     }
@@ -612,7 +611,21 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
-    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
+
+    // rerandomize prep state: we first rerandomize core, then step circuits by reusing shared commitments
+    let mut ps_core = prep_snark.ps_core.rerandomize(&pk.ck, &pk.S_core)?;
+    let mut ps_step = prep_snark
+      .ps_step
+      .par_iter()
+      .map(|ps_i| {
+        ps_i.rerandomize_with_shared(
+          &pk.ck,
+          &pk.S_step,
+          &ps_core.comm_W_shared,
+          &ps_core.r_W_shared,
+        )
+      })
+      .collect::<Result<Vec<_>, _>>()?;
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
@@ -622,8 +635,7 @@ where
     );
     let (res_steps, res_core) = rayon::join(
       || {
-        prep_snark
-          .ps_step
+        ps_step
           .par_iter_mut()
           .zip(step_circuits.par_iter().enumerate())
           .map(|(pre_state, (i, circuit))| {
@@ -682,7 +694,7 @@ where
             })?;
         transcript.absorb(b"public_values", &public_values_core.as_slice());
         SatisfyingAssignment::r1cs_instance_and_witness(
-          &mut prep_snark.ps_core,
+          &mut ps_core,
           &pk.S_core,
           &pk.ck,
           core_circuit,
@@ -741,8 +753,7 @@ where
     if nifs_rounds_from_shape != ell_b {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
-          "NIFS rounds mismatch between setup ({}) and batch ({})",
-          nifs_rounds_from_shape, ell_b
+          "NIFS rounds mismatch between setup ({nifs_rounds_from_shape}) and batch ({ell_b})",
         ),
       });
     }

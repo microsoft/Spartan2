@@ -38,7 +38,7 @@ where
 {
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
-  h: AffineGroupElement<E>,
+  h: E::GE,
 }
 
 /// A type that holds the verifier key for Hyrax commitments
@@ -50,7 +50,7 @@ where
 {
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
-  h: AffineGroupElement<E>,
+  h: E::GE,
 }
 
 /// Structure that holds commitments
@@ -93,16 +93,6 @@ where
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
-<<<<<<< HEAD
-  fn width() -> usize {
-    1024 // default (large) width used for monolithic witness commitments
-  }
-
-  /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  fn setup(label: &'static [u8], _n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    let num_cols = Self::width();
-    let gens = E::GE::from_label(label, num_cols + 2);
-=======
   /// Derives generators for Hyrax PC, where n is the size of the vector to be committed to and width is the number of columns.
   fn setup(
     label: &'static [u8],
@@ -111,9 +101,8 @@ where
   ) -> (Self::CommitmentKey, Self::VerifierKey) {
     let num_cols = width;
     let gens = E::GE::from_label(label, num_cols + 1);
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     let ck = gens[..num_cols].to_vec();
-    let h = gens[num_cols];
+    let h = <E::GE as DlogGroup>::group(&gens[num_cols]);
 
     let vk = Self::VerifierKey {
       num_cols,
@@ -172,33 +161,36 @@ where
             false,
           )?
         };
-        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
+        Ok(msm_result + ck.h * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HyraxCommitment { comm })
   }
 
-<<<<<<< HEAD
-  fn commit_partial(
+  fn rerandomize_commitment(
     ck: &Self::CommitmentKey,
-    v: &[E::Scalar],
-    r: &Self::Blind,
-    is_small: bool,
-  ) -> Result<Self::PartialCommitment, SpartanError> {
-    // commit to the vector using the provided blinds
-    let partial = Self::commit(ck, v, r, is_small)?;
+    comm: &Self::Commitment,
+    r_old: &Self::Blind,
+    r_new: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    if comm.comm.len() != r_old.blind.len() || comm.comm.len() != r_new.blind.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "rerandomize_commitment: commitment and blinds must have the same length"
+          .to_string(),
+      });
+    }
 
-    // return the partial commitment
-    Ok(partial)
+    let new_comm = (0..comm.comm.len())
+      .into_par_iter()
+      .map(|i| comm.comm[i] + ck.h * (r_new.blind[i] - r_old.blind[i]))
+      .collect::<Vec<_>>();
+
+    Ok(HyraxCommitment { comm: new_comm })
   }
 
-  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {
-    let min_rows = div_ceil(n, Self::width());
-=======
   fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError> {
     let min_rows = div_ceil(n, width);
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     if comm.comm.len() < min_rows {
       return Err(SpartanError::InvalidCommitmentLength {
         reason: format!(
@@ -295,8 +287,7 @@ where
         .into_par_iter()
         .map(|i| L[i] * blind.blind[i])
         .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?
-        + <E::GE as DlogGroup>::group(&ck.h) * r_LZ;
+      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + ck.h * r_LZ;
 
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 

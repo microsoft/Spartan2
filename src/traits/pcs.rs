@@ -68,6 +68,14 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Checks if the provided commitment commits to a vector of the specified length
   fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError>;
 
+  /// Rerandomizes the provided commitment using the provided blind
+  fn rerandomize_commitment(
+    ck: &Self::CommitmentKey,
+    comm: &Self::Commitment,
+    r_old: &Self::Blind,
+    r_new: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
+
   /// Combines the provided commitments (each committing to a multilinear polynomial) into a single commitment.
   ///
   /// # Parameters

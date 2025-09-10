@@ -5,8 +5,8 @@ use crate::{
   CommitmentKey,
   bellpepper::{
     r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, SpartanShape,
-      SpartanWitness,
+      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, RerandomizationTrait,
+      SpartanShape, SpartanWitness,
     },
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
@@ -152,16 +152,18 @@ pub struct PrepSNARK<E: Engine> {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSSNARK<E: Engine> {
+  // Original R1CS instance
+  U: SplitR1CSInstance<E>,
+
   // Multi-round verifier instance capturing the non-ZK verification trace
   U_verifier: SplitMultiRoundR1CSInstance<E>,
-  // Original single-round R1CS instance
-  U: SplitR1CSInstance<E>,
-  // NIFS proof for folding a random relaxed instance with the verifier instance
-  nifs_proof: NIFS<E>,
   // The random relaxed instance used for folding
   random_U: RelaxedR1CSInstance<E>,
+  // NIFS proof for folding a random relaxed instance with the verifier instance
+  nifs_proof: NIFS<E>,
   // Folded relaxed witness produced during NIFS proving
   folded_W: RelaxedR1CSWitness<E>,
+
   // PCS evaluation argument
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
@@ -263,7 +265,8 @@ where
     prep_snark: &Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
-    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
+    // rerandomize the prep state
+    let mut ps = prep_snark.ps.rerandomize(&pk.ck, &pk.S)?;
 
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
@@ -277,7 +280,7 @@ where
 
     // Original R1CS instance and witness (used for PCS evaluation only)
     let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
-      &mut prep_snark.ps,
+      &mut ps,
       &pk.S,
       &pk.ck,
       &circuit,

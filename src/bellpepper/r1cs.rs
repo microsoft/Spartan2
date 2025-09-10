@@ -28,10 +28,33 @@ pub trait SpartanShape<E: Engine> {
   fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError>;
 }
 
+/// Defines rerandomization behavior for preprocessed state
+pub trait RerandomizationTrait<E: Engine> {
+  /// Returns a rerandomized version of self.
+  fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
+  where
+    Self: Sized;
+
+  /// Returns a rerandomized version of self, reusing shared commitments and blinds if provided.
+  fn rerandomize_with_shared(
+    &self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+    comm_W_shared: &Option<Commitment<E>>,
+    r_W_shared: &Option<Blind<E>>,
+  ) -> Result<Self, SpartanError>
+  where
+    Self: Sized;
+}
+
 /// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
   /// Holds the state of the prover after committing to the precommitted portions of the witness.
-  type PrecommittedState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type PrecommittedState: Send
+    + Sync
+    + Serialize
+    + for<'de> Deserialize<'de>
+    + RerandomizationTrait<E>;
 
   /// Return partial commitments (to shared variables) and the shared state
   fn shared_witness<C: SpartanCircuit<E>>(
@@ -275,8 +298,8 @@ pub struct PrecommittedState<E: Engine> {
   cs: SatisfyingAssignment<E>,
   shared: Vec<AllocatedNum<E::Scalar>>,
   precommitted: Vec<AllocatedNum<E::Scalar>>,
-  comm_W_shared: Option<Commitment<E>>,
-  r_W_shared: Option<Blind<E>>,
+  pub(crate) comm_W_shared: Option<Commitment<E>>,
+  pub(crate) r_W_shared: Option<Blind<E>>,
   comm_W_precommitted: Option<Commitment<E>>,
   r_W_precommitted: Option<Blind<E>>,
   W: Vec<E::Scalar>,
@@ -482,6 +505,80 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
+  }
+}
+
+impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
+  fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
+  where
+    Self: Sized,
+  {
+    // generate new blinds for shared and precommitted commitments and rerandomize commitments
+    let (comm_W_shared_new, r_W_shared_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_shared, &self.r_W_shared) {
+        let r_new = PCS::<E>::blind(ck, S.num_shared);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+    let (comm_W_precommitted_new, r_W_precommitted_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+
+    Ok(PrecommittedState {
+      cs: self.cs.clone(),
+      shared: self.shared.clone(),
+      precommitted: self.precommitted.clone(),
+      comm_W_shared: comm_W_shared_new,
+      r_W_shared: r_W_shared_new,
+      comm_W_precommitted: comm_W_precommitted_new,
+      r_W_precommitted: r_W_precommitted_new,
+      W: self.W.clone(),
+    })
+  }
+
+  fn rerandomize_with_shared(
+    &self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+    comm_W_shared: &Option<Commitment<E>>,
+    r_W_shared: &Option<Blind<E>>,
+  ) -> Result<Self, SpartanError>
+  where
+    Self: Sized,
+  {
+    // generate new blinds for precommitted commitments and rerandomize commitments
+    let (comm_W_precommitted_new, r_W_precommitted_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+
+    Ok(PrecommittedState {
+      cs: self.cs.clone(),
+      shared: self.shared.clone(),
+      precommitted: self.precommitted.clone(),
+      comm_W_shared: comm_W_shared.clone(),
+      r_W_shared: r_W_shared.clone(),
+      comm_W_precommitted: comm_W_precommitted_new,
+      r_W_precommitted: r_W_precommitted_new,
+      W: self.W.clone(),
+    })
   }
 }
 

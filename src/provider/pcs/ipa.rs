@@ -120,9 +120,9 @@ where
   /// Proves the inner product argument
   pub fn prove(
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
-    h: &<E::GE as DlogGroup>::AffineGroupElement,
+    h: &E::GE,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
-    h_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    h_c: &E::GE,
     U: &InnerProductInstance<E>,
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
@@ -139,9 +139,8 @@ where
     let r_delta = E::Scalar::random(&mut OsRng);
     let r_beta = E::Scalar::random(&mut OsRng);
 
-    let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)?
-      + E::GE::group(h) * r_delta;
-    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h_c) * r_beta;
+    let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)? + *h * r_delta;
+    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + *h_c * r_beta;
 
     transcript.absorb(b"delta", &delta);
     transcript.absorb(b"beta", &beta);
@@ -170,9 +169,9 @@ where
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
-    h: &<E::GE as DlogGroup>::AffineGroupElement,
+    h: &E::GE,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
-    h_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    h_c: &E::GE,
     n: usize,
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
@@ -199,7 +198,7 @@ where
 
     if U.comm_a_vec * r + self.delta
       != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)?
-        + E::GE::group(h) * self.z_delta
+        + *h * self.z_delta
     {
       return Err(SpartanError::InvalidPCS {
         reason: "Inner product argument verify: First equation failed".to_string(),
@@ -207,7 +206,7 @@ where
     }
 
     if U.comm_c * r + self.beta
-      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + E::GE::group(h_c) * self.z_beta
+      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + *h_c * self.z_beta
     {
       return Err(SpartanError::InvalidPCS {
         reason: "Inner product argument verify: Second equation failed".to_string(),
