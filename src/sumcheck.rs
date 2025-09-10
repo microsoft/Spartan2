@@ -715,7 +715,7 @@ impl<E: Engine> SumcheckProof<E> {
     is_small: bool,
     transcript: &mut E::TE,
     start_round: usize,
-  ) -> Result<Vec<E::Scalar>, SpartanError> {
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_current_round = *claim;
 
@@ -753,7 +753,7 @@ impl<E: Engine> SumcheckProof<E> {
       claim_current_round = coeffs[0] + coeffs[1] * r_j + coeffs[2] * r_j * r_j;
     }
 
-    Ok(r_y)
+    Ok((r_y, vec![poly_ABC[0], poly_z[0]]))
   }
 
   /// Generates a batched sum-check proof for a cubic combination with additive term of four multilinear polynomials.
@@ -893,7 +893,7 @@ impl<E: Engine> SumcheckProof<E> {
     is_small: bool,
     transcript: &mut E::TE,
     start_round: usize,
-  ) -> Result<Vec<E::Scalar>, SpartanError> {
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     // Maintain separate claims for step and core branches
     let mut claim_step_round = claims[0];
@@ -952,7 +952,10 @@ impl<E: Engine> SumcheckProof<E> {
       claim_core_round = coeffs_core[0] + coeffs_core[1] * r_j + coeffs_core[2] * r_j * r_j;
     }
 
-    Ok(r_y)
+    Ok((
+      r_y,
+      vec![poly_A_0[0], poly_A_1[0], poly_B_0[0], poly_B_1[0]],
+    ))
   }
 
   /// Executes a **cubic-with-additive-term** batched outer sum-check in zero-knowledge mode

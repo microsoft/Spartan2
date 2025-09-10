@@ -988,7 +988,7 @@ where
       poly_ABC_step.len(),
       poly_ABC_core.len()
     );
-    let r_y = SumcheckProof::<E>::prove_quad_batched_zk(
+    let (r_y, evals) = SumcheckProof::<E>::prove_quad_batched_zk(
       &[claim_inner_joint_step, claim_inner_joint_core],
       num_rounds_y,
       &mut MultilinearPolynomial::new(poly_ABC_step),
@@ -1021,12 +1021,8 @@ where
     )?;
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
 
-    let (_eval_w_span, eval_w_t) = start_span!("evaluate_witnesses");
-    let (eval_W_step, eval_W_core) = rayon::join(
-      || MultilinearPolynomial::evaluate_with(&folded_W.W, &r_y[1..]),
-      || MultilinearPolynomial::evaluate_with(&core_witness.W, &r_y[1..]),
-    );
-    info!(elapsed_ms = %eval_w_t.elapsed().as_millis(), "evaluate_witnesses");
+    let eval_Z_step = evals[2];
+    let eval_Z_core = evals[3];
 
     let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let evals = {
@@ -1097,6 +1093,11 @@ where
       let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
+    let eval_W_step =
+      (eval_Z_step - r_y[0] * eval_X_step) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+    let eval_W_core =
+      (eval_Z_core - r_y[0] * eval_X_core) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+
     verifier_circuit.eval_W_step = eval_W_step;
     verifier_circuit.eval_W_core = eval_W_core;
     verifier_circuit.eval_X_step = eval_X_step;

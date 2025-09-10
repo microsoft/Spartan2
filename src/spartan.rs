@@ -400,7 +400,7 @@ where
     let claim_inner_joint =
       verifier_circuit.claim_Az + r * verifier_circuit.claim_Bz + r * r * verifier_circuit.claim_Cz;
 
-    let r_y = SumcheckProof::<E>::prove_quad_zk(
+    let (r_y, evals) = SumcheckProof::<E>::prove_quad_zk(
       &claim_inner_joint,
       num_rounds_y,
       &mut poly_ABC,
@@ -413,9 +413,7 @@ where
       &mut transcript,
       num_rounds_x + 2,
     )?;
-
-    // Final evaluations for the circuit's last round
-    let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
+    let eval_Z = evals[1]; // evaluation of Z at r_y
 
     // Compute final evaluations needed for the inner-final round
     let U_regular = U.to_regular_instance()?;
@@ -428,6 +426,9 @@ where
       let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
+
+    // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
+    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
 
     // Evaluate A, B, C at (r_x, r_y)
     let (eval_A, eval_B, eval_C) = {
