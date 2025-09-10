@@ -1,6 +1,6 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, PartialCommitment,
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, MULTIROUND_COMMITMENT_WIDTH, PCS,
   VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
@@ -666,9 +666,9 @@ impl<E: Engine> SimpleDigestible for SplitR1CSShape<E> {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SplitR1CSInstance<E: Engine> {
-  pub(crate) comm_W_shared: Option<PartialCommitment<E>>,
-  pub(crate) comm_W_precommitted: Option<PartialCommitment<E>>,
-  pub(crate) comm_W_rest: PartialCommitment<E>,
+  pub(crate) comm_W_shared: Option<Commitment<E>>,
+  pub(crate) comm_W_precommitted: Option<Commitment<E>>,
+  pub(crate) comm_W_rest: Commitment<E>,
 
   pub(crate) public_values: Vec<E::Scalar>,
   pub(crate) challenges: Vec<E::Scalar>,
@@ -954,7 +954,7 @@ impl<E: Engine> SimpleDigestible for SplitMultiRoundR1CSShape<E> {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SplitMultiRoundR1CSInstance<E: Engine> {
-  pub(crate) comm_w_per_round: Vec<PartialCommitment<E>>,
+  pub(crate) comm_w_per_round: Vec<Commitment<E>>,
   pub(crate) public_values: Vec<E::Scalar>,
   pub(crate) challenges_per_round: Vec<Vec<E::Scalar>>,
 }
@@ -963,9 +963,9 @@ impl<E: Engine> SplitR1CSInstance<E> {
   /// A method to create a split R1CS instance object using constituent elements
   pub fn new(
     S: &SplitR1CSShape<E>,
-    comm_W_shared: Option<PartialCommitment<E>>,
-    comm_W_precommitted: Option<PartialCommitment<E>>,
-    comm_W_rest: PartialCommitment<E>,
+    comm_W_shared: Option<Commitment<E>>,
+    comm_W_precommitted: Option<Commitment<E>>,
+    comm_W_rest: Commitment<E>,
     public_values: Vec<E::Scalar>,
     challenges: Vec<E::Scalar>,
   ) -> Result<SplitR1CSInstance<E>, SpartanError> {
@@ -1001,12 +1001,21 @@ impl<E: Engine> SplitR1CSInstance<E> {
     }
 
     if let Some(ref comm) = comm_W_shared {
+<<<<<<< HEAD
       E::PCS::check_partial(comm, S.num_shared)?;
     }
     if let Some(ref comm) = comm_W_precommitted {
       E::PCS::check_partial(comm, S.num_precommitted)?;
     }
     E::PCS::check_partial(&comm_W_rest, S.num_rest)?;
+=======
+      E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
+    }
+    if let Some(ref comm) = comm_W_precommitted {
+      E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
+    }
+    E::PCS::check_commitment(&comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
 
     Ok(SplitR1CSInstance {
       comm_W_shared,
@@ -1024,7 +1033,11 @@ impl<E: Engine> SplitR1CSInstance<E> {
   ) -> Result<(), SpartanError> {
     if S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
+<<<<<<< HEAD
         E::PCS::check_partial(comm, S.num_shared)?;
+=======
+        E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         transcript.absorb(b"comm_W_shared", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -1035,7 +1048,11 @@ impl<E: Engine> SplitR1CSInstance<E> {
 
     if S.num_precommitted > 0 {
       if let Some(comm) = &self.comm_W_precommitted {
+<<<<<<< HEAD
         E::PCS::check_partial(comm, S.num_precommitted)?;
+=======
+        E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         transcript.absorb(b"comm_W_precommitted", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -1056,7 +1073,11 @@ impl<E: Engine> SplitR1CSInstance<E> {
       });
     }
 
+<<<<<<< HEAD
     E::PCS::check_partial(&self.comm_W_rest, S.num_rest)?;
+=======
+    E::PCS::check_commitment(&self.comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
     Ok(())
@@ -1070,8 +1091,8 @@ impl<E: Engine> SplitR1CSInstance<E> {
     ]
     .iter()
     .filter_map(|comm| comm.clone())
-    .collect::<Vec<PartialCommitment<E>>>();
-    let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
+    .collect::<Vec<Commitment<E>>>();
+    let comm_W = PCS::<E>::combine_commitments(&partial_comms)?;
 
     Ok(R1CSInstance {
       comm_W,
@@ -1231,7 +1252,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
   /// A method to create a multi-round split R1CS instance object using constituent elements
   pub fn new(
     s: &SplitMultiRoundR1CSShape<E>,
-    comm_w_per_round: Vec<PartialCommitment<E>>,
+    comm_w_per_round: Vec<Commitment<E>>,
     public_values: Vec<E::Scalar>,
     challenges_per_round: Vec<Vec<E::Scalar>>,
   ) -> Result<SplitMultiRoundR1CSInstance<E>, SpartanError> {
@@ -1254,7 +1275,15 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
 
     // Validate commitments per round
     for (round, comm) in comm_w_per_round.iter().enumerate() {
+<<<<<<< HEAD
       E::PCS::check_partial(comm, s.num_vars_per_round[round])?;
+=======
+      E::PCS::check_commitment(
+        comm,
+        s.num_vars_per_round[round],
+        MULTIROUND_COMMITMENT_WIDTH,
+      )?;
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     }
 
     Ok(SplitMultiRoundR1CSInstance {
@@ -1262,6 +1291,16 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
       public_values,
       challenges_per_round,
     })
+  }
+
+  /// Returns a read-only view of the per-round commitments, in order.
+  pub fn commitments_per_round(&self) -> &[Commitment<E>] {
+    &self.comm_w_per_round
+  }
+
+  /// Returns the commitment for a specific round, if it exists.
+  pub fn commitment_for_round(&self, round_index: usize) -> Option<&Commitment<E>> {
+    self.comm_w_per_round.get(round_index)
   }
 
   pub fn validate(
@@ -1273,7 +1312,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
     for round in 0..s.num_rounds {
       if round > 0 {
         // Absorb commitment of previous round to influence current round's challenges
-        E::PCS::check_partial(
+        E::PCS::check_commitment(
           &self.comm_w_per_round[round - 1],
           s.num_vars_per_round[round - 1],
         )?;
@@ -1297,7 +1336,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
 
   pub fn to_regular_instance(&self) -> Result<R1CSInstance<E>, SpartanError> {
     let partial_comms = self.comm_w_per_round.clone();
-    let comm_w = PCS::<E>::combine_partial(&partial_comms)?;
+    let comm_w = PCS::<E>::combine_commitments(&partial_comms)?;
 
     let all_challenges: Vec<E::Scalar> = self
       .challenges_per_round

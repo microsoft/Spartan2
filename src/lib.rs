@@ -15,24 +15,24 @@
 #![forbid(unsafe_code)]
 
 // private modules
+mod digest;
 mod math;
+mod nifs;
+mod polys;
 mod r1cs;
+mod zk;
 
 #[macro_use]
 mod macros;
 
 // public modules
 pub mod bellpepper;
-pub mod digest;
 pub mod errors;
 pub mod neutronnova;
-pub mod nifs;
-pub mod polys;
 pub mod provider;
 pub mod spartan;
 pub mod sumcheck;
 pub mod traits;
-pub mod zk;
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {
@@ -53,6 +53,5 @@ use traits::{Engine, pcs::PCSEngineTrait};
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;
 type VerifierKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::VerifierKey;
 type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
-type PartialCommitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::PartialCommitment;
 type PCS<E> = <E as Engine>::PCS;
 type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;

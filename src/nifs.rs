@@ -117,8 +117,8 @@ mod tests {
     let total_vars: usize = shape_mr.num_vars_per_round.iter().sum();
     let mut W_vec = vec![<E as Engine>::Scalar::ZERO; total_vars];
     W_vec[0] = <E as Engine>::Scalar::ONE; // Set first variable to 1.
-    let r_W = <<E as Engine>::PCS as PCSEngineTrait<E>>::blind(&ck);
-    let (comm_round, _r_remaining) = <<E as Engine>::PCS as PCSEngineTrait<E>>::commit_partial(
+    let r_W = <<E as Engine>::PCS as PCSEngineTrait<E>>::blind(&ck, total_vars);
+    let comm_round = <<E as Engine>::PCS as PCSEngineTrait<E>>::commit(
       &ck,
       &W_vec[0..shape_mr.num_vars_per_round[0]],
       &r_W,

@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  Blind, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, PartialCommitment, VerifierKey,
+  Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{
@@ -275,9 +275,9 @@ pub struct PrecommittedState<E: Engine> {
   cs: SatisfyingAssignment<E>,
   shared: Vec<AllocatedNum<E::Scalar>>,
   precommitted: Vec<AllocatedNum<E::Scalar>>,
-  comm_W_shared: Option<PartialCommitment<E>>,
+  comm_W_shared: Option<Commitment<E>>,
   r_W_shared: Option<Blind<E>>,
-  comm_W_precommitted: Option<PartialCommitment<E>>,
+  comm_W_precommitted: Option<Commitment<E>>,
   r_W_precommitted: Option<Blind<E>>,
   W: Vec<E::Scalar>,
 }
@@ -332,7 +332,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-      let comm_W_shared = PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
+      let comm_W_shared = PCS::<E>::commit(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
       (Some(comm_W_shared), Some(r_W_shared))
     } else {
       (None, None)
@@ -383,8 +383,12 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
+<<<<<<< HEAD
 
       let comm_W_precommitted = PCS::<E>::commit_partial(
+=======
+      let comm_W_precommitted = PCS::<E>::commit(
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         ck,
         &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
         &r_W_precommitted,
@@ -443,7 +447,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
-    let comm_W_rest = PCS::<E>::commit_partial(
+    let comm_W_rest = PCS::<E>::commit(
       ck,
       &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &r_W_rest,
@@ -663,7 +667,12 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
 
     // Commit to this round's variables
     let start_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
+<<<<<<< HEAD
     let (comm_w_round, _) = PCS::<E>::commit_partial(
+=======
+    let r_w_per_round = PCS::<E>::blind(ck, s.num_vars_per_round[round_index]);
+    let comm_w_round = PCS::<E>::commit(
+>>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
       ck,
       &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
       &state.r_w,

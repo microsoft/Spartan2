@@ -106,6 +106,9 @@ impl<E: Engine> SpartanVerifierCircuit<E> {
   fn idx_inner_final(&self) -> usize {
     self.idx_inner_start() + self.inner_rounds()
   }
+  fn idx_inner_commit_w(&self) -> usize {
+    self.idx_inner_final() + 1
+  }
 }
 
 impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
@@ -123,12 +126,14 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
     if round_index < self.outer_rounds() {
       Ok(1)
-    } else if round_index == self.idx_outer_final() || round_index == self.idx_inner_final() {
+    } else if round_index == self.idx_outer_final() {
       Ok(0)
     } else if round_index == self.idx_inner_setup()
       || (round_index >= self.idx_inner_start() && round_index < self.idx_inner_final())
     {
       Ok(1)
+    } else if round_index == self.idx_inner_final() || round_index == self.idx_inner_commit_w() {
+      Ok(0)
     } else {
       Err(SynthesisError::Unsatisfiable)
     }
@@ -392,7 +397,8 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       Ok((vec![p_ry], vec![r_y]))
     } else if round_index == self.idx_inner_final() {
       // Final inner equality
-      let prev_e = &prior_round_vars.last().expect("prev inner round")[0];
+      // The previous logical round whose claim must be matched is the last inner sum-check round
+      let prev_e = &prior_round_vars[self.idx_inner_final() - 1][0];
 
       let r = &prev_challenges[self.idx_inner_setup()][0];
 
@@ -405,13 +411,8 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       eval_C.inputize(cs.namespace(|| "eval_C_input"))?;
       let tau_at_rx = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx"), || Ok(self.tau_at_rx))?;
       tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_input"))?;
+      // Allocate eval_W locally; it will be committed in the next (commit-only) round
       let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W"), || Ok(self.eval_W))?;
-      // Padding for per-round commitment width
-      let padding_width = MULTIROUND_COMMITMENT_WIDTH - 1; // width minus the already-allocated `eval_W`
-      for j in 0..padding_width {
-        // Allocate a variable fixed to zero
-        alloc_zero::<E, _>(cs.namespace(|| format!("eval_W_pad_{j}")))?;
-      }
       let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
       eval_X.inputize(cs.namespace(|| "eval_X_input"))?;
 
@@ -547,14 +548,33 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         |lc| lc + expected.get_variable(),
       );
 
-      Ok((vec![prev_e.clone()], vec![]))
+      // Expose eval_W so the commit-only round can link its committed value to this variable
+      Ok((vec![prev_e.clone(), eval_W.clone()], vec![]))
+    } else if round_index == self.idx_inner_commit_w() {
+      // Dedicated commit round for eval_W only (padded to commitment width), linking to prior eval_W
+      let eval_W_commit =
+        AllocatedNum::alloc(cs.namespace(|| "eval_W_commit"), || Ok(self.eval_W))?;
+      // Link: eval_W_commit == eval_W from the inner-final round
+      let prior_eval_W = &prior_round_vars[self.idx_inner_final()][1];
+      cs.enforce(
+        || "link_eval_W",
+        |lc| lc + eval_W_commit.get_variable() - prior_eval_W.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc,
+      );
+      // Pad to width
+      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
+      for j in 0..pad_width {
+        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
+      }
+      Ok((vec![eval_W_commit], vec![]))
     } else {
       Err(SynthesisError::Unsatisfiable)
     }
   }
 
   fn num_rounds(&self) -> usize {
-    self.idx_inner_final() + 1
+    self.idx_inner_commit_w() + 1
   }
 }
 
@@ -629,10 +649,12 @@ impl<E: Engine> NeutronNovaVerifierCircuit<E> {
     self.idx_inner_setup() + 1
   }
 
+  /// Returns the round index at which the circuit commits only to `eval_W` for the step circuit.
   fn idx_inner_commit_w_step(&self) -> usize {
     self.idx_inner_start() + self.inner_rounds()
   }
 
+  /// Returns the round index at which the circuit commits only to `eval_W` for the core circuit.
   fn idx_inner_commit_w_core(&self) -> usize {
     self.idx_inner_commit_w_step() + 1
   }
@@ -1952,7 +1974,7 @@ mod tests {
 
     let (shape_mr, ck, _vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-    assert_eq!(shape_mr.num_cons_unpadded, 40);
+    assert_eq!(shape_mr.num_cons_unpadded, 41);
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
         &shape_mr, &ck, &circuit, false,

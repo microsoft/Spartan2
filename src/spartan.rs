@@ -162,8 +162,6 @@ pub struct R1CSSNARK<E: Engine> {
   random_U: RelaxedR1CSInstance<E>,
   // Folded relaxed witness produced during NIFS proving
   folded_W: RelaxedR1CSWitness<E>,
-  // PCS opening for the original witness commitment
-  eval_W: E::Scalar,
   // PCS evaluation argument
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
@@ -414,19 +412,10 @@ where
     )?;
 
     // Final evaluations for the circuit's last round
-    // Compute PCS evaluation for original witness at point r_y[1..]
-
-    let U_regular = U.to_regular_instance()?;
-    let (eval_W, eval_arg) = E::PCS::prove(
-      &pk.ck,
-      &mut transcript,
-      &U_regular.comm_W,
-      &W.W,
-      &W.r_W,
-      &r_y[1..],
-    )?;
+    let eval_W = MultilinearPolynomial::evaluate_with(&W.W, &r_y[1..]);
 
     // Compute final evaluations needed for the inner-final round
+    let U_regular = U.to_regular_instance()?;
     let eval_X = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
@@ -450,13 +439,25 @@ where
     verifier_circuit.eval_B = eval_B;
     verifier_circuit.eval_C = eval_C;
 
-    // Process the circuit's inner-final round and capture challenges (unused)
+    // Process the inner-final equality round
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
       &pk.verifier_shape_mr,
       &pk.verifier_ck_mr,
       &verifier_circuit,
       (num_rounds_x + 2) + num_rounds_y,
+      mr_is_small,
+      &mut transcript,
+    )?;
+
+    // Process the dedicated commit-only round for eval_W
+    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y + 1;
+    let _ = SatisfyingAssignment::<E>::process_round(
+      &mut state,
+      &pk.verifier_shape_mr,
+      &pk.verifier_ck_mr,
+      &verifier_circuit,
+      eval_w_commit_round,
       mr_is_small,
       &mut transcript,
     )?;
@@ -470,6 +471,7 @@ where
         &verifier_circuit,
         mr_is_small,
       )?;
+
     // Use the instance as produced by witness finalization; its public values
     // are exactly those absorbed during round 0 by the prover.
     let U_verifier_regular = U_verifier.to_regular_instance()?;
@@ -485,12 +487,24 @@ where
       &mut transcript,
     )?;
 
+    // prove the claimed polynomial evaluation at point r_y[1..]
+    let eval_arg = E::PCS::prove(
+      &pk.ck,
+      &pk.verifier_ck_mr,
+      &mut transcript,
+      &U_regular.comm_W,
+      &W.W,
+      &W.r_W,
+      &r_y[1..],
+      &U_verifier.comm_w_per_round[eval_w_commit_round],
+      &state.r_w_per_round[eval_w_commit_round],
+    )?;
+
     Ok(R1CSSNARK {
       U_verifier,
       nifs_proof,
       random_U,
       folded_W,
-      eval_W,
       eval_arg,
       U,
     })
@@ -528,7 +542,7 @@ where
     for round in 0..(S_verifier.num_rounds - 1) {
       if round > 0 {
         // absorb commitment of previous round and check size
-        <E::PCS as PCSEngineTrait<E>>::check_partial(
+        <E::PCS as PCSEngineTrait<E>>::check_commitment(
           &U_verifier.comm_w_per_round[round - 1],
           S_verifier.num_vars_per_round[round - 1],
         )?;
@@ -635,20 +649,10 @@ where
       });
     }
 
-    // Continue with PCS verification on the same transcript
-    E::PCS::verify(
-      &vk.vk_ee,
-      &mut transcript,
-      &U_regular.comm_W,
-      &r_y[1..],
-      &self.eval_W,
-      &self.eval_arg,
-    )?;
-
     // Finish the last (final) multi-round step to catch up with the prover's schedule
     let last_round = S_verifier.num_rounds - 1;
     if last_round > 0 {
-      <E::PCS as PCSEngineTrait<E>>::check_partial(
+      <E::PCS as PCSEngineTrait<E>>::check_commitment(
         &U_verifier.comm_w_per_round[last_round - 1],
         S_verifier.num_vars_per_round[last_round - 1],
       )?;
@@ -678,6 +682,19 @@ where
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Folded instance not satisfiable: {e}"),
       })?;
+
+    // Continue with PCS verification on the same transcript
+    // Use the commitment from the dedicated eval_W commit-only last round
+    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y + 1;
+    E::PCS::verify(
+      &vk.vk_ee,
+      &vk.verifier_ck_mr,
+      &mut transcript,
+      &U_regular.comm_W,
+      &r_y[1..],
+      &U_verifier.comm_w_per_round[eval_w_commit_round],
+      &self.eval_arg,
+    )?;
 
     // Return original circuit public IO carried in the proof
     Ok(self.U.public_values.clone())

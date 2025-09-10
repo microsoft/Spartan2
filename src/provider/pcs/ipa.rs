@@ -27,13 +27,14 @@ pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
 pub struct InnerProductInstance<E: Engine> {
   comm_a_vec: E::GE,
   b_vec: Vec<E::Scalar>,
-  c: E::Scalar,
+  comm_c: E::GE,
 }
 
 /// Holds witness for the inner product instance.
 pub struct InnerProductWitness<E: Engine> {
   a_vec: Vec<E::Scalar>,
   r_a: E::Scalar, // blind for the commitment to a_vec
+  r_c: E::Scalar, // blind for the commitment to c
 }
 
 impl<E: Engine> InnerProductInstance<E>
@@ -41,11 +42,11 @@ where
   E::GE: DlogGroup,
 {
   /// Creates a new inner product instance
-  pub fn new(comm_a_vec: &E::GE, b_vec: &[E::Scalar], c: &E::Scalar) -> Self {
+  pub fn new(comm_a_vec: &E::GE, b_vec: &[E::Scalar], comm_c: &E::GE) -> Self {
     InnerProductInstance {
       comm_a_vec: *comm_a_vec,
       b_vec: b_vec.to_vec(),
-      c: *c,
+      comm_c: *comm_c,
     }
   }
 }
@@ -58,7 +59,7 @@ where
     // we do not need to include self.b_vec as in our context it is produced from the transcript
     [
       self.comm_a_vec.to_transcript_bytes(),
-      self.c.to_transcript_bytes(),
+      self.comm_c.to_transcript_bytes(),
     ]
     .concat()
   }
@@ -66,10 +67,11 @@ where
 
 impl<E: Engine> InnerProductWitness<E> {
   /// Creates a new inner product witness
-  pub fn new(a_vec: &[E::Scalar], r_a: &E::Scalar) -> Self {
+  pub fn new(a_vec: &[E::Scalar], r_a: &E::Scalar, r_c: &E::Scalar) -> Self {
     InnerProductWitness {
       a_vec: a_vec.to_vec(),
       r_a: *r_a,
+      r_c: *r_c,
     }
   }
 }
@@ -120,6 +122,7 @@ where
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
     h: &<E::GE as DlogGroup>::AffineGroupElement,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    h_c: &<E::GE as DlogGroup>::AffineGroupElement,
     U: &InnerProductInstance<E>,
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
@@ -138,7 +141,7 @@ where
 
     let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)?
       + E::GE::group(h) * r_delta;
-    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h) * r_beta;
+    let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + E::GE::group(h_c) * r_beta;
 
     transcript.absorb(b"delta", &delta);
     transcript.absorb(b"beta", &beta);
@@ -151,7 +154,7 @@ where
       .collect::<Vec<E::Scalar>>();
 
     let z_delta = r * W.r_a + r_delta;
-    let z_beta = r_beta; // since r_c = 0 
+    let z_beta = r * W.r_c + r_beta;
 
     Ok(Self {
       delta,
@@ -163,11 +166,13 @@ where
   }
 
   /// Verifies the inner product argument
+  #[allow(clippy::too_many_arguments)]
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],
     h: &<E::GE as DlogGroup>::AffineGroupElement,
     ck_c: &<E::GE as DlogGroup>::AffineGroupElement,
+    h_c: &<E::GE as DlogGroup>::AffineGroupElement,
     n: usize,
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
@@ -196,13 +201,17 @@ where
       != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)?
         + E::GE::group(h) * self.z_delta
     {
-      return Err(SpartanError::InvalidPCS);
+      return Err(SpartanError::InvalidPCS {
+        reason: "Inner product argument verify: First equation failed".to_string(),
+      });
     }
 
-    if E::GE::group(ck_c) * (U.c * r) + self.beta
-      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + E::GE::group(h) * self.z_beta
+    if U.comm_c * r + self.beta
+      != E::GE::group(ck_c) * inner_product(&self.z_vec, &U.b_vec) + E::GE::group(h_c) * self.z_beta
     {
-      return Err(SpartanError::InvalidPCS);
+      return Err(SpartanError::InvalidPCS {
+        reason: "Inner product argument verify: Second equation failed".to_string(),
+      });
     }
 
     Ok(())
