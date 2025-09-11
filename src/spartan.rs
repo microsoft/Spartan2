@@ -430,38 +430,36 @@ where
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
     let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
 
-    // Evaluate A, B, C at (r_x, r_y)
-    let (eval_A, eval_B, eval_C) = {
-      let T_y = EqPolynomial::evals_from_points(&r_y);
-      multi_inner_product(&T_y, &evals_A, &evals_B, &evals_C)
-    };
-
-    // Set verifier circuit public values before processing inner-final round
-    verifier_circuit.eval_W = eval_W;
-    verifier_circuit.eval_X = eval_X;
-    verifier_circuit.eval_A = eval_A;
-    verifier_circuit.eval_B = eval_B;
-    verifier_circuit.eval_C = eval_C;
-
-    // Process the inner-final equality round
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
-      (num_rounds_x + 2) + num_rounds_y,
-      mr_is_small,
-      &mut transcript,
-    )?;
-
     // Process the dedicated commit-only round for eval_W
-    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y + 1;
+    verifier_circuit.eval_W = eval_W;
+    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
       &pk.verifier_shape_mr,
       &pk.verifier_ck_mr,
       &verifier_circuit,
       eval_w_commit_round,
+      mr_is_small,
+      &mut transcript,
+    )?;
+
+    // Process the inner-final equality round
+    // Evaluate A, B, C at (r_x, r_y)
+    let (eval_A, eval_B, eval_C) = {
+      let T_y = EqPolynomial::evals_from_points(&r_y);
+      multi_inner_product(&T_y, &evals_A, &evals_B, &evals_C)
+    };
+    // Set verifier circuit public values before processing inner-final round
+    verifier_circuit.eval_X = eval_X;
+    verifier_circuit.eval_A = eval_A;
+    verifier_circuit.eval_B = eval_B;
+    verifier_circuit.eval_C = eval_C;
+    let _ = SatisfyingAssignment::<E>::process_round(
+      &mut state,
+      &pk.verifier_shape_mr,
+      &pk.verifier_ck_mr,
+      &verifier_circuit,
+      eval_w_commit_round + 1,
       mr_is_small,
       &mut transcript,
     )?;
@@ -689,7 +687,7 @@ where
 
     // Continue with PCS verification on the same transcript
     // Use the commitment from the dedicated eval_W commit-only last round
-    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y + 1;
+    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
     E::PCS::verify(
       &vk.vk_ee,
       &vk.verifier_ck_mr,
@@ -835,6 +833,7 @@ mod tests {
 
     // verify the SNARK
     let res = snark.verify(&vk);
+    println!("res = {res:?}");
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
   }

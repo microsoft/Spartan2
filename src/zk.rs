@@ -16,7 +16,7 @@ use ff::{Field, PrimeField};
 
 /// Evaluates a polynomial using Horner's method within R1CS constraints.
 fn eval_poly_horner<E: Engine, CS: ConstraintSystem<E::Scalar>>(
-  cs: &mut CS,
+  mut cs: CS,
   coeffs: &[AllocatedNum<E::Scalar>],
   x: &AllocatedNum<E::Scalar>,
 ) -> Result<AllocatedNum<E::Scalar>, SynthesisError> {
@@ -24,32 +24,20 @@ fn eval_poly_horner<E: Engine, CS: ConstraintSystem<E::Scalar>>(
   let mut acc = coeffs.last().unwrap().clone(); // degree ≥ 1 in practice
   // We iterate from degree-1 down to 0 (excluding last which we already used).
   for (i, c_i) in coeffs.iter().rev().skip(1).enumerate() {
-    // acc = acc * x
-    let acc_times_x = AllocatedNum::alloc(cs.namespace(|| format!("horner_mul_{i}")), || {
+    // new_acc = acc * x + c_i
+    let new_acc = AllocatedNum::alloc(cs.namespace(|| format!("new_acc_{i}")), || {
       let a = acc.get_value().unwrap_or(E::Scalar::ZERO);
       let xv = x.get_value().unwrap_or(E::Scalar::ZERO);
-      Ok(a * xv)
+      let c = c_i.get_value().unwrap_or(E::Scalar::ZERO);
+      Ok(a * xv + c)
     })?;
     cs.enforce(
-      || format!("horner_mul_enf_{i}"),
+      || format!("enforce_new_acc_{i}"),
       |lc| lc + acc.get_variable(),
       |lc| lc + x.get_variable(),
-      |lc| lc + acc_times_x.get_variable(),
+      |lc| lc + new_acc.get_variable() - c_i.get_variable(),
     );
 
-    // acc = acc * x + c_i
-    let new_acc = AllocatedNum::alloc(cs.namespace(|| format!("horner_add_{i}")), || {
-      let prod = acc_times_x.get_value().unwrap_or(E::Scalar::ZERO);
-      let cv = c_i.get_value().unwrap_or(E::Scalar::ZERO);
-      Ok(prod + cv)
-    })?;
-    // Enforce new_acc = acc_times_x + c_i
-    cs.enforce(
-      || format!("horner_add_enf_{i}"),
-      |lc| lc + acc_times_x.get_variable() + c_i.get_variable(),
-      |lc| lc + CS::one(),
-      |lc| lc + new_acc.get_variable(),
-    );
     acc = new_acc;
   }
   Ok(acc)
@@ -103,11 +91,11 @@ impl<E: Engine> SpartanVerifierCircuit<E> {
   fn idx_inner_start(&self) -> usize {
     self.idx_inner_setup() + 1
   }
-  fn idx_inner_final(&self) -> usize {
+  fn idx_inner_commit_w(&self) -> usize {
     self.idx_inner_start() + self.inner_rounds()
   }
-  fn idx_inner_commit_w(&self) -> usize {
-    self.idx_inner_final() + 1
+  fn idx_inner_final(&self) -> usize {
+    self.idx_inner_commit_w() + 1
   }
 }
 
@@ -129,10 +117,10 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
     } else if round_index == self.idx_outer_final() {
       Ok(0)
     } else if round_index == self.idx_inner_setup()
-      || (round_index >= self.idx_inner_start() && round_index < self.idx_inner_final())
+      || (round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w())
     {
       Ok(1)
-    } else if round_index == self.idx_inner_final() || round_index == self.idx_inner_commit_w() {
+    } else if round_index == self.idx_inner_commit_w() || round_index == self.idx_inner_final() {
       Ok(0)
     } else {
       Err(SynthesisError::Unsatisfiable)
@@ -147,41 +135,32 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
     prev_challenges: &[Vec<AllocatedNum<E::Scalar>>],
     challenges: Option<&[E::Scalar]>,
   ) -> Result<(Vec<AllocatedNum<E::Scalar>>, Vec<AllocatedNum<E::Scalar>>), SynthesisError> {
-    // Helper macros
-    macro_rules! alloc_coeffs {
-      ($ns:expr, $coeffs:expr) => {{
-        let mut v = Vec::new();
-        for (i, c) in $coeffs.iter().enumerate() {
-          v.push(AllocatedNum::alloc(
-            $ns.namespace(|| format!("coef_{i}")),
-            || Ok(*c),
-          )?);
-        }
-        v
-      }};
+    // Helper method
+    fn alloc_coeffs<E: Engine, CS: ConstraintSystem<E::Scalar>>(
+      mut cs: CS,
+      coeffs: &[E::Scalar],
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      coeffs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| AllocatedNum::alloc(cs.namespace(|| format!("coef_{i}")), || Ok(*c)))
+        .collect::<Result<Vec<_>, _>>()
     }
 
     // Routing
     if round_index < self.outer_rounds() {
       // Outer cubic sum-check per-round consistency
-      let i = round_index;
-
-      let mut ns_round = cs.namespace(|| format!("outer_round_{i}"));
-      let coeffs_raw = self.outer_polys[i];
-      let coeffs = alloc_coeffs!(ns_round, &coeffs_raw);
-
-      let r_val = challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO);
-      let r = AllocatedNum::alloc_input(ns_round.namespace(|| "r_x"), || Ok(r_val))?;
-
-      // Sum-check consistency: g(0)+g(1)=prev_e
-      let sum_p01 = AllocatedNum::alloc(ns_round.namespace(|| "sum_p01"), || {
-        Ok(coeffs_raw[0] + coeffs_raw[0] + coeffs_raw[1] + coeffs_raw[2] + coeffs_raw[3])
+      let coeffs = alloc_coeffs::<E, _>(
+        cs.namespace(|| format!("outer_sc_coeffs_round_{}", round_index)),
+        &self.outer_polys[round_index],
+      )?;
+      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{round_index}")), || {
+        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
       })?;
 
-      ns_round.enforce(
-        || "sum_p01_def",
-        |lc| lc + sum_p01.get_variable(),
-        |lc| lc + CS::one(),
+      // Sum-check consistency: g(0)+g(1)=prev_e; prev_e is 0 for first round
+      cs.enforce(
+        || format!("outer_prev_claim_{round_index}"),
         |lc| {
           lc + coeffs[0].get_variable()
             + coeffs[0].get_variable()
@@ -189,30 +168,23 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
             + coeffs[2].get_variable()
             + coeffs[3].get_variable()
         },
+        |lc| lc + CS::one(),
+        |lc| {
+          if round_index == 0 {
+            lc
+          } else {
+            let prev_e = &prior_round_vars.last().expect("has previous round")[0];
+            lc + prev_e.get_variable()
+          }
+        },
       );
 
-      if i == 0 {
-        ns_round.enforce(
-          || "outer_prev_claim_zero",
-          |lc| lc + sum_p01.get_variable(),
-          |lc| lc + CS::one(),
-          |lc| lc, // constant 0
-        );
-      } else {
-        let prev_e = &prior_round_vars.last().expect("has previous round")[0];
-        ns_round.enforce(
-          || format!("outer_consistency_{i}"),
-          |lc| lc + sum_p01.get_variable(),
-          |lc| lc + CS::one(),
-          |lc| lc + prev_e.get_variable(),
-        );
-      }
-
       // Compute p(r)
-      let p_r = {
-        let mut ns_eval = ns_round.namespace(|| "poly_eval");
-        eval_poly_horner::<E, _>(&mut ns_eval, &coeffs, &r)?
-      };
+      let p_r = eval_poly_horner::<E, _>(
+        &mut cs.namespace(|| format!("poly_eval_{round_index}")),
+        &coeffs,
+        &r,
+      )?;
 
       Ok((vec![p_r], vec![r]))
     } else if round_index == self.idx_outer_final() {
@@ -222,10 +194,11 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       let claim_Az = AllocatedNum::alloc(cs.namespace(|| "Az_outer"), || Ok(self.claim_Az))?;
       let claim_Bz = AllocatedNum::alloc(cs.namespace(|| "Bz_outer"), || Ok(self.claim_Bz))?;
       let claim_Cz = AllocatedNum::alloc(cs.namespace(|| "Cz_outer"), || Ok(self.claim_Cz))?;
-      let tau = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx_outer"), || Ok(self.tau_at_rx))?;
+      let tau_at_rx =
+        AllocatedNum::alloc(cs.namespace(|| "tau_at_rx_outer"), || Ok(self.tau_at_rx))?;
 
-      // diff = Az*Bz - Cz
-      let prod = AllocatedNum::alloc(cs.namespace(|| "AzBz"), || {
+      // prod_Az_Bz = Az*Bz
+      let prod_Az_Bz = AllocatedNum::alloc(cs.namespace(|| "AzBz"), || {
         let a = claim_Az
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
@@ -238,42 +211,15 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         || "prod = Az*Bz",
         |lc| lc + claim_Az.get_variable(),
         |lc| lc + claim_Bz.get_variable(),
-        |lc| lc + prod.get_variable(),
+        |lc| lc + prod_Az_Bz.get_variable(),
       );
 
-      let diff = AllocatedNum::alloc(cs.namespace(|| "diff"), || {
-        let p = prod.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        let c = claim_Cz
-          .get_value()
-          .ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(p - c)
-      })?;
+      // prev_e = tau_at_rx * (prod_AzBz - Cz)
       cs.enforce(
-        || "diff = prod - Cz",
-        |lc| lc + prod.get_variable() - claim_Cz.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + diff.get_variable(),
-      );
-
-      // expected = tau * diff
-      let expected = AllocatedNum::alloc(cs.namespace(|| "expected"), || {
-        let t = tau.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        let d = diff.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(t * d)
-      })?;
-      cs.enforce(
-        || "expected = tau*diff",
-        |lc| lc + tau.get_variable(),
-        |lc| lc + diff.get_variable(),
-        |lc| lc + expected.get_variable(),
-      );
-
-      // prev_e == expected
-      cs.enforce(
-        || "outer_final_eq",
+        || "prev_e = tau_at_rx*(prod_AzBz - Cz)",
+        |lc| lc + tau_at_rx.get_variable(),
+        |lc| lc + prod_Az_Bz.get_variable() - claim_Cz.get_variable(),
         |lc| lc + prev_e.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + expected.get_variable(),
       );
 
       Ok((
@@ -307,8 +253,8 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         |lc| lc + r_sq.get_variable(),
       );
 
-      // tmp1 = Bz * r
-      let tmp1 = AllocatedNum::alloc(cs.namespace(|| "tmp1"), || {
+      // r_times_Bz = Bz * r
+      let r_times_Bz = AllocatedNum::alloc(cs.namespace(|| "r_times_Bz"), || {
         let b = claim_Bz
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
@@ -316,91 +262,88 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         Ok(b * rv)
       })?;
       cs.enforce(
-        || "tmp1 = Bz*r",
+        || "r_times_Bz = Bz*r",
         |lc| lc + claim_Bz.get_variable(),
         |lc| lc + r.get_variable(),
-        |lc| lc + tmp1.get_variable(),
+        |lc| lc + r_times_Bz.get_variable(),
       );
 
-      // tmp2 = Cz * r^2
-      let tmp2 = AllocatedNum::alloc(cs.namespace(|| "tmp2"), || {
-        let c = claim_Cz
+      // claim_inner_joint = Az + r_times_claim_Bz + r_sq * claim_Cz
+      // We instead check: claim_inner_joint - Az - r_times_claim_Bz = r_sq * claim_Cz
+      let claim_inner_joint = AllocatedNum::alloc(cs.namespace(|| "inner_joint"), || {
+        let claim_Az_v = claim_Az
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
-        let rsq = r_sq.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(c * rsq)
-      })?;
-      cs.enforce(
-        || "tmp2 = Cz*r_sq",
-        |lc| lc + claim_Cz.get_variable(),
-        |lc| lc + r_sq.get_variable(),
-        |lc| lc + tmp2.get_variable(),
-      );
-
-      // claim_inner_joint = Az + tmp1 + tmp2
-      let inner_joint = AllocatedNum::alloc(cs.namespace(|| "inner_joint"), || {
-        let a = claim_Az
+        let r_times_Bz_v = r_times_Bz
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
-        let t1 = tmp1.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        let t2 = tmp2.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(a + t1 + t2)
+        let r_sq_v = r_sq.get_value().ok_or(SynthesisError::AssignmentMissing)?;
+        let claim_Cz_v = claim_Cz
+          .get_value()
+          .ok_or(SynthesisError::AssignmentMissing)?;
+        Ok(claim_Az_v + r_times_Bz_v + r_sq_v * claim_Cz_v)
       })?;
       cs.enforce(
         || "inner_joint_eq",
-        |lc| lc + claim_Az.get_variable() + tmp1.get_variable() + tmp2.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + inner_joint.get_variable(),
+        |lc| lc + claim_Cz.get_variable(),
+        |lc| lc + r_sq.get_variable(),
+        |lc| {
+          lc + claim_inner_joint.get_variable()
+            - claim_Az.get_variable()
+            - r_times_Bz.get_variable()
+        },
       );
 
-      Ok((vec![inner_joint], vec![r]))
-    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_final() {
+      Ok((vec![claim_inner_joint], vec![r]))
+    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w() {
       // Inner quadratic sum-check per-round consistency
       let idx = round_index - self.idx_inner_start();
 
-      let mut ns_round = cs.namespace(|| format!("inner_round_{idx}"));
-
-      let coeffs_raw = self.inner_polys[idx];
-      let coeffs = alloc_coeffs!(ns_round, &coeffs_raw);
-
-      let r_y_val = challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO);
-      let r_y = AllocatedNum::alloc_input(ns_round.namespace(|| "r_y"), || Ok(r_y_val))?;
+      let coeffs = alloc_coeffs::<E, _>(
+        cs.namespace(|| format!("inner_round_{idx}")),
+        &self.inner_polys[idx],
+      )?;
+      let r_y =
+        AllocatedNum::alloc_input(cs.namespace(|| format!("inner_round_{idx}_ry")), || {
+          Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+        })?;
 
       // Sum-check consistency: h(0)+h(1)=prev_e
-      let sum_p01 = AllocatedNum::alloc(ns_round.namespace(|| "sum_p01"), || {
-        Ok(coeffs_raw[0] + coeffs_raw[0] + coeffs_raw[1] + coeffs_raw[2])
-      })?;
-      ns_round.enforce(
-        || "sum_p01_def",
-        |lc| lc + sum_p01.get_variable(),
-        |lc| lc + CS::one(),
+      let prev_e = &prior_round_vars.last().expect("prev inner round")[0];
+      cs.enforce(
+        || format!("inner_consistency_{idx}"),
         |lc| {
           lc + coeffs[0].get_variable()
             + coeffs[0].get_variable()
             + coeffs[1].get_variable()
             + coeffs[2].get_variable()
         },
-      );
-
-      let prev_e = &prior_round_vars.last().expect("prev inner round")[0];
-      ns_round.enforce(
-        || format!("inner_consistency_{idx}"),
-        |lc| lc + sum_p01.get_variable(),
         |lc| lc + CS::one(),
         |lc| lc + prev_e.get_variable(),
       );
 
-      let p_ry = {
-        let mut ns_eval = ns_round.namespace(|| "poly_eval");
-        eval_poly_horner::<E, _>(&mut ns_eval, &coeffs, &r_y)?
-      };
+      let p_ry = eval_poly_horner::<E, _>(
+        cs.namespace(|| format!("inner_round_{idx}_poly_eval")),
+        &coeffs,
+        &r_y,
+      )?;
       Ok((vec![p_ry], vec![r_y]))
+    } else if round_index == self.idx_inner_commit_w() {
+      // Dedicated commit round for eval_W only (padded to commitment width)
+      let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W"), || Ok(self.eval_W))?;
+
+      // Pad to width
+      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
+      for j in 0..pad_width {
+        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
+      }
+      Ok((vec![eval_W], vec![]))
     } else if round_index == self.idx_inner_final() {
       // Final inner equality
       // The previous logical round whose claim must be matched is the last inner sum-check round
-      let prev_e = &prior_round_vars[self.idx_inner_final() - 1][0];
-
+      let prev_e = &prior_round_vars[self.idx_inner_final() - 2][0];
       let r = &prev_challenges[self.idx_inner_setup()][0];
+      let eval_W = &prior_round_vars[self.idx_inner_commit_w()][0];
 
       // Public inputs for eval_A, eval_B, eval_C, tau_at_rx, and eval_X are inputized here when known
       let eval_A = AllocatedNum::alloc(cs.namespace(|| "eval_A"), || Ok(self.eval_A))?;
@@ -411,60 +354,37 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       eval_C.inputize(cs.namespace(|| "eval_C_input"))?;
       let tau_at_rx = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx"), || Ok(self.tau_at_rx))?;
       tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_input"))?;
-      // Allocate eval_W locally; it will be committed in the next (commit-only) round
-      let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W"), || Ok(self.eval_W))?;
+
       let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
       eval_X.inputize(cs.namespace(|| "eval_X_input"))?;
 
       let r_y0 = &prev_challenges[self.idx_inner_start()][0];
-      let one_minus_ry0 = AllocatedNum::alloc(cs.namespace(|| "one_minus_ry0"), || {
-        let rv = r_y0.get_value().unwrap_or(E::Scalar::ZERO);
-        Ok(E::Scalar::ONE - rv)
-      })?;
-      cs.enforce(
-        || "one_minus_ry0_def",
-        |lc| lc + one_minus_ry0.get_variable() + r_y0.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + CS::one(),
-      );
 
-      // tmp_w = eval_W * one_minus_ry0
+      // tmp_w = eval_W * (1 - ry0)
       let tmp_w = AllocatedNum::alloc(cs.namespace(|| "tmp_w"), || {
         let ew = eval_W.get_value().unwrap_or(E::Scalar::ZERO);
-        let om = one_minus_ry0.get_value().unwrap_or(E::Scalar::ZERO);
+        let om = E::Scalar::ONE - r_y0.get_value().unwrap_or(E::Scalar::ZERO);
         Ok(ew * om)
       })?;
       cs.enforce(
         || "tmp_w_def",
         |lc| lc + eval_W.get_variable(),
-        |lc| lc + one_minus_ry0.get_variable(),
+        |lc| lc + CS::one() - r_y0.get_variable(),
         |lc| lc + tmp_w.get_variable(),
       );
 
-      // tmp_x = eval_X * r_y0
-      let tmp_x = AllocatedNum::alloc(cs.namespace(|| "tmp_x"), || {
-        let ex = eval_X.get_value().unwrap_or(E::Scalar::ZERO);
-        let ry = r_y0.get_value().unwrap_or(E::Scalar::ZERO);
-        Ok(ex * ry)
-      })?;
-      cs.enforce(
-        || "tmp_x_def",
-        |lc| lc + eval_X.get_variable(),
-        |lc| lc + r_y0.get_variable(),
-        |lc| lc + tmp_x.get_variable(),
-      );
-
-      // sum_z_expected = tmp_w + tmp_x
+      // sum_z_expected = tmp_w + eval_X * r_y0
+      // sum_z_expected - tmp_w = eval_X * r_y0
       let sum_z_expected = AllocatedNum::alloc(cs.namespace(|| "sum_z_expected"), || {
         let tw = tmp_w.get_value().unwrap_or(E::Scalar::ZERO);
-        let tx = tmp_x.get_value().unwrap_or(E::Scalar::ZERO);
-        Ok(tw + tx)
+        let tx = eval_X.get_value().unwrap_or(E::Scalar::ZERO);
+        Ok(tw + tx * r_y0.get_value().unwrap_or(E::Scalar::ZERO))
       })?;
       cs.enforce(
         || "sum_z_expected_def",
-        |lc| lc + tmp_w.get_variable() + tmp_x.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + sum_z_expected.get_variable(),
+        |lc| lc + eval_X.get_variable(),
+        |lc| lc + r_y0.get_variable(),
+        |lc| lc + sum_z_expected.get_variable() - tmp_w.get_variable(),
       );
 
       // r^2
@@ -509,72 +429,22 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         |lc| lc + tmp2.get_variable(),
       );
 
-      // sum = A + tmp1 + tmp2
-      let sum = AllocatedNum::alloc(cs.namespace(|| "sum_final"), || {
-        let a = eval_A
-          .get_value()
-          .ok_or(SynthesisError::AssignmentMissing)?;
-        let t1 = tmp1.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        let t2 = tmp2.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(a + t1 + t2)
-      })?;
+      // prev_e = (eval_A + tmp1 + tmp2) * sum_z_expected
       cs.enforce(
-        || "sum_final_def",
+        || "prev_e = (eval_A + tmp1 + tmp2)*sum_z_expected",
         |lc| lc + eval_A.get_variable() + tmp1.get_variable() + tmp2.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + sum.get_variable(),
-      );
-
-      // expected = sum * sum_z_expected
-      let expected = AllocatedNum::alloc(cs.namespace(|| "expected_final"), || {
-        let s = sum.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        let z = sum_z_expected
-          .get_value()
-          .ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(s * z)
-      })?;
-      cs.enforce(
-        || "expected_final = sum*sum_z_expected",
-        |lc| lc + sum.get_variable(),
         |lc| lc + sum_z_expected.get_variable(),
-        |lc| lc + expected.get_variable(),
-      );
-
-      // prev_e == expected
-      cs.enforce(
-        || "inner_final_eq",
         |lc| lc + prev_e.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc + expected.get_variable(),
       );
 
-      // Expose eval_W so the commit-only round can link its committed value to this variable
-      Ok((vec![prev_e.clone(), eval_W.clone()], vec![]))
-    } else if round_index == self.idx_inner_commit_w() {
-      // Dedicated commit round for eval_W only (padded to commitment width), linking to prior eval_W
-      let eval_W_commit =
-        AllocatedNum::alloc(cs.namespace(|| "eval_W_commit"), || Ok(self.eval_W))?;
-      // Link: eval_W_commit == eval_W from the inner-final round
-      let prior_eval_W = &prior_round_vars[self.idx_inner_final()][1];
-      cs.enforce(
-        || "link_eval_W",
-        |lc| lc + eval_W_commit.get_variable() - prior_eval_W.get_variable(),
-        |lc| lc + CS::one(),
-        |lc| lc,
-      );
-      // Pad to width
-      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
-      for j in 0..pad_width {
-        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
-      }
-      Ok((vec![eval_W_commit], vec![]))
+      Ok((vec![], vec![]))
     } else {
       Err(SynthesisError::Unsatisfiable)
     }
   }
 
   fn num_rounds(&self) -> usize {
-    self.idx_inner_commit_w() + 1
+    self.idx_inner_final() + 1
   }
 }
 
@@ -1974,7 +1844,7 @@ mod tests {
 
     let (shape_mr, ck, _vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-    assert_eq!(shape_mr.num_cons_unpadded, 41);
+    assert_eq!(shape_mr.num_cons_unpadded, 26);
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
         &shape_mr, &ck, &circuit, false,
