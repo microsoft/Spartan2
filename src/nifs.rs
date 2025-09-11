@@ -181,7 +181,7 @@ mod tests {
     // Witness generation across rounds
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape_mr, &ck, &circuit, is_small,
+        &shape_mr,
       )
       .unwrap();
     let mut transcript = <E as Engine>::TE::new(b"nifs");
@@ -205,7 +205,7 @@ mod tests {
 
     let (inst_split, wit_reg) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape_mr, &ck, &circuit, is_small,
+        &mut state, &shape_mr, is_small,
       )
       .unwrap();
 

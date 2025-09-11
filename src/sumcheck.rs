@@ -721,14 +721,12 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let coeffs = {
-        let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-        let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z, &comb);
-        let evals = vec![eval0, claim_current_round - eval0, eval2];
-        let poly = UniPoly::from_evals(&evals)?;
-        [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]]
-      };
-      verifier_circuit.inner_polys[j] = coeffs;
+      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
+      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z, &comb);
+      let evals = vec![eval0, claim_current_round - eval0, eval2];
+      let poly = UniPoly::from_evals(&evals)?;
+
+      verifier_circuit.inner_polys[j] = [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
 
       // -------- transcript / witness handling --------
       let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
@@ -750,7 +748,7 @@ impl<E: Engine> SumcheckProof<E> {
       );
 
       // -------- advance claim for next round --------
-      claim_current_round = coeffs[0] + coeffs[1] * r_j + coeffs[2] * r_j * r_j;
+      claim_current_round = poly.evaluate(&r_j);
     }
 
     Ok((r_y, vec![poly_ABC[0], poly_z[0]]))
@@ -901,20 +899,19 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let (coeffs_step, coeffs_core) = {
-        let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-        // step branch
-        let (eval0_s, eval2_s) = Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb);
-        let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s];
-        let poly_s = UniPoly::from_evals(&evals_s)?;
-        let step = [poly_s.coeffs[0], poly_s.coeffs[1], poly_s.coeffs[2]];
-        // core branch
-        let (eval0_c, eval2_c) = Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb);
-        let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c];
-        let poly_c = UniPoly::from_evals(&evals_c)?;
-        let core = [poly_c.coeffs[0], poly_c.coeffs[1], poly_c.coeffs[2]];
-        (step, core)
-      };
+      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
+      // step branch
+      let (eval0_s, eval2_s) = Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb);
+      let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s];
+      let poly_s = UniPoly::from_evals(&evals_s)?;
+      let coeffs_step = [poly_s.coeffs[0], poly_s.coeffs[1], poly_s.coeffs[2]];
+
+      // core branch
+      let (eval0_c, eval2_c) = Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb);
+      let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c];
+      let poly_c = UniPoly::from_evals(&evals_c)?;
+      let coeffs_core = [poly_c.coeffs[0], poly_c.coeffs[1], poly_c.coeffs[2]];
+
       verifier_circuit.inner_polys_step[j] = coeffs_step;
       verifier_circuit.inner_polys_core[j] = coeffs_core;
 
@@ -948,8 +945,8 @@ impl<E: Engine> SumcheckProof<E> {
       );
 
       // -------- advance claim for next round --------
-      claim_step_round = coeffs_step[0] + coeffs_step[1] * r_j + coeffs_step[2] * r_j * r_j;
-      claim_core_round = coeffs_core[0] + coeffs_core[1] * r_j + coeffs_core[2] * r_j * r_j;
+      claim_step_round = poly_s.evaluate(&r_j);
+      claim_core_round = poly_c.evaluate(&r_j);
     }
 
     Ok((
@@ -985,47 +982,45 @@ impl<E: Engine> SumcheckProof<E> {
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
-      let (coeffs_step, coeffs_core) = {
-        let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
-          *a * (*b * *c - *d)
-        };
 
-        // step branch
-        let (eval0_s, eval2_s, eval3_s) = Self::compute_eval_points_cubic_with_additive_term(
-          poly_A,
-          poly_B_step,
-          poly_C_step,
-          poly_D_step,
-          &comb,
-        );
-        let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s, eval3_s];
-        let poly_s = UniPoly::from_evals(&evals_s)?;
-        let step = [
-          poly_s.coeffs[0],
-          poly_s.coeffs[1],
-          poly_s.coeffs[2],
-          poly_s.coeffs[3],
-        ];
-
-        // core branch
-        let (eval0_c, eval2_c, eval3_c) = Self::compute_eval_points_cubic_with_additive_term(
-          poly_A,
-          poly_B_core,
-          poly_C_core,
-          poly_D_core,
-          &comb,
-        );
-        let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c, eval3_c];
-        let poly_c = UniPoly::from_evals(&evals_c)?;
-        let core = [
-          poly_c.coeffs[0],
-          poly_c.coeffs[1],
-          poly_c.coeffs[2],
-          poly_c.coeffs[3],
-        ];
-
-        (step, core)
+      let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
+        *a * (*b * *c - *d)
       };
+
+      // step branch
+      let (eval0_s, eval2_s, eval3_s) = Self::compute_eval_points_cubic_with_additive_term(
+        poly_A,
+        poly_B_step,
+        poly_C_step,
+        poly_D_step,
+        &comb,
+      );
+      let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s, eval3_s];
+      let poly_s = UniPoly::from_evals(&evals_s)?;
+      let coeffs_step = [
+        poly_s.coeffs[0],
+        poly_s.coeffs[1],
+        poly_s.coeffs[2],
+        poly_s.coeffs[3],
+      ];
+
+      // core branch
+      let (eval0_c, eval2_c, eval3_c) = Self::compute_eval_points_cubic_with_additive_term(
+        poly_A,
+        poly_B_core,
+        poly_C_core,
+        poly_D_core,
+        &comb,
+      );
+      let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c, eval3_c];
+      let poly_c = UniPoly::from_evals(&evals_c)?;
+      let coeffs_core = [
+        poly_c.coeffs[0],
+        poly_c.coeffs[1],
+        poly_c.coeffs[2],
+        poly_c.coeffs[3],
+      ];
+
       verifier_circuit.outer_polys_step[i] = coeffs_step;
       verifier_circuit.outer_polys_core[i] = coeffs_core;
 
@@ -1043,12 +1038,8 @@ impl<E: Engine> SumcheckProof<E> {
       r_x.push(r_i);
 
       // -------- advance claim and bind polys --------
-      let r2 = r_i * r_i;
-      let r3 = r2 * r_i;
-      claim_step_round =
-        coeffs_step[0] + coeffs_step[1] * r_i + coeffs_step[2] * r2 + coeffs_step[3] * r3;
-      claim_core_round =
-        coeffs_core[0] + coeffs_core[1] * r_i + coeffs_core[2] * r2 + coeffs_core[3] * r3;
+      claim_step_round = poly_s.evaluate(&r_i);
+      claim_core_round = poly_c.evaluate(&r_i);
 
       // bind polynomials to the verifier's challenge
       rayon::join(

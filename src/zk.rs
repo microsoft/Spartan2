@@ -68,9 +68,6 @@ pub struct SpartanVerifierCircuit<E: Engine> {
   pub(crate) claim_Cz: E::Scalar,
   pub(crate) tau_at_rx: E::Scalar,
   pub(crate) inner_polys: Vec<[E::Scalar; 3]>,
-  pub(crate) eval_A: E::Scalar,
-  pub(crate) eval_B: E::Scalar,
-  pub(crate) eval_C: E::Scalar,
   pub(crate) eval_W: E::Scalar,
   pub(crate) eval_X: E::Scalar,
 }
@@ -100,17 +97,6 @@ impl<E: Engine> SpartanVerifierCircuit<E> {
 }
 
 impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
-  fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-    // Public non-challenge inputs: [eval_A, eval_B, eval_C, tau_at_rx, eval_X]
-    Ok(vec![
-      self.eval_A,
-      self.eval_B,
-      self.eval_C,
-      self.tau_at_rx,
-      self.eval_X,
-    ])
-  }
-
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
     if round_index < self.outer_rounds() {
       Ok(1)
@@ -151,7 +137,7 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
     if round_index < self.outer_rounds() {
       // Outer cubic sum-check per-round consistency
       let coeffs = alloc_coeffs::<E, _>(
-        cs.namespace(|| format!("outer_sc_coeffs_round_{}", round_index)),
+        cs.namespace(|| format!("outer_sc_coeffs_round_{round_index}")),
         &self.outer_polys[round_index],
       )?;
       let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{round_index}")), || {
@@ -228,6 +214,7 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
           claim_Az.clone(),
           claim_Bz.clone(),
           claim_Cz.clone(),
+          tau_at_rx.clone(),
         ],
         vec![],
       ))
@@ -342,22 +329,12 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       // Final inner equality
       // The previous logical round whose claim must be matched is the last inner sum-check round
       let prev_e = &prior_round_vars[self.idx_inner_final() - 2][0];
-      let r = &prev_challenges[self.idx_inner_setup()][0];
       let eval_W = &prior_round_vars[self.idx_inner_commit_w()][0];
 
-      // Public inputs for eval_A, eval_B, eval_C, tau_at_rx, and eval_X are inputized here when known
-      let eval_A = AllocatedNum::alloc(cs.namespace(|| "eval_A"), || Ok(self.eval_A))?;
-      eval_A.inputize(cs.namespace(|| "eval_A_input"))?;
-      let eval_B = AllocatedNum::alloc(cs.namespace(|| "eval_B"), || Ok(self.eval_B))?;
-      eval_B.inputize(cs.namespace(|| "eval_B_input"))?;
-      let eval_C = AllocatedNum::alloc(cs.namespace(|| "eval_C"), || Ok(self.eval_C))?;
-      eval_C.inputize(cs.namespace(|| "eval_C_input"))?;
-      let tau_at_rx = AllocatedNum::alloc(cs.namespace(|| "tau_at_rx"), || Ok(self.tau_at_rx))?;
-      tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_input"))?;
+      let tau_at_rx = prior_round_vars[self.idx_outer_final()][4].clone();
+      tau_at_rx.inputize(cs.namespace(|| "inputize_tau_at_rx"))?;
 
-      let eval_X = AllocatedNum::alloc(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
-      eval_X.inputize(cs.namespace(|| "eval_X_input"))?;
-
+      let eval_X = AllocatedNum::alloc_input(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
       let r_y0 = &prev_challenges[self.idx_inner_start()][0];
 
       // tmp_w = eval_W * (1 - ry0)
@@ -387,52 +364,27 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         |lc| lc + sum_z_expected.get_variable() - tmp_w.get_variable(),
       );
 
-      // r^2
-      let r_sq = AllocatedNum::alloc(cs.namespace(|| "r_sq_final"), || {
-        let rv = r.get_value().unwrap_or(E::Scalar::ZERO);
-        Ok(rv * rv)
-      })?;
-      cs.enforce(
-        || "r_sq_final = r*r",
-        |lc| lc + r.get_variable(),
-        |lc| lc + r.get_variable(),
-        |lc| lc + r_sq.get_variable(),
-      );
-
-      // tmp1 = eval_B * r
-      let tmp1 = AllocatedNum::alloc(cs.namespace(|| "tmp1_final"), || {
-        let eb = eval_B
+      // prev_e = (eval_A + r * eval_B + r^2 * eval_C) * sum_z_expected
+      // we compute prev_e / sum_z_expected and inputize that
+      // The verifier can compute eval_A + r * eval_B + r^2 * eval_C and check equality
+      let quotient = AllocatedNum::alloc_input(cs.namespace(|| "quotient"), || {
+        let prev_e_v = prev_e
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
-        let rv = r.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(eb * rv)
-      })?;
-      cs.enforce(
-        || "tmp1_final = B*r",
-        |lc| lc + eval_B.get_variable(),
-        |lc| lc + r.get_variable(),
-        |lc| lc + tmp1.get_variable(),
-      );
-
-      // tmp2 = eval_C * r_sq
-      let tmp2 = AllocatedNum::alloc(cs.namespace(|| "tmp2_final"), || {
-        let ec = eval_C
+        let se_v = sum_z_expected
           .get_value()
           .ok_or(SynthesisError::AssignmentMissing)?;
-        let rsq = r_sq.get_value().ok_or(SynthesisError::AssignmentMissing)?;
-        Ok(ec * rsq)
+        Ok(if se_v.is_zero().into() {
+          E::Scalar::ZERO
+        } else {
+          prev_e_v * se_v.invert().unwrap()
+        })
       })?;
-      cs.enforce(
-        || "tmp2_final = C*r_sq",
-        |lc| lc + eval_C.get_variable(),
-        |lc| lc + r_sq.get_variable(),
-        |lc| lc + tmp2.get_variable(),
-      );
 
-      // prev_e = (eval_A + tmp1 + tmp2) * sum_z_expected
+      // check that quotient * sum_z_expected = prev_e
       cs.enforce(
-        || "prev_e = (eval_A + tmp1 + tmp2)*sum_z_expected",
-        |lc| lc + eval_A.get_variable() + tmp1.get_variable() + tmp2.get_variable(),
+        || "check_quotient",
+        |lc| lc + quotient.get_variable(),
         |lc| lc + sum_z_expected.get_variable(),
         |lc| lc + prev_e.get_variable(),
       );
@@ -796,25 +748,6 @@ struct InnerBranchParams<'a, F: PrimeField> {
 }
 
 impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
-  fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-    // Public inputs used by NeutronNovaSNARK verifier instance:
-    // [eval_A_step, eval_B_step, eval_C_step,
-    //  eval_A_core, eval_B_core, eval_C_core,
-    //  tau_at_rx, eval_X_step, eval_X_core, rho_acc_at_rb]
-    Ok(vec![
-      self.eval_A_step,
-      self.eval_B_step,
-      self.eval_C_step,
-      self.eval_A_core,
-      self.eval_B_core,
-      self.eval_C_core,
-      self.tau_at_rx,
-      self.eval_X_step,
-      self.eval_X_core,
-      self.rho_acc_at_rb,
-    ])
-  }
-
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
     if round_index < self.nifs_rounds() {
       return Ok(1); // r_b only; rho_t provided as witness
@@ -1835,19 +1768,16 @@ mod tests {
       claim_Cz: <E as Engine>::Scalar::ZERO,
       tau_at_rx: <E as Engine>::Scalar::ZERO,
       inner_polys: vec![[<E as Engine>::Scalar::ZERO; 3]],
-      eval_A: <E as Engine>::Scalar::ZERO,
-      eval_B: <E as Engine>::Scalar::ZERO,
-      eval_C: <E as Engine>::Scalar::ZERO,
       eval_W: <E as Engine>::Scalar::ZERO,
       eval_X: <E as Engine>::Scalar::ZERO,
     };
 
     let (shape_mr, ck, _vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-    assert_eq!(shape_mr.num_cons_unpadded, 26);
+    assert_eq!(shape_mr.num_cons_unpadded, 19);
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape_mr, &ck, &circuit, false,
+        &shape_mr,
       )
       .unwrap();
     let mut transcript = <E as Engine>::TE::new(b"nifs");
@@ -1868,7 +1798,7 @@ mod tests {
 
     let (inst_split, wit_reg) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape_mr, &ck, &circuit, false,
+        &mut state, &shape_mr, false,
       )
       .unwrap();
 
@@ -1946,7 +1876,7 @@ mod tests {
     assert!(shape_mr.num_cons_unpadded > 0);
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape_mr, &ck, &circuit, false,
+        &shape_mr,
       )
       .unwrap();
     let mut transcript = <E as Engine>::TE::new(b"nifs");
@@ -1986,7 +1916,7 @@ mod tests {
 
     let (inst_split, wit_reg) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape_mr, &ck, &circuit, false,
+        &mut state, &shape_mr, false,
       )
       .unwrap();
 

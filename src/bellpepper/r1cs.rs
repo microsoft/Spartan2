@@ -105,11 +105,8 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
   type MultiRoundState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Initialize the multi-round witness process and return the initial state.
-  fn initialize_multiround_witness<C: MultiRoundCircuit<E>>(
+  fn initialize_multiround_witness(
     s: &SplitMultiRoundR1CSShape<E>,
-    ck: &CommitmentKey<E>,
-    circuit: &C,
-    is_small: bool,
   ) -> Result<Self::MultiRoundState, SpartanError>;
 
   /// Process a specific round and update the state, returning the challenges generated.
@@ -124,11 +121,9 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
   ) -> Result<Vec<E::Scalar>, SpartanError>;
 
   /// Finalize the multi-round witness and return the instance and witness.
-  fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
+  fn finalize_multiround_witness(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
-    ck: &CommitmentKey<E>,
-    circuit: &C,
     is_small: bool,
   ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
@@ -406,12 +401,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
-<<<<<<< HEAD
-
-      let comm_W_precommitted = PCS::<E>::commit_partial(
-=======
       let comm_W_precommitted = PCS::<E>::commit(
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         ck,
         &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
         &r_W_precommitted,
@@ -680,11 +670,8 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
 impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
   type MultiRoundState = MultiRoundState<E>;
 
-  fn initialize_multiround_witness<C: MultiRoundCircuit<E>>(
+  fn initialize_multiround_witness(
     s: &SplitMultiRoundR1CSShape<E>,
-    ck: &CommitmentKey<E>,
-    _circuit: &C,
-    _is_small: bool,
   ) -> Result<Self::MultiRoundState, SpartanError> {
     let cs = Self::new();
     let total_vars: usize = s.num_vars_per_round.iter().sum();
@@ -764,12 +751,8 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
 
     // Commit to this round's variables
     let start_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
-<<<<<<< HEAD
-    let (comm_w_round, _) = PCS::<E>::commit_partial(
-=======
     let r_w_per_round = PCS::<E>::blind(ck, s.num_vars_per_round[round_index]);
     let comm_w_round = PCS::<E>::commit(
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
       ck,
       &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
       &state.r_w,
@@ -785,11 +768,9 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     Ok(challenges)
   }
 
-  fn finalize_multiround_witness<C: MultiRoundCircuit<E>>(
+  fn finalize_multiround_witness(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
-    _ck: &CommitmentKey<E>,
-    circuit: &C,
     is_small: bool,
   ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
     if state.current_round != state.num_rounds {
@@ -800,12 +781,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
         ),
       });
     }
-
-    let public_values = circuit
-      .public_values()
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to get public values: {e}"),
-      })?;
 
     // Collect all challenges
     let challenges_per_round: Vec<Vec<E::Scalar>> = state
@@ -818,6 +793,11 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
           .collect()
       })
       .collect();
+
+    let num_challenges: usize = s.num_challenges_per_round.iter().sum();
+
+    // collect public values
+    let public_values = state.cs.input_assignment[1 + num_challenges..].to_vec();
 
     let u = SplitMultiRoundR1CSInstance::<E>::new(
       s,

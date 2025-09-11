@@ -799,9 +799,6 @@ where
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
         &pk.verifier_shape_mr,
-        &pk.verifier_ck_mr,
-        &verifier_circuit,
-        mr_is_small,
       )?;
 
     // Perform ZK NIFS prove and collect outputs
@@ -1139,8 +1136,6 @@ where
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
         &mut state,
         &pk.verifier_shape_mr,
-        &pk.verifier_ck_mr,
-        &verifier_circuit,
         mr_is_small,
       )?;
 

@@ -78,10 +78,6 @@ pub mod tests {
   pub struct TwoRoundBitsCircuit;
 
   impl<E: Engine> MultiRoundCircuit<E> for TwoRoundBitsCircuit {
-    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-      Ok(vec![])
-    }
-
     fn num_challenges(&self, _round_index: usize) -> Result<usize, SynthesisError> {
       Ok(0)
     }
@@ -123,7 +119,7 @@ pub mod tests {
     // Initialize witness state
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape, &ck, &circuit, is_small,
+        &shape,
       )
       .unwrap();
     let mut transcript = <E as Engine>::TE::new(b"test");
@@ -146,7 +142,7 @@ pub mod tests {
     // Finalize
     let (instance, witness) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape, &ck, &circuit, is_small,
+        &mut state, &shape, is_small,
       )
       .unwrap();
 
@@ -172,10 +168,6 @@ pub mod tests {
   pub struct TwoRoundPermutationCircuit;
 
   impl<E: Engine> MultiRoundCircuit<E> for TwoRoundPermutationCircuit {
-    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-      Ok(vec![])
-    }
-
     fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
       if round_index >= 2 {
         return Err(SynthesisError::Unsatisfiable);
@@ -352,7 +344,7 @@ pub mod tests {
     // Initialize witness state
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape, &ck, &circuit, is_small,
+        &shape,
       )
       .unwrap();
     let mut transcript = <E as Engine>::TE::new(b"test");
@@ -375,7 +367,7 @@ pub mod tests {
     // Finalize
     let (instance, witness) =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape, &ck, &circuit, is_small,
+        &mut state, &shape, is_small,
       )
       .unwrap();
 

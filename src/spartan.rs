@@ -194,9 +194,6 @@ where
       claim_Cz: zero,
       tau_at_rx: zero,
       inner_polys: vec![[zero; 3]; num_rounds_y],
-      eval_A: zero,
-      eval_B: zero,
-      eval_C: zero,
       eval_W: zero,
       eval_X: zero,
     };
@@ -325,9 +322,6 @@ where
       claim_Cz: zero,
       tau_at_rx: zero,
       inner_polys: vec![[zero; 3]; num_rounds_y],
-      eval_A: zero,
-      eval_B: zero,
-      eval_C: zero,
       eval_W: zero,
       eval_X: zero,
     };
@@ -336,9 +330,6 @@ where
     let mut state =
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
         &pk.verifier_shape_mr,
-        &pk.verifier_ck_mr,
-        &verifier_circuit,
-        mr_is_small,
       )?;
 
     // Outer sum-check
@@ -444,16 +435,8 @@ where
     )?;
 
     // Process the inner-final equality round
-    // Evaluate A, B, C at (r_x, r_y)
-    let (eval_A, eval_B, eval_C) = {
-      let T_y = EqPolynomial::evals_from_points(&r_y);
-      multi_inner_product(&T_y, &evals_A, &evals_B, &evals_C)
-    };
     // Set verifier circuit public values before processing inner-final round
     verifier_circuit.eval_X = eval_X;
-    verifier_circuit.eval_A = eval_A;
-    verifier_circuit.eval_B = eval_B;
-    verifier_circuit.eval_C = eval_C;
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
       &pk.verifier_shape_mr,
@@ -469,8 +452,6 @@ where
       <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
         &mut state,
         &pk.verifier_shape_mr,
-        &pk.verifier_ck_mr,
-        &verifier_circuit,
         mr_is_small,
       )?;
 
@@ -569,8 +550,8 @@ where
     let num_rounds_x = usize::try_from(vk.S.num_cons.ilog2()).unwrap();
     let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
 
-    // The regular instance packs [challenges..., public_values...], where public_values are 5 items (A,B,C,tau_at_rx,X)
-    let num_public_values = 5usize;
+    // The regular instance packs [challenges..., public_values...], where public_values are 3 items (tau_at_rx,eval_X,quotient)
+    let num_public_values = 3usize;
     if U_verifier_regular.X.len() < num_public_values {
       return Err(SpartanError::ProofVerifyError {
         reason: "Verifier instance missing public values".to_string(),
@@ -586,6 +567,7 @@ where
 
     let start_inner = num_rounds_x + 1; // index of r_y[0]
     let r_x = &all_challenges[0..num_rounds_x];
+    let r = all_challenges[num_rounds_x]; // r from inner setup round
     let r_y = &all_challenges[start_inner..start_inner + num_rounds_y];
 
     // Recompute eval_A, eval_B, eval_C at (r_x, r_y)
@@ -618,6 +600,7 @@ where
         multi_eval(&vk.S.C),
       )
     };
+    let quotient = eval_A + r * eval_B + r * r * eval_C;
 
     // Recompute eval_X from original circuit public IO at r_y[1..]
     let U_regular = self.U.to_regular_instance()?;
@@ -635,18 +618,13 @@ where
     // Recompute tau(r_x) using the same tau polynomial challenges
     let tau_at_rx = tau.evaluate(r_x);
 
-    // Compare against the instance's public inputs [eval_A, eval_B, eval_C, tau_at_rx, eval_X]
+    // Compare against the instance's public inputs [tau_at_rx, eval_X, quotient]
     let pub_start = total_challenges;
     let pub_vals = &U_verifier_regular.X[pub_start..pub_start + num_public_values];
-    if pub_vals[0] != eval_A
-      || pub_vals[1] != eval_B
-      || pub_vals[2] != eval_C
-      || pub_vals[3] != tau_at_rx
-      || pub_vals[4] != eval_X
-    {
+    if pub_vals[0] != tau_at_rx || pub_vals[1] != eval_X || pub_vals[2] != quotient {
       return Err(SpartanError::ProofVerifyError {
         reason:
-          "Verifier instance public values do not match recomputed evaluations (A,B,C,tau_at_rx,X)"
+          "Verifier instance public values do not match recomputed evaluations (tau_at_rx, eval_X, quotient)"
             .to_string(),
       });
     }
@@ -701,24 +679,6 @@ where
     // Return original circuit public IO carried in the proof
     Ok(self.U.public_values.clone())
   }
-}
-
-/// computes an inner products <t, a>, <t, b>, and <t,c>
-fn multi_inner_product<T: Field + Send + Sync>(t: &[T], a: &[T], b: &[T], c: &[T]) -> (T, T, T) {
-  assert_eq!(t.len(), a.len());
-  assert_eq!(a.len(), b.len());
-  assert_eq!(b.len(), c.len());
-
-  (0..t.len())
-    .into_par_iter()
-    .map(|i| {
-      let ti = t[i]; // read t[i] once
-      (ti * a[i], ti * b[i], ti * c[i])
-    })
-    .reduce(
-      || (T::ZERO, T::ZERO, T::ZERO),
-      |(sa, sb, sc), (xa, xb, xc)| (sa + xa, sb + xb, sc + xc),
-    )
 }
 
 #[cfg(test)]

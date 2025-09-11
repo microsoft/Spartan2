@@ -51,10 +51,6 @@ pub trait SpartanCircuit<E: Engine>: Send + Sync + Clone {
 /// where each round can allocate different constraints and witness variables based on the round index.
 /// The public IO includes the challenges and other things made public by the circuit across all rounds.
 pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
-  /// Returns the public values of the circuit, which is the list of values that will be made public
-  /// The circuit must make public these values followed by the challenges generated via the transcript
-  fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError>;
-
   /// Returns the number of challenges that the circuit expects from the verifier
   /// for randomized checks added in the round `round_index`
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError>;
