@@ -109,7 +109,6 @@ pub mod tests {
   }
 
   fn test_multiround_bits_with<E: Engine>() {
-    let is_small = true;
     let circuit = TwoRoundBitsCircuit;
 
     // Generate shape
@@ -117,23 +116,18 @@ pub mod tests {
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
 
     // Initialize witness state
-    let mut state =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape,
-      )
-      .unwrap();
+    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape).unwrap();
     let mut transcript = <E as Engine>::TE::new(b"test");
 
     // Process each round
     let num_rounds = <TwoRoundBitsCircuit as MultiRoundCircuit<E>>::num_rounds(&circuit);
     for r in 0..num_rounds {
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      SatisfyingAssignment::<E>::process_round(
         &mut state,
         &shape,
         &ck,
         &circuit,
         r,
-        is_small,
         &mut transcript,
       )
       .unwrap();
@@ -141,10 +135,7 @@ pub mod tests {
 
     // Finalize
     let (instance, witness) =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape, is_small,
-      )
-      .unwrap();
+      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape).unwrap();
 
     // Convert to regular instance/shape for satisfiability check
     let regular_shape = shape.to_regular_shape();
@@ -334,7 +325,6 @@ pub mod tests {
   }
 
   fn test_multiround_permutation_with<E: Engine>() {
-    let is_small = false;
     let circuit = TwoRoundPermutationCircuit;
 
     // Generate shape
@@ -342,23 +332,18 @@ pub mod tests {
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
 
     // Initialize witness state
-    let mut state =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape,
-      )
-      .unwrap();
+    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape).unwrap();
     let mut transcript = <E as Engine>::TE::new(b"test");
 
     // Process each round
     let num_rounds = <TwoRoundPermutationCircuit as MultiRoundCircuit<E>>::num_rounds(&circuit);
     for r in 0..num_rounds {
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      SatisfyingAssignment::<E>::process_round(
         &mut state,
         &shape,
         &ck,
         &circuit,
         r,
-        is_small,
         &mut transcript,
       )
       .unwrap();
@@ -366,10 +351,7 @@ pub mod tests {
 
     // Finalize
     let (instance, witness) =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape, is_small,
-      )
-      .unwrap();
+      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape).unwrap();
 
     // Convert to regular instance/shape for satisfiability check
     let regular_shape = shape.to_regular_shape();

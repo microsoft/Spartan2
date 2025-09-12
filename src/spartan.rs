@@ -46,10 +46,10 @@ pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
   // Verifier-circuit (multi-round) parameters
-  verifier_shape_mr: SplitMultiRoundR1CSShape<E>,
+  vc_shape: SplitMultiRoundR1CSShape<E>,
   // Precomputed regular (single-round) verifier shape
-  verifier_shape_reg: R1CSShape<E>,
-  verifier_ck_mr: CommitmentKey<E>,
+  vc_shape_regular: R1CSShape<E>,
+  vc_ck: CommitmentKey<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -71,11 +71,11 @@ pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   S: SplitR1CSShape<E>,
   // Verifier-circuit (multi-round) shape
-  verifier_shape_mr: SplitMultiRoundR1CSShape<E>,
+  vc_shape: SplitMultiRoundR1CSShape<E>,
   // Precomputed regular (single-round) verifier shape
-  verifier_shape_reg: R1CSShape<E>,
+  vc_shape_regular: R1CSShape<E>,
   // Commitment key for the verifier-circuit (multi-round) shape; shared with prover
-  verifier_ck_mr: CommitmentKey<E>,
+  vc_ck: CommitmentKey<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -197,9 +197,9 @@ where
       eval_W: zero,
       eval_X: zero,
     };
-    let (verifier_shape_mr, verifier_ck_mr, _vk_mr) =
+    let (vc_shape, vc_ck, _vk_mr) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&spartan_verifier_circuit)?;
-    let verifier_shape_reg = verifier_shape_mr.to_regular_shape();
+    let vc_shape_regular = vc_shape.to_regular_shape();
 
     // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
@@ -226,17 +226,17 @@ where
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
-      verifier_shape_mr: verifier_shape_mr.clone(),
-      verifier_shape_reg: verifier_shape_reg.clone(),
-      verifier_ck_mr: verifier_ck_mr.clone(),
+      vc_shape: vc_shape.clone(),
+      vc_shape_regular: vc_shape_regular.clone(),
+      vc_ck: vc_ck.clone(),
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
       S,
-      verifier_shape_mr,
-      verifier_shape_reg,
-      verifier_ck_mr,
+      vc_shape,
+      vc_shape_regular,
+      vc_ck,
       vk_digest: vk.digest()?,
     };
 
@@ -285,9 +285,6 @@ where
       &mut transcript,
     )?;
 
-    // Multi-round witness may contain random field elements that are NOT small, so always commit full elements.
-    let mr_is_small = false;
-
     // Prepare vectors and polynomials for building the verifier-circuit trace
     let mut z = W.W.clone();
     z.push(E::Scalar::ONE);
@@ -327,10 +324,7 @@ where
     };
 
     // Build the multi-round instance by interleaving with challenge generation
-    let mut state =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &pk.verifier_shape_mr,
-      )?;
+    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Outer sum-check
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_zk(
@@ -341,9 +335,8 @@ where
       &mut poly_Cz,
       &mut verifier_circuit,
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      mr_is_small,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &mut transcript,
     )?;
 
@@ -355,11 +348,10 @@ where
     // Process the synthetic "outer final" round in the circuit and capture challenges (unused)
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &verifier_circuit,
       num_rounds_x,
-      mr_is_small,
       &mut transcript,
     )?;
 
@@ -367,11 +359,10 @@ where
     let inner_setup_round = num_rounds_x + 1;
     let chals = SatisfyingAssignment::<E>::process_round(
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &verifier_circuit,
       inner_setup_round,
-      mr_is_small,
       &mut transcript,
     )?;
     let r = chals[0];
@@ -398,9 +389,8 @@ where
       &mut poly_z,
       &mut verifier_circuit,
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      mr_is_small,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &mut transcript,
       num_rounds_x + 2,
     )?;
@@ -426,11 +416,10 @@ where
     let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &verifier_circuit,
       eval_w_commit_round,
-      mr_is_small,
       &mut transcript,
     )?;
 
@@ -439,29 +428,24 @@ where
     verifier_circuit.eval_X = eval_X;
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &verifier_circuit,
       eval_w_commit_round + 1,
-      mr_is_small,
       &mut transcript,
     )?;
 
     // Finalize multi-round witness and construct NIFS proof
     let (U_verifier, W_verifier) =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state,
-        &pk.verifier_shape_mr,
-        mr_is_small,
-      )?;
+      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &pk.vc_shape)?;
 
     // Use the instance as produced by witness finalization; its public values
     // are exactly those absorbed during round 0 by the prover.
     let U_verifier_regular = U_verifier.to_regular_instance()?;
-    let S_verifier = &pk.verifier_shape_reg;
-    let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.verifier_ck_mr)?;
+    let S_verifier = &pk.vc_shape_regular;
+    let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.vc_ck)?;
     let (nifs_proof, folded_W) = NIFS::<E>::prove(
-      &pk.verifier_ck_mr,
+      &pk.vc_ck,
       S_verifier,
       &random_U,
       &random_W,
@@ -473,7 +457,7 @@ where
     // prove the claimed polynomial evaluation at point r_y[1..]
     let eval_arg = E::PCS::prove(
       &pk.ck,
-      &pk.verifier_ck_mr,
+      &pk.vc_ck,
       &mut transcript,
       &U_regular.comm_W,
       &W.W,
@@ -497,7 +481,7 @@ where
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     // Verify by checking the multi-round verifier instance via NIFS folding
     let (_verify_span, _verify_t) = start_span!("r1cs_snark_verify");
-    let ck_verifier = &vk.verifier_ck_mr;
+    let ck_verifier = &vk.vc_ck;
     let mut transcript = E::TE::new(b"R1CSSNARK");
     transcript.absorb(b"vk", &vk.digest()?);
     transcript.absorb(b"public_values", &self.U.public_values.as_slice());
@@ -513,7 +497,7 @@ where
 
     // Reproduce the multi-round transcript schedule up to (but excluding) the final round
     // so that PCS occurs at the same transcript state as in the prover.
-    let S_verifier = &vk.verifier_shape_mr;
+    let S_verifier = &vk.vc_shape;
     let U_verifier = &self.U_verifier;
     if S_verifier.num_rounds == 0 {
       return Err(SpartanError::ProofVerifyError {
@@ -656,7 +640,7 @@ where
       .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
 
     // Check satisfiability of the folded relaxed instance with the folded witness
-    let S_verifier = &vk.verifier_shape_reg;
+    let S_verifier = &vk.vc_shape_regular;
     S_verifier
       .is_sat_relaxed(ck_verifier, &folded_U, &self.folded_W)
       .map_err(|e| SpartanError::ProofVerifyError {
@@ -668,7 +652,7 @@ where
     let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
     E::PCS::verify(
       &vk.vk_ee,
-      &vk.verifier_ck_mr,
+      &vk.vc_ck,
       &mut transcript,
       &U_regular.comm_W,
       &r_y[1..],

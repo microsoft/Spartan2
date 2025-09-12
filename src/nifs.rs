@@ -171,7 +171,6 @@ mod tests {
       solver::SatisfyingAssignment,
     };
 
-    let is_small = false;
     let circuit = TwoRoundPermutationCircuit;
 
     // Generate multi-round shape via Bellpepper
@@ -179,11 +178,7 @@ mod tests {
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
 
     // Witness generation across rounds
-    let mut state =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &shape_mr,
-      )
-      .unwrap();
+    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape_mr).unwrap();
     let mut transcript = <E as Engine>::TE::new(b"nifs");
 
     let num_rounds =
@@ -191,23 +186,19 @@ mod tests {
         &circuit,
       );
     for r in 0..num_rounds {
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      SatisfyingAssignment::<E>::process_round(
         &mut state,
         &shape_mr,
         &ck,
         &circuit,
         r,
-        is_small,
         &mut transcript,
       )
       .unwrap();
     }
 
     let (inst_split, wit_reg) =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state, &shape_mr, is_small,
-      )
-      .unwrap();
+      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape_mr).unwrap();
 
     let inst_reg = inst_split.to_regular_instance().unwrap();
     let S_reg = shape_mr.to_regular_shape();

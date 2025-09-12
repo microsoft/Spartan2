@@ -639,9 +639,8 @@ impl<E: Engine> SumcheckProof<E> {
     poly_Cz: &mut MultilinearPolynomial<E::Scalar>,
     verifier_circuit: &mut SpartanVerifierCircuit<E>,
     state: &mut MultiRoundState<E>,
-    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
-    verifier_ck_mr: &CommitmentKey<E>,
-    is_small: bool,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
@@ -668,13 +667,12 @@ impl<E: Engine> SumcheckProof<E> {
       verifier_circuit.outer_polys[i] = coeffs;
 
       // -------- transcript / witness handling --------
-      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      let chals = SatisfyingAssignment::<E>::process_round(
         state,
-        verifier_shape_mr,
-        verifier_ck_mr,
+        vc_shape,
+        vc_ck,
         verifier_circuit,
         i,
-        is_small,
         transcript,
       )?;
       let r_i = chals[0];
@@ -710,9 +708,8 @@ impl<E: Engine> SumcheckProof<E> {
     poly_z: &mut MultilinearPolynomial<E::Scalar>,
     verifier_circuit: &mut SpartanVerifierCircuit<E>,
     state: &mut MultiRoundState<E>,
-    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
-    verifier_ck_mr: &CommitmentKey<E>,
-    is_small: bool,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
   ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
@@ -729,13 +726,12 @@ impl<E: Engine> SumcheckProof<E> {
       verifier_circuit.inner_polys[j] = [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
 
       // -------- transcript / witness handling --------
-      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      let chals = SatisfyingAssignment::<E>::process_round(
         state,
-        verifier_shape_mr,
-        verifier_ck_mr,
+        vc_shape,
+        vc_ck,
         verifier_circuit,
         start_round + j,
-        is_small,
         transcript,
       )?;
       let r_j = chals[0];
@@ -886,9 +882,8 @@ impl<E: Engine> SumcheckProof<E> {
     poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
     verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
     state: &mut MultiRoundState<E>,
-    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
-    verifier_ck_mr: &CommitmentKey<E>,
-    is_small: bool,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
   ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
@@ -916,13 +911,12 @@ impl<E: Engine> SumcheckProof<E> {
       verifier_circuit.inner_polys_core[j] = coeffs_core;
 
       // -------- transcript / witness handling --------
-      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      let chals = SatisfyingAssignment::<E>::process_round(
         state,
-        verifier_shape_mr,
-        verifier_ck_mr,
+        vc_shape,
+        vc_ck,
         verifier_circuit,
         start_round + j,
-        is_small,
         transcript,
       )?;
       let r_j = chals[0];
@@ -969,9 +963,8 @@ impl<E: Engine> SumcheckProof<E> {
     poly_D_core: &mut MultilinearPolynomial<E::Scalar>,
     verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
     state: &mut MultiRoundState<E>,
-    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
-    verifier_ck_mr: &CommitmentKey<E>,
-    is_small: bool,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
   ) -> Result<Vec<E::Scalar>, SpartanError> {
@@ -1025,13 +1018,12 @@ impl<E: Engine> SumcheckProof<E> {
       verifier_circuit.outer_polys_core[i] = coeffs_core;
 
       // -------- transcript / witness handling --------
-      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
+      let chals = SatisfyingAssignment::<E>::process_round(
         state,
-        verifier_shape_mr,
-        verifier_ck_mr,
+        vc_shape,
+        vc_ck,
         verifier_circuit,
         start_round + i,
-        is_small,
         transcript,
       )?;
       let r_i = chals[0];

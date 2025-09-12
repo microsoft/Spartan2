@@ -194,27 +194,45 @@ where
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
-    verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
-    state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
-    verifier_shape_mr: &SplitMultiRoundR1CSShape<E>,
-    verifier_ck_mr: &CommitmentKey<E>,
-    mr_is_small: bool,
+    vc: &mut NeutronNovaVerifierCircuit<E>,
+    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
   ) -> Result<
     (
-      Self,
-      Vec<E::Scalar>, // E_eq (split evals, length left+right)
-      Vec<E::Scalar>, // Az layer 0
-      Vec<E::Scalar>, // Bz layer 0
-      Vec<E::Scalar>, // Cz layer 0
-      E::Scalar,      // T_out
-      Vec<E::Scalar>, // r_b challenges
+      Vec<E::Scalar>,  // E_eq (split evals, length left+right)
+      Vec<E::Scalar>,  // Az layer 0
+      Vec<E::Scalar>,  // Bz layer 0
+      Vec<E::Scalar>,  // Cz layer 0
+      R1CSWitness<E>,  // final folded witness
+      R1CSInstance<E>, // final folded instance
     ),
     SpartanError,
   > {
     // Determine padding and NIFS rounds
+    let n = Us.len();
     let n_padded = Us.len().next_power_of_two();
     let ell_b = n_padded.log_2();
+
+    info!(
+      "NeutronNova NIFS prove for {} instances and padded to {} instances",
+      Us.len(),
+      n_padded
+    );
+
+    let mut Us = Us.to_vec();
+    let mut Ws = Ws.to_vec();
+    if Us.len() < n_padded {
+      Us.extend(vec![Us[0].clone(); n_padded - n]);
+      Ws.extend(vec![Ws[0].clone(); n_padded - n]);
+    }
+
+    for U in Us.iter() {
+      transcript.absorb(b"U", U);
+    }
+    let T = E::Scalar::ZERO;
+    transcript.absorb(b"T", &T);
 
     // Squeeze tau and rhos fresh inside this function (like ZK sum-check APIs)
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
@@ -231,9 +249,8 @@ where
     let triples = (0..n_padded)
       .into_par_iter()
       .map(|i| {
-        let idx = if i < Us.len() { i } else { 0 };
-        let w = &Ws[idx].W;
-        let x = &Us[idx].X;
+        let w = &Ws[i].W;
+        let x = &Us[i].X;
         let mut z = Vec::with_capacity(w.len() + 1 + x.len());
         z.extend_from_slice(w);
         z.push(E::Scalar::ONE);
@@ -250,22 +267,6 @@ where
       A_layers.push(a);
       B_layers.push(b);
       C_layers.push(c);
-    }
-
-    // Sanity check shape: ensure the number of NIFS rounds aligns with the multi-round circuit
-    let nifs_rounds_from_shape = verifier_shape_mr
-      .num_challenges_per_round
-      .iter()
-      .position(|&c| c == 0)
-      .ok_or_else(|| SpartanError::ProofVerifyError {
-        reason: "Verifier shape missing NIFS final round".to_string(),
-      })?;
-    if nifs_rounds_from_shape != ell_b {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!(
-          "NIFS rounds mismatch between setup ({nifs_rounds_from_shape}) and batch ({ell_b})",
-        ),
-      });
     }
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
@@ -312,18 +313,11 @@ where
 
       // Expose polynomial coefficients to the verifier circuit and feed into the transcript/state
       let c = &poly_t.coeffs;
-      verifier_circuit.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
-      // Derive challenges only from per-round commitments via the multiround circuit; do not
-      // absorb plaintext polynomials into the transcript.
-      let chals = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
-        state,
-        verifier_shape_mr,
-        verifier_ck_mr,
-        verifier_circuit,
-        t,
-        mr_is_small,
-        transcript,
-      )?;
+      vc.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
+
+      // Derive challenges only from per-round commitments via the multiround circuit
+      let chals =
+        SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, t, transcript)?;
       let r_b = chals[0];
       r_bs.push(r_b);
 
@@ -370,28 +364,25 @@ where
       m = pairs;
     }
 
-    // Final NIFS equality: publish T_out and rho_acc
+    // T_out = poly_last(r_last) / eq(r_b, rho)
     let T_out = T_cur * acc_eq.invert().unwrap();
-    verifier_circuit.t_out_step = T_out;
-    verifier_circuit.rho_acc_at_rb = acc_eq;
-    let _ = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::process_round(
-      state,
-      verifier_shape_mr,
-      verifier_ck_mr,
-      verifier_circuit,
-      ell_b,
-      mr_is_small,
-      transcript,
-    )?;
+    vc.t_out_step = T_out;
+    vc.rho_acc_at_rb = acc_eq;
+    let _ =
+      SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+
+    let (_fold_final_span, fold_final_t) = start_span!("fold_instances_witnesses");
+    let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
+    let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
+    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances_witnesses");
 
     Ok((
-      Self { polys },
       E_eq,
       A_layers[0].clone(),
       B_layers[0].clone(),
       C_layers[0].clone(),
-      T_out,
-      r_bs,
+      folded_W,
+      folded_U,
     ))
   }
 }
@@ -404,9 +395,9 @@ pub struct NeutronNovaProverKey<E: Engine> {
   S_step: SplitR1CSShape<E>,
   S_core: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
-  verifier_shape_mr: SplitMultiRoundR1CSShape<E>,
-  verifier_shape_reg: R1CSShape<E>,
-  verifier_ck_mr: CommitmentKey<E>,
+  vc_shape: SplitMultiRoundR1CSShape<E>,
+  vc_shape_regular: R1CSShape<E>,
+  vc_ck: CommitmentKey<E>,
 }
 
 /// A type that represents the verifier's key
@@ -417,9 +408,9 @@ pub struct NeutronNovaVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   S_step: SplitR1CSShape<E>,
   S_core: SplitR1CSShape<E>,
-  verifier_shape_mr: SplitMultiRoundR1CSShape<E>,
-  verifier_shape_reg: R1CSShape<E>,
-  verifier_ck_mr: CommitmentKey<E>,
+  vc_shape: SplitMultiRoundR1CSShape<E>,
+  vc_shape_regular: R1CSShape<E>,
+  vc_ck: CommitmentKey<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -478,10 +469,6 @@ where
     core_circuit: &C2,
     num_steps: usize,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    // Calculate nifs_rounds from num_steps by padding to next power of two
-    let n_padded = num_steps.next_power_of_two();
-    let nifs_rounds = n_padded.log_2();
-
     debug!("Synthesizing step circuit");
     let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
@@ -503,58 +490,35 @@ where
 
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
 
+    // Calculate nifs_rounds from num_steps by padding to next power of two
+    let num_rounds_z = num_steps.next_power_of_two().log_2();
+
     let num_vars = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
     let num_rounds_x = usize::try_from(S_step.num_cons.ilog2()).unwrap();
     let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
-    let zero = E::Scalar::ZERO;
-    let nn_verifier_circuit = NeutronNovaVerifierCircuit::<E> {
-      outer_polys_step: vec![[zero; 4]; num_rounds_x],
-      outer_polys_core: vec![[zero; 4]; num_rounds_x],
-      claim_Az_step: zero,
-      claim_Bz_step: zero,
-      claim_Cz_step: zero,
-      claim_Az_core: zero,
-      claim_Bz_core: zero,
-      claim_Cz_core: zero,
-      tau_at_rx: zero,
-      inner_polys_step: vec![[zero; 3]; num_rounds_y],
-      inner_polys_core: vec![[zero; 3]; num_rounds_y],
-      eval_A_step: zero,
-      eval_B_step: zero,
-      eval_C_step: zero,
-      eval_W_step: zero,
-      eval_A_core: zero,
-      eval_B_core: zero,
-      eval_C_core: zero,
-      eval_W_core: zero,
-      eval_X_step: zero,
-      eval_X_core: zero,
-      t_out_step: zero,
-      nifs_polys: vec![[zero; 4]; nifs_rounds],
-      rho_acc_at_rb: zero,
-    };
-    let (verifier_shape_mr, verifier_ck_mr, _vk_mr) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&nn_verifier_circuit)?;
-    let verifier_shape_reg = verifier_shape_mr.to_regular_shape();
+    let vc = NeutronNovaVerifierCircuit::<E>::default(num_rounds_z, num_rounds_x, num_rounds_y);
+    let (vc_shape, vc_ck, _vk_mr) =
+      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
+    let vc_shape_regular = vc_shape.to_regular_shape();
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
       S_step: S_step.clone(),
       S_core: S_core.clone(),
       vk_ee,
-      verifier_shape_mr: verifier_shape_mr.clone(),
-      verifier_shape_reg: verifier_shape_reg.clone(),
-      verifier_ck_mr: verifier_ck_mr.clone(),
+      vc_shape: vc_shape.clone(),
+      vc_shape_regular: vc_shape_regular.clone(),
+      vc_ck: vc_ck.clone(),
       digest: OnceCell::new(),
     };
     let pk = NeutronNovaProverKey {
       ck,
       S_step,
       S_core,
+      vc_shape,
+      vc_shape_regular,
+      vc_ck,
       vk_digest: vk.digest()?,
-      verifier_shape_mr,
-      verifier_shape_reg,
-      verifier_ck_mr,
     };
 
     Ok((pk, vk))
@@ -721,119 +685,33 @@ where
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &pk.vk_digest);
 
-    // absorb the core instance
+    // absorb the core instance; NIFS will absorb the step instances
     transcript.absorb(b"core_instance", &core_instance_regular);
-    for U in step_instances_regular.iter() {
-      transcript.absorb(b"U", U);
-    }
-    let T_zero = E::Scalar::ZERO;
-    transcript.absorb(b"T", &T_zero);
 
     let n_padded = step_instances_regular.len().next_power_of_two();
-    let ell_b = n_padded.log_2();
+    let num_rounds_z = n_padded.log_2();
 
-    info!(
-      "NeutronNova NIFS prove for {} instances and padded to {} instances",
-      step_instances_regular.len(),
-      n_padded
-    );
-
-    let zero = E::Scalar::ZERO;
     let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
     let num_rounds_x = usize::try_from(pk.S_step.num_cons.ilog2()).unwrap();
     let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
-    let s_mr = &pk.verifier_shape_mr;
-    let nifs_rounds_from_shape = s_mr
-      .num_challenges_per_round
-      .iter()
-      .position(|&c| c == 0)
-      .ok_or_else(|| SpartanError::ProofVerifyError {
-        reason: "Verifier shape missing NIFS final round".to_string(),
-      })?;
-    if nifs_rounds_from_shape != ell_b {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!(
-          "NIFS rounds mismatch between setup ({nifs_rounds_from_shape}) and batch ({ell_b})",
-        ),
-      });
-    }
-    // Rounds = NIFS (ell_b) + NIFS-final (1) + outer (num_rounds_x) + outer-final (1)
-    //        + inner-setup (1) + inner (num_rounds_y) + commit_W_step (1) + commit_W_core (1)
-    //        + inner-final (1)
-    let expected_total_rounds = ell_b + 1 + num_rounds_x + 1 + 1 + num_rounds_y + 2 + 1;
-    if s_mr.num_rounds != expected_total_rounds {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!(
-          "Verifier shape total rounds ({}) do not match expected ({}) [NIFS={}, outer={}, inner={}]",
-          s_mr.num_rounds, expected_total_rounds, ell_b, num_rounds_x, num_rounds_y
-        ),
-      });
-    }
-    let mut verifier_circuit = NeutronNovaVerifierCircuit::<E> {
-      outer_polys_step: vec![[zero; 4]; num_rounds_x],
-      outer_polys_core: vec![[zero; 4]; num_rounds_x],
-      claim_Az_step: zero,
-      claim_Bz_step: zero,
-      claim_Cz_step: zero,
-      claim_Az_core: zero,
-      claim_Bz_core: zero,
-      claim_Cz_core: zero,
-      tau_at_rx: zero,
-      inner_polys_step: vec![[zero; 3]; num_rounds_y],
-      inner_polys_core: vec![[zero; 3]; num_rounds_y],
-      eval_A_step: zero,
-      eval_B_step: zero,
-      eval_C_step: zero,
-      eval_W_step: zero,
-      eval_A_core: zero,
-      eval_B_core: zero,
-      eval_C_core: zero,
-      eval_W_core: zero,
-      eval_X_step: zero,
-      eval_X_core: zero,
-      t_out_step: zero,
-      nifs_polys: vec![[zero; 4]; ell_b],
-      rho_acc_at_rb: zero,
-    };
-    let mr_is_small = false;
-    let mut state =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::initialize_multiround_witness(
-        &pk.verifier_shape_mr,
-      )?;
+
+    let mut vc = NeutronNovaVerifierCircuit::<E>::default(num_rounds_z, num_rounds_x, num_rounds_y);
+
+    let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Perform ZK NIFS prove and collect outputs
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let (_nifs_ignored, E_eq, Az0_vec, Bz0_vec, Cz0_vec, _t_out_ignored, r_bs) =
-      NeutronNovaNIFS::<E>::prove_zk(
-        &pk.S_step,
-        &step_instances_regular,
-        &step_witnesses,
-        &mut verifier_circuit,
-        &mut state,
-        &pk.verifier_shape_mr,
-        &pk.verifier_ck_mr,
-        mr_is_small,
-        &mut transcript,
-      )?;
+    let (E_eq, Az0_vec, Bz0_vec, Cz0_vec, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove_zk(
+      &pk.S_step,
+      &step_instances_regular,
+      &step_witnesses,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &mut transcript,
+    )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
-
-    let mut step_witnesses_padded = step_witnesses.clone();
-    if step_witnesses_padded.len() < n_padded {
-      step_witnesses_padded.extend(std::iter::repeat_n(
-        step_witnesses[0].clone(),
-        n_padded - step_witnesses_padded.len(),
-      ));
-    }
-    let mut step_instances_padded = step_instances_regular.clone();
-    if step_instances_padded.len() < n_padded {
-      step_instances_padded.extend(std::iter::repeat_n(
-        step_instances_regular[0].clone(),
-        n_padded - step_instances_padded.len(),
-      ));
-    }
-
-    let folded_W = R1CSWitness::fold_multiple(&r_bs, &step_witnesses_padded)?;
-    let folded_U = R1CSInstance::fold_multiple(&r_bs, &step_instances_padded);
 
     let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
     let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
@@ -850,12 +728,6 @@ where
       });
     let mut poly_tau = MultilinearPolynomial::new(full_E);
     info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "compute_tensor_and_poly_tau");
-
-    let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
-    let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S_step.num_cons.ilog2()).unwrap(),
-      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
-    );
 
     // outer sum-check preparation
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
@@ -885,7 +757,7 @@ where
     };
 
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-    let outer_start_index = ell_b + 1;
+    let outer_start_index = num_rounds_z + 1;
     // outer sum-check (batched)
     let (_sc_span, sc_t) = start_span!("outer_sumcheck (batched)");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_batched_zk(
@@ -897,11 +769,10 @@ where
       &mut poly_Bz_core,
       &mut poly_Cz_step,
       &mut poly_Cz_core,
-      &mut verifier_circuit,
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      mr_is_small,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &mut transcript,
       outer_start_index,
     )?;
@@ -914,43 +785,37 @@ where
     let claim_Cz_core = poly_Cz_core[0];
     let tau_at_rx = poly_tau[0];
 
-    verifier_circuit.claim_Az_step = claim_Az_step;
-    verifier_circuit.claim_Bz_step = claim_Bz_step;
-    verifier_circuit.claim_Cz_step = claim_Cz_step;
-    verifier_circuit.claim_Az_core = claim_Az_core;
-    verifier_circuit.claim_Bz_core = claim_Bz_core;
-    verifier_circuit.claim_Cz_core = claim_Cz_core;
-    verifier_circuit.tau_at_rx = tau_at_rx;
+    vc.claim_Az_step = claim_Az_step;
+    vc.claim_Bz_step = claim_Bz_step;
+    vc.claim_Cz_step = claim_Cz_step;
+    vc.claim_Az_core = claim_Az_core;
+    vc.claim_Bz_core = claim_Bz_core;
+    vc.claim_Cz_core = claim_Cz_core;
+    vc.tau_at_rx = tau_at_rx;
 
     let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &vc,
       outer_start_index + num_rounds_x,
-      mr_is_small,
       &mut transcript,
     )?;
 
     let chals = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &vc,
       outer_start_index + 1 + num_rounds_x,
-      mr_is_small,
       &mut transcript,
     )?;
     let r = chals[0];
 
     // inner sum-check preparation
     let (_r_span, r_t) = start_span!("prepare_inner_claims");
-    let claim_inner_joint_step = verifier_circuit.claim_Az_step
-      + r * verifier_circuit.claim_Bz_step
-      + r * r * verifier_circuit.claim_Cz_step;
-    let claim_inner_joint_core = verifier_circuit.claim_Az_core
-      + r * verifier_circuit.claim_Bz_core
-      + r * r * verifier_circuit.claim_Cz_core;
+    let claim_inner_joint_step = vc.claim_Az_step + r * vc.claim_Bz_step + r * r * vc.claim_Cz_step;
+    let claim_inner_joint_core = vc.claim_Az_core + r * vc.claim_Bz_core + r * r * vc.claim_Cz_core;
     info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
     // inner sum-check preparation
@@ -1008,11 +873,10 @@ where
         v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.X);
         v
       }),
-      &mut verifier_circuit,
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      mr_is_small,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
       &mut transcript,
       outer_start_index + num_rounds_x + 2,
     )?;
@@ -1020,59 +884,6 @@ where
 
     let eval_Z_step = evals[2];
     let eval_Z_core = evals[3];
-
-    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
-    let evals = {
-      let multi_evaluate =
-        |M_vec: &[&SparseMatrix<E::Scalar>], r_x: &[E::Scalar], r_y: &[E::Scalar]| {
-          let T_x = EqPolynomial::evals_from_points(r_x);
-          let T_y = EqPolynomial::evals_from_points(r_y);
-          let evaluate_with_table =
-            |M: &SparseMatrix<E::Scalar>, T_x: &[E::Scalar], T_y: &[E::Scalar]| -> E::Scalar {
-              M.indptr
-                .par_windows(2)
-                .enumerate()
-                .map(|(row_idx, ptrs)| {
-                  M.get_row_unchecked(ptrs.try_into().unwrap())
-                    .map(|(val, col_idx)| {
-                      let prod = T_x[row_idx] * T_y[*col_idx];
-                      if *val == E::Scalar::ONE {
-                        prod
-                      } else if *val == -E::Scalar::ONE {
-                        -prod
-                      } else {
-                        prod * val
-                      }
-                    })
-                    .sum::<E::Scalar>()
-                })
-                .sum()
-            };
-          (0..M_vec.len())
-            .into_par_iter()
-            .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
-            .collect::<Vec<_>>()
-        };
-      multi_evaluate(
-        &[
-          &pk.S_step.A,
-          &pk.S_step.B,
-          &pk.S_step.C,
-          &pk.S_core.A,
-          &pk.S_core.B,
-          &pk.S_core.C,
-        ],
-        &r_x,
-        &r_y,
-      )
-    };
-    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
-    verifier_circuit.eval_A_step = evals[0];
-    verifier_circuit.eval_B_step = evals[1];
-    verifier_circuit.eval_C_step = evals[2];
-    verifier_circuit.eval_A_core = evals[3];
-    verifier_circuit.eval_B_core = evals[4];
-    verifier_circuit.eval_C_core = evals[5];
 
     let eval_X_step = {
       let X = vec![E::Scalar::ONE]
@@ -1095,56 +906,50 @@ where
     let eval_W_core =
       (eval_Z_core - r_y[0] * eval_X_core) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
 
-    verifier_circuit.eval_W_step = eval_W_step;
-    verifier_circuit.eval_W_core = eval_W_core;
-    verifier_circuit.eval_X_step = eval_X_step;
-    verifier_circuit.eval_X_core = eval_X_core;
+    vc.eval_W_step = eval_W_step;
+    vc.eval_W_core = eval_W_core;
+    vc.eval_X_step = eval_X_step;
+    vc.eval_X_core = eval_X_core;
 
     // Commit eval_W_step
     let eval_w_step_commit_round = outer_start_index + num_rounds_x + 2 + num_rounds_y;
     let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &vc,
       eval_w_step_commit_round,
-      mr_is_small,
       &mut transcript,
     )?;
     // Commit eval_W_core
     let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &vc,
       eval_w_step_commit_round + 1,
-      mr_is_small,
       &mut transcript,
     )?;
-    // Inner final equality round (c_inner)
+    // Inner final equality round
     let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.verifier_shape_mr,
-      &pk.verifier_ck_mr,
-      &verifier_circuit,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &vc,
       outer_start_index + num_rounds_x + 2 + num_rounds_y + 2,
-      mr_is_small,
       &mut transcript,
     )?;
 
     let (U_verifier, W_verifier) =
-      <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::finalize_multiround_witness(
-        &mut state,
-        &pk.verifier_shape_mr,
-        mr_is_small,
-      )?;
+      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut vc_state, &pk.vc_shape)?;
 
     let U_verifier_regular = U_verifier.to_regular_instance()?;
-    let S_verifier = &pk.verifier_shape_reg;
-    let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.verifier_ck_mr)?;
+    let (random_U, random_W) = pk
+      .vc_shape_regular
+      .sample_random_instance_witness(&pk.vc_ck)?;
     let (nifs_proof, folded_W_verifier) = NIFS::<E>::prove(
-      &pk.verifier_ck_mr,
-      S_verifier,
+      &pk.vc_ck,
+      &pk.vc_shape_regular,
       &random_U,
       &random_W,
       &U_verifier_regular,
@@ -1154,10 +959,10 @@ where
 
     // access two claimed commitments to evaluations of W_step and W_core
     let comm_eval_W_step = U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
-    let blind_eval_W_step = state.r_w_per_round[eval_w_step_commit_round].clone();
+    let blind_eval_W_step = vc_state.r_w_per_round[eval_w_step_commit_round].clone();
 
     let comm_eval_W_core = U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone();
-    let blind_eval_W_core = state.r_w_per_round[eval_w_step_commit_round + 1].clone();
+    let blind_eval_W_core = vc_state.r_w_per_round[eval_w_step_commit_round + 1].clone();
 
     // the commitments are already absorbed in the transcript, so we simply squeeze the challenge
     let c_eval = transcript.squeeze(b"c_eval")?;
@@ -1191,7 +996,7 @@ where
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let eval_arg = E::PCS::prove(
       &pk.ck,
-      &pk.verifier_ck_mr,
+      &pk.vc_ck,
       &mut transcript,
       &comm,
       &W,
@@ -1250,7 +1055,7 @@ where
       u.validate(&vk.S_step, &mut transcript)?;
     }
 
-    // validate the core instanceq
+    // validate the core instance
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
     // absorb the public IO into the transcript
@@ -1272,11 +1077,17 @@ where
     }
 
     let (_convert_span, convert_t) = start_span!("convert_to_regular_verify");
-    let step_instances_regular = self
+    let mut step_instances_regular = self
       .step_instances
       .par_iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
+    if step_instances_regular.len() != step_instances_regular.len().next_power_of_two() {
+      step_instances_regular.extend(std::iter::repeat_n(
+        step_instances_regular[0].clone(),
+        step_instances_regular.len().next_power_of_two() - step_instances_regular.len(),
+      ));
+    }
 
     let core_instance_regular = self.core_instance.to_regular_instance()?;
     info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_regular_verify");
@@ -1288,11 +1099,10 @@ where
     for U in step_instances_regular.iter() {
       transcript.absorb(b"U", U);
     }
-    let T_zero = E::Scalar::ZERO;
-    transcript.absorb(b"T", &T_zero);
+    transcript.absorb(b"T", &E::Scalar::ZERO); // we always have T=0 in NeutronNova
     let tau_eq = transcript.squeeze(b"tau")?;
     let nifs_rounds = vk
-      .verifier_shape_mr
+      .vc_shape
       .num_challenges_per_round
       .iter()
       .position(|&c| c == 0)
@@ -1304,7 +1114,7 @@ where
       rhos.push(transcript.squeeze(b"rho")?);
     }
 
-    let S_verifier = &vk.verifier_shape_mr;
+    let S_verifier = &vk.vc_shape;
     let U_verifier = &self.U_verifier;
     if S_verifier.num_rounds == 0 {
       return Err(SpartanError::ProofVerifyError {
@@ -1467,26 +1277,26 @@ where
     );
 
     let U_verifier_regular = self.U_verifier.to_regular_instance()?;
-    let num_public_values = 10usize;
+    let num_public_values = 6usize; // [tau_at_rx, eval_X_step, eval_X_core, rho_acc_at_rb, quotient_step, quotient_core]
     if U_verifier_regular.X.len() < num_public_values {
       return Err(SpartanError::ProofVerifyError {
         reason: "Verifier instance missing public values".to_string(),
       });
     }
     let total_challenges = U_verifier_regular.X.len() - num_public_values;
-    let nifs_chals = nifs_rounds;
-    // Expected challenges: nifs + outer_x + c_outer + r (inner_setup) + inner_y + c_inner
-    if total_challenges != nifs_chals + num_rounds_x + 1 + 1 + num_rounds_y + 1 {
+    // Expected challenges: nifs + outer_x + c_outer + r (inner_setup) + inner_y
+    if total_challenges != nifs_rounds + num_rounds_x + 1 + num_rounds_y {
       return Err(SpartanError::ProofVerifyError {
         reason: "Unexpected number of challenges in verifier instance".to_string(),
       });
     }
     let all_challenges = &U_verifier_regular.X[0..total_challenges];
-    let start_outer = nifs_chals;
+    let start_outer = nifs_rounds;
     let start_outer_final = start_outer + num_rounds_x;
-    let start_inner_setup = start_outer_final + 1;
+    let start_inner_setup = start_outer_final;
     let start_inner = start_inner_setup + 1;
     let r_x = &all_challenges[start_outer..start_outer + num_rounds_x];
+    let r = all_challenges[start_inner_setup];
     let r_y = &all_challenges[start_inner..start_inner + num_rounds_y];
 
     let last_round = S_verifier.num_rounds - 1;
@@ -1516,10 +1326,10 @@ where
         .nifs_proof
         .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
 
-    let S_verifier_reg = &vk.verifier_shape_reg;
+    let S_verifier_reg = &vk.vc_shape_regular;
 
     S_verifier_reg
-      .is_sat_relaxed(&vk.verifier_ck_mr, &folded_U_verifier, &self.folded_W)
+      .is_sat_relaxed(&vk.vc_ck, &folded_U_verifier, &self.folded_W)
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Folded instance not satisfiable: {e}"),
       })?;
@@ -1581,30 +1391,23 @@ where
     let pub_vals = &U_verifier_regular.X[pub_start..pub_start + num_public_values];
     let tau_at_rx = crate::polys::power::PowPolynomial::new(&tau_eq, r_x.len()).evaluate(r_x)?;
 
-    if pub_vals[0] != eval_A_step
-      || pub_vals[1] != eval_B_step
-      || pub_vals[2] != eval_C_step
-      || pub_vals[3] != eval_A_core
-      || pub_vals[4] != eval_B_core
-      || pub_vals[5] != eval_C_core
-      || pub_vals[6] != tau_at_rx
-      || pub_vals[7] != eval_X_step
-      || pub_vals[8] != eval_X_core
+    // Compute quotient_* = (eval_A + r*eval_B + r^2*eval_C) for both branches
+    let quotient_step = eval_A_step + r * eval_B_step + r * r * eval_C_step;
+    let quotient_core = eval_A_core + r * eval_B_core + r * r * eval_C_core;
+
+    let acc_eq = EqPolynomial::new(r_bs_nifs).evaluate(&rhos);
+
+    if pub_vals[0] != tau_at_rx
+      || pub_vals[1] != eval_X_step
+      || pub_vals[2] != eval_X_core
+      || pub_vals[3] != acc_eq
+      || pub_vals[4] != quotient_step
+      || pub_vals[5] != quotient_core
     {
       return Err(SpartanError::ProofVerifyError {
         reason:
-          "Verifier instance public ABC/tau_at_rx/X_step/X_core values do not match recomputation"
+          "Verifier instance public tau_at_rx/eval_X_step/acc_eq/eval_X_core/quotients do not match recomputation"
             .to_string(),
-      });
-    }
-    let rho_acc_at_rb_pub = pub_vals[9];
-    let mut acc_eq = E::Scalar::ONE;
-    for (t, r_b) in r_bs_nifs.iter().enumerate() {
-      acc_eq *= (E::Scalar::ONE - *r_b) * (E::Scalar::ONE - rhos[t]) + *r_b * rhos[t];
-    }
-    if rho_acc_at_rb_pub != acc_eq {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "rho_acc_at_rb mismatch".to_string(),
       });
     }
 
@@ -1628,7 +1431,7 @@ where
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
       &vk.vk_ee,
-      &vk.verifier_ck_mr,
+      &vk.vc_ck,
       &mut transcript,
       &comm,
       &r_y[1..],
@@ -1769,15 +1572,18 @@ mod benchmarks {
       "[bench_neutron_inner] name: {name}, num_circuits: {}",
       step_circuits.len()
     );
-    // sanity check: prove and verify before benching
 
     let ps = NeutronNovaSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
-
     let res = NeutronNovaSNARK::prove(pk, step_circuits, core_circuit, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
     let res = snark.verify(vk, step_circuits.len());
+    println!(
+      "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",
+      step_circuits.len(),
+      res
+    );
     assert!(res.is_ok());
 
     let (public_values_step, _public_values_core) = res.unwrap();

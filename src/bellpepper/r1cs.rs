@@ -116,7 +116,6 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
     ck: &CommitmentKey<E>,
     circuit: &C,
     round_index: usize,
-    is_small: bool,
     transcript: &mut E::TE,
   ) -> Result<Vec<E::Scalar>, SpartanError>;
 
@@ -124,7 +123,6 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
   fn finalize_multiround_witness(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
-    is_small: bool,
   ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
@@ -696,7 +694,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     ck: &CommitmentKey<E>,
     circuit: &C,
     round_index: usize,
-    is_small: bool,
     transcript: &mut E::TE,
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     if round_index != state.current_round {
@@ -755,8 +752,13 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     let comm_w_round = PCS::<E>::commit(
       ck,
       &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
+<<<<<<< HEAD
       &state.r_w,
       is_small,
+=======
+      &r_w_per_round,
+      false,
+>>>>>>> c5303f5 (opt: neutronnova zk optimizations (#39))
     )?;
 
     state.vars_per_round.push(round_vars);
@@ -771,7 +773,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
   fn finalize_multiround_witness(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
-    is_small: bool,
   ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
     if state.current_round != state.num_rounds {
       return Err(SpartanError::SynthesisError {
@@ -806,7 +807,13 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       challenges_per_round,
     )?;
 
+<<<<<<< HEAD
     let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), state.r_w.clone(), is_small)?;
+=======
+    let r_w = PCS::<E>::combine_blinds(&state.r_w_per_round)?;
+
+    let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), r_w, false)?;
+>>>>>>> c5303f5 (opt: neutronnova zk optimizations (#39))
 
     Ok((u, w))
   }
