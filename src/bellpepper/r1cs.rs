@@ -807,13 +807,9 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       challenges_per_round,
     )?;
 
-<<<<<<< HEAD
-    let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), state.r_w.clone(), is_small)?;
-=======
     let r_w = PCS::<E>::combine_blinds(&state.r_w_per_round)?;
 
     let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), r_w, false)?;
->>>>>>> c5303f5 (opt: neutronnova zk optimizations (#39))
 
     Ok((u, w))
   }
