@@ -13,7 +13,8 @@ use crate::{
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
-  nifs::NIFS,
+  math::Math,
+  nifs::NovaNIFS,
   polys::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
@@ -160,7 +161,7 @@ pub struct R1CSSNARK<E: Engine> {
   // The random relaxed instance used for folding
   random_U: RelaxedR1CSInstance<E>,
   // NIFS proof for folding a random relaxed instance with the verifier instance
-  nifs_proof: NIFS<E>,
+  nifs: NovaNIFS<E>,
   // Folded relaxed witness produced during NIFS proving
   folded_W: RelaxedR1CSWitness<E>,
 
@@ -184,10 +185,10 @@ where
 
     // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-    let num_rounds_x = usize::try_from(S.num_cons.ilog2()).unwrap();
-    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+    let num_rounds_x = S.num_cons.log_2();
+    let num_rounds_y = num_vars.log_2() + 1;
     let zero = E::Scalar::ZERO;
-    let spartan_verifier_circuit = SpartanVerifierCircuit::<E> {
+    let vc = SpartanVerifierCircuit::<E> {
       outer_polys: vec![[zero; 4]; num_rounds_x],
       claim_Az: zero,
       claim_Bz: zero,
@@ -198,32 +199,10 @@ where
       eval_X: zero,
     };
     let (vc_shape, vc_ck, _vk_mr) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&spartan_verifier_circuit)?;
+      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
     let vc_shape_regular = vc_shape.to_regular_shape();
 
-    // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
-    let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-    let num_rounds_x = usize::try_from(S.num_cons.ilog2()).unwrap();
-    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
-    let zero = E::Scalar::ZERO;
-    let spartan_verifier_circuit = SpartanVerifierCircuit::<E> {
-      outer_polys: vec![[zero; 4]; num_rounds_x],
-      claim_Az: zero,
-      claim_Bz: zero,
-      claim_Cz: zero,
-      tau_at_rx: zero,
-      inner_polys: vec![[zero; 3]; num_rounds_y],
-      eval_A: zero,
-      eval_B: zero,
-      eval_C: zero,
-      eval_W: zero,
-      eval_X: zero,
-    };
-    let (verifier_shape_mr, verifier_ck_mr, _vk_mr) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&spartan_verifier_circuit)?;
-    let verifier_shape_reg = verifier_shape_mr.to_regular_shape();
-
-    let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
+    let vk = Self::VerifierKey {
       S: S.clone(),
       vk_ee,
       vc_shape: vc_shape.clone(),
@@ -292,10 +271,7 @@ where
     z.extend_from_slice(&U.challenges);
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
-      usize::try_from(num_vars.ilog2()).unwrap() + 1,
-    );
+    let (num_rounds_x, num_rounds_y) = (pk.S.num_cons.log_2(), num_vars.log_2() + 1);
 
     // Build tau and Az/Bz/Cz polynomials
     let tau = (0..num_rounds_x)
@@ -308,22 +284,8 @@ where
     let mut poly_Bz = MultilinearPolynomial::new(Bz);
     let mut poly_Cz = MultilinearPolynomial::new(Cz);
 
-    // Helpers now live in `sumcheck.rs` and are called below via `SumcheckProof::*`.
-
     // Initialize multi-round verifier circuit (will be filled as we go)
-    let zero = E::Scalar::ZERO;
-    let mut verifier_circuit = SpartanVerifierCircuit::<E> {
-      outer_polys: vec![[zero; 4]; num_rounds_x],
-      claim_Az: zero,
-      claim_Bz: zero,
-      claim_Cz: zero,
-      tau_at_rx: zero,
-      inner_polys: vec![[zero; 3]; num_rounds_y],
-      eval_W: zero,
-      eval_X: zero,
-    };
-
-    // Build the multi-round instance by interleaving with challenge generation
+    let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(num_rounds_x, num_rounds_y);
     let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Outer sum-check
@@ -345,24 +307,14 @@ where
     verifier_circuit.claim_Bz = poly_Bz[0];
     verifier_circuit.claim_Cz = poly_Cz[0];
     verifier_circuit.tau_at_rx = poly_tau[0];
-    // Process the synthetic "outer final" round in the circuit and capture challenges (unused)
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &verifier_circuit,
-      num_rounds_x,
-      &mut transcript,
-    )?;
 
-    // Inner setup: derive r from transcript by processing that round
-    let inner_setup_round = num_rounds_x + 1;
+    // Process the "outer final" round in the circuit and capture challenge
     let chals = SatisfyingAssignment::<E>::process_round(
       &mut state,
       &pk.vc_shape,
       &pk.vc_ck,
       &verifier_circuit,
-      inner_setup_round,
+      num_rounds_x,
       &mut transcript,
     )?;
     let r = chals[0];
@@ -392,7 +344,7 @@ where
       &pk.vc_shape,
       &pk.vc_ck,
       &mut transcript,
-      num_rounds_x + 2,
+      num_rounds_x + 1,
     )?;
     let eval_Z = evals[1]; // evaluation of Z at r_y
 
@@ -403,35 +355,33 @@ where
         .into_iter()
         .chain(U_regular.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
-      let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
-      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
+      SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
     };
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
     let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
 
-    // Process the dedicated commit-only round for eval_W
+    // Process the inner-final equality round
+    // Set verifier circuit public values before processing inner-final round
     verifier_circuit.eval_W = eval_W;
-    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
+    verifier_circuit.eval_X = eval_X;
+    _ = SatisfyingAssignment::<E>::process_round(
+      &mut state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &verifier_circuit,
+      (num_rounds_x + 1) + num_rounds_y,
+      &mut transcript,
+    )?;
+
+    // Process the dedicated commit-only round for eval_W
+    let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
     let _ = SatisfyingAssignment::<E>::process_round(
       &mut state,
       &pk.vc_shape,
       &pk.vc_ck,
       &verifier_circuit,
       eval_w_commit_round,
-      &mut transcript,
-    )?;
-
-    // Process the inner-final equality round
-    // Set verifier circuit public values before processing inner-final round
-    verifier_circuit.eval_X = eval_X;
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &verifier_circuit,
-      eval_w_commit_round + 1,
       &mut transcript,
     )?;
 
@@ -444,7 +394,7 @@ where
     let U_verifier_regular = U_verifier.to_regular_instance()?;
     let S_verifier = &pk.vc_shape_regular;
     let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.vc_ck)?;
-    let (nifs_proof, folded_W) = NIFS::<E>::prove(
+    let (nifs, folded_W) = NovaNIFS::<E>::prove(
       &pk.vc_ck,
       S_verifier,
       &random_U,
@@ -469,7 +419,7 @@ where
 
     Ok(R1CSSNARK {
       U_verifier,
-      nifs_proof,
+      nifs,
       random_U,
       folded_W,
       eval_arg,
@@ -490,100 +440,44 @@ where
     self.U.validate(&vk.S, &mut transcript)?;
 
     // Recreate tau polynomial coefficients via Fiat-Shamir and advance transcript
-    let num_rounds_x = usize::try_from(vk.S.num_cons.ilog2()).unwrap();
+    let num_rounds_x = vk.S.num_cons.log_2();
     let tau = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
 
-    // Reproduce the multi-round transcript schedule up to (but excluding) the final round
-    // so that PCS occurs at the same transcript state as in the prover.
-    let S_verifier = &vk.vc_shape;
-    let U_verifier = &self.U_verifier;
-    if S_verifier.num_rounds == 0 {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "Verifier shape has zero rounds".to_string(),
-      });
-    }
+    // validate the provided multi-round verifier instance and advance transcript
+    self.U_verifier.validate(&vk.vc_shape, &mut transcript)?;
 
-    // Validate rounds [0 .. num_rounds-1)
-    for round in 0..(S_verifier.num_rounds - 1) {
-      if round > 0 {
-        // absorb commitment of previous round and check size
-        <E::PCS as PCSEngineTrait<E>>::check_commitment(
-          &U_verifier.comm_w_per_round[round - 1],
-          S_verifier.num_vars_per_round[round - 1],
-        )?;
-        transcript.absorb(b"comm_w_round", &U_verifier.comm_w_per_round[round - 1]);
-      }
-      // derive and validate challenges for this round
-      let expected = (0..S_verifier.num_challenges_per_round[round])
-        .map(|_| transcript.squeeze(b"challenge"))
-        .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
-      if expected != U_verifier.challenges_per_round[round] {
-        return Err(SpartanError::ProofVerifyError {
-          reason: format!("Challenges for round {round} do not match"),
-        });
-      }
-    }
+    // Derive expected challenge counts from the original shape sizes
+    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
+    let num_rounds_x = vk.S.num_cons.log_2();
+    let num_rounds_y = num_vars.log_2() + 1;
 
     let U_verifier_regular = self.U_verifier.to_regular_instance()?;
 
-    // Verify PCS opening at r_y[1..] using challenges extracted from the multi-round instance
-    // Derive expected challenge counts from the original shape sizes
-    let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
-    let num_rounds_x = usize::try_from(vk.S.num_cons.ilog2()).unwrap();
-    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
-
-    // The regular instance packs [challenges..., public_values...], where public_values are 3 items (tau_at_rx,eval_X,quotient)
     let num_public_values = 3usize;
-    if U_verifier_regular.X.len() < num_public_values {
+    let num_challenges = num_rounds_x + 1 + num_rounds_y;
+
+    if U_verifier_regular.X.len() != num_challenges + num_public_values {
       return Err(SpartanError::ProofVerifyError {
-        reason: "Verifier instance missing public values".to_string(),
+        reason: format!(
+          "Verifier instance has incorrect number of public IO: expected {}, got {}",
+          num_challenges + num_public_values,
+          U_verifier_regular.X.len()
+        ),
       });
     }
-    let total_challenges = U_verifier_regular.X.len() - num_public_values;
-    if total_challenges != num_rounds_x + 1 + num_rounds_y {
-      return Err(SpartanError::ProofVerifyError {
-        reason: "Unexpected number of challenges in verifier instance".to_string(),
-      });
-    }
-    let all_challenges = &U_verifier_regular.X[0..total_challenges];
+    let challenges = &U_verifier_regular.X[0..num_challenges];
+    let public_values = &U_verifier_regular.X[num_challenges..num_challenges + 3];
 
-    let start_inner = num_rounds_x + 1; // index of r_y[0]
-    let r_x = &all_challenges[0..num_rounds_x];
-    let r = all_challenges[num_rounds_x]; // r from inner setup round
-    let r_y = &all_challenges[start_inner..start_inner + num_rounds_y];
+    let r_x = challenges[0..num_rounds_x].to_vec();
+    let r = challenges[num_rounds_x]; // r for combining inner claims
+    let r_y = challenges[num_rounds_x + 1..].to_vec();
 
-    // Recompute eval_A, eval_B, eval_C at (r_x, r_y)
-    let (eval_A, eval_B, eval_C) = {
-      let T_x = EqPolynomial::evals_from_points(r_x);
-      let T_y = EqPolynomial::evals_from_points(r_y);
-      let multi_eval = |M: &SparseMatrix<E::Scalar>| -> E::Scalar {
-        M.indptr
-          .par_windows(2)
-          .enumerate()
-          .map(|(row_idx, ptrs)| {
-            M.get_row_unchecked(ptrs.try_into().unwrap())
-              .map(|(val, col_idx)| {
-                let prod = T_x[row_idx] * T_y[*col_idx];
-                if *val == E::Scalar::ONE {
-                  prod
-                } else if *val == -E::Scalar::ONE {
-                  -prod
-                } else {
-                  prod * val
-                }
-              })
-              .sum::<E::Scalar>()
-          })
-          .sum()
-      };
-      (
-        multi_eval(&vk.S.A),
-        multi_eval(&vk.S.B),
-        multi_eval(&vk.S.C),
-      )
-    };
+    // compute eval_A, eval_B, eval_C at (r_x, r_y)
+    let T_x = EqPolynomial::evals_from_points(&r_x);
+    let T_y = EqPolynomial::evals_from_points(&r_y);
+    let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables(&T_x, &T_y);
     let quotient = eval_A + r * eval_B + r * r * eval_C;
 
     // Recompute eval_X from original circuit public IO at r_y[1..]
@@ -595,17 +489,14 @@ where
         .chain(U_regular.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
       let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
-      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
+      SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
     };
 
     // Recompute tau(r_x) using the same tau polynomial challenges
-    let tau_at_rx = tau.evaluate(r_x);
+    let tau_at_rx = tau.evaluate(&r_x);
 
     // Compare against the instance's public inputs [tau_at_rx, eval_X, quotient]
-    let pub_start = total_challenges;
-    let pub_vals = &U_verifier_regular.X[pub_start..pub_start + num_public_values];
-    if pub_vals[0] != tau_at_rx || pub_vals[1] != eval_X || pub_vals[2] != quotient {
+    if public_values[0] != tau_at_rx || public_values[1] != eval_X || public_values[2] != quotient {
       return Err(SpartanError::ProofVerifyError {
         reason:
           "Verifier instance public values do not match recomputed evaluations (tau_at_rx, eval_X, quotient)"
@@ -613,35 +504,13 @@ where
       });
     }
 
-    // Finish the last (final) multi-round step to catch up with the prover's schedule
-    let last_round = S_verifier.num_rounds - 1;
-    if last_round > 0 {
-      <E::PCS as PCSEngineTrait<E>>::check_commitment(
-        &U_verifier.comm_w_per_round[last_round - 1],
-        S_verifier.num_vars_per_round[last_round - 1],
-      )?;
-      transcript.absorb(
-        b"comm_w_round",
-        &U_verifier.comm_w_per_round[last_round - 1],
-      );
-    }
-    let expected_last = (0..S_verifier.num_challenges_per_round[last_round])
-      .map(|_| transcript.squeeze(b"challenge"))
-      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
-    if expected_last != U_verifier.challenges_per_round[last_round] {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!("Challenges for round {last_round} do not match"),
-      });
-    }
-
     // Finally, run NIFS verification using the same transcript
     let folded_U = self
-      .nifs_proof
+      .nifs
       .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
 
     // Check satisfiability of the folded relaxed instance with the folded witness
-    let S_verifier = &vk.vc_shape_regular;
-    S_verifier
+    vk.vc_shape_regular
       .is_sat_relaxed(ck_verifier, &folded_U, &self.folded_W)
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Folded instance not satisfiable: {e}"),
@@ -649,14 +518,14 @@ where
 
     // Continue with PCS verification on the same transcript
     // Use the commitment from the dedicated eval_W commit-only last round
-    let eval_w_commit_round = (num_rounds_x + 2) + num_rounds_y;
+    let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
     E::PCS::verify(
       &vk.vk_ee,
       &vk.vc_ck,
       &mut transcript,
       &U_regular.comm_W,
       &r_y[1..],
-      &U_verifier.comm_w_per_round[eval_w_commit_round],
+      &self.U_verifier.comm_w_per_round[eval_w_commit_round],
       &self.eval_arg,
     )?;
 
@@ -777,7 +646,6 @@ mod tests {
 
     // verify the SNARK
     let res = snark.verify(&vk);
-    println!("res = {res:?}");
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
   }

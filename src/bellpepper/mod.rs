@@ -122,7 +122,7 @@ pub mod tests {
     // Process each round
     let num_rounds = <TwoRoundBitsCircuit as MultiRoundCircuit<E>>::num_rounds(&circuit);
     for r in 0..num_rounds {
-      SatisfyingAssignment::<E>::process_round(
+      let _ = SatisfyingAssignment::<E>::process_round(
         &mut state,
         &shape,
         &ck,
@@ -164,8 +164,8 @@ pub mod tests {
         return Err(SynthesisError::Unsatisfiable);
       }
       Ok(match round_index {
-        0 => 0, // no challenges in the first round
-        1 => 1, // one challenge r in the second round
+        0 => 1, // one challenges after the first round
+        1 => 0, // no challenges in the second round
         _ => 0, // no challenges in other rounds
       })
     }
@@ -338,7 +338,7 @@ pub mod tests {
     // Process each round
     let num_rounds = <TwoRoundPermutationCircuit as MultiRoundCircuit<E>>::num_rounds(&circuit);
     for r in 0..num_rounds {
-      SatisfyingAssignment::<E>::process_round(
+      let _ = SatisfyingAssignment::<E>::process_round(
         &mut state,
         &shape,
         &ck,

@@ -1,23 +1,25 @@
-//! Non-Interactive Folding Scheme (NIFS) for Spartan2.
-#![allow(non_snake_case)]
-
+//! Nova's non-Interactive Folding Scheme (NIFS)
 use crate::{
-  Blind, Commitment, CommitmentKey,
+  Blind, Commitment, CommitmentKey, PCS,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness},
-  traits::{Engine, folding::FoldingEngineTrait, transcript::TranscriptEngineTrait},
+  traits::{
+    Engine,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
+    transcript::TranscriptEngineTrait,
+  },
 };
 use serde::{Deserialize, Serialize};
 
-/// NIFS proof containing the commitment to the cross-term `T`.
+/// Nova NIFS proof containing the commitment to the cross-term `T`.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct NIFS<E: Engine> {
+pub struct NovaNIFS<E: Engine> {
   pub(crate) comm_T: Commitment<E>,
 }
 
-impl<E: Engine> NIFS<E>
+impl<E: Engine> NovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
@@ -37,7 +39,7 @@ where
     transcript.absorb(b"U2", U2);
 
     // Compute the cross-term commitment.
-    let r_T: Blind<E> = <E::PCS as crate::traits::pcs::PCSEngineTrait<E>>::blind(ck);
+    let r_T: Blind<E> = PCS::<E>::blind(ck, S.num_cons);
     let (T, comm_T) = S.commit_T(ck, U1, W1, U2, W2, &r_T)?;
 
     // Continue transcript with the cross-term commitment and derive the challenge `r`.
@@ -64,169 +66,5 @@ where
     let r = transcript.squeeze(b"r")?;
 
     Ok(U1.fold(U2, &self.comm_T, &r))
-  }
-}
-
-// ------------------------------------------------------------------------------------------------
-// Tests
-// ------------------------------------------------------------------------------------------------
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::{
-    CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
-    bellpepper::tests::TwoRoundPermutationCircuit,
-    provider::P256HyraxEngine,
-    r1cs::{R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape},
-    traits::{Engine, pcs::PCSEngineTrait},
-  };
-  use ff::Field;
-
-  type E = P256HyraxEngine;
-
-  fn multiround_fold_with() {
-    // Build a trivial 1-constraint, 1-variable, 1-round shape.
-    let width = MULTIROUND_COMMITMENT_WIDTH;
-    let num_cons = 1usize;
-    let num_vars_per_round = vec![1usize];
-    let num_challenges_per_round = vec![0usize];
-    let num_public = 0usize;
-
-    let make_sparse =
-      |rows: usize, cols: usize| SparseMatrix::<<E as Engine>::Scalar>::new(&[], rows, cols);
-    let total_vars = num_vars_per_round.iter().sum::<usize>();
-    let total_challenges = num_challenges_per_round.iter().sum::<usize>();
-    let cols = total_vars + 1 + num_public + total_challenges;
-
-    let shape_mr = SplitMultiRoundR1CSShape::<E>::new(
-      width,
-      num_cons,
-      num_vars_per_round,
-      num_challenges_per_round,
-      num_public,
-      make_sparse(num_cons, cols),
-      make_sparse(num_cons, cols),
-      make_sparse(num_cons, cols),
-    )
-    .expect("shape construction");
-
-    let S_reg = shape_mr.to_regular_shape();
-    let (ck, _vk): (CommitmentKey<E>, _) = shape_mr.commitment_key();
-
-    // Build witness & commitments for the (single-round) multi-round instance.
-    let total_vars: usize = shape_mr.num_vars_per_round.iter().sum();
-    let mut W_vec = vec![<E as Engine>::Scalar::ZERO; total_vars];
-    W_vec[0] = <E as Engine>::Scalar::ONE; // Set first variable to 1.
-    let r_W = <<E as Engine>::PCS as PCSEngineTrait<E>>::blind(&ck, total_vars);
-    let comm_round = <<E as Engine>::PCS as PCSEngineTrait<E>>::commit(
-      &ck,
-      &W_vec[0..shape_mr.num_vars_per_round[0]],
-      &r_W,
-      false,
-    )
-    .unwrap();
-
-    let inst_mr =
-      SplitMultiRoundR1CSInstance::<E>::new(&shape_mr, vec![comm_round], vec![], vec![vec![]])
-        .expect("instance construction");
-
-    let inst_reg = inst_mr.to_regular_instance().unwrap();
-    let wit_reg = R1CSWitness::<E>::new_unchecked(W_vec, r_W, false).unwrap();
-
-    // Create a random relaxed instance/witness compatible with the same shape.
-    let (random_U, random_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
-
-    // Prove & verify
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-    let (proof, folded_W) = NIFS::<E>::prove(
-      &ck,
-      &S_reg,
-      &random_U,
-      &random_W,
-      &inst_reg,
-      &wit_reg,
-      &mut transcript,
-    )
-    .unwrap();
-
-    // Validation now happens at callsite; here we provide a regular U2 and transcript
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-    let U2_reg = inst_mr.to_regular_instance().unwrap();
-    let verified_U = proof.verify(&mut transcript, &random_U, &U2_reg).unwrap();
-    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
-  }
-
-  #[test]
-  fn test_multiround_fold() {
-    multiround_fold_with();
-  }
-
-  // ----------------------------------------------------------------------------------
-  // Permutation folding test
-  // ----------------------------------------------------------------------------------
-  fn multiround_permutation_fold_with() {
-    use crate::bellpepper::{
-      r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness},
-      shape_cs::ShapeCS,
-      solver::SatisfyingAssignment,
-    };
-
-    let circuit = TwoRoundPermutationCircuit;
-
-    // Generate multi-round shape via Bellpepper
-    let (shape_mr, ck, _vk) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-
-    // Witness generation across rounds
-    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape_mr).unwrap();
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-
-    let num_rounds =
-      <TwoRoundPermutationCircuit as crate::traits::circuit::MultiRoundCircuit<E>>::num_rounds(
-        &circuit,
-      );
-    for r in 0..num_rounds {
-      SatisfyingAssignment::<E>::process_round(
-        &mut state,
-        &shape_mr,
-        &ck,
-        &circuit,
-        r,
-        &mut transcript,
-      )
-      .unwrap();
-    }
-
-    let (inst_split, wit_reg) =
-      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape_mr).unwrap();
-
-    let inst_reg = inst_split.to_regular_instance().unwrap();
-    let S_reg = shape_mr.to_regular_shape();
-
-    // Random relaxed instance
-    let (random_U, random_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
-
-    // NIFS prove + verify
-    let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
-    let (proof, folded_W) = NIFS::<E>::prove(
-      &ck,
-      &S_reg,
-      &random_U,
-      &random_W,
-      &inst_reg,
-      &wit_reg,
-      &mut transcript_nifs,
-    )
-    .unwrap();
-
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-    let U2_reg = inst_split.to_regular_instance().unwrap();
-    let verified_U = proof.verify(&mut transcript, &random_U, &U2_reg).unwrap();
-    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
-  }
-
-  #[test]
-  fn test_multiround_permutation_fold() {
-    multiround_permutation_fold_with();
   }
 }

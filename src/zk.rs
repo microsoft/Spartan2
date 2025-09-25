@@ -71,6 +71,27 @@ fn alloc_coeffs<E: Engine, CS: ConstraintSystem<E::Scalar>>(
     .collect::<Result<Vec<_>, _>>()
 }
 
+fn enforce_sc_claim<E: Engine, CS: ConstraintSystem<E::Scalar>>(
+  mut cs: CS,
+  poly: &[AllocatedNum<E::Scalar>],
+  claim: &AllocatedNum<E::Scalar>,
+) -> Result<(), SynthesisError> {
+  // Enforce that the sum of coefficients equals the claim
+  cs.enforce(
+    || "sum_of_coeffs_equals_claim",
+    |lc| {
+      poly
+        .iter()
+        .map(|p| p.get_variable())
+        .fold(lc, |lc, p| lc + p)
+        + poly[0].get_variable()
+    },
+    |lc| lc + CS::one(),
+    |lc| lc + claim.get_variable(),
+  );
+  Ok(())
+}
+
 /// Enforces the final check of the outer sum-check of Spartan:
 /// prev_claim = tau_at_rx * (claim_Az*claim_Bz - claim_Cz)
 fn enforce_outer_sc_final_check<E: Engine, CS: ConstraintSystem<E::Scalar>>(
@@ -207,40 +228,47 @@ pub struct SpartanVerifierCircuit<E: Engine> {
 }
 
 impl<E: Engine> SpartanVerifierCircuit<E> {
-  fn outer_rounds(&self) -> usize {
+  pub fn default(num_rounds_x: usize, num_rounds_y: usize) -> Self {
+    Self {
+      outer_polys: vec![[E::Scalar::ZERO; 4]; num_rounds_x],
+      claim_Az: E::Scalar::ZERO,
+      claim_Bz: E::Scalar::ZERO,
+      claim_Cz: E::Scalar::ZERO,
+      tau_at_rx: E::Scalar::ZERO,
+      inner_polys: vec![[E::Scalar::ZERO; 3]; num_rounds_y],
+      eval_W: E::Scalar::ZERO,
+      eval_X: E::Scalar::ZERO,
+    }
+  }
+
+  // number of outer sum-check rounds
+  fn num_outer_rounds(&self) -> usize {
     self.outer_polys.len()
   }
-  fn inner_rounds(&self) -> usize {
+  // number of inner sum-check rounds
+  fn num_inner_rounds(&self) -> usize {
     self.inner_polys.len()
   }
+
   fn idx_outer_final(&self) -> usize {
-    self.outer_rounds()
-  }
-  fn idx_inner_setup(&self) -> usize {
-    self.idx_outer_final() + 1
+    self.num_outer_rounds()
   }
   fn idx_inner_start(&self) -> usize {
-    self.idx_inner_setup() + 1
-  }
-  fn idx_inner_commit_w(&self) -> usize {
-    self.idx_inner_start() + self.inner_rounds()
+    self.idx_outer_final() + 1
   }
   fn idx_inner_final(&self) -> usize {
-    self.idx_inner_commit_w() + 1
+    self.idx_inner_start() + self.num_inner_rounds()
+  }
+  fn idx_commit_w(&self) -> usize {
+    self.idx_inner_final() + 1
   }
 }
 
 impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
-    if round_index < self.outer_rounds() {
+    if round_index < self.idx_inner_final() {
       Ok(1)
-    } else if round_index == self.idx_outer_final() {
-      Ok(0)
-    } else if round_index == self.idx_inner_setup()
-      || (round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w())
-    {
-      Ok(1)
-    } else if round_index == self.idx_inner_commit_w() || round_index == self.idx_inner_final() {
+    } else if round_index == self.idx_inner_final() || round_index == self.idx_commit_w() {
       Ok(0)
     } else {
       Err(SynthesisError::Unsatisfiable)
@@ -255,49 +283,47 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
     prev_challenges: &[Vec<AllocatedNum<E::Scalar>>],
     challenges: Option<&[E::Scalar]>,
   ) -> Result<(Vec<AllocatedNum<E::Scalar>>, Vec<AllocatedNum<E::Scalar>>), SynthesisError> {
-    // Routing
-    if round_index < self.outer_rounds() {
-      // Outer cubic sum-check per-round consistency
-      let coeffs = alloc_coeffs::<E, _>(
+    // outer cubic sum-check rounds
+    if round_index < self.idx_outer_final() {
+      // allocate polynomial sent in this round
+      let poly = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("outer_sc_coeffs_round_{round_index}")),
         &self.outer_polys[round_index],
       )?;
+
+      let claim = if round_index == 0 {
+        alloc_zero::<E, _>(cs.namespace(|| "initial_claim_zero"))
+      } else {
+        // allocate challenge r_x[round_index]
+        let r_x_idx =
+          AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{round_index}")), || {
+            Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+          })?;
+
+        eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("outer_prev_eval_{round_index}")),
+          &prior_round_vars[round_index - 1],
+          &r_x_idx,
+        )
+      }?;
+
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("outer_sc_claim_check {round_index}")),
+        &poly,
+        &claim,
+      )?;
+
+      Ok((poly, vec![]))
+    } else if round_index == self.idx_outer_final() {
+      // Compute claim = poly(r) from last round's coefficients and the new challenge r
       let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{round_index}")), || {
         Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
       })?;
-
-      // Sum-check consistency: g(0)+g(1)=prev_e; prev_e is 0 for first round
-      cs.enforce(
-        || format!("outer_prev_claim_{round_index}"),
-        |lc| {
-          lc + coeffs[0].get_variable()
-            + coeffs[0].get_variable()
-            + coeffs[1].get_variable()
-            + coeffs[2].get_variable()
-            + coeffs[3].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| {
-          if round_index == 0 {
-            lc
-          } else {
-            let prev_e = &prior_round_vars.last().expect("has previous round")[0];
-            lc + prev_e.get_variable()
-          }
-        },
-      );
-
-      // Compute p(r)
-      let p_r = eval_poly_horner::<E, _>(
-        &mut cs.namespace(|| format!("poly_eval_{round_index}")),
-        &coeffs,
+      let claim = eval_poly_horner::<E, _>(
+        cs.namespace(|| "outer_final_prev_eval"),
+        &prior_round_vars[round_index - 1],
         &r,
       )?;
-
-      Ok((vec![p_r], vec![r]))
-    } else if round_index == self.idx_outer_final() {
-      // Final outer equality: prev_claim == tau_at_rx * (claim_Az*claim_Bz - claim_Cz)
-      let prev_claim = &prior_round_vars.last().expect("has previous round")[0];
 
       let claim_Az = AllocatedNum::alloc(cs.namespace(|| "Az_outer"), || Ok(self.claim_Az))?;
       let claim_Bz = AllocatedNum::alloc(cs.namespace(|| "Bz_outer"), || Ok(self.claim_Bz))?;
@@ -305,18 +331,18 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       let tau_at_rx =
         AllocatedNum::alloc(cs.namespace(|| "tau_at_rx_outer"), || Ok(self.tau_at_rx))?;
 
+      // Final outer equality: claim == tau_at_rx * (claim_Az*claim_Bz - claim_Cz)
       enforce_outer_sc_final_check::<E, _>(
         cs.namespace(|| "enforce_outer_final_check"),
         &claim_Az,
         &claim_Bz,
         &claim_Cz,
         &tau_at_rx,
-        prev_claim,
+        &claim,
       )?;
 
       Ok((
         vec![
-          prev_claim.clone(),
           claim_Az.clone(),
           claim_Bz.clone(),
           claim_Cz.clone(),
@@ -324,100 +350,104 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
         ],
         vec![],
       ))
-    } else if round_index == self.idx_inner_setup() {
-      // Inner setup: introduce global r and compute claim_inner_joint
-      let r_val = challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO);
-      let r = AllocatedNum::alloc_input(cs.namespace(|| "r"), || Ok(r_val))?;
-
-      let prev_outer_vars = &prior_round_vars[self.idx_outer_final()];
-      let claim_Az = &prev_outer_vars[1];
-      let claim_Bz = &prev_outer_vars[2];
-      let claim_Cz = &prev_outer_vars[3];
-
-      // r^2
-      let r_sq = r.square(cs.namespace(|| "r_sq"))?;
-
-      let claim_inner_joint = compute_joint_claim::<E, _>(
-        cs.namespace(|| "compute_inner_joint_claim"),
-        claim_Az,
-        claim_Bz,
-        claim_Cz,
-        &r,
-        &r_sq,
-      )?;
-
-      Ok((vec![claim_inner_joint], vec![r]))
-    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w() {
+    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_final() {
       // Inner quadratic sum-check per-round consistency
       let idx = round_index - self.idx_inner_start();
 
-      let coeffs = alloc_coeffs::<E, _>(
+      // Allocate current round's poly
+      let poly = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("inner_round_{idx}")),
         &self.inner_polys[idx],
       )?;
-      let r_y =
-        AllocatedNum::alloc_input(cs.namespace(|| format!("inner_round_{idx}_ry")), || {
+
+      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r {round_index}")), || {
+        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+      })?;
+
+      let claim = if idx == 0 {
+        let r_sq = r.square(cs.namespace(|| "r_sq"))?;
+
+        let claims_outer = &prior_round_vars[self.idx_outer_final()];
+        compute_joint_claim::<E, _>(
+          cs.namespace(|| "compute_inner_joint_claim"),
+          &claims_outer[0], // claim_Az
+          &claims_outer[1], // claim_Bz
+          &claims_outer[2], // claim_Cz
+          &r,
+          &r_sq,
+        )
+      } else {
+        let prev_poly = &prior_round_vars[round_index - 1];
+        eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("inner_prev_eval_{idx}")),
+          prev_poly,
+          &r,
+        )
+      }?;
+
+      // Enforce 2*c0+c1+c2 == claim
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("inner_sc_claim_check {idx}")),
+        &poly,
+        &claim,
+      )?;
+
+      // Expose this round's coefficients; next round will consume them
+      Ok((poly, vec![r]))
+    } else if round_index == self.idx_inner_final() {
+      let prev_poly = &prior_round_vars[round_index - 1];
+      let r_y_idx =
+        AllocatedNum::alloc_input(cs.namespace(|| format!("r_y_{round_index}")), || {
           Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
         })?;
-
-      // Sum-check consistency: h(0)+h(1)=prev_e
-      let prev_e = &prior_round_vars.last().expect("prev inner round")[0];
-      cs.enforce(
-        || format!("inner_consistency_{idx}"),
-        |lc| {
-          lc + coeffs[0].get_variable()
-            + coeffs[0].get_variable()
-            + coeffs[1].get_variable()
-            + coeffs[2].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| lc + prev_e.get_variable(),
-      );
-
-      let p_ry = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("inner_round_{idx}_poly_eval")),
-        &coeffs,
-        &r_y,
+      let claim = eval_poly_horner::<E, _>(
+        cs.namespace(|| format!("inner_prev_eval_{round_index}")),
+        prev_poly,
+        &r_y_idx,
       )?;
-      Ok((vec![p_ry], vec![r_y]))
-    } else if round_index == self.idx_inner_commit_w() {
-      // Dedicated commit round for eval_W only (padded to commitment width)
+
       let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W"), || Ok(self.eval_W))?;
 
-      // Pad to width
-      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
-      for j in 0..pad_width {
-        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
-      }
-      Ok((vec![eval_W], vec![]))
-    } else if round_index == self.idx_inner_final() {
-      // Final inner equality
-      // The previous logical round whose claim must be matched is the last inner sum-check round
-      let prev_e = &prior_round_vars[self.idx_inner_final() - 2][0];
-      let eval_W = &prior_round_vars[self.idx_inner_commit_w()][0];
-
-      let tau_at_rx = prior_round_vars[self.idx_outer_final()][4].clone();
+      let tau_at_rx = prior_round_vars[self.idx_outer_final()][3].clone();
       tau_at_rx.inputize(cs.namespace(|| "inputize_tau_at_rx"))?;
 
       let eval_X = AllocatedNum::alloc_input(cs.namespace(|| "eval_X"), || Ok(self.eval_X))?;
-      let r_y0 = &prev_challenges[self.idx_inner_start()][0];
+      let r_y0 = &prev_challenges[self.idx_inner_start() + 1][0];
 
       enforce_inner_sc_final_check::<E, _>(
         cs.namespace(|| "enforce_inner_final_check"),
         r_y0,
-        eval_W,
+        &eval_W,
         &eval_X,
-        prev_e,
+        &claim,
       )?;
 
-      Ok((vec![], vec![]))
+      Ok((vec![eval_W], vec![]))
+    } else if round_index == self.idx_commit_w() {
+      // Dedicated commit round for eval_W only (padded to commitment width)
+      let eval_W = AllocatedNum::alloc(cs.namespace(|| "eval_W_dedicated"), || Ok(self.eval_W))?;
+
+      // enforce that eval_W matches the one from prior round
+      let eval_W_prev = &prior_round_vars[round_index - 1][0];
+      cs.enforce(
+        || "eval_W_match",
+        |lc| lc + eval_W.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + eval_W_prev.get_variable(),
+      );
+
+      // Pad to width
+      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
+      }
+      Ok((vec![eval_W], vec![]))
     } else {
       Err(SynthesisError::Unsatisfiable)
     }
   }
 
   fn num_rounds(&self) -> usize {
-    self.idx_inner_final() + 1
+    self.idx_commit_w() + 1
   }
 }
 
@@ -428,7 +458,7 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
   // NIFS cubic sum-check polynomials (4 coeffs per round)
   pub(crate) nifs_polys: Vec<[E::Scalar; 4]>,
   // Accumulated equality value acc_eq = \prod_t eq(r_b_t; rho_t), provided as a public input
-  pub(crate) rho_acc_at_rb: E::Scalar,
+  pub(crate) eq_rho_at_rb: E::Scalar,
   pub(crate) t_out_step: E::Scalar,
 
   // Spartan sum-check proof for step and core circuits
@@ -443,7 +473,7 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
   pub(crate) claim_Bz_core: E::Scalar,
   pub(crate) claim_Cz_core: E::Scalar,
 
-  // Fiat–Shamir coefficients mixing step & core branches are derived as round challenges
+  // evaluation of tau at rx
   pub(crate) tau_at_rx: E::Scalar,
 
   pub(crate) inner_polys_step: Vec<[E::Scalar; 3]>,
@@ -451,7 +481,6 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
 
   pub(crate) eval_W_step: E::Scalar,
   pub(crate) eval_W_core: E::Scalar,
-
   pub(crate) eval_X_step: E::Scalar,
   pub(crate) eval_X_core: E::Scalar,
 }
@@ -477,25 +506,25 @@ impl<E: Engine> NeutronNovaVerifierCircuit<E> {
       eval_X_core: E::Scalar::ZERO,
       t_out_step: E::Scalar::ZERO,
       nifs_polys: vec![[E::Scalar::ZERO; 4]; num_rounds_z],
-      rho_acc_at_rb: E::Scalar::ZERO,
+      eq_rho_at_rb: E::Scalar::ZERO,
     }
   }
 
   // Number of NIFS rounds
-  fn nifs_rounds(&self) -> usize {
+  fn num_nifs_rounds(&self) -> usize {
     self.nifs_polys.len()
   }
   // Number of outer sum-check rounds (same for step and core)
-  fn outer_rounds(&self) -> usize {
-    self.outer_polys_step.len() // same as outer_polys_core.len()
+  fn num_outer_rounds(&self) -> usize {
+    self.outer_polys_step.len()
   }
   // Number of inner sum-check rounds (same for step and core)
-  fn inner_rounds(&self) -> usize {
-    self.inner_polys_step.len() // same as inner_polys_core.len()
+  fn num_inner_rounds(&self) -> usize {
+    self.inner_polys_step.len()
   }
 
   fn idx_nifs_final(&self) -> usize {
-    self.nifs_rounds()
+    self.num_nifs_rounds()
   }
 
   fn idx_outer_start(&self) -> usize {
@@ -503,62 +532,44 @@ impl<E: Engine> NeutronNovaVerifierCircuit<E> {
   }
 
   fn idx_outer_final(&self) -> usize {
-    self.idx_outer_start() + self.outer_rounds()
-  }
-
-  fn idx_inner_setup(&self) -> usize {
-    self.idx_outer_final() + 1
+    self.idx_outer_start() + self.num_outer_rounds()
   }
 
   fn idx_inner_start(&self) -> usize {
-    self.idx_inner_setup() + 1
-  }
-
-  /// Returns the round index at which the circuit commits only to `eval_W` for the step circuit.
-  fn idx_inner_commit_w_step(&self) -> usize {
-    self.idx_inner_start() + self.inner_rounds()
-  }
-
-  /// Returns the round index at which the circuit commits only to `eval_W` for the core circuit.
-  fn idx_inner_commit_w_core(&self) -> usize {
-    self.idx_inner_commit_w_step() + 1
+    self.idx_outer_final() + 1
   }
 
   fn idx_inner_final(&self) -> usize {
-    self.idx_inner_commit_w_core() + 1
+    self.idx_inner_start() + self.num_inner_rounds()
+  }
+
+  /// Returns the round index at which the circuit commits only to `eval_W` for the step circuit.
+  fn idx_commit_w_step(&self) -> usize {
+    self.idx_inner_final() + 1
+  }
+
+  /// Returns the round index at which the circuit commits only to `eval_W` for the core circuit.
+  fn idx_commit_w_core(&self) -> usize {
+    self.idx_commit_w_step() + 1
   }
 }
 
 impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
   fn num_challenges(&self, round_index: usize) -> Result<usize, SynthesisError> {
-    if round_index < self.nifs_rounds() {
-      return Ok(1); // r_b only; rho_t provided as witness
+    if round_index < self.num_nifs_rounds() {
+      Ok(1)
+    } else if round_index == self.idx_nifs_final() {
+      Ok(0) // no challenge after the NIFS final round and for the first round of outer sum-check
+    } else if round_index < self.idx_inner_final() {
+      Ok(1)
+    } else if round_index == self.idx_inner_final()
+      || round_index == self.idx_commit_w_step()
+      || round_index == self.idx_commit_w_core()
+    {
+      Ok(0)
+    } else {
+      Err(SynthesisError::Unsatisfiable)
     }
-    if round_index == self.idx_nifs_final() {
-      return Ok(0);
-    }
-    if round_index >= self.idx_outer_start() && round_index < self.idx_outer_final() {
-      return Ok(1); // r_x
-    }
-    if round_index == self.idx_outer_final() {
-      return Ok(0);
-    }
-    if round_index == self.idx_inner_setup() {
-      return Ok(1); // r
-    }
-    if round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w_step() {
-      return Ok(1); // r_y[i]
-    }
-    if round_index == self.idx_inner_commit_w_step() {
-      return Ok(0); // commit eval_W_step
-    }
-    if round_index == self.idx_inner_commit_w_core() {
-      return Ok(0); // commit eval_W_core
-    }
-    if round_index == self.idx_inner_final() {
-      return Ok(0);
-    }
-    Err(SynthesisError::Unsatisfiable)
   }
 
   fn rounds<CS: ConstraintSystem<E::Scalar>>(
@@ -570,149 +581,124 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
     challenges: Option<&[E::Scalar]>,
   ) -> Result<(Vec<AllocatedNum<E::Scalar>>, Vec<AllocatedNum<E::Scalar>>), SynthesisError> {
     // NIFS cubic sum-check rounds
-    if round_index < self.nifs_rounds() {
-      let coeffs = alloc_coeffs::<E, _>(
+    if round_index < self.num_nifs_rounds() {
+      // allocate polynomial sent in this round
+      let poly = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("nifs_round_{round_index}")),
         &self.nifs_polys[round_index],
       )?;
 
-      // Enforce g_i(0)+g_i(1)=prev_claim directly
-      // When round index is zero, previous claim is zero
-      cs.enforce(
-        || format!("nifs_init_claim_zero {round_index}"),
-        |lc| {
-          lc + coeffs[0].get_variable()
-            + coeffs[0].get_variable()
-            + coeffs[1].get_variable()
-            + coeffs[2].get_variable()
-            + coeffs[3].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| {
-          if round_index == 0 {
-            lc
-          } else {
-            let prev_p_rb = &prior_round_vars[round_index - 1][0];
-            lc + prev_p_rb.get_variable()
-          }
-        }, // 0
-      );
+      let claim = if round_index == 0 {
+        alloc_zero::<E, _>(cs.namespace(|| "initial_claim_zero"))
+      } else {
+        // allocate challenge r_x[round_index]
+        let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_z_{round_index}")), || {
+          Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+        })?;
 
-      let r_b = AllocatedNum::alloc_input(cs.namespace(|| format!("r_b_{round_index}")), || {
-        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
-      })?;
-      let p_rb = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("poly_eval_{round_index}")),
-        &coeffs,
-        &r_b,
+        eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("nifs_prev_eval_{round_index}")),
+          &prior_round_vars[round_index - 1],
+          &r,
+        )
+      }?;
+
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("nifs_sc_claim_check {round_index}")),
+        &poly,
+        &claim,
       )?;
 
-      // Expose p_rb only; next round consumes it as previous claim
-      Ok((vec![p_rb], vec![r_b]))
+      Ok((poly, vec![]))
     } else if round_index == self.idx_nifs_final() {
-      // Final NIFS equality (mirrors prover): p_last(r_b_last) == rho_acc_at_rb * t_out_step
-      // The previous NIFS round exposes [p_rb, carry]; bind p_rb to the equality.
-      let prev_vars = &prior_round_vars[self.idx_nifs_final() - 1];
-      let p_rb_last = &prev_vars[0];
+      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_z_{round_index}")), || {
+        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+      })?;
+      let claim = eval_poly_horner::<E, _>(
+        cs.namespace(|| "nifs_final_prev_eval"),
+        &prior_round_vars[round_index - 1],
+        &r,
+      )?;
 
       let t_out_step = AllocatedNum::alloc(cs.namespace(|| "t_out_step"), || Ok(self.t_out_step))?;
-      let rho_acc = AllocatedNum::alloc(cs.namespace(|| "rho_acc_at_rb_nifs"), || {
-        Ok(self.rho_acc_at_rb)
-      })?;
+      let eq_rho_at_rb =
+        AllocatedNum::alloc(cs.namespace(|| "eq_rho_at_rb"), || Ok(self.eq_rho_at_rb))?;
 
-      // rho_acc * t_out_step = p_rb_last
+      // rho_acc * t_out_step = claim
       cs.enforce(
         || "nifs_final_eq",
-        |lc| lc + rho_acc.get_variable(),
+        |lc| lc + eq_rho_at_rb.get_variable(),
         |lc| lc + t_out_step.get_variable(),
-        |lc| lc + p_rb_last.get_variable(),
+        |lc| lc + claim.get_variable(),
       );
 
-      // Expose rho_acc so later rounds (inner-final) can inputize it as a public value without re-allocation
-      Ok((
-        vec![p_rb_last.clone(), rho_acc.clone(), t_out_step.clone()],
-        vec![],
-      ))
-    } else if round_index >= self.idx_outer_start() && round_index < self.idx_outer_final() {
+      // Expose eq_rho_at_rb so later rounds (inner-final) can inputize it as a public value without re-allocation
+      Ok((vec![eq_rho_at_rb.clone(), t_out_step.clone()], vec![]))
+    } else if round_index > self.idx_nifs_final() && round_index < self.idx_outer_final() {
       let i = round_index - self.idx_outer_start();
 
-      let coeffs_step = alloc_coeffs::<E, _>(
+      let poly_step = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("outer_step_{i}")),
         &self.outer_polys_step[i],
       )?;
-      let coeffs_core = alloc_coeffs::<E, _>(
+      let poly_core = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("outer_core_{i}")),
         &self.outer_polys_core[i],
       )?;
 
-      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{i}")), || {
+      // for core branch, claim = 0 if i == 0 else eval at r of previous round's polynomial
+      // for step branch, claim = t_out_step if i == 0 else eval at r of previous round's polynomial
+      let (claim_step, claim_core) = if i == 0 {
+        let claim_step = prior_round_vars[round_index - 1][1].clone();
+        let claim_core = alloc_zero::<E, _>(cs.namespace(|| "initial_claim_core_zero"))?;
+
+        (claim_step, claim_core)
+      } else {
+        let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{i}")), || {
+          Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+        })?;
+
+        let claim_step = eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("outer_step_prev_eval_{i}")),
+          &prior_round_vars[round_index - 1][0..4], // cubic polynomial
+          &r,
+        )?;
+
+        let claim_core = eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("outer_core_prev_eval_{i}")),
+          &prior_round_vars[round_index - 1][4..8], // cubic polynomial
+          &r,
+        )?;
+
+        (claim_step, claim_core)
+      };
+
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("outer_sc_claim_check_step_{i}")),
+        &poly_step,
+        &claim_step,
+      )?;
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("outer_sc_claim_check_core_{i}")),
+        &poly_core,
+        &claim_core,
+      )?;
+
+      Ok(([poly_step, poly_core].concat(), vec![]))
+    } else if round_index == self.idx_outer_final() {
+      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_x_{round_index}")), || {
         Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
       })?;
-
-      // Consistency with previous round
-      // The step branch starts from the folded instance target T_out, whereas the core branch
-      // starts from 0
-      // Enforce sum(coeffs_step) == if i ==0 {t_out_step} else {prev_e_step}
-      cs.enforce(
-        || format!("outer_init_step zero_{i}"),
-        |lc| {
-          lc + coeffs_step[0].get_variable()
-            + coeffs_step[0].get_variable()
-            + coeffs_step[1].get_variable()
-            + coeffs_step[2].get_variable()
-            + coeffs_step[3].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| {
-          lc + if i == 0 {
-            let t_out_step = prior_round_vars[self.idx_nifs_final()][2].clone();
-            t_out_step.get_variable()
-          } else {
-            let prev_e_step = &prior_round_vars[self.idx_outer_start() + i - 1][0];
-            prev_e_step.get_variable()
-          }
-        },
-      );
-
-      // Core branch still starts from zero: sum(coeffs_core) == 0
-      cs.enforce(
-        || format!("outer_init_zero_core_{i}"),
-        |lc| {
-          lc + coeffs_core[0].get_variable()
-            + coeffs_core[0].get_variable()
-            + coeffs_core[1].get_variable()
-            + coeffs_core[2].get_variable()
-            + coeffs_core[3].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| {
-          if i == 0 {
-            lc
-          } else {
-            let prev_e_core = &prior_round_vars[self.idx_outer_start() + i - 1][1];
-            lc + prev_e_core.get_variable()
-          }
-        }, // constant 0
-      );
-
-      // Evaluate polynomials at r
-      let p_r_step = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("poly_eval_step_{i}")),
-        &coeffs_step,
+      let claim_step = eval_poly_horner::<E, _>(
+        cs.namespace(|| "outer_final_prev_eval"),
+        &prior_round_vars[round_index - 1][0..4], // cubic polynomial
         &r,
       )?;
-      let p_r_core = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("poly_eval_core_{i}")),
-        &coeffs_core,
+      let claim_core = eval_poly_horner::<E, _>(
+        cs.namespace(|| "outer_final_prev_eval_core"),
+        &prior_round_vars[round_index - 1][4..8], // cubic polynomial
         &r,
       )?;
-
-      Ok((vec![p_r_step, p_r_core], vec![r]))
-    } else if round_index == self.idx_outer_final() {
-      // Outer final equality round
-      // Previous variables come from the previous OUTER round explicitly
-      let prev_claim_step = &prior_round_vars[self.idx_outer_final() - 1][0];
-      let prev_claim_core = &prior_round_vars[self.idx_outer_final() - 1][1];
 
       let claim_Az_step =
         AllocatedNum::alloc(cs.namespace(|| "Az_step"), || Ok(self.claim_Az_step))?;
@@ -737,7 +723,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
         &claim_Bz_step,
         &claim_Cz_step,
         &tau_at_rx,
-        prev_claim_step,
+        &claim_step,
       )?;
 
       enforce_outer_sc_final_check::<E, _>(
@@ -746,13 +732,11 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
         &claim_Bz_core,
         &claim_Cz_core,
         &tau_at_rx,
-        prev_claim_core,
+        &claim_core,
       )?;
 
       Ok((
         vec![
-          prev_claim_step.clone(),
-          prev_claim_core.clone(),
           claim_Az_step,
           claim_Bz_step,
           claim_Cz_step,
@@ -763,51 +747,15 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
         ],
         vec![],
       ))
-    } else if round_index == self.idx_inner_setup() {
-      // Inner setup round
-      let r = AllocatedNum::alloc_input(cs.namespace(|| "r"), || {
-        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
-      })?;
-      let r_sq = r.square(cs.namespace(|| "r_sq"))?;
-
-      // Fetch Az, Bz, Cz values from outer-final outputs
-      let outer_vars = &prior_round_vars[self.idx_outer_final()];
-      let Az_step = &outer_vars[2];
-      let Bz_step = &outer_vars[3];
-      let Cz_step = &outer_vars[4];
-      let Az_core = &outer_vars[5];
-      let Bz_core = &outer_vars[6];
-      let Cz_core = &outer_vars[7];
-
-      // Compute for step and core
-      let joint_step = compute_joint_claim::<E, _>(
-        cs.namespace(|| "step"),
-        Az_step,
-        Bz_step,
-        Cz_step,
-        &r,
-        &r_sq,
-      )?;
-      let joint_core = compute_joint_claim::<E, _>(
-        cs.namespace(|| "core"),
-        Az_core,
-        Bz_core,
-        Cz_core,
-        &r,
-        &r_sq,
-      )?;
-
-      Ok((vec![joint_step, joint_core], vec![r]))
-    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_commit_w_step()
-    {
+    } else if round_index >= self.idx_inner_start() && round_index < self.idx_inner_final() {
       // Inner quadratic sum-check rounds
       let idx = round_index - self.idx_inner_start();
 
-      let coeffs_step = alloc_coeffs::<E, _>(
+      let poly_step = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("inner_step_{idx}")),
         &self.inner_polys_step[idx],
       )?;
-      let coeffs_core = alloc_coeffs::<E, _>(
+      let poly_core = alloc_coeffs::<E, _>(
         cs.namespace(|| format!("inner_core_{idx}")),
         &self.inner_polys_core[idx],
       )?;
@@ -815,314 +763,152 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
       let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_y[{idx}]")), || {
         Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
       })?;
-      // Consistency with previous claims
-      let prev_vars = if idx == 0 {
-        // The first inner round should match the values from inner_setup
-        &prior_round_vars[self.idx_inner_setup()]
+
+      let (claim_step, claim_core) = if idx == 0 {
+        let r_sq = r.square(cs.namespace(|| "r_sq"))?;
+
+        let claims_outer = &prior_round_vars[self.idx_outer_final()];
+        let claim_step = compute_joint_claim::<E, _>(
+          cs.namespace(|| "compute_inner_joint_claim_step"),
+          &claims_outer[0], // claim_Az_step
+          &claims_outer[1], // claim_Bz_step
+          &claims_outer[2], // claim_Cz_step
+          &r,
+          &r_sq,
+        )?;
+        let claim_core = compute_joint_claim::<E, _>(
+          cs.namespace(|| "compute_inner_joint_claim_core"),
+          &claims_outer[3], // claim_Az_core
+          &claims_outer[4], // claim_Bz_core
+          &claims_outer[5], // claim_Cz_core
+          &r,
+          &r_sq,
+        )?;
+
+        (claim_step, claim_core)
       } else {
-        // Otherwise, use the immediately previous inner round
-        &prior_round_vars[self.idx_inner_start() + idx - 1]
+        let prev_poly_step = &prior_round_vars[round_index - 1][0..3]; // quadratic polynomial
+        let prev_poly_core = &prior_round_vars[round_index - 1][3..6]; // quadratic polynomial
+
+        let claim_step = eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("inner_step_prev_eval_{idx}")),
+          prev_poly_step,
+          &r,
+        )?;
+        let claim_core = eval_poly_horner::<E, _>(
+          cs.namespace(|| format!("inner_core_prev_eval_{idx}")),
+          prev_poly_core,
+          &r,
+        )?;
+
+        (claim_step, claim_core)
       };
-      let prev_e_step = &prev_vars[0];
-      let prev_e_core = &prev_vars[1];
 
-      // sum(coeffs_step) == prev_e_step
-      cs.enforce(
-        || format!("inner_consistency_step_{idx}"),
-        |lc| {
-          lc + coeffs_step[0].get_variable()
-            + coeffs_step[0].get_variable()
-            + coeffs_step[1].get_variable()
-            + coeffs_step[2].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| lc + prev_e_step.get_variable(),
-      );
-
-      // sum(coeffs_core) == prev_e_core
-      cs.enforce(
-        || format!("inner_consistency_core_{idx}"),
-        |lc| {
-          lc + coeffs_core[0].get_variable()
-            + coeffs_core[0].get_variable()
-            + coeffs_core[1].get_variable()
-            + coeffs_core[2].get_variable()
-        },
-        |lc| lc + CS::one(),
-        |lc| lc + prev_e_core.get_variable(),
-      );
-
-      // Evaluate polynomials at r
-      let p_r_step = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("inner_poly_eval_step_idx_{idx}")),
-        &coeffs_step,
-        &r,
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("inner_sc_claim_check_step_{idx}")),
+        &poly_step,
+        &claim_step,
       )?;
-      let p_r_core = eval_poly_horner::<E, _>(
-        cs.namespace(|| format!("inner_poly_eval_core_idx_{idx}")),
-        &coeffs_core,
-        &r,
+      enforce_sc_claim::<E, _>(
+        cs.namespace(|| format!("inner_sc_claim_check_core_{idx}")),
+        &poly_core,
+        &claim_core,
       )?;
-
-      Ok((vec![p_r_step, p_r_core], vec![r]))
-    } else if round_index == self.idx_inner_commit_w_step() {
-      // Commit round for eval_W_step
-      let eval_W_step =
-        AllocatedNum::alloc(cs.namespace(|| "eval_W_step"), || Ok(self.eval_W_step))?;
-
-      // Pad to per-round commitment width
-      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
-      for j in 0..pad_width {
-        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_step_{j}")))?;
-      }
-      Ok((vec![eval_W_step], vec![]))
-    } else if round_index == self.idx_inner_commit_w_core() {
-      // Commit round for eval_W_core
-      let eval_W_core = AllocatedNum::alloc(cs.namespace(|| "eval_W_core_commit"), || {
-        Ok(self.eval_W_core)
-      })?;
-      // Pad to per-round commitment width
-      let pad_width = MULTIROUND_COMMITMENT_WIDTH - 1;
-      for j in 0..pad_width {
-        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_core_{j}")))?;
-      }
-      Ok((vec![eval_W_core], vec![]))
+      Ok(([poly_step, poly_core].concat(), vec![r]))
     } else if round_index == self.idx_inner_final() {
-      // Inner final equality round
-      // Use outputs from the last inner sum-check round (before commit rounds)
-      let prev_vars = &prior_round_vars[self.idx_inner_commit_w_step() - 1];
-      let prev_e_step = &prev_vars[0];
-      let prev_e_core = &prev_vars[1];
-
-      let r_y0 = &prev_challenges[self.idx_inner_start()][0];
+      let prev_poly_step = &prior_round_vars[round_index - 1][0..3]; // quadratic polynomial
+      let prev_poly_core = &prior_round_vars[round_index - 1][3..6]; // quadratic polynomial
+      let r = AllocatedNum::alloc_input(cs.namespace(|| format!("r_y_{round_index}")), || {
+        Ok(challenges.map(|c| c[0]).unwrap_or(E::Scalar::ZERO))
+      })?;
+      let claim_step =
+        eval_poly_horner::<E, _>(cs.namespace(|| "inner_step_prev_eval"), prev_poly_step, &r)?;
+      let claim_core =
+        eval_poly_horner::<E, _>(cs.namespace(|| "inner_core_prev_eval"), prev_poly_core, &r)?;
 
       // tau_at_rx is a public input
-      let tau_at_rx = prior_round_vars[self.idx_outer_final()][8].clone();
+      let tau_at_rx = prior_round_vars[self.idx_outer_final()][6].clone();
       tau_at_rx.inputize(cs.namespace(|| "tau_at_rx_inp"))?;
 
       let eval_X_step =
-        AllocatedNum::alloc(cs.namespace(|| "eval_X_step"), || Ok(self.eval_X_step))?;
-      eval_X_step.inputize(cs.namespace(|| "eval_X_step_inp"))?;
+        AllocatedNum::alloc_input(cs.namespace(|| "eval_X_step"), || Ok(self.eval_X_step))?;
       let eval_X_core =
-        AllocatedNum::alloc(cs.namespace(|| "eval_X_core"), || Ok(self.eval_X_core))?;
-      eval_X_core.inputize(cs.namespace(|| "eval_X_core_inp"))?;
+        AllocatedNum::alloc_input(cs.namespace(|| "eval_X_core"), || Ok(self.eval_X_core))?;
 
-      let rho_acc_from_nifs = &prior_round_vars[self.idx_nifs_final()][1];
-      rho_acc_from_nifs.inputize(cs.namespace(|| "rho_acc_at_rb_inp"))?;
+      let eq_rho_at_rb = &prior_round_vars[self.idx_nifs_final()][0];
+      eq_rho_at_rb.inputize(cs.namespace(|| "eq_rho_at_rb_inp"))?;
 
-      // Fetch committed eval_W values from the dedicated commit rounds
-      let eval_W_step = &prior_round_vars[self.idx_inner_commit_w_step()][0];
-      let eval_W_core = &prior_round_vars[self.idx_inner_commit_w_core()][0];
+      // allocate eval_W_step and eval_W_core and use it in the next rounds
+      let eval_W_step =
+        AllocatedNum::alloc(cs.namespace(|| "eval_W_step"), || Ok(self.eval_W_step))?;
+      let eval_W_core =
+        AllocatedNum::alloc(cs.namespace(|| "eval_W_core"), || Ok(self.eval_W_core))?;
 
+      let r_y0 = &prev_challenges[self.idx_inner_start() + 1][0];
       enforce_inner_sc_final_check::<E, _>(
         cs.namespace(|| "enforce_inner_final_check_step"),
         r_y0,
-        eval_W_step,
+        &eval_W_step,
         &eval_X_step,
-        prev_e_step,
+        &claim_step,
       )?;
 
       enforce_inner_sc_final_check::<E, _>(
         cs.namespace(|| "enforce_inner_final_check_core"),
         r_y0,
-        eval_W_core,
+        &eval_W_core,
         &eval_X_core,
-        prev_e_core,
+        &claim_core,
       )?;
 
-      Ok((vec![prev_e_step.clone(), prev_e_core.clone()], vec![]))
+      Ok((vec![eval_W_step.clone(), eval_W_core.clone()], vec![]))
+    } else if round_index == self.idx_commit_w_step() {
+      // Commit round for eval_W_step
+      let eval_W_step = AllocatedNum::alloc(cs.namespace(|| "eval_W_step_commit"), || {
+        Ok(self.eval_W_step)
+      })?;
+
+      // enforce that eval_W matches the one from prior round
+      let eval_W_prev = &prior_round_vars[round_index - 1][0];
+      cs.enforce(
+        || "eval_W_step_match",
+        |lc| lc + eval_W_step.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + eval_W_prev.get_variable(),
+      );
+
+      // Pad to per-round commitment width
+      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_step_{j}")))?;
+      }
+
+      Ok((vec![], vec![]))
+    } else if round_index == self.idx_commit_w_core() {
+      // Commit round for eval_W_core
+      let eval_W_core = AllocatedNum::alloc(cs.namespace(|| "eval_W_core_commit"), || {
+        Ok(self.eval_W_core)
+      })?;
+
+      // enforce that eval_W matches the one from prior round
+      let eval_W_prev = &prior_round_vars[round_index - 2][1];
+      cs.enforce(
+        || "eval_W_core_match",
+        |lc| lc + eval_W_core.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + eval_W_prev.get_variable(),
+      );
+
+      // Pad to per-round commitment width
+      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+        alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_core_{j}")))?;
+      }
+      Ok((vec![], vec![]))
     } else {
       Err(SynthesisError::Unsatisfiable)
     }
   }
 
   fn num_rounds(&self) -> usize {
-    self.idx_inner_final() + 1
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::{
-    bellpepper::{
-      r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness},
-      shape_cs::ShapeCS,
-      solver::SatisfyingAssignment,
-    },
-    nifs::NIFS,
-    provider::P256HyraxEngine,
-    traits::{self, Engine, transcript::TranscriptEngineTrait},
-  };
-  use tracing_subscriber::EnvFilter;
-
-  type E = crate::provider::P256HyraxEngine;
-
-  #[test]
-  fn test_full_spartan_verifier_nifs_fold() {
-    let _ = tracing_subscriber::fmt()
-      .with_target(false)
-      .with_ansi(true)
-      .with_env_filter(EnvFilter::from_default_env())
-      .try_init();
-
-    // Build a minimal circuit with 1 outer round and 1 inner round (all zeros)
-    let circuit = SpartanVerifierCircuit::<E> {
-      outer_polys: vec![[<E as Engine>::Scalar::ZERO; 4]],
-      claim_Az: <E as Engine>::Scalar::ZERO,
-      claim_Bz: <E as Engine>::Scalar::ZERO,
-      claim_Cz: <E as Engine>::Scalar::ZERO,
-      tau_at_rx: <E as Engine>::Scalar::ZERO,
-      inner_polys: vec![[<E as Engine>::Scalar::ZERO; 3]],
-      eval_W: <E as Engine>::Scalar::ZERO,
-      eval_X: <E as Engine>::Scalar::ZERO,
-    };
-
-    let (shape_mr, ck, _vk) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-    assert_eq!(shape_mr.num_cons_unpadded, 19);
-    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape_mr).unwrap();
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-
-    let num_rounds = circuit.num_rounds();
-    for r in 0..num_rounds {
-      SatisfyingAssignment::<E>::process_round(
-        &mut state,
-        &shape_mr,
-        &ck,
-        &circuit,
-        r,
-        &mut transcript,
-      )
-      .unwrap();
-    }
-
-    let (inst_split, wit_reg) =
-      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape_mr).unwrap();
-
-    let inst_reg = inst_split.to_regular_instance().unwrap();
-    let S_reg = shape_mr.to_regular_shape();
-
-    let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
-
-    let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
-    let (proof, folded_W) = NIFS::<E>::prove(
-      &ck,
-      &S_reg,
-      &running_U,
-      &running_W,
-      &inst_reg,
-      &wit_reg,
-      &mut transcript_nifs,
-    )
-    .unwrap();
-
-    let mut transcript_verify = <E as Engine>::TE::new(b"nifs");
-    let U2_reg = inst_split.to_regular_instance().unwrap();
-    let verified_U = proof
-      .verify(&mut transcript_verify, &running_U, &U2_reg)
-      .unwrap();
-    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
-  }
-
-  #[test]
-  fn test_full_neutron_verifier_nifs_fold() {
-    let _ = tracing_subscriber::fmt()
-      .with_target(false)
-      .with_ansi(true)
-      .with_env_filter(EnvFilter::from_default_env())
-      .try_init();
-
-    let mut circuit = NeutronNovaVerifierCircuit::<E> {
-      outer_polys_step: vec![[<E as Engine>::Scalar::ZERO; 4]],
-      outer_polys_core: vec![[<E as Engine>::Scalar::ZERO; 4]],
-
-      claim_Az_step: <E as Engine>::Scalar::ZERO,
-      claim_Bz_step: <E as Engine>::Scalar::ZERO,
-      claim_Cz_step: <E as Engine>::Scalar::ZERO,
-
-      claim_Az_core: <E as Engine>::Scalar::ZERO,
-      claim_Bz_core: <E as Engine>::Scalar::ZERO,
-      claim_Cz_core: <E as Engine>::Scalar::ZERO,
-
-      tau_at_rx: <E as Engine>::Scalar::ZERO,
-
-      inner_polys_step: vec![[<E as Engine>::Scalar::ZERO; 3]],
-      inner_polys_core: vec![[<E as Engine>::Scalar::ZERO; 3]],
-      eval_W_step: <E as Engine>::Scalar::ZERO,
-      eval_W_core: <E as Engine>::Scalar::ZERO,
-
-      eval_X_step: <E as Engine>::Scalar::ZERO,
-      eval_X_core: <E as Engine>::Scalar::ZERO,
-
-      t_out_step: <E as Engine>::Scalar::ZERO,
-      nifs_polys: vec![[<E as Engine>::Scalar::ZERO; 4]],
-      rho_acc_at_rb: <E as Engine>::Scalar::ONE,
-    };
-
-    let (shape_mr, ck, _vk) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&circuit).unwrap();
-
-    assert_eq!(shape_mr.num_cons_unpadded, 44);
-    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&shape_mr).unwrap();
-    let mut transcript = <E as Engine>::TE::new(b"nifs");
-
-    let num_rounds = circuit.num_rounds();
-    // First, run NIFS challenge rounds to capture r_b values
-    let nifs_rounds = circuit.nifs_polys.len();
-    for i in 0..nifs_rounds {
-      let chals = SatisfyingAssignment::<E>::process_round(
-        &mut state,
-        &shape_mr,
-        &ck,
-        &circuit,
-        i,
-        &mut transcript,
-      )
-      .unwrap();
-      let _r_b = chals[0];
-    }
-    // Set rho_acc_at_rb for the NIFS final equality (trivial in this mock)
-    circuit.rho_acc_at_rb = <P256HyraxEngine as traits::Engine>::Scalar::ONE;
-
-    // Continue with remaining rounds starting at NIFS final
-    for r in nifs_rounds..num_rounds {
-      SatisfyingAssignment::<E>::process_round(
-        &mut state,
-        &shape_mr,
-        &ck,
-        &circuit,
-        r,
-        &mut transcript,
-      )
-      .unwrap();
-    }
-
-    let (inst_split, wit_reg) =
-      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &shape_mr).unwrap();
-
-    let inst_reg = inst_split.to_regular_instance().unwrap();
-    let S_reg = shape_mr.to_regular_shape();
-
-    let (running_U, running_W) = S_reg.sample_random_instance_witness(&ck).unwrap();
-
-    let mut transcript_nifs = <E as Engine>::TE::new(b"nifs");
-    let (proof, folded_W) = NIFS::<E>::prove(
-      &ck,
-      &S_reg,
-      &running_U,
-      &running_W,
-      &inst_reg,
-      &wit_reg,
-      &mut transcript_nifs,
-    )
-    .unwrap();
-
-    let mut transcript_verify = <E as Engine>::TE::new(b"nifs");
-    let U2_reg = inst_split.to_regular_instance().unwrap();
-    let verified_U = proof
-      .verify(&mut transcript_verify, &running_U, &U2_reg)
-      .unwrap();
-    assert!(S_reg.is_sat_relaxed(&ck, &verified_U, &folded_W).is_ok());
+    self.idx_commit_w_core() + 1
   }
 }

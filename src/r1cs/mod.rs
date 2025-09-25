@@ -927,6 +927,39 @@ impl<E: Engine> SplitR1CSShape<E> {
 
     Ok((Az?, Bz?, Cz?))
   }
+
+  /// Evaluates the MLE of R1CS matrices at the provided point
+  pub fn evaluate_with_tables(
+    &self,
+    T_x: &[E::Scalar],
+    T_y: &[E::Scalar],
+  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+    let multi_eval = |M: &SparseMatrix<E::Scalar>| -> E::Scalar {
+      M.indptr
+        .par_windows(2)
+        .enumerate()
+        .map(|(row_idx, ptrs)| {
+          M.get_row_unchecked(ptrs.try_into().unwrap())
+            .map(|(val, col_idx)| {
+              let prod = T_x[row_idx] * T_y[*col_idx];
+              if *val == E::Scalar::ONE {
+                prod
+              } else if *val == -E::Scalar::ONE {
+                -prod
+              } else {
+                prod * val
+              }
+            })
+            .sum::<E::Scalar>()
+        })
+        .sum()
+    };
+    (
+      multi_eval(&self.A),
+      multi_eval(&self.B),
+      multi_eval(&self.C),
+    )
+  }
 }
 
 /// A type that holds a multi-round split R1CS shape
@@ -1001,21 +1034,12 @@ impl<E: Engine> SplitR1CSInstance<E> {
     }
 
     if let Some(ref comm) = comm_W_shared {
-<<<<<<< HEAD
-      E::PCS::check_partial(comm, S.num_shared)?;
-    }
-    if let Some(ref comm) = comm_W_precommitted {
-      E::PCS::check_partial(comm, S.num_precommitted)?;
-    }
-    E::PCS::check_partial(&comm_W_rest, S.num_rest)?;
-=======
       E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
     }
     if let Some(ref comm) = comm_W_precommitted {
       E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
     }
     E::PCS::check_commitment(&comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
 
     Ok(SplitR1CSInstance {
       comm_W_shared,
@@ -1033,11 +1057,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
   ) -> Result<(), SpartanError> {
     if S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
-<<<<<<< HEAD
-        E::PCS::check_partial(comm, S.num_shared)?;
-=======
         E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         transcript.absorb(b"comm_W_shared", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -1048,11 +1068,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
 
     if S.num_precommitted > 0 {
       if let Some(comm) = &self.comm_W_precommitted {
-<<<<<<< HEAD
-        E::PCS::check_partial(comm, S.num_precommitted)?;
-=======
         E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
         transcript.absorb(b"comm_W_precommitted", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -1073,11 +1089,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
       });
     }
 
-<<<<<<< HEAD
-    E::PCS::check_partial(&self.comm_W_rest, S.num_rest)?;
-=======
     E::PCS::check_commitment(&self.comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
     Ok(())
@@ -1110,9 +1122,9 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     num_vars_per_round: Vec<usize>,
     num_challenges_per_round: Vec<usize>,
     num_public: usize,
-    a: SparseMatrix<E::Scalar>,
-    b: SparseMatrix<E::Scalar>,
-    c: SparseMatrix<E::Scalar>,
+    A: SparseMatrix<E::Scalar>,
+    B: SparseMatrix<E::Scalar>,
+    C: SparseMatrix<E::Scalar>,
   ) -> Result<SplitMultiRoundR1CSShape<E>, SpartanError> {
     let num_rounds = num_vars_per_round.len();
     if num_challenges_per_round.len() != num_rounds {
@@ -1124,9 +1136,9 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     let num_rows = num_cons;
     let num_cols = total_vars + 1 + num_public + total_challenges; // +1 for the constant term
 
-    is_sparse_matrix_valid::<E>(num_rows, num_cols, &a)?;
-    is_sparse_matrix_valid::<E>(num_rows, num_cols, &b)?;
-    is_sparse_matrix_valid::<E>(num_rows, num_cols, &c)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &A)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &B)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &C)?;
 
     // Pad each round's variables to be a multiple of width
     let num_vars_per_round_padded: Vec<usize> = num_vars_per_round
@@ -1174,9 +1186,9 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
       m
     };
 
-    let a_padded = apply_pad(a);
-    let b_padded = apply_pad(b);
-    let c_padded = apply_pad(c);
+    let A_padded = apply_pad(A);
+    let B_padded = apply_pad(B);
+    let C_padded = apply_pad(C);
 
     Ok(Self {
       num_cons: num_cons_padded,
@@ -1186,9 +1198,9 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
       num_vars_per_round: num_vars_per_round_padded,
       num_challenges_per_round,
       num_public,
-      A: a_padded,
-      B: b_padded,
-      C: c_padded,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
       digest: OnceCell::new(),
     })
   }
@@ -1200,8 +1212,6 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     R1CSShape {
       num_cons: self.num_cons,
       num_vars: total_vars,
-      // Keep IO order consistent with SplitMultiRoundR1CSInstance::to_regular_instance
-      // which concatenates [challenges, public_values]
       num_io: total_challenges + self.num_public,
       A: self.A.clone(),
       B: self.B.clone(),
@@ -1275,15 +1285,11 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
 
     // Validate commitments per round
     for (round, comm) in comm_w_per_round.iter().enumerate() {
-<<<<<<< HEAD
-      E::PCS::check_partial(comm, s.num_vars_per_round[round])?;
-=======
       E::PCS::check_commitment(
         comm,
         s.num_vars_per_round[round],
         MULTIROUND_COMMITMENT_WIDTH,
       )?;
->>>>>>> 4bbc0a1 (Finish making the proofs zero-knowledge (#32))
     }
 
     Ok(SplitMultiRoundR1CSInstance {
@@ -1293,16 +1299,6 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
     })
   }
 
-  /// Returns a read-only view of the per-round commitments, in order.
-  pub fn commitments_per_round(&self) -> &[Commitment<E>] {
-    &self.comm_w_per_round
-  }
-
-  /// Returns the commitment for a specific round, if it exists.
-  pub fn commitment_for_round(&self, round_index: usize) -> Option<&Commitment<E>> {
-    self.comm_w_per_round.get(round_index)
-  }
-
   pub fn validate(
     &self,
     s: &SplitMultiRoundR1CSShape<E>,
@@ -1310,23 +1306,20 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
   ) -> Result<(), SpartanError> {
     // Process each round, absorbing the previous round's commitment before deriving this round's challenges
     for round in 0..s.num_rounds {
-      if round > 0 {
-        // Absorb commitment of previous round to influence current round's challenges
-        E::PCS::check_commitment(
-          &self.comm_w_per_round[round - 1],
-          s.num_vars_per_round[round - 1],
-        )?;
-        transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round - 1]);
-      }
+      E::PCS::check_commitment(
+        &self.comm_w_per_round[round],
+        s.num_vars_per_round[round],
+        MULTIROUND_COMMITMENT_WIDTH,
+      )?;
+      transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round]);
 
-      // Derive and validate challenges for this round
-      let expected_challenges = (0..s.num_challenges_per_round[round])
+      let derived_challenges = (0..s.num_challenges_per_round[round])
         .map(|_| transcript.squeeze(b"challenge"))
         .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
-      if expected_challenges != self.challenges_per_round[round] {
+      if self.challenges_per_round[round] != derived_challenges {
         return Err(SpartanError::ProofVerifyError {
-          reason: format!("Challenges for round {round} do not match"),
+          reason: format!("MultiRoundR1CSInstance:: Challenges do not match for round {round}"),
         });
       }
     }
@@ -1338,7 +1331,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
     let partial_comms = self.comm_w_per_round.clone();
     let comm_w = PCS::<E>::combine_commitments(&partial_comms)?;
 
-    let all_challenges: Vec<E::Scalar> = self
+    let challenges: Vec<E::Scalar> = self
       .challenges_per_round
       .iter()
       .flatten()
@@ -1349,7 +1342,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
       comm_W: comm_w,
       // Multi-round circuits inputize challenges before public values during synthesis.
       // The regular instance must reflect the same ordering for satisfiability checks.
-      X: [all_challenges, self.public_values.clone()].concat(),
+      X: [challenges, self.public_values.clone()].concat(),
     })
   }
 }

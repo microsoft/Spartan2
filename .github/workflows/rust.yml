@@ -6,84 +6,80 @@ permissions:
 
 on:
   push:
-    branches: [ main ]
+    branches: ['**']
   pull_request:
-    branches: [ main ]
+    branches: ['**']
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --examples --benches --verbose
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --examples --benches --verbose
 
   build-wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Wasm build
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable + wasm32)
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-          target: wasm32-unknown-unknown
-      - uses: actions-rs/cargo@v1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
         with:
-          command: build
-          args: --no-default-features --target wasm32-unknown-unknown
+          # cache the wasm target, too
+          cache-targets: "true"
+      - name: Wasm build
+        run: cargo build --no-default-features --target wasm32-unknown-unknown
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Run tests
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --release --verbose
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --release --verbose
 
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Check Rustfmt Code Style
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
           components: rustfmt
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+      - name: Check Rustfmt Code Style
+        run: cargo fmt --all -- --check
 
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Check clippy warnings
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
           components: clippy
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+      - name: Check clippy warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   spelling:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Actions Repository
-      uses: actions/checkout@v2
-    - name: Spell Check Repo
-      uses: crate-ci/typos@685eb3d55be2f85191e8c84acb9f44d7756f84ab
-
+      - uses: actions/checkout@v4
+      - name: Spell Check Repo
+        uses: crate-ci/typos@685eb3d55be2f85191e8c84acb9f44d7756f84ab

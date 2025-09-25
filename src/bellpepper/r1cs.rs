@@ -752,13 +752,8 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     let comm_w_round = PCS::<E>::commit(
       ck,
       &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
-<<<<<<< HEAD
-      &state.r_w,
-      is_small,
-=======
       &r_w_per_round,
       false,
->>>>>>> c5303f5 (opt: neutronnova zk optimizations (#39))
     )?;
 
     state.vars_per_round.push(round_vars);
