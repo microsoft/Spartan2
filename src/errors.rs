@@ -44,7 +44,10 @@ pub enum SpartanError {
   },
   /// returned when an invalid PCS evaluation argument is provided
   #[error("InvalidPCS")]
-  InvalidPCS,
+  InvalidPCS {
+    /// The reason for the invalid PCS error
+    reason: String,
+  },
   /// returned when an invalid sum-check proof is provided
   #[error("InvalidSumcheckProof")]
   InvalidSumcheckProof,

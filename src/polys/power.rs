@@ -1,5 +1,4 @@
 //! `PowPolynomial`: Represents multilinear extension of power polynomials
-
 use crate::errors::SpartanError;
 use core::iter::successors;
 use ff::PrimeField;

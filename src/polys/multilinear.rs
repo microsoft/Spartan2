@@ -7,8 +7,7 @@ use core::ops::Index;
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
@@ -156,7 +155,7 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
       .sum();
 
     let common = (0..self.num_vars - 1 - num_vars_z)
-      .map(|i| (Scalar::ONE - r[i]))
+      .map(|i| Scalar::ONE - r[i])
       .product::<Scalar>();
 
     common * eval_partial
