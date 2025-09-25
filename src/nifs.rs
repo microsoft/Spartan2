@@ -59,7 +59,6 @@ where
     U1: &RelaxedR1CSInstance<E>,
     U2: &R1CSInstance<E>,
   ) -> Result<RelaxedR1CSInstance<E>, SpartanError> {
-    // Re-run the prover’s transcript schedule to obtain `r` using caller transcript.
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
     transcript.absorb(b"comm_T", &self.comm_T);

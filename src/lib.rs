@@ -47,7 +47,10 @@ pub(crate) use start_span;
 
 /// The width used for per-round commitments in the multiround protocol.
 /// This affects the commitment scheme structure and padding calculations.
-pub const MULTIROUND_COMMITMENT_WIDTH: usize = 4;
+pub(crate) const MULTIROUND_COMMITMENT_WIDTH: usize = 4;
+
+// The default width used for monolithic commitments.
+pub(crate) const DEFAULT_COMMITMENT_WIDTH: usize = 1024;
 
 use traits::{Engine, pcs::PCSEngineTrait};
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;

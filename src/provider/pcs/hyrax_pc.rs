@@ -408,7 +408,13 @@ where
         comm
           .comm
           .par_iter()
-          .map(|c| *c * weight)
+          .map(|c| {
+            if weight == &E::Scalar::ONE {
+              *c
+            } else {
+              *c * weight
+            }
+          })
           .collect::<Vec<_>>()
       })
       .reduce(

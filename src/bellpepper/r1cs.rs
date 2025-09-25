@@ -109,7 +109,7 @@ pub trait MultiRoundSpartanWitness<E: Engine> {
     s: &SplitMultiRoundR1CSShape<E>,
   ) -> Result<Self::MultiRoundState, SpartanError>;
 
-  /// Process a specific round and update the state, returning the challenges generated.
+  /// Process a specific round and update the state, returning the challenges generated after the commitment to the round.
   fn process_round<C: MultiRoundCircuit<E>>(
     state: &mut Self::MultiRoundState,
     s: &SplitMultiRoundR1CSShape<E>,
@@ -201,8 +201,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     let num_rest = num_vars - num_shared - num_precommitted;
 
-    let width = E::PCS::width();
-
     debug!("num_constraints: {}", num_constraints);
     debug!("num_vars: {}", num_vars);
     debug!("num_inputs: {}", num_inputs);
@@ -212,7 +210,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     // Don't count One as an input for shape's purposes.
     let S = SplitR1CSShape::new(
-      width,
       num_constraints,
       num_shared,
       num_precommitted,
@@ -296,20 +293,6 @@ pub struct PrecommittedState<E: Engine> {
   comm_W_precommitted: Option<Commitment<E>>,
   r_W_precommitted: Option<Blind<E>>,
   W: Vec<E::Scalar>,
-}
-
-/// A type that holds the multi-round state for proving
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct MultiRoundState<E: Engine> {
-  cs: SatisfyingAssignment<E>,
-  vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
-  challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
-  comm_w_per_round: Vec<PartialCommitment<E>>,
-  w: Vec<E::Scalar>,
-  r_w: Blind<E>,
-  current_round: usize,
-  num_rounds: usize,
 }
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
@@ -618,12 +601,12 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
       challenges_per_round.push(round_challenges);
     }
 
-    let mut a = SparseMatrix::<E::Scalar>::empty();
-    let mut b = SparseMatrix::<E::Scalar>::empty();
-    let mut c = SparseMatrix::<E::Scalar>::empty();
+    let mut A = SparseMatrix::<E::Scalar>::empty();
+    let mut B = SparseMatrix::<E::Scalar>::empty();
+    let mut C = SparseMatrix::<E::Scalar>::empty();
 
     let mut num_cons_added = 0;
-    let mut x = (&mut a, &mut b, &mut c, &mut num_cons_added);
+    let mut x = (&mut A, &mut B, &mut C, &mut num_cons_added);
     let num_inputs = cs.num_inputs();
     let num_constraints = cs.num_constraints();
     let total_vars = cs.num_aux();
@@ -639,30 +622,42 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
     }
     assert_eq!(num_cons_added, num_constraints);
 
-    let total_challenges: usize = num_challenges_per_round.iter().sum();
-    a.cols = total_vars + num_inputs;
-    b.cols = total_vars + num_inputs;
-    c.cols = total_vars + num_inputs;
-
-    // Width for per-round commitments
-    let width = MULTIROUND_COMMITMENT_WIDTH;
+    A.cols = total_vars + num_inputs;
+    B.cols = total_vars + num_inputs;
+    C.cols = total_vars + num_inputs;
 
     // Don't count One as an input for shape's purposes.
-    let s = SplitMultiRoundR1CSShape::new(
-      width,
+    let num_public_values = num_inputs - 1 - num_challenges_per_round.iter().sum::<usize>();
+    let S = SplitMultiRoundR1CSShape::new(
+      MULTIROUND_COMMITMENT_WIDTH,
       num_constraints,
       num_vars_per_round,
       num_challenges_per_round,
-      num_inputs - 1 - total_challenges, // public values
-      a,
-      b,
-      c,
-    )
-    .unwrap();
-    let (ck, vk) = s.commitment_key();
+      num_public_values,
+      A,
+      B,
+      C,
+    )?;
 
-    Ok((s, ck, vk))
+    let (ck, vk) = S.commitment_key();
+
+    Ok((S, ck, vk))
   }
+}
+
+/// A type that holds the multi-round state for proving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct MultiRoundState<E: Engine> {
+  cs: SatisfyingAssignment<E>,
+  vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  challenges: Vec<Vec<E::Scalar>>,
+  comm_w_per_round: Vec<Commitment<E>>,
+  pub(crate) r_w_per_round: Vec<Blind<E>>,
+  w: Vec<E::Scalar>,
+  current_round: usize,
+  num_rounds: usize,
 }
 
 impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
@@ -673,16 +668,16 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
   ) -> Result<Self::MultiRoundState, SpartanError> {
     let cs = Self::new();
     let total_vars: usize = s.num_vars_per_round.iter().sum();
-    let r_w = PCS::<E>::blind(ck);
     let w = vec![E::Scalar::ZERO; total_vars];
 
     Ok(MultiRoundState {
       cs,
       vars_per_round: Vec::new(),
       challenges_per_round: Vec::new(),
+      challenges: Vec::new(),
       comm_w_per_round: Vec::new(),
+      r_w_per_round: Vec::new(),
       w,
-      r_w,
       current_round: 0,
       num_rounds: s.num_rounds,
     })
@@ -705,24 +700,20 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       });
     }
 
-    // Absorb commitment from the immediately preceding round (if any)
-    if let Some(comm) = state.comm_w_per_round.last() {
-      transcript.absorb(b"comm_w_round", comm);
-    }
-
-    // Generate challenges for this round
-    let challenges = (0..s.num_challenges_per_round[round_index])
-      .map(|_| transcript.squeeze(b"challenge"))
-      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
-
     // Process this round, supplying references to variables/challenges from previous rounds
+    let chals = if round_index == 0 {
+      None
+    } else {
+      state.challenges.get(round_index - 1).map(|c| c.as_slice())
+    };
+
     let (round_vars, round_challenges) = circuit
       .rounds(
         &mut state.cs,
         round_index,
         &state.vars_per_round,
         &state.challenges_per_round,
-        Some(&challenges),
+        chals,
       )
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize round {round_index}: {e}"),
@@ -756,9 +747,19 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       false,
     )?;
 
+    // absorb commitment to this round's variables
+    transcript.absorb(b"comm_w_round", &comm_w_round);
+
+    // Generate challenges for this round
+    let challenges = (0..s.num_challenges_per_round[round_index])
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
     state.vars_per_round.push(round_vars);
     state.challenges_per_round.push(round_challenges);
     state.comm_w_per_round.push(comm_w_round);
+    state.r_w_per_round.push(r_w_per_round);
+    state.challenges.push(challenges.clone());
     state.current_round += 1;
 
     // Return the challenges that were generated for this round
@@ -778,18 +779,6 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       });
     }
 
-    // Collect all challenges
-    let challenges_per_round: Vec<Vec<E::Scalar>> = state
-      .challenges_per_round
-      .iter()
-      .map(|round_challenges| {
-        round_challenges
-          .iter()
-          .map(|c| c.get_value().unwrap_or(E::Scalar::ZERO))
-          .collect()
-      })
-      .collect();
-
     let num_challenges: usize = s.num_challenges_per_round.iter().sum();
 
     // collect public values
@@ -799,11 +788,10 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
       s,
       state.comm_w_per_round.clone(),
       public_values,
-      challenges_per_round,
+      state.challenges.clone(),
     )?;
 
     let r_w = PCS::<E>::combine_blinds(&state.r_w_per_round)?;
-
     let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), r_w, false)?;
 
     Ok((u, w))

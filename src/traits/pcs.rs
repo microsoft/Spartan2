@@ -40,19 +40,11 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Samples a new commitment key of a specified size and a verifier key
-  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    Self::setup_with_width(label, n, Self::width())
-  }
-
-  /// Samples a new commitment key and verifier key using an explicit column width (`width`).
-  fn setup_with_width(
+  fn setup(
     label: &'static [u8],
     n: usize,
     width: usize,
   ) -> (Self::CommitmentKey, Self::VerifierKey);
-
-  /// Size of the polynomial committed with one unit
-  fn width() -> usize;
 
   /// Returns a blind to be used for commitment to a polynomial of size `n`
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind;

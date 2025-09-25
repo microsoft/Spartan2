@@ -28,8 +28,7 @@ use crate::{
   traits::{
     Engine,
     circuit::SpartanCircuit,
-    folding::FoldingEngineTrait,
-    pcs::PCSEngineTrait,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
     snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
     transcript::TranscriptEngineTrait,
   },
@@ -640,7 +639,7 @@ mod tests {
     let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
 
     // generate a witness and proof
-    let res = S::prove(&pk, circuit, &mut prep_snark, false);
+    let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
     assert!(res.is_ok());
     let snark = res.unwrap();
 

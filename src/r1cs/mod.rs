@@ -350,7 +350,7 @@ impl<E: Engine> R1CSShape<E> {
   /// * `S`: The shape of the R1CS matrices.
   ///
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
-    E::PCS::setup(b"ck", self.num_vars)
+    E::PCS::setup(b"ck", self.num_vars, DEFAULT_COMMITMENT_WIDTH)
   }
 
   pub fn multiply_vec(
@@ -419,8 +419,8 @@ impl<E: Engine> R1CSShape<E> {
       .map(|_| E::Scalar::random(&mut rand_core::OsRng))
       .collect::<Vec<E::Scalar>>();
 
-    let r_W = PCS::<E>::blind(ck);
-    let r_E = PCS::<E>::blind(ck);
+    let r_W = PCS::<E>::blind(ck, self.num_vars);
+    let r_E = PCS::<E>::blind(ck, self.num_cons);
 
     let u = Z[self.num_vars];
 
@@ -678,7 +678,6 @@ impl<E: Engine> SplitR1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
   #[allow(clippy::too_many_arguments)]
   pub fn new(
-    width: usize,
     num_cons: usize,
     num_shared: usize,
     num_precommitted: usize,
@@ -689,6 +688,8 @@ impl<E: Engine> SplitR1CSShape<E> {
     B: SparseMatrix<E::Scalar>,
     C: SparseMatrix<E::Scalar>,
   ) -> Result<SplitR1CSShape<E>, SpartanError> {
+    let width = DEFAULT_COMMITMENT_WIDTH;
+
     let num_rows = num_cons;
     let num_cols = num_shared + num_precommitted + num_rest + 1 + num_public + num_challenges; // +1 for the constant term
 
@@ -902,7 +903,7 @@ impl<E: Engine> SplitR1CSShape<E> {
         reason: "commitment_key: unable to find max number of variables".to_string(),
       })?;
 
-    Ok(E::PCS::setup(b"ck", max))
+    Ok(E::PCS::setup(b"ck", max, DEFAULT_COMMITMENT_WIDTH))
   }
 
   pub fn multiply_vec(
@@ -1128,7 +1129,13 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   ) -> Result<SplitMultiRoundR1CSShape<E>, SpartanError> {
     let num_rounds = num_vars_per_round.len();
     if num_challenges_per_round.len() != num_rounds {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CSShape: Expected {} challenges per round, got {}",
+          num_rounds,
+          num_challenges_per_round.len()
+        ),
+      });
     }
 
     let total_vars: usize = num_vars_per_round.iter().sum();
@@ -1235,7 +1242,7 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let total_vars: usize = self.num_vars_per_round.iter().sum();
     // Use a narrower commitment width for multi-round witnesses to reduce padding overhead.
-    E::PCS::setup_with_width(b"ck", total_vars, MULTIROUND_COMMITMENT_WIDTH)
+    E::PCS::setup(b"ck", total_vars, MULTIROUND_COMMITMENT_WIDTH)
   }
 
   pub fn multiply_vec(
@@ -1267,19 +1274,44 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
     challenges_per_round: Vec<Vec<E::Scalar>>,
   ) -> Result<SplitMultiRoundR1CSInstance<E>, SpartanError> {
     if public_values.len() != s.num_public {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} public values, got {}",
+          s.num_public,
+          public_values.len()
+        ),
+      });
     }
     if challenges_per_round.len() != s.num_rounds {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} rounds, got {}",
+          s.num_rounds,
+          challenges_per_round.len()
+        ),
+      });
     }
     if comm_w_per_round.len() != s.num_rounds {
-      return Err(SpartanError::InvalidInputLength);
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} rounds, got {}",
+          s.num_rounds,
+          comm_w_per_round.len()
+        ),
+      });
     }
 
     // Validate challenges per round
     for (round, challenges) in challenges_per_round.iter().enumerate() {
       if challenges.len() != s.num_challenges_per_round[round] {
-        return Err(SpartanError::InvalidInputLength);
+        return Err(SpartanError::InvalidInputLength {
+          reason: format!(
+            "SplitMultiRoundR1CS instance: Expected {} challenges in round {}, got {}",
+            s.num_challenges_per_round[round],
+            round,
+            challenges.len()
+          ),
+        });
       }
     }
 

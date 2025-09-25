@@ -5,7 +5,9 @@ use crate::{
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness},
   traits::{
-    Engine, folding::FoldingEngineTrait, pcs::PCSEngineTrait, transcript::TranscriptReprTrait,
+    Engine,
+    pcs::{FoldingEngineTrait, PCSEngineTrait},
+    transcript::TranscriptReprTrait,
   },
 };
 use ff::Field;
