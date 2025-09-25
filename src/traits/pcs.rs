@@ -66,7 +66,7 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     v: &[E::Scalar],
     r: &Self::Blind,
     is_small: bool,
-  ) -> Result<(Self::PartialCommitment, Self::Blind), SpartanError>;
+  ) -> Result<Self::PartialCommitment, SpartanError>;
 
   /// Checks if the provided partial commitment commits to a vector of the specified length
   fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError>;
