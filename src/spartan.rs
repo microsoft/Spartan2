@@ -1,55 +1,43 @@
 //! This module implements the spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
-#![allow(non_snake_case)]
 use crate::{
-  CommitmentKey,
+  Blind, CommitmentKey,
   bellpepper::{
-    r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, RerandomizationTrait,
-      SpartanShape, SpartanWitness,
-    },
+    r1cs::{PrecommittedState, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   math::Math,
-  nifs::NovaNIFS,
   polys::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
-  r1cs::{
-    R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance,
-    SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
-  },
+  r1cs::{SplitR1CSInstance, SplitR1CSShape},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
     circuit::SpartanCircuit,
-    pcs::{FoldingEngineTrait, PCSEngineTrait},
+    pcs::PCSEngineTrait,
     snark::{DigestHelperTrait, R1CSSNARKTrait, SpartanDigest},
     transcript::TranscriptEngineTrait,
   },
-  zk::SpartanVerifierCircuit,
 };
 use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
+  ck_s: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
-  // Verifier-circuit (multi-round) parameters
-  vc_shape: SplitMultiRoundR1CSShape<E>,
-  // Precomputed regular (single-round) verifier shape
-  vc_shape_regular: R1CSShape<E>,
-  vc_ck: CommitmentKey<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
@@ -69,13 +57,8 @@ impl<E: Engine> SpartanProverKey<E> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
+  ck_s: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
-  // Verifier-circuit (multi-round) shape
-  vc_shape: SplitMultiRoundR1CSShape<E>,
-  // Precomputed regular (single-round) verifier shape
-  vc_shape_regular: R1CSShape<E>,
-  // Commitment key for the verifier-circuit (multi-round) shape; shared with prover
-  vc_ck: CommitmentKey<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
@@ -98,123 +81,50 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   }
 }
 
-/// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-pub(crate) fn compute_eval_table_sparse<E: Engine>(
-  S: &SplitR1CSShape<E>,
-  rx: &[E::Scalar],
-) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
-  assert_eq!(rx.len(), S.num_cons);
-
-  let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
-    for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
-      for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
-        M_evals[*col_idx] += rx[row_idx] * val;
-      }
-    }
-  };
-
-  let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-  let (A_evals, (B_evals, C_evals)) = rayon::join(
-    || {
-      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-      inner(&S.A, &mut A_evals);
-      A_evals
-    },
-    || {
-      rayon::join(
-        || {
-          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-          inner(&S.B, &mut B_evals);
-          B_evals
-        },
-        || {
-          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-          inner(&S.C, &mut C_evals);
-          C_evals
-        },
-      )
-    },
-  );
-
-  (A_evals, B_evals, C_evals)
-}
-
 /// A type that holds the pre-processed state for proving
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct PrepSNARK<E: Engine> {
+pub struct SpartanPrepSNARK<E: Engine> {
   ps: PrecommittedState<E>,
 }
 
-/// A succinct non-interactive argument of knowledge (SNARK) for a relaxed R1CS instance,
-/// produced using Spartan's combination of sum-check protocols and polynomial commitments.
-/// This proof attests to knowledge of a witness satisfying the given R1CS constraints.
+/// A succinct proof of knowledge of a witness to a relaxed R1CS instance
+/// The proof is produced using Spartan's combination of the sum-check and
+/// the commitment to a vector viewed as a polynomial commitment
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct R1CSSNARK<E: Engine> {
-  // Original R1CS instance
+pub struct SpartanSNARK<E: Engine> {
   U: SplitR1CSInstance<E>,
-
-  // Multi-round verifier instance capturing the non-ZK verification trace
-  U_verifier: SplitMultiRoundR1CSInstance<E>,
-  // The random relaxed instance used for folding
-  random_U: RelaxedR1CSInstance<E>,
-  // NIFS proof for folding a random relaxed instance with the verifier instance
-  nifs: NovaNIFS<E>,
-  // Folded relaxed witness produced during NIFS proving
-  folded_W: RelaxedR1CSWitness<E>,
-
-  // PCS evaluation argument
+  sc_proof_outer: SumcheckProof<E>,
+  claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+  sc_proof_inner: SumcheckProof<E>,
+  eval_W: E::Scalar,
+  blind_eval_W: Blind<E>, // it is okay to send the blind since we are targeting non-zk
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
-impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E>
-where
-  E::PCS: FoldingEngineTrait<E>,
-{
+impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
-  type PrepSNARK = PrepSNARK<E>;
+  type PrepSNARK = SpartanPrepSNARK<E>;
 
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
+    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, 1); // for committing to a scalar
 
-    // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
-    let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-    let num_rounds_x = S.num_cons.log_2();
-    let num_rounds_y = num_vars.log_2() + 1;
-    let zero = E::Scalar::ZERO;
-    let vc = SpartanVerifierCircuit::<E> {
-      outer_polys: vec![[zero; 4]; num_rounds_x],
-      claim_Az: zero,
-      claim_Bz: zero,
-      claim_Cz: zero,
-      tau_at_rx: zero,
-      inner_polys: vec![[zero; 3]; num_rounds_y],
-      eval_W: zero,
-      eval_X: zero,
-    };
-    let (vc_shape, vc_ck, _vk_mr) =
-      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
-    let vc_shape_regular = vc_shape.to_regular_shape();
-
-    let vk = Self::VerifierKey {
+    let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
-      vc_shape: vc_shape.clone(),
-      vc_shape_regular: vc_shape_regular.clone(),
-      vc_ck: vc_ck.clone(),
+      ck_s: ck_s.clone(),
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
+      ck_s,
       S,
-      vc_shape,
-      vc_shape_regular,
-      vc_ck,
       vk_digest: vk.digest()?,
     };
 
@@ -230,7 +140,7 @@ where
     let mut ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuit, is_small)?;
     SatisfyingAssignment::precommitted_witness(&mut ps, &pk.S, &pk.ck, &circuit, is_small)?;
 
-    Ok(PrepSNARK { ps })
+    Ok(SpartanPrepSNARK { ps })
   }
 
   /// produces a succinct proof of satisfiability of an R1CS instance
@@ -240,22 +150,22 @@ where
     prep_snark: &Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
-    // rerandomize the prep state
-    let mut ps = prep_snark.ps.rerandomize(&pk.ck, &pk.S)?;
+    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
 
-    let mut transcript = E::TE::new(b"R1CSSNARK");
+    let mut transcript = E::TE::new(b"SpartanSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
-    // absorb public IO before
+
     let public_values = circuit
       .public_values()
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Circuit does not provide public IO: {e}"),
       })?;
+
+    // absorb the public values into the transcript
     transcript.absorb(b"public_values", &public_values.as_slice());
 
-    // Original R1CS instance and witness (used for PCS evaluation only)
     let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
-      &mut ps,
+      &mut prep_snark.ps,
       &pk.S,
       &pk.ck,
       &circuit,
@@ -263,89 +173,125 @@ where
       &mut transcript,
     )?;
 
-    // Prepare vectors and polynomials for building the verifier-circuit trace
-    let mut z = W.W.clone();
-    z.push(E::Scalar::ONE);
-    z.extend_from_slice(&U.public_values);
-    z.extend_from_slice(&U.challenges);
+    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
+    let mut z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let (num_rounds_x, num_rounds_y) = (pk.S.num_cons.log_2(), num_vars.log_2() + 1);
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
 
-    // Build tau and Az/Bz/Cz polynomials
+    // outer sum-check preparation
     let tau = (0..num_rounds_x)
-      .map(|_| transcript.squeeze(b"t"))
+      .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+
+    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
     let mut poly_tau = MultilinearPolynomial::new(tau.evals());
+    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
 
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
-    let mut poly_Az = MultilinearPolynomial::new(Az);
-    let mut poly_Bz = MultilinearPolynomial::new(Bz);
-    let mut poly_Cz = MultilinearPolynomial::new(Cz);
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      constraints = %pk.S.num_cons,
+      vars = %num_vars,
+      "matrix_vector_multiply"
+    );
 
-    // Initialize multi-round verifier circuit (will be filled as we go)
-    let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(num_rounds_x, num_rounds_y);
-    let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+      MultilinearPolynomial::new(Az),
+      MultilinearPolynomial::new(Bz),
+      MultilinearPolynomial::new(Cz),
+    );
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
 
-    // Outer sum-check
-    let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_zk(
+    // outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+
+    let comb_func_outer =
+      |poly_A_comp: &E::Scalar,
+       poly_B_comp: &E::Scalar,
+       poly_C_comp: &E::Scalar,
+       poly_D_comp: &E::Scalar|
+       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
+    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_additive_term(
+      &E::Scalar::ZERO, // claim is zero
       num_rounds_x,
       &mut poly_tau,
       &mut poly_Az,
       &mut poly_Bz,
       &mut poly_Cz,
-      &mut verifier_circuit,
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
+      comb_func_outer,
       &mut transcript,
     )?;
 
-    // Outer final round data
-    verifier_circuit.claim_Az = poly_Az[0];
-    verifier_circuit.claim_Bz = poly_Bz[0];
-    verifier_circuit.claim_Cz = poly_Cz[0];
-    verifier_circuit.tau_at_rx = poly_tau[0];
+    // claims from the end of sum-check
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[1], claims_outer[2], claims_outer[3]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
 
-    // Process the "outer final" round in the circuit and capture challenge
-    let chals = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &verifier_circuit,
-      num_rounds_x,
-      &mut transcript,
-    )?;
-    let r = chals[0];
+    // inner sum-check preparation
+    let (_r_span, r_t) = start_span!("prepare_inner_claims");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
-    // Prepare inner polynomials
-    let evals_rx = EqPolynomial::evals_from_points(&r_x);
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
-    let poly_ABC: Vec<E::Scalar> = (0..evals_A.len())
+    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
+    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
+    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
+
+    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
+    let (evals_A, evals_B, evals_C) = pk.S.bind_row_vars(&evals_rx);
+    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
+
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
+    assert_eq!(evals_A.len(), evals_B.len());
+    assert_eq!(evals_A.len(), evals_C.len());
+    let poly_ABC = (0..evals_A.len())
       .into_par_iter()
       .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-      .collect();
-    z.resize(num_vars * 2, E::Scalar::ZERO);
-    let mut poly_ABC = MultilinearPolynomial::new(poly_ABC);
-    let mut poly_z = MultilinearPolynomial::new(z);
+      .collect::<Vec<E::Scalar>>();
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
-    // Inner sum-check
-    let claim_inner_joint =
-      verifier_circuit.claim_Az + r * verifier_circuit.claim_Bz + r * r * verifier_circuit.claim_Cz;
+    let (_z_span, z_t) = start_span!("prepare_poly_z");
+    let poly_z = {
+      z.resize(num_vars * 2, E::Scalar::ZERO);
+      z
+    };
+    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
 
-    let (r_y, evals) = SumcheckProof::<E>::prove_quad_zk(
+    // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
+    let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
       &claim_inner_joint,
       num_rounds_y,
-      &mut poly_ABC,
-      &mut poly_z,
-      &mut verifier_circuit,
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
+      &mut MultilinearPolynomial::new(poly_ABC),
+      &mut MultilinearPolynomial::new(poly_z),
+      comb_func,
       &mut transcript,
-      num_rounds_x + 1,
     )?;
-    let eval_Z = evals[1]; // evaluation of Z at r_y
+    let eval_Z = claims_inner[1]; // evaluation of Z at r_y
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
     // Compute final evaluations needed for the inner-final round
     let U_regular = U.to_regular_instance()?;
@@ -360,175 +306,142 @@ where
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
     let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
 
-    // Process the inner-final equality round
-    // Set verifier circuit public values before processing inner-final round
-    verifier_circuit.eval_W = eval_W;
-    verifier_circuit.eval_X = eval_X;
-    _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &verifier_circuit,
-      (num_rounds_x + 1) + num_rounds_y,
-      &mut transcript,
-    )?;
-
-    // Process the dedicated commit-only round for eval_W
-    let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &verifier_circuit,
-      eval_w_commit_round,
-      &mut transcript,
-    )?;
-
-    // Finalize multi-round witness and construct NIFS proof
-    let (U_verifier, W_verifier) =
-      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &pk.vc_shape)?;
-
-    // Use the instance as produced by witness finalization; its public values
-    // are exactly those absorbed during round 0 by the prover.
-    let U_verifier_regular = U_verifier.to_regular_instance()?;
-    let S_verifier = &pk.vc_shape_regular;
-    let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.vc_ck)?;
-    let (nifs, folded_W) = NovaNIFS::<E>::prove(
-      &pk.vc_ck,
-      S_verifier,
-      &random_U,
-      &random_W,
-      &U_verifier_regular,
-      &W_verifier,
-      &mut transcript,
-    )?;
-
-    // prove the claimed polynomial evaluation at point r_y[1..]
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
+    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?; // commitment to eval_W
+    let U_regular = U.to_regular_instance()?;
     let eval_arg = E::PCS::prove(
       &pk.ck,
-      &pk.vc_ck,
+      &pk.ck_s,
       &mut transcript,
       &U_regular.comm_W,
       &W.W,
       &W.r_W,
       &r_y[1..],
-      &U_verifier.comm_w_per_round[eval_w_commit_round],
-      &state.r_w_per_round[eval_w_commit_round],
+      &comm_eval_W,
+      &blind_eval_W,
     )?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
-    Ok(R1CSSNARK {
-      U_verifier,
-      nifs,
-      random_U,
-      folded_W,
-      eval_arg,
+    Ok(SpartanSNARK {
       U,
+      sc_proof_outer,
+      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_inner,
+      eval_W,
+      blind_eval_W,
+      eval_arg,
     })
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
-    // Verify by checking the multi-round verifier instance via NIFS folding
-    let (_verify_span, _verify_t) = start_span!("r1cs_snark_verify");
-    let ck_verifier = &vk.vc_ck;
-    let mut transcript = E::TE::new(b"R1CSSNARK");
+    let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
+    let mut transcript = E::TE::new(b"SpartanSNARK");
+
+    // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
-    transcript.absorb(b"public_values", &self.U.public_values.as_slice());
 
-    // Validate the provided split R1CS instance and advance the transcript
+    // validate the provided split R1CS instance and convert to regular instance
     self.U.validate(&vk.S, &mut transcript)?;
+    let U_regular = self.U.to_regular_instance()?;
 
-    // Recreate tau polynomial coefficients via Fiat-Shamir and advance transcript
-    let num_rounds_x = vk.S.num_cons.log_2();
-    let tau = (0..num_rounds_x)
-      .map(|_| transcript.squeeze(b"t"))
-      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-
-    // validate the provided multi-round verifier instance and advance transcript
-    self.U_verifier.validate(&vk.vc_shape, &mut transcript)?;
-
-    // Derive expected challenge counts from the original shape sizes
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
-    let num_rounds_x = vk.S.num_cons.log_2();
-    let num_rounds_y = num_vars.log_2() + 1;
 
-    let U_verifier_regular = self.U_verifier.to_regular_instance()?;
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
 
-    let num_public_values = 3usize;
-    let num_challenges = num_rounds_x + 1 + num_rounds_y;
+    info!(
+      "Verifying R1CS SNARK with {} rounds for outer sum-check and {} rounds for inner sum-check",
+      num_rounds_x, num_rounds_y
+    );
 
-    if U_verifier_regular.X.len() != num_challenges + num_public_values {
-      return Err(SpartanError::ProofVerifyError {
-        reason: format!(
-          "Verifier instance has incorrect number of public IO: expected {}, got {}",
-          num_challenges + num_public_values,
-          U_verifier_regular.X.len()
-        ),
-      });
+    // outer sum-check
+    let (_tau_span, tau_t) = start_span!("compute_tau_verify");
+    let tau = (0..num_rounds_x)
+      .map(|_i| transcript.squeeze(b"t"))
+      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
+
+    let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
+    let (claim_outer_final, r_x) =
+      self
+        .sc_proof_outer
+        .verify(E::Scalar::ZERO, num_rounds_x, 3, &mut transcript)?;
+
+    // verify claim_outer_final
+    let (claim_Az, claim_Bz, claim_Cz) = self.claims_outer;
+    let taus_bound_rx = tau.evaluate(&r_x);
+    let claim_outer_final_expected = taus_bound_rx * (claim_Az * claim_Bz - claim_Cz);
+    if claim_outer_final != claim_outer_final_expected {
+      return Err(SpartanError::InvalidSumcheckProof);
     }
-    let challenges = &U_verifier_regular.X[0..num_challenges];
-    let public_values = &U_verifier_regular.X[num_challenges..num_challenges + 3];
+    info!(elapsed_ms = %outer_sumcheck_t.elapsed().as_millis(), "outer_sumcheck_verify");
 
-    let r_x = challenges[0..num_rounds_x].to_vec();
-    let r = challenges[num_rounds_x]; // r for combining inner claims
-    let r_y = challenges[num_rounds_x + 1..].to_vec();
+    transcript.absorb(
+      b"claims_outer",
+      &[
+        self.claims_outer.0,
+        self.claims_outer.1,
+        self.claims_outer.2,
+      ]
+      .as_slice(),
+    );
 
-    // compute eval_A, eval_B, eval_C at (r_x, r_y)
+    // inner sum-check
+    let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint =
+      self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
+
+    let (claim_inner_final, r_y) =
+      self
+        .sc_proof_inner
+        .verify(claim_inner_joint, num_rounds_y, 2, &mut transcript)?;
+
+    // verify claim_inner_final
+    let eval_Z = {
+      let eval_X = {
+        // public IO is (1, X)
+        let X = vec![E::Scalar::ONE]
+          .into_iter()
+          .chain(U_regular.X.iter().cloned())
+          .collect::<Vec<E::Scalar>>();
+        SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
+      };
+      (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
+    };
+
+    // compute evaluations of R1CS matrices
+    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let T_x = EqPolynomial::evals_from_points(&r_x);
     let T_y = EqPolynomial::evals_from_points(&r_y);
     let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables(&T_x, &T_y);
-    let quotient = eval_A + r * eval_B + r * r * eval_C;
 
-    // Recompute eval_X from original circuit public IO at r_y[1..]
-    let U_regular = self.U.to_regular_instance()?;
-
-    let eval_X = {
-      let X = vec![E::Scalar::ONE]
-        .into_iter()
-        .chain(U_regular.X.iter().cloned())
-        .collect::<Vec<E::Scalar>>();
-      let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
-      SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
-    };
-
-    // Recompute tau(r_x) using the same tau polynomial challenges
-    let tau_at_rx = tau.evaluate(&r_x);
-
-    // Compare against the instance's public inputs [tau_at_rx, eval_X, quotient]
-    if public_values[0] != tau_at_rx || public_values[1] != eval_X || public_values[2] != quotient {
-      return Err(SpartanError::ProofVerifyError {
-        reason:
-          "Verifier instance public values do not match recomputed evaluations (tau_at_rx, eval_X, quotient)"
-            .to_string(),
-      });
+    let claim_inner_final_expected = (eval_A + r * eval_B + r * r * eval_C) * eval_Z;
+    if claim_inner_final != claim_inner_final_expected {
+      return Err(SpartanError::InvalidSumcheckProof);
     }
+    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
+    info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
 
-    // Finally, run NIFS verification using the same transcript
-    let folded_U = self
-      .nifs
-      .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
-
-    // Check satisfiability of the folded relaxed instance with the folded witness
-    vk.vc_shape_regular
-      .is_sat_relaxed(ck_verifier, &folded_U, &self.folded_W)
-      .map_err(|e| SpartanError::ProofVerifyError {
-        reason: format!("Folded instance not satisfiable: {e}"),
-      })?;
-
-    // Continue with PCS verification on the same transcript
-    // Use the commitment from the dedicated eval_W commit-only last round
-    let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
+    // verify
+    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
+    let comm_eval_W = E::PCS::commit(&vk.ck_s, &[self.eval_W], &self.blind_eval_W, false)?; // commitment to eval_W
     E::PCS::verify(
       &vk.vk_ee,
-      &vk.vc_ck,
+      &vk.ck_s,
       &mut transcript,
       &U_regular.comm_W,
       &r_y[1..],
-      &self.U_verifier.comm_w_per_round[eval_w_commit_round],
+      &comm_eval_W,
       &self.eval_arg,
     )?;
+    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
-    // Return original circuit public IO carried in the proof
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
     Ok(self.U.public_values.clone())
   }
 }
@@ -538,13 +451,6 @@ mod tests {
   use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
-
-  #[cfg(feature = "jem")]
-  use tikv_jemallocator::Jemalloc;
-
-  #[cfg(feature = "jem")]
-  #[global_allocator]
-  static GLOBAL: Jemalloc = Jemalloc;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
@@ -614,18 +520,18 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    let _ = tracing_subscriber::fmt()
-      .with_target(false)
-      .with_ansi(true) // no bold colour codes
-      .with_env_filter(EnvFilter::from_default_env())
-      .try_init();
+    tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)                // no bold colour codes
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
 
     type E = crate::provider::PallasHyraxEngine;
-    type S = R1CSSNARK<E>;
+    type S = SpartanSNARK<E>;
     test_snark_with::<E, S>();
 
     type E2 = crate::provider::T256HyraxEngine;
-    type S2 = R1CSSNARK<E2>;
+    type S2 = SpartanSNARK<E2>;
     test_snark_with::<E2, S2>();
   }
 

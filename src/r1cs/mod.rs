@@ -961,6 +961,47 @@ impl<E: Engine> SplitR1CSShape<E> {
       multi_eval(&self.C),
     )
   }
+
+  /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
+  pub(crate) fn bind_row_vars(
+    &self,
+    rx: &[E::Scalar],
+  ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    assert_eq!(rx.len(), self.num_cons);
+
+    let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
+      for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
+        for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
+          M_evals[*col_idx] += rx[row_idx] * val;
+        }
+      }
+    };
+
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    let (A_evals, (B_evals, C_evals)) = rayon::join(
+      || {
+        let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+        inner(&self.A, &mut A_evals);
+        A_evals
+      },
+      || {
+        rayon::join(
+          || {
+            let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+            inner(&self.B, &mut B_evals);
+            B_evals
+          },
+          || {
+            let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+            inner(&self.C, &mut C_evals);
+            C_evals
+          },
+        )
+      },
+    );
+
+    (A_evals, B_evals, C_evals)
+  }
 }
 
 /// A type that holds a multi-round split R1CS shape

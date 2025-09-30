@@ -28,11 +28,14 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
-pub mod neutronnova;
 pub mod provider;
-pub mod spartan;
 pub mod sumcheck;
 pub mod traits;
+
+// public modules for different proof systems
+pub mod neutronnova_zk; // NeutronNova with zero-knowledge
+pub mod spartan;
+pub mod spartan_zk; // Spartan with zero-knowledge // Spartan without zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

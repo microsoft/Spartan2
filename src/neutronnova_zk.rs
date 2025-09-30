@@ -27,7 +27,6 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness,
     SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
-  spartan::compute_eval_table_sparse,
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -803,10 +802,8 @@ where
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A_step, evals_B_step, evals_C_step) =
-      compute_eval_table_sparse(&pk.S_step, &evals_rx);
-    let (evals_A_core, evals_B_core, evals_C_core) =
-      compute_eval_table_sparse(&pk.S_core, &evals_rx);
+    let (evals_A_step, evals_B_step, evals_C_step) = pk.S_step.bind_row_vars(&evals_rx);
+    let (evals_A_core, evals_B_core, evals_C_core) = pk.S_core.bind_row_vars(&evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
