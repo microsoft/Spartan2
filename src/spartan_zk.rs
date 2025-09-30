@@ -498,11 +498,8 @@ mod tests {
   use tracing_subscriber::EnvFilter;
 
   #[cfg(feature = "jem")]
-  use tikv_jemallocator::Jemalloc;
-
-  #[cfg(feature = "jem")]
   #[global_allocator]
-  static GLOBAL: Jemalloc = Jemalloc;
+  static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
@@ -571,7 +568,7 @@ mod tests {
   }
 
   #[test]
-  fn test_snark() {
+  fn test_zksnark() {
     let _ = tracing_subscriber::fmt()
       .with_target(false)
       .with_ansi(true) // no bold colour codes
@@ -580,14 +577,14 @@ mod tests {
 
     type E = crate::provider::PallasHyraxEngine;
     type S = SpartanZkSNARK<E>;
-    test_snark_with::<E, S>();
+    test_zksnark_with::<E, S>();
 
     type E2 = crate::provider::T256HyraxEngine;
     type S2 = SpartanZkSNARK<E2>;
-    test_snark_with::<E2, S2>();
+    test_zksnark_with::<E2, S2>();
   }
 
-  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
+  fn test_zksnark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
     let circuit = CubicCircuit::default();
 
     // produce keys

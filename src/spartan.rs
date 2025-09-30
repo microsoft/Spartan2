@@ -341,6 +341,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
     // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
+    transcript.absorb(b"public_values", &self.U.public_values.as_slice());
 
     // validate the provided split R1CS instance and convert to regular instance
     self.U.validate(&vk.S, &mut transcript)?;
