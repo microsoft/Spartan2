@@ -187,7 +187,7 @@ where
   /// - the final A/B/C layers after folding (as multilinear tables),
   /// - the final outer claim T_out for the step branch, and
   /// - the sequence of challenges r_b used to fold instances/witnesses.
-  pub fn prove_zk(
+  pub fn prove(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
@@ -433,7 +433,7 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 /// A type that holds the pre-processed state for proving
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct NeutronNovaPrepSNARK<E: Engine> {
+pub struct NeutronNovaPrepZkSNARK<E: Engine> {
   ps_step: Vec<PrecommittedState<E>>,
   ps_core: PrecommittedState<E>,
 }
@@ -441,7 +441,7 @@ pub struct NeutronNovaPrepSNARK<E: Engine> {
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct NeutronNovaSNARK<E: Engine> {
+pub struct NeutronNovaZkSNARK<E: Engine> {
   step_instances: Vec<SplitR1CSInstance<E>>,
   core_instance: SplitR1CSInstance<E>,
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
@@ -451,7 +451,7 @@ pub struct NeutronNovaSNARK<E: Engine> {
   folded_W: RelaxedR1CSWitness<E>,
 }
 
-impl<E: Engine> NeutronNovaSNARK<E>
+impl<E: Engine> NeutronNovaZkSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
@@ -527,7 +527,7 @@ where
     step_circuits: &[C1],
     core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<NeutronNovaPrepSNARK<E>, SpartanError> {
+  ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
@@ -557,7 +557,7 @@ where
       is_small,
     )?;
 
-    Ok(NeutronNovaPrepSNARK {
+    Ok(NeutronNovaPrepZkSNARK {
       ps_step,
       ps_core: ps,
     })
@@ -568,7 +568,7 @@ where
     pk: &NeutronNovaProverKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
-    prep_snark: &NeutronNovaPrepSNARK<E>,
+    prep_snark: &NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError> {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
@@ -696,7 +696,7 @@ where
 
     // Perform ZK NIFS prove and collect outputs
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove_zk(
+    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
       &pk.S_step,
       &step_instances_regular,
       &step_witnesses,
@@ -998,7 +998,7 @@ where
     Ok(result)
   }
 
-  /// Verifies the NeutronNovaSNARK and returns the public IO from the instances
+  /// Verifies the NeutronNovaZkSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
     vk: &NeutronNovaVerifierKey<E>,
@@ -1321,7 +1321,7 @@ mod tests {
       _p: Default::default(),
     };
 
-    let (pk, vk) = NeutronNovaSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
+    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
 
     let circuits = (0..num_circuits)
       .map(|i| Sha256Circuit::<E> {
@@ -1347,8 +1347,8 @@ mod tests {
       step_circuits.len()
     );
 
-    let ps = NeutronNovaSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
-    let res = NeutronNovaSNARK::prove(pk, step_circuits, core_circuit, &ps, true);
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
+    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, &ps, true);
     assert!(res.is_ok());
 
     let snark = res.unwrap();

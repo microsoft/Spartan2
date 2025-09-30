@@ -1,7 +1,7 @@
 //! This module implements the Spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
 use crate::{
-  Blind, CommitmentKey,
+  Blind, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
   bellpepper::{
     r1cs::{PrecommittedState, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
@@ -113,7 +113,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
-    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, 1); // for committing to a scalar
+    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, MULTIROUND_COMMITMENT_WIDTH); // for committing to a scalar
 
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
