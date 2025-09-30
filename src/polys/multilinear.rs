@@ -88,7 +88,6 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Returns Z(r) in O(n) time.
   ///
   /// The point must have a value for each variable.
-  #[allow(dead_code)]
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
     let chis = EqPolynomial::evals_from_points(r);
@@ -249,7 +248,6 @@ mod tests {
   }
 
   /// Returns a random ML polynomial
-  #[allow(clippy::needless_borrows_for_generic_args)]
   fn random<R: RngCore + CryptoRng, Scalar: PrimeField>(
     num_vars: usize,
     mut rng: &mut R,

@@ -1,6 +1,4 @@
-#![allow(non_snake_case)]
-
-//! This module implements the sum-check protocol used in the Spartan SNARK.
+//! This module implements the sum-check protocol used in Spartan.
 //!
 //! The sum-check protocol allows a prover to convince a verifier that a claimed sum
 //! over a multivariate polynomial equals a specific value, without the verifier
@@ -254,7 +252,6 @@ impl<E: Engine> SumcheckProof<E> {
   }
 
   /// Proves a batch of quadratic combinations of two multilinear polynomials.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_quad_batched<F>(
     challenge: &E::Scalar,
     claims: &[E::Scalar; 2],
@@ -428,7 +425,6 @@ impl<E: Engine> SumcheckProof<E> {
   /// # Returns
   /// A tuple containing the sum-check proof, the sequence of verifier challenges,
   /// and the final evaluations of the polynomials.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term<F>(
     claim: &E::Scalar,
     num_rounds: usize,
@@ -510,7 +506,6 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes the **outer** cubic-with-additive-term sum-check in
   /// Zero-knowledge outer sum-check for the cubic-with-additive-term case.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term_zk(
     num_rounds: usize,
     poly_tau: &mut MultilinearPolynomial<E::Scalar>,
@@ -575,7 +570,6 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** sum-check in zero-knowledge mode and returns the
   /// Zero-knowledge quadratic sum-check used for the inner round.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_quad_zk(
     claim: &E::Scalar,
     num_rounds: usize,
@@ -625,7 +619,6 @@ impl<E: Engine> SumcheckProof<E> {
   }
 
   /// Generates a batched sum-check proof for a cubic combination with additive term of four multilinear polynomials.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term_batched<F>(
     challenge: &E::Scalar,
     claims: &[E::Scalar; 2],
@@ -746,7 +739,6 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** batched sum-check in zero-knowledge mode and returns the
   /// sequence of verifier challenges used for the inner round.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_quad_batched_zk(
     claims: &[E::Scalar; 2],
     num_rounds: usize,
@@ -829,7 +821,6 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **cubic-with-additive-term** batched outer sum-check in zero-knowledge mode
   /// and returns the sequence of verifier challenges.
-  #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term_batched_zk(
     num_rounds: usize,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,

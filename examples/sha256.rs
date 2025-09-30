@@ -3,8 +3,6 @@
 //! circuit with varying message lengths
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
-#![allow(non_snake_case)]
-
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 

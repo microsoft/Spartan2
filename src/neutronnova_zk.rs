@@ -1,8 +1,8 @@
 //! This module implements NeutronNova's folding scheme for folding together a batch of R1CS instances
 //! This implementation focuses on a non-recursive version of NeutronNova and targets the case where the batch size is moderately large.
 //! Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding)
-//! and then use spartan to prove that folded instance.
-#![allow(non_snake_case)]
+//! and then use Spartan to prove that folded instance.
+//! The proof system implemented here provides zero-knowledge via Nova's folding scheme.
 use crate::{
   CommitmentKey,
   bellpepper::{
@@ -81,7 +81,6 @@ where
 {
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   #[inline]
-  #[allow(clippy::too_many_arguments)]
   fn prove_helper(
     rho: &E::Scalar,
     (left, right): (usize, usize),
@@ -188,7 +187,6 @@ where
   /// - the final A/B/C layers after folding (as multilinear tables),
   /// - the final outer claim T_out for the step branch, and
   /// - the sequence of challenges r_b used to fold instances/witnesses.
-  #[allow(clippy::type_complexity, clippy::too_many_arguments)]
   pub fn prove_zk(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],

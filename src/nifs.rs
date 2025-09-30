@@ -12,7 +12,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 /// Nova NIFS proof containing the commitment to the cross-term `T`.
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NovaNIFS<E: Engine> {

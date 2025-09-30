@@ -1,14 +1,10 @@
 //! This module implements the Hyrax polynomial commitment scheme
-#![allow(unused, non_snake_case)]
 use crate::{
-  Blind, Commitment, CommitmentKey,
   errors::SpartanError,
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    pcs::ipa::{
-      InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness, inner_product,
-    },
+    pcs::ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -24,8 +20,7 @@ use num_integer::div_ceil;
 use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
 type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
 

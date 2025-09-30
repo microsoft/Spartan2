@@ -165,7 +165,6 @@ where
   }
 
   /// Verifies the inner product argument
-  #[allow(clippy::too_many_arguments)]
   pub fn verify(
     &self,
     ck: &[<E::GE as DlogGroup>::AffineGroupElement],

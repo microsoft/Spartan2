@@ -676,7 +676,6 @@ pub struct SplitR1CSInstance<E: Engine> {
 
 impl<E: Engine> SplitR1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
-  #[allow(clippy::too_many_arguments)]
   pub fn new(
     num_cons: usize,
     num_shared: usize,
@@ -1157,7 +1156,6 @@ impl<E: Engine> SplitR1CSInstance<E> {
 
 impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   /// Create an object of type `SplitMultiRoundR1CSShape` from the explicitly specified R1CS matrices
-  #[allow(clippy::too_many_arguments)]
   pub fn new(
     width: usize,
     num_cons: usize,

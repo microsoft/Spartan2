@@ -9,7 +9,6 @@ use ff::PrimeField;
 /// $$
 /// \tilde{power}(x, t) = \prod_{i=1}^m(1 + (t^{2^i} - 1) * x_i)
 /// $$
-#[allow(dead_code)]
 pub struct PowPolynomial<Scalar: PrimeField> {
   t_pow: Vec<Scalar>,
 }

@@ -1,4 +1,3 @@
-#![allow(non_snake_case)]
 //! Support for generating R1CS using bellpepper.
 use crate::{
   Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, VerifierKey,

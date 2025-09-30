@@ -1,4 +1,4 @@
-//! This module implements the spartan SNARK protocol.
+//! This module implements the Spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
 use crate::{
   Blind, CommitmentKey,

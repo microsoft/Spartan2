@@ -46,7 +46,6 @@ impl Ord for OrderedVariable {
   }
 }
 
-#[allow(clippy::upper_case_acronyms)]
 /// `ShapeCS` is a `ConstraintSystem` for creating `R1CSShape`s for a circuit.
 pub struct ShapeCS<E: Engine>
 where
@@ -54,7 +53,6 @@ where
 {
   named_objects: HashMap<String, NamedObject>,
   current_namespace: Vec<String>,
-  #[allow(clippy::type_complexity)]
   /// All constraints added to the `ShapeCS`.
   pub constraints: Vec<(
     LinearCombination<E::Scalar>,

@@ -1,6 +1,5 @@
-//! This module implements the spartan SNARK protocol.
-//! It provides the prover and verifier keys, as well as the SNARK itself.
-#![allow(non_snake_case)]
+//! This module implements the Spartan zkSNARK protocol. We provide zero-knowledge via Nova's folding scheme
+//! It provides the prover and verifier keys, as well as the zkSNARK itself.
 use crate::{
   CommitmentKey,
   bellpepper::{

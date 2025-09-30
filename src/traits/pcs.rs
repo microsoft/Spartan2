@@ -92,7 +92,6 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   fn combine_blinds(blinds: &[Self::Blind]) -> Result<Self::Blind, SpartanError>;
 
   /// A method to prove the evaluation of a multilinear polynomial
-  #[allow(clippy::too_many_arguments)]
   fn prove(
     ck: &Self::CommitmentKey,
     ck_eval: &Self::CommitmentKey,
