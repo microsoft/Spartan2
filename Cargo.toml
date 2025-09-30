@@ -50,7 +50,7 @@ proptest = "1.2.0"
 
 
 [features]
-default = []
+default = ["halo2curves/asm"]
 jem = ["tikv-jemallocator"]
 
 [profile.release]
