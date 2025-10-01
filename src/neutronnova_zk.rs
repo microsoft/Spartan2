@@ -242,6 +242,7 @@ where
     }
 
     // Build Az, Bz, Cz tables for each (possibly padded) instance
+    let (_matrix_span, matrix_t) = start_span!("matrix_vector_multiply_instances", instances = n_padded);
     let chunk_len = left * right;
     let triples = (0..n_padded)
       .into_par_iter()
@@ -265,8 +266,10 @@ where
       B_layers.push(b);
       C_layers.push(c);
     }
+    info!(elapsed_ms = %matrix_t.elapsed().as_millis(), instances = n_padded, "matrix_vector_multiply_instances");
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
+    let (_nifs_rounds_span, nifs_rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // the current target value, starts at 0
@@ -360,6 +363,7 @@ where
       // m becomes ceil(m/2)
       m = pairs;
     }
+    info!(elapsed_ms = %nifs_rounds_t.elapsed().as_millis(), rounds = ell_b, "nifs_folding_rounds");
 
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let T_out = T_cur * acc_eq.invert().unwrap();
@@ -466,6 +470,9 @@ where
     core_circuit: &C2,
     num_steps: usize,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
+    let (_setup_span, setup_t) = start_span!("neutronnova_setup");
+
+    let (_r1cs_span, r1cs_t) = start_span!("r1cs_shape_generation");
     debug!("Synthesizing step circuit");
     let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
@@ -484,10 +491,14 @@ where
       "Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
       S_core.num_shared, S_core.num_precommitted, S_core.num_rest
     );
+    info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "r1cs_shape_generation");
 
+    let (_ck_span, ck_t) = start_span!("commitment_key_generation");
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
+    info!(elapsed_ms = %ck_t.elapsed().as_millis(), "commitment_key_generation");
 
     // Calculate num_rounds_b from num_steps by padding to next power of two
+    let (_vc_span, vc_t) = start_span!("verifier_circuit_setup");
     let num_rounds_b = num_steps.next_power_of_two().log_2();
 
     let num_vars = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
@@ -497,6 +508,7 @@ where
     let (vc_shape, vc_ck, _vk_mr) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
     let vc_shape_regular = vc_shape.to_regular_shape();
+    info!(elapsed_ms = %vc_t.elapsed().as_millis(), "verifier_circuit_setup");
 
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
@@ -518,6 +530,7 @@ where
       vk_digest: vk.digest()?,
     };
 
+    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "neutronnova_setup");
     Ok((pk, vk))
   }
 
@@ -528,10 +541,15 @@ where
     core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
+    let (_prep_span, prep_t) = start_span!("neutronnova_prep_prove");
+
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
+    let (_shared_span, shared_t) = start_span!("generate_shared_witness");
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
+    info!(elapsed_ms = %shared_t.elapsed().as_millis(), "generate_shared_witness");
 
+    let (_precommit_span, precommit_t) = start_span!("generate_precommitted_witnesses", circuits = step_circuits.len() + 1);
     let ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
@@ -556,7 +574,9 @@ where
       core_circuit,
       is_small,
     )?;
+    info!(elapsed_ms = %precommit_t.elapsed().as_millis(), circuits = step_circuits.len() + 1, "generate_precommitted_witnesses");
 
+    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_prep_prove");
     Ok(NeutronNovaPrepZkSNARK {
       ps_step,
       ps_core: ps,
@@ -574,6 +594,7 @@ where
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
     // rerandomize prep state: we first rerandomize core, then step circuits by reusing shared commitments
+    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
     let mut ps_core = prep_snark.ps_core.rerandomize(&pk.ck, &pk.S_core)?;
     let mut ps_step = prep_snark
       .ps_step
@@ -587,6 +608,7 @@ where
         )
       })
       .collect::<Result<Vec<_>, _>>()?;
+    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
 
     // Parallel generation of instances and witnesses
     // Build instances and witnesses in one parallel pass
@@ -754,7 +776,7 @@ where
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
     let outer_start_index = num_rounds_b + 1;
     // outer sum-check (batched)
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck (batched)");
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck_batched");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_batched_zk(
       num_rounds_x,
       &mut poly_tau,
@@ -771,7 +793,7 @@ where
       &mut transcript,
       outer_start_index,
     )?;
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck (batched)");
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck_batched");
 
     vc.claim_Az_step = poly_Az_step[0];
     vc.claim_Bz_step = poly_Bz_step[0];
@@ -816,7 +838,7 @@ where
     info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
     // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck (batched)");
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck_batched");
 
     debug!("Proving inner sum-check with {} rounds", num_rounds_y);
     debug!(
@@ -854,7 +876,7 @@ where
       &mut transcript,
       outer_start_index + num_rounds_x + 1,
     )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck (batched)");
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck_batched");
 
     let eval_Z_step = evals[2];
     let eval_Z_core = evals[3];
@@ -1366,6 +1388,12 @@ mod tests {
 
   #[test]
   fn test_neutron_sha256() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+      .try_init();
+
     type E = T256HyraxEngine;
 
     for num_circuits in [2, 7, 32, 64] {
