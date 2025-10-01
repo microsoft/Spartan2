@@ -526,28 +526,25 @@ impl<E: Engine> R1CSWitness<E> {
       });
     }
 
-    let acc_W = (0..n)
-      .into_par_iter()
-      .fold(
-        || vec![E::Scalar::ZERO; dim],
-        |mut acc, i| {
-          let wi = w[i];
-          let Wi = &Ws[i].W;
-          for k in 0..dim {
-            acc[k] += wi * Wi[k];
+    let mut acc_W = vec![E::Scalar::ZERO; dim];
+    let tile = 4096; // process 4096 elements at a time
+    acc_W
+      .par_chunks_mut(tile)
+      .enumerate()
+      .for_each(|(block_idx, acc_blk)| {
+        let start = block_idx * tile;
+        let end = start + acc_blk.len(); // last block may be < tile
+
+        // Stream over the small number of rows for this block.
+        // This keeps both `acc_blk` and the row-slice hot in cache.
+        for (i, &wi) in w.iter().enumerate() {
+          let row_slice = &Ws[i].W[start..end];
+          // Accumulate: acc_blk += wi * row_slice
+          for (a, &x) in acc_blk.iter_mut().zip(row_slice.iter()) {
+            *a += wi * x;
           }
-          acc
-        },
-      )
-      .reduce(
-        || vec![E::Scalar::ZERO; dim],
-        |mut a, b| {
-          for (ai, bi) in a.iter_mut().zip(b.iter()) {
-            *ai += *bi;
-          }
-          a
-        },
-      );
+        }
+      });
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
@@ -594,7 +591,10 @@ impl<E: Engine> R1CSInstance<E> {
   }
 
   /// Fold multiple instances with a sequence of r_b values
-  pub fn fold_multiple(r_bs: &[E::Scalar], Us: &[R1CSInstance<E>]) -> R1CSInstance<E>
+  pub fn fold_multiple(
+    r_bs: &[E::Scalar],
+    Us: &[R1CSInstance<E>],
+  ) -> Result<R1CSInstance<E>, SpartanError>
   where
     E::PCS: FoldingEngineTrait<E>,
   {
@@ -615,13 +615,12 @@ impl<E: Engine> R1CSInstance<E> {
     let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &Us.iter().map(|U| U.comm_W.clone()).collect::<Vec<_>>(),
       &w,
-    )
-    .expect("fold_commitments");
+    )?;
 
-    R1CSInstance::<E> {
+    Ok(R1CSInstance::<E> {
       X: X_acc,
       comm_W: comm_acc,
-    }
+    })
   }
 }
 

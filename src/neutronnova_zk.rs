@@ -373,10 +373,13 @@ where
     let _ =
       SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
 
-    let (_fold_final_span, fold_final_t) = start_span!("fold_instances_witnesses");
+    let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
     let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
-    let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us);
-    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances_witnesses");
+    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_witnesses");
+
+    let (_fold_final_span, fold_final_t) = start_span!("fold_instances");
+    let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us)?;
+    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
 
     Ok((
       E_eq,
@@ -1144,7 +1147,7 @@ where
     let r = challenges[num_rounds_b + num_rounds_x]; // r for combining inner claims
     let r_y = challenges[num_rounds_b + num_rounds_x + 1..].to_vec();
 
-    let folded_U = R1CSInstance::fold_multiple(&r_b, &step_instances_regular);
+    let folded_U = R1CSInstance::fold_multiple(&r_b, &step_instances_regular)?;
 
     let folded_U_verifier =
       self

@@ -394,34 +394,24 @@ where
       });
     }
 
-    // scale ith commitment by the ith weight
-    let folded_comm = comms
-      .par_iter()
-      .zip(weights.par_iter())
-      .map(|(comm, weight)| {
-        // scale each commitment by the corresponding weight
-        comm
-          .comm
+    // take weighted sum of commitments via MSM
+    let n = comms[0].comm.len();
+    if !comms.iter().all(|c| c.comm.len() == n) {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_commitments: all inner commitment vectors must have the same length".into(),
+      });
+    }
+
+    let folded_comm = (0..n)
+      .into_par_iter()
+      .map(|i| {
+        let bases = comms
           .par_iter()
-          .map(|c| {
-            if weight == &E::Scalar::ONE {
-              *c
-            } else {
-              *c * weight
-            }
-          })
-          .collect::<Vec<_>>()
+          .map(|c| c.comm[i].affine())
+          .collect::<Vec<_>>();
+        E::GE::vartime_multiscalar_mul(weights, &bases, false)
       })
-      .reduce(
-        || vec![E::GE::zero(); comms[0].comm.len()],
-        |acc, x| {
-          acc
-            .par_iter()
-            .zip(x.par_iter())
-            .map(|(a, b)| *a + *b)
-            .collect::<Vec<_>>()
-        },
-      );
+      .collect::<Result<Vec<_>, SpartanError>>()?;
 
     Ok(Self::Commitment { comm: folded_comm })
   }
