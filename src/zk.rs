@@ -1,4 +1,3 @@
-#![allow(non_snake_case)]
 //! Zero-knowledge circuit implementing the algebraic checks of the Spartan verifier logic.
 //!
 //! [`SpartanVerifierCircuit`] constrains the complete Spartan verification across
@@ -6,7 +5,6 @@
 //!
 //! Note: This circuit only encodes the algebraic checks of the verifier. It does **not**
 //! encode the Fiat-Shamir challenge generation, so no proof composition is performed here.
-
 use crate::{
   MULTIROUND_COMMITMENT_WIDTH,
   traits::{Engine, circuit::MultiRoundCircuit},
