@@ -242,7 +242,8 @@ where
     }
 
     // Build Az, Bz, Cz tables for each (possibly padded) instance
-    let (_matrix_span, matrix_t) = start_span!("matrix_vector_multiply_instances", instances = n_padded);
+    let (_matrix_span, matrix_t) =
+      start_span!("matrix_vector_multiply_instances", instances = n_padded);
     let chunk_len = left * right;
     let triples = (0..n_padded)
       .into_par_iter()
@@ -549,7 +550,10 @@ where
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
     info!(elapsed_ms = %shared_t.elapsed().as_millis(), "generate_shared_witness");
 
-    let (_precommit_span, precommit_t) = start_span!("generate_precommitted_witnesses", circuits = step_circuits.len() + 1);
+    let (_precommit_span, precommit_t) = start_span!(
+      "generate_precommitted_witnesses",
+      circuits = step_circuits.len() + 1
+    );
     let ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
