@@ -409,7 +409,7 @@ where
           .par_iter()
           .map(|c| c.comm[i].affine())
           .collect::<Vec<_>>();
-        E::GE::vartime_multiscalar_mul(&weights, &bases, false)
+        E::GE::vartime_multiscalar_mul(weights, &bases, false)
       })
       .collect::<Result<Vec<_>, SpartanError>>()?;
 
