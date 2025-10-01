@@ -538,7 +538,7 @@ impl<E: Engine> R1CSWitness<E> {
         // Stream over the small number of rows for this block.
         // This keeps both `acc_blk` and the row-slice hot in cache.
         for (i, &wi) in w.iter().enumerate() {
-          let row_slice = &Ws[i].as_ref()[start..end];
+          let row_slice = &Ws[i].W[start..end];
           // Accumulate: acc_blk += wi * row_slice
           for (a, &x) in acc_blk.iter_mut().zip(row_slice.iter()) {
             *a += wi * x;
@@ -591,7 +591,10 @@ impl<E: Engine> R1CSInstance<E> {
   }
 
   /// Fold multiple instances with a sequence of r_b values
-  pub fn fold_multiple(r_bs: &[E::Scalar], Us: &[R1CSInstance<E>]) -> R1CSInstance<E>
+  pub fn fold_multiple(
+    r_bs: &[E::Scalar],
+    Us: &[R1CSInstance<E>],
+  ) -> Result<R1CSInstance<E>, SpartanError>
   where
     E::PCS: FoldingEngineTrait<E>,
   {
@@ -614,10 +617,10 @@ impl<E: Engine> R1CSInstance<E> {
       &w,
     )?;
 
-    R1CSInstance::<E> {
+    Ok(R1CSInstance::<E> {
       X: X_acc,
       comm_W: comm_acc,
-    }
+    })
   }
 }
 
