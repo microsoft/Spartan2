@@ -3,7 +3,9 @@
 //! circuit with varying message lengths
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
-#![allow(non_snake_case)]
+#[cfg(feature = "jem")]
+#[global_allocator]
+static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
@@ -14,7 +16,7 @@ use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
   provider::T256HyraxEngine,
-  spartan::R1CSSNARK,
+  spartan::SpartanSNARK,
   traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
 use std::{marker::PhantomData, time::Instant};
@@ -70,25 +72,9 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
 
   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
     &self,
-    _: &mut CS,
+    cs: &mut CS,
     _: &[AllocatedNum<E::Scalar>], // shared variables, if any
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-    // No precommitted variables in this circuit
-    Ok(vec![])
-  }
-
-  fn num_challenges(&self) -> usize {
-    // SHA-256 circuit does not expect any challenges
-    0
-  }
-
-  fn synthesize<CS: ConstraintSystem<E::Scalar>>(
-    &self,
-    cs: &mut CS,
-    _: &[AllocatedNum<E::Scalar>],
-    _: &[AllocatedNum<E::Scalar>],
-    _: Option<&[E::Scalar]>,
-  ) -> Result<(), SynthesisError> {
     // 1. Preimage bits
     let bit_values: Vec<_> = self
       .preimage
@@ -147,6 +133,21 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
       );
     }
 
+    Ok(vec![])
+  }
+
+  fn num_challenges(&self) -> usize {
+    // SHA-256 circuit does not expect any challenges
+    0
+  }
+
+  fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    _: &mut CS,
+    _: &[AllocatedNum<E::Scalar>],
+    _: &[AllocatedNum<E::Scalar>],
+    _: Option<&[E::Scalar]>,
+  ) -> Result<(), SynthesisError> {
     Ok(())
   }
 }
@@ -170,21 +171,21 @@ fn main() {
 
     // SETUP
     let t0 = Instant::now();
-    let (pk, vk) = R1CSSNARK::<E>::setup(circuit.clone()).expect("setup failed");
+    let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup failed");
     let setup_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = setup_ms, "setup");
 
     // PREPARE
     let t0 = Instant::now();
     let prep_snark =
-      R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
+      SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
     let prep_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prep_ms, "prep_prove");
 
     // PROVE
     let t0 = Instant::now();
     let proof =
-      R1CSSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true).expect("prove failed");
+      SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true).expect("prove failed");
     let prove_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prove_ms, "prove");
 

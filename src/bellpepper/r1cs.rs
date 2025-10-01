@@ -1,20 +1,25 @@
 //! Support for generating R1CS using bellpepper.
 use crate::{
-  Blind, CommitmentKey, PCS, PartialCommitment,
+  Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
-  r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
+  r1cs::{
+    R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
+    SplitR1CSInstance, SplitR1CSShape,
+  },
   start_span,
   traits::{
-    Engine, circuit::SpartanCircuit, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait,
+    Engine,
+    circuit::{MultiRoundCircuit, SpartanCircuit},
+    pcs::PCSEngineTrait,
+    transcript::TranscriptEngineTrait,
   },
 };
 use bellpepper::gadgets::num::AllocatedNum;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
 use ff::{Field, PrimeField};
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{debug, info, info_span};
+use tracing::{debug, info};
 
 /// `SpartanShape` provides methods for acquiring `SplitR1CSShape` from implementers.
 pub trait SpartanShape<E: Engine> {
@@ -22,10 +27,33 @@ pub trait SpartanShape<E: Engine> {
   fn r1cs_shape<C: SpartanCircuit<E>>(circuit: &C) -> Result<SplitR1CSShape<E>, SpartanError>;
 }
 
+/// Defines rerandomization behavior for preprocessed state
+pub trait RerandomizationTrait<E: Engine> {
+  /// Returns a rerandomized version of self.
+  fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
+  where
+    Self: Sized;
+
+  /// Returns a rerandomized version of self, reusing shared commitments and blinds if provided.
+  fn rerandomize_with_shared(
+    &self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+    comm_W_shared: &Option<Commitment<E>>,
+    r_W_shared: &Option<Blind<E>>,
+  ) -> Result<Self, SpartanError>
+  where
+    Self: Sized;
+}
+
 /// `SpartanWitness` provide a method for acquiring an `SplitR1CSInstance` and `R1CSWitness` from implementers.
 pub trait SpartanWitness<E: Engine> {
   /// Holds the state of the prover after committing to the precommitted portions of the witness.
-  type PrecommittedState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+  type PrecommittedState: Send
+    + Sync
+    + Serialize
+    + for<'de> Deserialize<'de>
+    + RerandomizationTrait<E>;
 
   /// Return partial commitments (to shared variables) and the shared state
   fn shared_witness<C: SpartanCircuit<E>>(
@@ -53,6 +81,48 @@ pub trait SpartanWitness<E: Engine> {
     is_small: bool,
     transcript: &mut E::TE,
   ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
+}
+
+/// `MultiRoundSpartanShape` provides methods for acquiring `SplitMultiRoundR1CSShape` and `CommitmentKey` from implementers.
+pub trait MultiRoundSpartanShape<E: Engine> {
+  /// Return an appropriate `SplitMultiRoundR1CSShape` and `CommitmentKey` structs.
+  fn multiround_r1cs_shape<C: MultiRoundCircuit<E>>(
+    circuit: &C,
+  ) -> Result<
+    (
+      SplitMultiRoundR1CSShape<E>,
+      CommitmentKey<E>,
+      VerifierKey<E>,
+    ),
+    SpartanError,
+  >;
+}
+
+/// `MultiRoundSpartanWitness` provide a method for acquiring an `SplitMultiRoundR1CSInstance` and `R1CSWitness` from implementers.
+pub trait MultiRoundSpartanWitness<E: Engine> {
+  /// Holds the state of the prover across multiple rounds.
+  type MultiRoundState: Send + Sync + Serialize + for<'de> Deserialize<'de>;
+
+  /// Initialize the multi-round witness process and return the initial state.
+  fn initialize_multiround_witness(
+    s: &SplitMultiRoundR1CSShape<E>,
+  ) -> Result<Self::MultiRoundState, SpartanError>;
+
+  /// Process a specific round and update the state, returning the challenges generated after the commitment to the round.
+  fn process_round<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    round_index: usize,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError>;
+
+  /// Finalize the multi-round witness and return the instance and witness.
+  fn finalize_multiround_witness(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+  ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError>;
 }
 
 impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
@@ -130,8 +200,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     let num_rest = num_vars - num_shared - num_precommitted;
 
-    let width = E::PCS::width();
-
     debug!("num_constraints: {}", num_constraints);
     debug!("num_vars: {}", num_vars);
     debug!("num_inputs: {}", num_inputs);
@@ -141,7 +209,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     // Don't count One as an input for shape's purposes.
     let S = SplitR1CSShape::new(
-      width,
       num_constraints,
       num_shared,
       num_precommitted,
@@ -220,9 +287,9 @@ pub struct PrecommittedState<E: Engine> {
   cs: SatisfyingAssignment<E>,
   shared: Vec<AllocatedNum<E::Scalar>>,
   precommitted: Vec<AllocatedNum<E::Scalar>>,
-  comm_W_shared: Option<PartialCommitment<E>>,
-  r_W_shared: Option<Blind<E>>,
-  comm_W_precommitted: Option<PartialCommitment<E>>,
+  pub(crate) comm_W_shared: Option<Commitment<E>>,
+  pub(crate) r_W_shared: Option<Blind<E>>,
+  comm_W_precommitted: Option<Commitment<E>>,
   r_W_precommitted: Option<Blind<E>>,
   W: Vec<E::Scalar>,
 }
@@ -263,7 +330,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-      let comm_W_shared = PCS::<E>::commit_partial(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
+      let comm_W_shared = PCS::<E>::commit(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
       (Some(comm_W_shared), Some(r_W_shared))
     } else {
       (None, None)
@@ -314,8 +381,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
-
-      let comm_W_precommitted = PCS::<E>::commit_partial(
+      let comm_W_precommitted = PCS::<E>::commit(
         ck,
         &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
         &r_W_precommitted,
@@ -374,7 +440,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     // commit to the rest with partial commitment
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
-    let comm_W_rest = PCS::<E>::commit_partial(
+    let comm_W_rest = PCS::<E>::commit(
       ck,
       &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &r_W_rest,
@@ -409,5 +475,324 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
+  }
+}
+
+impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
+  fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
+  where
+    Self: Sized,
+  {
+    // generate new blinds for shared and precommitted commitments and rerandomize commitments
+    let (comm_W_shared_new, r_W_shared_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_shared, &self.r_W_shared) {
+        let r_new = PCS::<E>::blind(ck, S.num_shared);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+    let (comm_W_precommitted_new, r_W_precommitted_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+
+    Ok(PrecommittedState {
+      cs: self.cs.clone(),
+      shared: self.shared.clone(),
+      precommitted: self.precommitted.clone(),
+      comm_W_shared: comm_W_shared_new,
+      r_W_shared: r_W_shared_new,
+      comm_W_precommitted: comm_W_precommitted_new,
+      r_W_precommitted: r_W_precommitted_new,
+      W: self.W.clone(),
+    })
+  }
+
+  fn rerandomize_with_shared(
+    &self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+    comm_W_shared: &Option<Commitment<E>>,
+    r_W_shared: &Option<Blind<E>>,
+  ) -> Result<Self, SpartanError>
+  where
+    Self: Sized,
+  {
+    // generate new blinds for precommitted commitments and rerandomize commitments
+    let (comm_W_precommitted_new, r_W_precommitted_new) =
+      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+        (
+          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
+          Some(r_new),
+        )
+      } else {
+        (None, None)
+      };
+
+    Ok(PrecommittedState {
+      cs: self.cs.clone(),
+      shared: self.shared.clone(),
+      precommitted: self.precommitted.clone(),
+      comm_W_shared: comm_W_shared.clone(),
+      r_W_shared: r_W_shared.clone(),
+      comm_W_precommitted: comm_W_precommitted_new,
+      r_W_precommitted: r_W_precommitted_new,
+      W: self.W.clone(),
+    })
+  }
+}
+
+impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
+  fn multiround_r1cs_shape<C: MultiRoundCircuit<E>>(
+    circuit: &C,
+  ) -> Result<
+    (
+      SplitMultiRoundR1CSShape<E>,
+      CommitmentKey<E>,
+      VerifierKey<E>,
+    ),
+    SpartanError,
+  > {
+    let num_rounds = circuit.num_rounds();
+    let mut cs: Self = Self::new();
+
+    // Collect variables and challenges per round
+    let mut vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>> = Vec::new();
+    let mut challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>> = Vec::new();
+    let mut num_vars_per_round: Vec<usize> = Vec::new();
+    let mut num_challenges_per_round: Vec<usize> = Vec::new();
+
+    // Process each round to collect shape information
+    for round in 0..num_rounds {
+      let num_challenges =
+        circuit
+          .num_challenges(round)
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Unable to get num_challenges for round {round}: {e}"),
+          })?;
+      num_challenges_per_round.push(num_challenges);
+
+      // For shape generation, we don't need actual challenge values, so pass None
+      let prev_aux = cs.num_aux();
+      let (round_vars, round_challenges) = circuit
+        .rounds(&mut cs, round, &vars_per_round, &challenges_per_round, None)
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to synthesize round {round}: {e}"),
+        })?;
+
+      // Determine how many new auxiliary variables were allocated in this round.
+      let new_aux = cs.num_aux();
+      num_vars_per_round.push(new_aux - prev_aux);
+
+      // Record the high-level variables/challenges that the round chose to return so
+      // they can be fed into subsequent rounds.
+      vars_per_round.push(round_vars);
+      challenges_per_round.push(round_challenges);
+    }
+
+    let mut A = SparseMatrix::<E::Scalar>::empty();
+    let mut B = SparseMatrix::<E::Scalar>::empty();
+    let mut C = SparseMatrix::<E::Scalar>::empty();
+
+    let mut num_cons_added = 0;
+    let mut x = (&mut A, &mut B, &mut C, &mut num_cons_added);
+    let num_inputs = cs.num_inputs();
+    let num_constraints = cs.num_constraints();
+    let total_vars = cs.num_aux();
+
+    for constraint in cs.constraints.iter() {
+      add_constraint(
+        &mut x,
+        total_vars,
+        &constraint.0,
+        &constraint.1,
+        &constraint.2,
+      );
+    }
+    assert_eq!(num_cons_added, num_constraints);
+
+    A.cols = total_vars + num_inputs;
+    B.cols = total_vars + num_inputs;
+    C.cols = total_vars + num_inputs;
+
+    // Don't count One as an input for shape's purposes.
+    let num_public_values = num_inputs - 1 - num_challenges_per_round.iter().sum::<usize>();
+    let S = SplitMultiRoundR1CSShape::new(
+      MULTIROUND_COMMITMENT_WIDTH,
+      num_constraints,
+      num_vars_per_round,
+      num_challenges_per_round,
+      num_public_values,
+      A,
+      B,
+      C,
+    )?;
+
+    let (ck, vk) = S.commitment_key();
+
+    Ok((S, ck, vk))
+  }
+}
+
+/// A type that holds the multi-round state for proving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct MultiRoundState<E: Engine> {
+  cs: SatisfyingAssignment<E>,
+  vars_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  challenges_per_round: Vec<Vec<AllocatedNum<E::Scalar>>>,
+  challenges: Vec<Vec<E::Scalar>>,
+  comm_w_per_round: Vec<Commitment<E>>,
+  pub(crate) r_w_per_round: Vec<Blind<E>>,
+  w: Vec<E::Scalar>,
+  current_round: usize,
+  num_rounds: usize,
+}
+
+impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
+  type MultiRoundState = MultiRoundState<E>;
+
+  fn initialize_multiround_witness(
+    s: &SplitMultiRoundR1CSShape<E>,
+  ) -> Result<Self::MultiRoundState, SpartanError> {
+    let cs = Self::new();
+    let total_vars: usize = s.num_vars_per_round.iter().sum();
+    let w = vec![E::Scalar::ZERO; total_vars];
+
+    Ok(MultiRoundState {
+      cs,
+      vars_per_round: Vec::new(),
+      challenges_per_round: Vec::new(),
+      challenges: Vec::new(),
+      comm_w_per_round: Vec::new(),
+      r_w_per_round: Vec::new(),
+      w,
+      current_round: 0,
+      num_rounds: s.num_rounds,
+    })
+  }
+
+  fn process_round<C: MultiRoundCircuit<E>>(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    round_index: usize,
+    transcript: &mut E::TE,
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    if round_index != state.current_round {
+      return Err(SpartanError::SynthesisError {
+        reason: format!(
+          "Expected round {}, got {}",
+          state.current_round, round_index
+        ),
+      });
+    }
+
+    // Process this round, supplying references to variables/challenges from previous rounds
+    let chals = if round_index == 0 {
+      None
+    } else {
+      state.challenges.get(round_index - 1).map(|c| c.as_slice())
+    };
+
+    let (round_vars, round_challenges) = circuit
+      .rounds(
+        &mut state.cs,
+        round_index,
+        &state.vars_per_round,
+        &state.challenges_per_round,
+        chals,
+      )
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize round {round_index}: {e}"),
+      })?;
+
+    // Update witness with new variables
+    // We need to map the *unpadded* auxiliary variables produced by this round
+    // into the appropriate *padded* segment of the global witness vector.
+    // 1. `start_idx_unpadded` – offset within `aux_assignment` (contains only the
+    //    actual variables produced so far).
+    // 2. `start_idx_padded`   – offset within the global witness vector (which
+    //    has per-round padding applied).
+    let start_idx_unpadded: usize = s.num_vars_per_round_unpadded[..round_index].iter().sum();
+    let start_idx_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
+    let round_vars_unpadded = s.num_vars_per_round_unpadded[round_index];
+
+    // Copy only the actually-allocated variables; leave the padding slots as 0.
+    if state.cs.aux_assignment.len() >= start_idx_unpadded + round_vars_unpadded {
+      state.w[start_idx_padded..start_idx_padded + round_vars_unpadded].copy_from_slice(
+        &state.cs.aux_assignment[start_idx_unpadded..start_idx_unpadded + round_vars_unpadded],
+      );
+    }
+
+    // Commit to this round's variables
+    let start_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
+    let r_w_per_round = PCS::<E>::blind(ck, s.num_vars_per_round[round_index]);
+    let comm_w_round = PCS::<E>::commit(
+      ck,
+      &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
+      &r_w_per_round,
+      false,
+    )?;
+
+    // absorb commitment to this round's variables
+    transcript.absorb(b"comm_w_round", &comm_w_round);
+
+    // Generate challenges for this round
+    let challenges = (0..s.num_challenges_per_round[round_index])
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    state.vars_per_round.push(round_vars);
+    state.challenges_per_round.push(round_challenges);
+    state.comm_w_per_round.push(comm_w_round);
+    state.r_w_per_round.push(r_w_per_round);
+    state.challenges.push(challenges.clone());
+    state.current_round += 1;
+
+    // Return the challenges that were generated for this round
+    Ok(challenges)
+  }
+
+  fn finalize_multiround_witness(
+    state: &mut Self::MultiRoundState,
+    s: &SplitMultiRoundR1CSShape<E>,
+  ) -> Result<(SplitMultiRoundR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    if state.current_round != state.num_rounds {
+      return Err(SpartanError::SynthesisError {
+        reason: format!(
+          "Expected {} rounds, processed {}",
+          state.num_rounds, state.current_round
+        ),
+      });
+    }
+
+    let num_challenges: usize = s.num_challenges_per_round.iter().sum();
+
+    // collect public values
+    let public_values = state.cs.input_assignment[1 + num_challenges..].to_vec();
+
+    let u = SplitMultiRoundR1CSInstance::<E>::new(
+      s,
+      state.comm_w_per_round.clone(),
+      public_values,
+      state.challenges.clone(),
+    )?;
+
+    let r_w = PCS::<E>::combine_blinds(&state.r_w_per_round)?;
+    let w = R1CSWitness::<E>::new_unchecked(state.w.clone(), r_w, false)?;
+
+    Ok((u, w))
   }
 }

@@ -46,7 +46,6 @@ impl Ord for OrderedVariable {
   }
 }
 
-#[allow(clippy::upper_case_acronyms)]
 /// `TestShapeCS` is a `ConstraintSystem` for creating `R1CSShape`s for a circuit.
 pub struct TestShapeCS<E: Engine>
 where
@@ -54,7 +53,6 @@ where
 {
   named_objects: HashMap<String, NamedObject>,
   current_namespace: Vec<String>,
-  #[allow(clippy::type_complexity)]
   /// All constraints added to the `TestShapeCS`.
   pub constraints: Vec<(
     LinearCombination<E::Scalar>,
@@ -96,7 +94,6 @@ impl<E: Engine> TestShapeCS<E>
 where
   E::Scalar: PrimeField,
 {
-  #[allow(unused)]
   /// Create a new, default `TestShapeCS`,
   pub fn new() -> Self {
     TestShapeCS::default()

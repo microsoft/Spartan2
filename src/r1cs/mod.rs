@@ -1,6 +1,7 @@
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, PCS, PartialCommitment, VerifierKey,
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, MULTIROUND_COMMITMENT_WIDTH, PCS,
+  VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
   start_span,
@@ -15,9 +16,9 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
+mod folds;
 mod sparse;
 pub(crate) use sparse::SparseMatrix;
 
@@ -71,6 +72,107 @@ pub struct R1CSWitness<E: Engine> {
 pub struct R1CSInstance<E: Engine> {
   pub(crate) comm_W: Commitment<E>,
   pub(crate) X: Vec<E::Scalar>,
+}
+
+/// A type that holds a witness for a given Relaxed R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct RelaxedR1CSWitness<E: Engine> {
+  pub(crate) W: Vec<E::Scalar>,
+  pub(crate) r_W: Blind<E>,
+  pub(crate) E: Vec<E::Scalar>,
+  pub(crate) r_E: Blind<E>,
+}
+
+/// A type that holds a Relaxed R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct RelaxedR1CSInstance<E: Engine> {
+  pub(crate) comm_W: Commitment<E>,
+  pub(crate) comm_E: Commitment<E>,
+  pub(crate) X: Vec<E::Scalar>,
+  pub(crate) u: E::Scalar,
+}
+
+impl<E: Engine> RelaxedR1CSWitness<E> {
+  /// Commits to the witness using the supplied generators
+  pub fn commit(
+    &self,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(Commitment<E>, Commitment<E>), SpartanError> {
+    Ok((
+      PCS::<E>::commit(ck, &self.W, &self.r_W, false)?,
+      PCS::<E>::commit(ck, &self.E, &self.r_E, false)?,
+    ))
+  }
+}
+
+#[cfg(test)]
+mod tests_relaxed_sample {
+  use super::*;
+  use crate::{provider::P256HyraxEngine, traits::Engine};
+  use ff::Field;
+
+  fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
+    let one = <E::Scalar as Field>::ONE;
+    let (num_cons, num_vars, num_io, a_entries, b_entries, c_entries) = {
+      let num_cons = 4;
+      let num_io = 2;
+
+      let mut A: Vec<(usize, usize, E::Scalar)> = Vec::new();
+      let mut B: Vec<(usize, usize, E::Scalar)> = Vec::new();
+      let mut C: Vec<(usize, usize, E::Scalar)> = Vec::new();
+
+      // constraint 0: I0 * I0 - Z0 = 0
+      A.push((0, num_vars + 1, one));
+      B.push((0, num_vars + 1, one));
+      C.push((0, 0, one));
+
+      // constraint 1: Z0 * I0 - Z1 = 0
+      A.push((1, 0, one));
+      B.push((1, num_vars + 1, one));
+      C.push((1, 1, one));
+
+      // constraint 2: (Z1 + I0) * 1 - Z2 = 0
+      A.push((2, 1, one));
+      A.push((2, num_vars + 1, one));
+      B.push((2, num_vars, one));
+      C.push((2, 2, one));
+
+      // constraint 3: (Z2 + 5) * 1 - I1 = 0
+      A.push((3, 2, one));
+      A.push((3, num_vars, one + one + one + one + one));
+      B.push((3, num_vars, one));
+      C.push((3, num_vars + 2, one));
+
+      (num_cons, num_vars, num_io, A, B, C)
+    };
+
+    let rows = num_cons;
+    let cols = num_vars + num_io + 1;
+
+    R1CSShape::new(
+      num_cons,
+      num_vars,
+      num_io,
+      SparseMatrix::new(&a_entries, rows, cols),
+      SparseMatrix::new(&b_entries, rows, cols),
+      SparseMatrix::new(&c_entries, rows, cols),
+    )
+    .unwrap()
+  }
+
+  fn test_random_sample_with<E: Engine>() {
+    let s = tiny_r1cs::<E>(4);
+    let (ck, _) = s.commitment_key();
+    let (inst, wit) = s.sample_random_instance_witness(&ck).unwrap();
+    assert!(s.is_sat_relaxed(&ck, &inst, &wit).is_ok());
+  }
+
+  #[test]
+  fn test_random_sample() {
+    test_random_sample_with::<P256HyraxEngine>();
+  }
 }
 
 /// Round `n` up to the next multiple of width.
@@ -248,7 +350,7 @@ impl<E: Engine> R1CSShape<E> {
   /// * `S`: The shape of the R1CS matrices.
   ///
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
-    E::PCS::setup(b"ck", self.num_vars)
+    E::PCS::setup(b"ck", self.num_vars, DEFAULT_COMMITMENT_WIDTH)
   }
 
   pub fn multiply_vec(
@@ -265,6 +367,92 @@ impl<E: Engine> R1CSShape<E> {
     );
 
     Ok((Az?, Bz?, Cz?))
+  }
+  /// Checks if the Relaxed R1CS instance is satisfiable given a witness and its shape
+  pub fn is_sat_relaxed(
+    &self,
+    ck: &CommitmentKey<E>,
+    U: &RelaxedR1CSInstance<E>,
+    W: &RelaxedR1CSWitness<E>,
+  ) -> Result<(), SpartanError> {
+    assert_eq!(W.W.len(), self.num_vars);
+    assert_eq!(W.E.len(), self.num_cons);
+    assert_eq!(U.X.len(), self.num_io);
+
+    // verify if Az * Bz = u*Cz + E
+    let res_eq = {
+      let z = [W.W.clone(), vec![U.u], U.X.clone()].concat();
+      let (az, bz, cz) = self.multiply_vec(&z)?;
+      (0..self.num_cons).all(|i| az[i] * bz[i] == U.u * cz[i] + W.E[i])
+    };
+
+    // verify if comm_E and comm_W are commitments to E and W
+    let res_comm = {
+      let comm_W = PCS::<E>::commit(ck, &W.W, &W.r_W, false)?;
+      let comm_E = PCS::<E>::commit(ck, &W.E, &W.r_E, false)?;
+      U.comm_W == comm_W && U.comm_E == comm_E
+    };
+
+    if !res_eq {
+      return Err(SpartanError::UnSat {
+        reason: "Relaxed R1CS is unsatisfiable".to_string(),
+      });
+    }
+
+    if !res_comm {
+      return Err(SpartanError::UnSat {
+        reason: "Invalid commitments".to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  /// Samples a new random `RelaxedR1CSInstance`/`RelaxedR1CSWitness` pair
+  pub fn sample_random_instance_witness(
+    &self,
+    ck: &CommitmentKey<E>,
+  ) -> Result<(RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>), SpartanError> {
+    // sample Z = (W, u, X)
+    let Z = (0..self.num_vars + self.num_io + 1)
+      .into_par_iter()
+      .map(|_| E::Scalar::random(&mut rand_core::OsRng))
+      .collect::<Vec<E::Scalar>>();
+
+    let r_W = PCS::<E>::blind(ck, self.num_vars);
+    let r_E = PCS::<E>::blind(ck, self.num_cons);
+
+    let u = Z[self.num_vars];
+
+    // compute E <- AZ o BZ - u * CZ
+    let (az, bz, cz) = self.multiply_vec(&Z)?;
+    let E_vec = az
+      .par_iter()
+      .zip(bz.par_iter())
+      .zip(cz.par_iter())
+      .map(|((az_i, bz_i), cz_i)| *az_i * *bz_i - u * *cz_i)
+      .collect::<Vec<E::Scalar>>();
+
+    // compute commitments to W,E in parallel
+    let (comm_W_res, comm_E_res) = rayon::join(
+      || PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false),
+      || PCS::<E>::commit(ck, &E_vec, &r_E, false),
+    );
+
+    Ok((
+      RelaxedR1CSInstance {
+        comm_W: comm_W_res?,
+        comm_E: comm_E_res?,
+        u,
+        X: Z[self.num_vars + 1..].to_vec(),
+      },
+      RelaxedR1CSWitness {
+        W: Z[..self.num_vars].to_vec(),
+        r_W,
+        E: E_vec,
+        r_E,
+      },
+    ))
   }
 }
 
@@ -478,9 +666,9 @@ impl<E: Engine> SimpleDigestible for SplitR1CSShape<E> {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SplitR1CSInstance<E: Engine> {
-  pub(crate) comm_W_shared: Option<PartialCommitment<E>>,
-  pub(crate) comm_W_precommitted: Option<PartialCommitment<E>>,
-  pub(crate) comm_W_rest: PartialCommitment<E>,
+  pub(crate) comm_W_shared: Option<Commitment<E>>,
+  pub(crate) comm_W_precommitted: Option<Commitment<E>>,
+  pub(crate) comm_W_rest: Commitment<E>,
 
   pub(crate) public_values: Vec<E::Scalar>,
   pub(crate) challenges: Vec<E::Scalar>,
@@ -488,9 +676,7 @@ pub struct SplitR1CSInstance<E: Engine> {
 
 impl<E: Engine> SplitR1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
-  #[allow(clippy::too_many_arguments)]
   pub fn new(
-    width: usize,
     num_cons: usize,
     num_shared: usize,
     num_precommitted: usize,
@@ -501,6 +687,8 @@ impl<E: Engine> SplitR1CSShape<E> {
     B: SparseMatrix<E::Scalar>,
     C: SparseMatrix<E::Scalar>,
   ) -> Result<SplitR1CSShape<E>, SpartanError> {
+    let width = DEFAULT_COMMITMENT_WIDTH;
+
     let num_rows = num_cons;
     let num_cols = num_shared + num_precommitted + num_rest + 1 + num_public + num_challenges; // +1 for the constant term
 
@@ -586,6 +774,9 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 
   pub fn equalize(S_A: &mut Self, S_B: &mut Self) {
+    let orig_cons_a = S_A.num_cons;
+    let orig_cons_b = S_B.num_cons;
+
     let num_cons_padded = max(S_A.num_cons, S_B.num_cons);
     let num_vars_padded = max(
       S_A.num_shared + S_A.num_precommitted + S_A.num_rest,
@@ -616,23 +807,32 @@ impl<E: Engine> SplitR1CSShape<E> {
       M.indptr.extend(ex);
     };
 
-    // get the total number of variables to `num_vars_padded` by increasing rest variables
+    // Grow variables (if needed) and pad rows using original constraint counts
     if S_A.num_shared + S_A.num_precommitted + S_A.num_rest != num_vars_padded {
-      let num_cons = S_A.num_cons;
       let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
       S_A.num_rest = num_vars_padded - (S_A.num_shared + S_A.num_precommitted);
-      move_public_vars(&mut S_A.A, num_cons, num_vars);
-      move_public_vars(&mut S_A.B, num_cons, num_vars);
-      move_public_vars(&mut S_A.C, num_cons, num_vars);
+      move_public_vars(&mut S_A.A, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.B, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.C, orig_cons_a, num_vars);
+    } else {
+      // No var growth; still ensure row padding happens
+      let num_vars = S_A.num_shared + S_A.num_precommitted + S_A.num_rest;
+      move_public_vars(&mut S_A.A, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.B, orig_cons_a, num_vars);
+      move_public_vars(&mut S_A.C, orig_cons_a, num_vars);
     }
 
     if S_B.num_shared + S_B.num_precommitted + S_B.num_rest != num_vars_padded {
-      let num_cons = S_B.num_cons;
       let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
       S_B.num_rest = num_vars_padded - (S_B.num_shared + S_B.num_precommitted);
-      move_public_vars(&mut S_B.A, num_cons, num_vars);
-      move_public_vars(&mut S_B.B, num_cons, num_vars);
-      move_public_vars(&mut S_B.C, num_cons, num_vars);
+      move_public_vars(&mut S_B.A, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.B, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.C, orig_cons_b, num_vars);
+    } else {
+      let num_vars = S_B.num_shared + S_B.num_precommitted + S_B.num_rest;
+      move_public_vars(&mut S_B.A, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.B, orig_cons_b, num_vars);
+      move_public_vars(&mut S_B.C, orig_cons_b, num_vars);
     }
   }
 
@@ -702,7 +902,7 @@ impl<E: Engine> SplitR1CSShape<E> {
         reason: "commitment_key: unable to find max number of variables".to_string(),
       })?;
 
-    Ok(E::PCS::setup(b"ck", max))
+    Ok(E::PCS::setup(b"ck", max, DEFAULT_COMMITMENT_WIDTH))
   }
 
   pub fn multiply_vec(
@@ -727,15 +927,119 @@ impl<E: Engine> SplitR1CSShape<E> {
 
     Ok((Az?, Bz?, Cz?))
   }
+
+  /// Evaluates the MLE of R1CS matrices at the provided point
+  pub fn evaluate_with_tables(
+    &self,
+    T_x: &[E::Scalar],
+    T_y: &[E::Scalar],
+  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+    let multi_eval = |M: &SparseMatrix<E::Scalar>| -> E::Scalar {
+      M.indptr
+        .par_windows(2)
+        .enumerate()
+        .map(|(row_idx, ptrs)| {
+          M.get_row_unchecked(ptrs.try_into().unwrap())
+            .map(|(val, col_idx)| {
+              let prod = T_x[row_idx] * T_y[*col_idx];
+              if *val == E::Scalar::ONE {
+                prod
+              } else if *val == -E::Scalar::ONE {
+                -prod
+              } else {
+                prod * val
+              }
+            })
+            .sum::<E::Scalar>()
+        })
+        .sum()
+    };
+    (
+      multi_eval(&self.A),
+      multi_eval(&self.B),
+      multi_eval(&self.C),
+    )
+  }
+
+  /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
+  pub(crate) fn bind_row_vars(
+    &self,
+    rx: &[E::Scalar],
+  ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    assert_eq!(rx.len(), self.num_cons);
+
+    let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
+      for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
+        for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
+          M_evals[*col_idx] += rx[row_idx] * val;
+        }
+      }
+    };
+
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    let (A_evals, (B_evals, C_evals)) = rayon::join(
+      || {
+        let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+        inner(&self.A, &mut A_evals);
+        A_evals
+      },
+      || {
+        rayon::join(
+          || {
+            let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+            inner(&self.B, &mut B_evals);
+            B_evals
+          },
+          || {
+            let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
+            inner(&self.C, &mut C_evals);
+            C_evals
+          },
+        )
+      },
+    );
+
+    (A_evals, B_evals, C_evals)
+  }
+}
+
+/// A type that holds a multi-round split R1CS shape
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitMultiRoundR1CSShape<E: Engine> {
+  pub(crate) num_cons: usize,
+  pub(crate) num_cons_unpadded: usize, // number of constraints before padding
+
+  pub(crate) num_rounds: usize,
+  pub(crate) num_vars_per_round_unpadded: Vec<usize>, // variables per round before padding
+  pub(crate) num_vars_per_round: Vec<usize>,          // variables per round after padding
+  pub(crate) num_challenges_per_round: Vec<usize>,    // challenges per round
+  pub(crate) num_public: usize,                       // number of public variables
+
+  pub(crate) A: SparseMatrix<E::Scalar>,
+  pub(crate) B: SparseMatrix<E::Scalar>,
+  pub(crate) C: SparseMatrix<E::Scalar>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) digest: OnceCell<E::Scalar>,
+}
+
+impl<E: Engine> SimpleDigestible for SplitMultiRoundR1CSShape<E> {}
+
+/// A type that holds a multi-round split R1CS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct SplitMultiRoundR1CSInstance<E: Engine> {
+  pub(crate) comm_w_per_round: Vec<Commitment<E>>,
+  pub(crate) public_values: Vec<E::Scalar>,
+  pub(crate) challenges_per_round: Vec<Vec<E::Scalar>>,
 }
 
 impl<E: Engine> SplitR1CSInstance<E> {
   /// A method to create a split R1CS instance object using constituent elements
   pub fn new(
     S: &SplitR1CSShape<E>,
-    comm_W_shared: Option<PartialCommitment<E>>,
-    comm_W_precommitted: Option<PartialCommitment<E>>,
-    comm_W_rest: PartialCommitment<E>,
+    comm_W_shared: Option<Commitment<E>>,
+    comm_W_precommitted: Option<Commitment<E>>,
+    comm_W_rest: Commitment<E>,
     public_values: Vec<E::Scalar>,
     challenges: Vec<E::Scalar>,
   ) -> Result<SplitR1CSInstance<E>, SpartanError> {
@@ -771,12 +1075,12 @@ impl<E: Engine> SplitR1CSInstance<E> {
     }
 
     if let Some(ref comm) = comm_W_shared {
-      E::PCS::check_partial(comm, S.num_shared)?;
+      E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
     }
     if let Some(ref comm) = comm_W_precommitted {
-      E::PCS::check_partial(comm, S.num_precommitted)?;
+      E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
     }
-    E::PCS::check_partial(&comm_W_rest, S.num_rest)?;
+    E::PCS::check_commitment(&comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
 
     Ok(SplitR1CSInstance {
       comm_W_shared,
@@ -792,12 +1096,9 @@ impl<E: Engine> SplitR1CSInstance<E> {
     S: &SplitR1CSShape<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_values", &self.public_values.as_slice());
-
     if S.num_shared > 0 {
       if let Some(comm) = &self.comm_W_shared {
-        E::PCS::check_partial(comm, S.num_shared)?;
+        E::PCS::check_commitment(comm, S.num_shared, DEFAULT_COMMITMENT_WIDTH)?;
         transcript.absorb(b"comm_W_shared", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -808,7 +1109,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
 
     if S.num_precommitted > 0 {
       if let Some(comm) = &self.comm_W_precommitted {
-        E::PCS::check_partial(comm, S.num_precommitted)?;
+        E::PCS::check_commitment(comm, S.num_precommitted, DEFAULT_COMMITMENT_WIDTH)?;
         transcript.absorb(b"comm_W_precommitted", comm);
       } else {
         return Err(SpartanError::ProofVerifyError {
@@ -829,7 +1130,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
       });
     }
 
-    E::PCS::check_partial(&self.comm_W_rest, S.num_rest)?;
+    E::PCS::check_commitment(&self.comm_W_rest, S.num_rest, DEFAULT_COMMITMENT_WIDTH)?;
     transcript.absorb(b"comm_W_rest", &self.comm_W_rest);
 
     Ok(())
@@ -843,12 +1144,276 @@ impl<E: Engine> SplitR1CSInstance<E> {
     ]
     .iter()
     .filter_map(|comm| comm.clone())
-    .collect::<Vec<PartialCommitment<E>>>();
-    let comm_W = PCS::<E>::combine_partial(&partial_comms)?;
+    .collect::<Vec<Commitment<E>>>();
+    let comm_W = PCS::<E>::combine_commitments(&partial_comms)?;
 
     Ok(R1CSInstance {
       comm_W,
       X: [self.public_values.clone(), self.challenges.clone()].concat(),
+    })
+  }
+}
+
+impl<E: Engine> SplitMultiRoundR1CSShape<E> {
+  /// Create an object of type `SplitMultiRoundR1CSShape` from the explicitly specified R1CS matrices
+  pub fn new(
+    width: usize,
+    num_cons: usize,
+    num_vars_per_round: Vec<usize>,
+    num_challenges_per_round: Vec<usize>,
+    num_public: usize,
+    A: SparseMatrix<E::Scalar>,
+    B: SparseMatrix<E::Scalar>,
+    C: SparseMatrix<E::Scalar>,
+  ) -> Result<SplitMultiRoundR1CSShape<E>, SpartanError> {
+    let num_rounds = num_vars_per_round.len();
+    if num_challenges_per_round.len() != num_rounds {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CSShape: Expected {} challenges per round, got {}",
+          num_rounds,
+          num_challenges_per_round.len()
+        ),
+      });
+    }
+
+    let total_vars: usize = num_vars_per_round.iter().sum();
+    let total_challenges: usize = num_challenges_per_round.iter().sum();
+    let num_rows = num_cons;
+    let num_cols = total_vars + 1 + num_public + total_challenges; // +1 for the constant term
+
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &A)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &B)?;
+    is_sparse_matrix_valid::<E>(num_rows, num_cols, &C)?;
+
+    // Pad each round's variables to be a multiple of width
+    let num_vars_per_round_padded: Vec<usize> = num_vars_per_round
+      .iter()
+      .map(|&n| pad_to_width(width, n))
+      .collect();
+
+    let total_vars_padded: usize = num_vars_per_round_padded.iter().sum();
+    let num_cons_padded = num_cons.next_power_of_two();
+
+    // Apply padding transformation to matrices
+    let apply_pad = |mut m: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
+      m.indices.par_iter_mut().for_each(|c| {
+        // Find which round this variable belongs to and apply appropriate offset
+        let mut current_offset = 0;
+        let mut current_padded_offset = 0;
+
+        for round in 0..num_rounds {
+          if *c >= current_offset && *c < current_offset + num_vars_per_round[round] {
+            // Variable belongs to this round, apply the padded offset
+            *c = current_padded_offset + (*c - current_offset);
+            return;
+          }
+          current_offset += num_vars_per_round[round];
+          current_padded_offset += num_vars_per_round_padded[round];
+        }
+
+        // If we get here, it's a public/challenge variable, apply total padding offset
+        if *c >= total_vars {
+          *c += total_vars_padded - total_vars;
+        }
+      });
+
+      m.cols += total_vars_padded - total_vars;
+
+      let ex = {
+        let nnz = if m.indptr.is_empty() {
+          0
+        } else {
+          m.indptr[m.indptr.len() - 1]
+        };
+        vec![nnz; num_cons_padded - num_cons]
+      };
+      m.indptr.extend(ex);
+      m
+    };
+
+    let A_padded = apply_pad(A);
+    let B_padded = apply_pad(B);
+    let C_padded = apply_pad(C);
+
+    Ok(Self {
+      num_cons: num_cons_padded,
+      num_cons_unpadded: num_cons,
+      num_rounds,
+      num_vars_per_round_unpadded: num_vars_per_round,
+      num_vars_per_round: num_vars_per_round_padded,
+      num_challenges_per_round,
+      num_public,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
+      digest: OnceCell::new(),
+    })
+  }
+
+  pub fn to_regular_shape(&self) -> R1CSShape<E> {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    let total_challenges: usize = self.num_challenges_per_round.iter().sum();
+
+    R1CSShape {
+      num_cons: self.num_cons,
+      num_vars: total_vars,
+      num_io: total_challenges + self.num_public,
+      A: self.A.clone(),
+      B: self.B.clone(),
+      C: self.C.clone(),
+      digest: OnceCell::new(),
+    }
+  }
+
+  /// Returns statistics about the shape of the multi-round R1CS matrices
+  pub fn sizes(&self) -> (usize, Vec<usize>, Vec<usize>, Vec<usize>, usize) {
+    (
+      self.num_cons_unpadded,
+      self.num_vars_per_round_unpadded.clone(),
+      self.num_vars_per_round.clone(),
+      self.num_challenges_per_round.clone(),
+      self.num_public,
+    )
+  }
+
+  /// Generates public parameters for a multi-round R1CS
+  pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    // Use a narrower commitment width for multi-round witnesses to reduce padding overhead.
+    E::PCS::setup(b"ck", total_vars, MULTIROUND_COMMITMENT_WIDTH)
+  }
+
+  pub fn multiply_vec(
+    &self,
+    z: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let total_vars: usize = self.num_vars_per_round.iter().sum();
+    let total_challenges: usize = self.num_challenges_per_round.iter().sum();
+
+    if z.len() != self.num_public + total_challenges + 1 + total_vars {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+
+    let (az, (bz, cz)) = rayon::join(
+      || self.A.multiply_vec(z),
+      || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
+    );
+
+    Ok((az?, bz?, cz?))
+  }
+}
+
+impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
+  /// A method to create a multi-round split R1CS instance object using constituent elements
+  pub fn new(
+    s: &SplitMultiRoundR1CSShape<E>,
+    comm_w_per_round: Vec<Commitment<E>>,
+    public_values: Vec<E::Scalar>,
+    challenges_per_round: Vec<Vec<E::Scalar>>,
+  ) -> Result<SplitMultiRoundR1CSInstance<E>, SpartanError> {
+    if public_values.len() != s.num_public {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} public values, got {}",
+          s.num_public,
+          public_values.len()
+        ),
+      });
+    }
+    if challenges_per_round.len() != s.num_rounds {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} rounds, got {}",
+          s.num_rounds,
+          challenges_per_round.len()
+        ),
+      });
+    }
+    if comm_w_per_round.len() != s.num_rounds {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CS instance: Expected {} rounds, got {}",
+          s.num_rounds,
+          comm_w_per_round.len()
+        ),
+      });
+    }
+
+    // Validate challenges per round
+    for (round, challenges) in challenges_per_round.iter().enumerate() {
+      if challenges.len() != s.num_challenges_per_round[round] {
+        return Err(SpartanError::InvalidInputLength {
+          reason: format!(
+            "SplitMultiRoundR1CS instance: Expected {} challenges in round {}, got {}",
+            s.num_challenges_per_round[round],
+            round,
+            challenges.len()
+          ),
+        });
+      }
+    }
+
+    // Validate commitments per round
+    for (round, comm) in comm_w_per_round.iter().enumerate() {
+      E::PCS::check_commitment(
+        comm,
+        s.num_vars_per_round[round],
+        MULTIROUND_COMMITMENT_WIDTH,
+      )?;
+    }
+
+    Ok(SplitMultiRoundR1CSInstance {
+      comm_w_per_round,
+      public_values,
+      challenges_per_round,
+    })
+  }
+
+  pub fn validate(
+    &self,
+    s: &SplitMultiRoundR1CSShape<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(), SpartanError> {
+    // Process each round, absorbing the previous round's commitment before deriving this round's challenges
+    for round in 0..s.num_rounds {
+      E::PCS::check_commitment(
+        &self.comm_w_per_round[round],
+        s.num_vars_per_round[round],
+        MULTIROUND_COMMITMENT_WIDTH,
+      )?;
+      transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round]);
+
+      let derived_challenges = (0..s.num_challenges_per_round[round])
+        .map(|_| transcript.squeeze(b"challenge"))
+        .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+      if self.challenges_per_round[round] != derived_challenges {
+        return Err(SpartanError::ProofVerifyError {
+          reason: format!("MultiRoundR1CSInstance:: Challenges do not match for round {round}"),
+        });
+      }
+    }
+
+    Ok(())
+  }
+
+  pub fn to_regular_instance(&self) -> Result<R1CSInstance<E>, SpartanError> {
+    let partial_comms = self.comm_w_per_round.clone();
+    let comm_w = PCS::<E>::combine_commitments(&partial_comms)?;
+
+    let challenges: Vec<E::Scalar> = self
+      .challenges_per_round
+      .iter()
+      .flatten()
+      .cloned()
+      .collect();
+
+    Ok(R1CSInstance {
+      comm_W: comm_w,
+      // Multi-round circuits inputize challenges before public values during synthesis.
+      // The regular instance must reflect the same ordering for satisfiability checks.
+      X: [challenges, self.public_values.clone()].concat(),
     })
   }
 }

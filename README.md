@@ -13,10 +13,14 @@ Spartan is a sum-check-based zkSNARK with an extremely efficient prover (a zkSNA
 
 * For uniform constraint systems, Spartan's prover can be optimized further by eliminating the witness-independent work of the prover, which constitutes about 90% of the prover's work.
 
-## About this library
-Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The first version of this code is derived from Nova's open-source code.
+## About this library and zero-knowledge properties
+We implement two zkSNARKs in this library.
 
-The proofs are *not* zero-knowledge (we plan to add it in the near future). Also, the current implementation does not implement the Spark protocol, so the verifier's work is proportional to the number of non-zero entries in the R1CS matrices.
+* **Spartan:** Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The first version of this code is derived from Nova's open-source code. The current implementation does not implement the Spark protocol, so the verifier's work is proportional to the number of non-zero entries in the R1CS matrices.
+
+* **NeutronNova in non-recursive mode for handling nearly uniform computation:** We additionally implement NeutronNova's folding scheme for folding together a batch of R1CS instances. This implementation focuses on a non-recursive version of NeutronNova and targets the case where the batch size is moderately large. Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding) and then use Spartan to prove that folded instance.
+
+Both Spartan and NeutronNova's SNARKs are made zero-knowledge (i.e., they are both zkSNARKs) using Nova's folding scheme. The details of this zero-knowledge transformation will be described in an upcoming paper.
 
 ### Supported polynomial commitment schemes
 - [ ] Elliptic-curve based schemes

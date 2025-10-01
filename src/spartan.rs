@@ -1,7 +1,7 @@
-//! This module implements the spartan SNARK protocol.
+//! This module implements the Spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
 use crate::{
-  CommitmentKey,
+  Blind, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
   bellpepper::{
     r1cs::{PrecommittedState, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
@@ -14,7 +14,7 @@ use crate::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
-  r1cs::{SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
+  r1cs::{SplitR1CSInstance, SplitR1CSShape},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -29,14 +29,14 @@ use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{debug, info, info_span};
+use tracing::{debug, info};
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
+  ck_s: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
@@ -57,6 +57,7 @@ impl<E: Engine> SpartanProverKey<E> {
 #[serde(bound = "")]
 pub struct SpartanVerifierKey<E: Engine> {
   vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
+  ck_s: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
@@ -80,51 +81,10 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   }
 }
 
-/// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-pub(crate) fn compute_eval_table_sparse<E: Engine>(
-  S: &SplitR1CSShape<E>,
-  rx: &[E::Scalar],
-) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
-  assert_eq!(rx.len(), S.num_cons);
-
-  let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
-    for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
-      for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
-        M_evals[*col_idx] += rx[row_idx] * val;
-      }
-    }
-  };
-
-  let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-  let (A_evals, (B_evals, C_evals)) = rayon::join(
-    || {
-      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-      inner(&S.A, &mut A_evals);
-      A_evals
-    },
-    || {
-      rayon::join(
-        || {
-          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-          inner(&S.B, &mut B_evals);
-          B_evals
-        },
-        || {
-          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-          inner(&S.C, &mut C_evals);
-          C_evals
-        },
-      )
-    },
-  );
-
-  (A_evals, B_evals, C_evals)
-}
-
 /// A type that holds the pre-processed state for proving
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct PrepSNARK<E: Engine> {
+pub struct SpartanPrepSNARK<E: Engine> {
   ps: PrecommittedState<E>,
 }
 
@@ -133,33 +93,37 @@ pub struct PrepSNARK<E: Engine> {
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct R1CSSNARK<E: Engine> {
+pub struct SpartanSNARK<E: Engine> {
   U: SplitR1CSInstance<E>,
   sc_proof_outer: SumcheckProof<E>,
   claims_outer: (E::Scalar, E::Scalar, E::Scalar),
   sc_proof_inner: SumcheckProof<E>,
   eval_W: E::Scalar,
+  blind_eval_W: Blind<E>, // it is okay to send the blind since we are targeting non-zk
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
-impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
+impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
-  type PrepSNARK = PrepSNARK<E>;
+  type PrepSNARK = SpartanPrepSNARK<E>;
 
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
+    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, MULTIROUND_COMMITMENT_WIDTH); // for committing to a scalar
 
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
       vk_ee,
+      ck_s: ck_s.clone(),
       digest: OnceCell::new(),
     };
     let pk = Self::ProverKey {
       ck,
+      ck_s,
       S,
       vk_digest: vk.digest()?,
     };
@@ -176,7 +140,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let mut ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuit, is_small)?;
     SatisfyingAssignment::precommitted_witness(&mut ps, &pk.S, &pk.ck, &circuit, is_small)?;
 
-    Ok(PrepSNARK { ps })
+    Ok(SpartanPrepSNARK { ps })
   }
 
   /// produces a succinct proof of satisfiability of an R1CS instance
@@ -188,7 +152,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   ) -> Result<Self, SpartanError> {
     let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
 
-    let mut transcript = E::TE::new(b"R1CSSNARK");
+    let mut transcript = E::TE::new(b"SpartanSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
 
     let public_values = circuit
@@ -287,7 +251,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    let (evals_A, evals_B, evals_C) = pk.S.bind_row_vars(&evals_rx);
     info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
 
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
@@ -318,7 +282,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
     let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
       *poly_A_comp * *poly_B_comp
     };
-    let (sc_proof_inner, r_y, _claims_inner) = SumcheckProof::prove_quad(
+    let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
       &claim_inner_joint,
       num_rounds_y,
       &mut MultilinearPolynomial::new(poly_ABC),
@@ -326,26 +290,46 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
       comb_func,
       &mut transcript,
     )?;
+    let eval_Z = claims_inner[1]; // evaluation of Z at r_y
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    // Compute final evaluations needed for the inner-final round
     let U_regular = U.to_regular_instance()?;
-    let (eval_W, eval_arg) = E::PCS::prove(
+    let eval_X = {
+      let X = vec![E::Scalar::ONE]
+        .into_iter()
+        .chain(U_regular.X.iter().cloned())
+        .collect::<Vec<E::Scalar>>();
+      SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
+    };
+
+    // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
+    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
+    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?; // commitment to eval_W
+    let U_regular = U.to_regular_instance()?;
+    let eval_arg = E::PCS::prove(
       &pk.ck,
+      &pk.ck_s,
       &mut transcript,
       &U_regular.comm_W,
       &W.W,
       &W.r_W,
       &r_y[1..],
+      &comm_eval_W,
+      &blind_eval_W,
     )?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
-    Ok(R1CSSNARK {
+    Ok(SpartanSNARK {
       U,
       sc_proof_outer,
       claims_outer: (claim_Az, claim_Bz, claim_Cz),
       sc_proof_inner,
       eval_W,
+      blind_eval_W,
       eval_arg,
     })
   }
@@ -353,10 +337,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
-    let mut transcript = E::TE::new(b"R1CSSNARK");
+    let mut transcript = E::TE::new(b"SpartanSNARK");
 
     // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
+    transcript.absorb(b"public_values", &self.U.public_values.as_slice());
 
     // validate the provided split R1CS instance and convert to regular instance
     self.U.validate(&vk.S, &mut transcript)?;
@@ -432,46 +417,11 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // compute evaluations of R1CS matrices
     let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
-    let multi_evaluate = |M_vec: &[&SparseMatrix<E::Scalar>],
-                          r_x: &[E::Scalar],
-                          r_y: &[E::Scalar]|
-     -> Vec<E::Scalar> {
-      let evaluate_with_table =
-        |M: &SparseMatrix<E::Scalar>, T_x: &[E::Scalar], T_y: &[E::Scalar]| -> E::Scalar {
-          M.indptr
-            .par_windows(2)
-            .enumerate()
-            .map(|(row_idx, ptrs)| {
-              M.get_row_unchecked(ptrs.try_into().unwrap())
-                .map(|(val, col_idx)| {
-                  let prod = T_x[row_idx] * T_y[*col_idx];
-                  if *val == E::Scalar::ONE {
-                    prod
-                  } else if *val == -E::Scalar::ONE {
-                    -prod
-                  } else {
-                    prod * val
-                  }
-                })
-                .sum::<E::Scalar>()
-            })
-            .sum()
-        };
+    let T_x = EqPolynomial::evals_from_points(&r_x);
+    let T_y = EqPolynomial::evals_from_points(&r_y);
+    let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables(&T_x, &T_y);
 
-      let (T_x, T_y) = rayon::join(
-        || EqPolynomial::evals_from_points(r_x),
-        || EqPolynomial::evals_from_points(r_y),
-      );
-
-      (0..M_vec.len())
-        .into_par_iter()
-        .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
-        .collect()
-    };
-
-    let evals = multi_evaluate(&[&vk.S.A, &vk.S.B, &vk.S.C], &r_x, &r_y);
-
-    let claim_inner_final_expected = (evals[0] + r * evals[1] + r * r * evals[2]) * eval_Z;
+    let claim_inner_final_expected = (eval_A + r * eval_B + r * r * eval_C) * eval_Z;
     if claim_inner_final != claim_inner_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
@@ -480,12 +430,14 @@ impl<E: Engine> R1CSSNARKTrait<E> for R1CSSNARK<E> {
 
     // verify
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
+    let comm_eval_W = E::PCS::commit(&vk.ck_s, &[self.eval_W], &self.blind_eval_W, false)?; // commitment to eval_W
     E::PCS::verify(
       &vk.vk_ee,
+      &vk.ck_s,
       &mut transcript,
       &U_regular.comm_W,
       &r_y[1..],
-      &self.eval_W,
+      &comm_eval_W,
       &self.eval_arg,
     )?;
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
@@ -576,11 +528,11 @@ mod tests {
     .init();
 
     type E = crate::provider::PallasHyraxEngine;
-    type S = R1CSSNARK<E>;
+    type S = SpartanSNARK<E>;
     test_snark_with::<E, S>();
 
     type E2 = crate::provider::T256HyraxEngine;
-    type S2 = R1CSSNARK<E2>;
+    type S2 = SpartanSNARK<E2>;
     test_snark_with::<E2, S2>();
   }
 

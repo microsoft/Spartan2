@@ -33,9 +33,6 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Holds the type of the commitment
   type Commitment: CommitmentTrait<E>;
 
-  /// Holds the type of the partial commitment
-  type PartialCommitment: CommitmentTrait<E>;
-
   /// Holds the type of the blind
   type Blind: Clone + Debug + Send + Sync + PartialEq + Eq + Serialize + for<'de> Deserialize<'de>;
 
@@ -43,10 +40,11 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   type EvaluationArgument: Clone + Debug + Send + Sync + Serialize + for<'de> Deserialize<'de>;
 
   /// Samples a new commitment key of a specified size and a verifier key
-  fn setup(label: &'static [u8], n: usize) -> (Self::CommitmentKey, Self::VerifierKey);
-
-  /// Size of the polynomial committed with one unit
-  fn width() -> usize;
+  fn setup(
+    label: &'static [u8],
+    n: usize,
+    width: usize,
+  ) -> (Self::CommitmentKey, Self::VerifierKey);
 
   /// Returns a blind to be used for commitment to a polynomial of size `n`
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind;
@@ -59,61 +57,61 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     is_small: bool,
   ) -> Result<Self::Commitment, SpartanError>;
 
-  /// Commits to v using the provided ck and returns a partial commitment
-  /// Also, returns the unused blind if the commitment is partial
-  fn commit_partial(
+  /// Checks if the provided commitment commits to a vector of the specified length
+  fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError>;
+
+  /// Rerandomizes the provided commitment using the provided blind
+  fn rerandomize_commitment(
     ck: &Self::CommitmentKey,
-    v: &[E::Scalar],
-    r: &Self::Blind,
-    is_small: bool,
-  ) -> Result<Self::PartialCommitment, SpartanError>;
+    comm: &Self::Commitment,
+    r_old: &Self::Blind,
+    r_new: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
 
-  /// Checks if the provided partial commitment commits to a vector of the specified length
-  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError>;
-
-  /// Combines the provided partial commitments into a single commitment.
+  /// Combines the provided commitments (each committing to a multilinear polynomial) into a single commitment.
   ///
   /// # Parameters
-  /// - `partial_comms`: A slice of partial commitments to be combined. The order of the partial
-  ///   commitments in the slice must match the order in which they were generated using `commit_partial`.
+  /// - `comms`: A slice of commitments to be combined. The order of the commitments in the slice must match the order in which they were generated using `commit`.
   ///
   /// # Constraints
-  /// - All partial commitments in the slice must be valid and correspond to the same commitment key.
-  /// - The number of partial commitments must match the expected number for the final commitment.
+  /// - All commitments in the slice must be valid and correspond to the same commitment key.
+  /// - The number of commitments must match the expected number for the final commitment.
   ///
   /// # Returns
   /// - A single combined commitment if the operation is successful.
   /// - An error of type `SpartanError` if the combination fails due to invalid inputs or mismatched constraints.
   ///
   /// # Usage
-  /// This method is used to finalize the commitment after multiple partial commitments have been made.
-  /// Ensure that the partial commitments are provided in the correct order and meet all constraints.
-  fn combine_partial(
-    partial_comms: &[Self::PartialCommitment],
-  ) -> Result<Self::Commitment, SpartanError>;
+  /// This method is used to finalize the commitment after multiple commitments have been made.
+  /// Ensure that the commitments are provided in the correct order and meet all constraints.
+  fn combine_commitments(comms: &[Self::Commitment]) -> Result<Self::Commitment, SpartanError>;
 
   /// Combines the provided blinds into a single blind.
-  /// The order of the blinds must match the order of the partial commitments used to generate them
+  /// The order of the blinds must match the order of the commitments used to generate them
   /// Returns an error if the combination fails
   fn combine_blinds(blinds: &[Self::Blind]) -> Result<Self::Blind, SpartanError>;
 
   /// A method to prove the evaluation of a multilinear polynomial
   fn prove(
     ck: &Self::CommitmentKey,
+    ck_eval: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     poly: &[E::Scalar],
     blind: &Self::Blind,
     point: &[E::Scalar],
-  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError>;
+    comm_eval: &Self::Commitment,
+    blind_eval: &Self::Blind,
+  ) -> Result<Self::EvaluationArgument, SpartanError>;
 
   /// A method to verify the purported evaluation of a multilinear polynomials
   fn verify(
     vk: &Self::VerifierKey,
+    ck_eval: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     point: &[E::Scalar],
-    eval: &E::Scalar,
+    comm_eval: &Self::Commitment,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError>;
 }

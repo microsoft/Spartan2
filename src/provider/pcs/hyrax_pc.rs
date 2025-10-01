@@ -1,14 +1,10 @@
 //! This module implements the Hyrax polynomial commitment scheme
-#[allow(unused)]
 use crate::{
-  Blind, Commitment, CommitmentKey,
   errors::SpartanError,
   math::Math,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{
-    pcs::ipa::{
-      InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness, inner_product,
-    },
+    pcs::ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -24,8 +20,7 @@ use num_integer::div_ceil;
 use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
 type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
 
@@ -38,8 +33,7 @@ where
 {
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
-  h: AffineGroupElement<E>,
-  ck_s: AffineGroupElement<E>,
+  h: E::GE,
 }
 
 /// A type that holds the verifier key for Hyrax commitments
@@ -51,8 +45,7 @@ where
 {
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
-  h: AffineGroupElement<E>,
-  ck_s: AffineGroupElement<E>,
+  h: E::GE,
 }
 
 /// Structure that holds commitments
@@ -92,35 +85,27 @@ where
   type CommitmentKey = HyraxCommitmentKey<E>;
   type VerifierKey = HyraxVerifierKey<E>;
   type Commitment = HyraxCommitment<E>;
-  type PartialCommitment = HyraxCommitment<E>;
   type Blind = HyraxBlind<E>;
   type EvaluationArgument = HyraxEvaluationArgument<E>;
 
-  fn width() -> usize {
-    1024 // Hyrax PC is always 1024 columns wide
-  }
-
-  /// Derives generators for Hyrax PC, where num_vars is the number of variables in multilinear poly
-  fn setup(label: &'static [u8], _n: usize) -> (Self::CommitmentKey, Self::VerifierKey) {
-    let num_cols = Self::width();
-    let gens = E::GE::from_label(label, num_cols + 2);
+  /// Derives generators for Hyrax PC, where n is the size of the vector to be committed to and width is the number of columns.
+  fn setup(
+    label: &'static [u8],
+    _n: usize,
+    width: usize,
+  ) -> (Self::CommitmentKey, Self::VerifierKey) {
+    let num_cols = width;
+    let gens = E::GE::from_label(label, num_cols + 1);
     let ck = gens[..num_cols].to_vec();
-    let h = gens[num_cols];
-    let ck_s = gens[num_cols + 1];
+    let h = <E::GE as DlogGroup>::group(&gens[num_cols]);
 
     let vk = Self::VerifierKey {
       num_cols,
       ck: ck.clone(),
       h,
-      ck_s,
     };
 
-    let ck = Self::CommitmentKey {
-      num_cols,
-      ck,
-      h,
-      ck_s,
-    };
+    let ck = Self::CommitmentKey { num_cols, ck, h };
 
     (ck, vk)
   }
@@ -171,50 +156,56 @@ where
             false,
           )?
         };
-        Ok(msm_result + <E::GE as DlogGroup>::group(&ck.h) * r.blind[i])
+        Ok(msm_result + ck.h * r.blind[i])
       })
       .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HyraxCommitment { comm })
   }
 
-  fn commit_partial(
+  fn rerandomize_commitment(
     ck: &Self::CommitmentKey,
-    v: &[E::Scalar],
-    r: &Self::Blind,
-    is_small: bool,
-  ) -> Result<Self::PartialCommitment, SpartanError> {
-    // commit to the vector using the provided blinds
-    let partial = Self::commit(ck, v, r, is_small)?;
+    comm: &Self::Commitment,
+    r_old: &Self::Blind,
+    r_new: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    if comm.comm.len() != r_old.blind.len() || comm.comm.len() != r_new.blind.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "rerandomize_commitment: commitment and blinds must have the same length"
+          .to_string(),
+      });
+    }
 
-    // return the partial commitment
-    Ok(partial)
+    let new_comm = (0..comm.comm.len())
+      .into_par_iter()
+      .map(|i| comm.comm[i] + ck.h * (r_new.blind[i] - r_old.blind[i]))
+      .collect::<Vec<_>>();
+
+    Ok(HyraxCommitment { comm: new_comm })
   }
 
-  fn check_partial(comm: &Self::PartialCommitment, n: usize) -> Result<(), SpartanError> {
-    let num_rows = div_ceil(n, Self::width());
-    if comm.comm.len() != num_rows {
+  fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError> {
+    let min_rows = div_ceil(n, width);
+    if comm.comm.len() < min_rows {
       return Err(SpartanError::InvalidCommitmentLength {
         reason: format!(
-          "InvalidCommitmentLength: actual: {}, expected: {}",
+          "InvalidCommitmentLength: actual: {}, expected at least: {}",
           comm.comm.len(),
-          num_rows
+          min_rows
         ),
       });
     }
     Ok(())
   }
 
-  fn combine_partial(
-    partial_comms: &[Self::PartialCommitment],
-  ) -> Result<Self::Commitment, SpartanError> {
-    if partial_comms.is_empty() {
+  fn combine_commitments(comms: &[Self::Commitment]) -> Result<Self::Commitment, SpartanError> {
+    if comms.is_empty() {
       return Err(SpartanError::InvalidInputLength {
-        reason: "combine_partial: No partial commitments provided".to_string(),
+        reason: "combine_commitments: No commitments provided".to_string(),
       });
     }
-    // combine comm from each partial commitment
-    let comm = partial_comms
+    // combine comm from each commitment
+    let comm = comms
       .iter()
       .flat_map(|pc| pc.comm.clone())
       .collect::<Vec<_>>();
@@ -236,12 +227,15 @@ where
 
   fn prove(
     ck: &Self::CommitmentKey,
+    ck_eval: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     poly: &[E::Scalar],
     blind: &Self::Blind,
     point: &[E::Scalar],
-  ) -> Result<(E::Scalar, Self::EvaluationArgument), SpartanError> {
+    comm_eval: &Self::Commitment,
+    blind_eval: &Self::Blind,
+  ) -> Result<Self::EvaluationArgument, SpartanError> {
     let n = poly.len();
     let (_setup_span, setup_t) = start_span!("hyrax_prove_prep");
     if n != (2usize).pow(point.len() as u32) {
@@ -288,40 +282,38 @@ where
         .into_par_iter()
         .map(|i| L[i] * blind.blind[i])
         .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)?
-        + <E::GE as DlogGroup>::group(&ck.h) * r_LZ;
+      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + ck.h * r_LZ;
 
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
       (comm_LZ, R, LZ, r_LZ)
     };
 
-    let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
-    // compute the evaluation of the multilinear polynomial at the point
-    let eval = inner_product(&LZ, &R);
-
     // a dot product argument (IPA) of size R_size
-    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &eval);
-    let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ);
+    let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
+    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &comm_eval.comm[0]);
+    let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ, &blind_eval.blind[0]);
     let ipa = InnerProductArgumentLinear::<E>::prove(
       &ck.ck,
       &ck.h,
-      &ck.ck_s,
+      &ck_eval.ck[0],
+      &ck_eval.h,
       &ipa_instance,
       &ipa_witness,
       transcript,
     )?;
     info!(elapsed_ms = %ipa_t.elapsed().as_millis(), "hyrax_prove_ipa");
 
-    Ok((eval, HyraxEvaluationArgument { ipa }))
+    Ok(HyraxEvaluationArgument { ipa })
   }
 
   fn verify(
     vk: &Self::VerifierKey,
+    ck_eval: &Self::CommitmentKey,
     transcript: &mut E::TE,
     comm: &Self::Commitment,
     point: &[E::Scalar],
-    eval: &E::Scalar,
+    comm_eval: &Self::Commitment,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError> {
     let (_verify_span, verify_t) = start_span!("hyrax_pcs_verify");
@@ -352,11 +344,17 @@ where
       (comm_LZ, R)
     };
 
-    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, eval);
+    let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &comm_eval.comm[0]);
 
-    let result = arg
-      .ipa
-      .verify(&vk.ck, &vk.h, &vk.ck_s, R.len(), &ipa_instance, transcript);
+    let result = arg.ipa.verify(
+      &vk.ck,
+      &vk.h,
+      &ck_eval.ck[0],
+      &ck_eval.h,
+      R.len(),
+      &ipa_instance,
+      transcript,
+    );
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "hyrax_pcs_verify");
     result
@@ -405,7 +403,13 @@ where
         comm
           .comm
           .par_iter()
-          .map(|c| *c * weight)
+          .map(|c| {
+            if weight == &E::Scalar::ONE {
+              *c
+            } else {
+              *c * weight
+            }
+          })
           .collect::<Vec<_>>()
       })
       .reduce(
