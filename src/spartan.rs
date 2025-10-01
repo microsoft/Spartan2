@@ -150,6 +150,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     prep_snark: &Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
+    let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
     let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
 
     let mut transcript = E::TE::new(b"SpartanSNARK");
@@ -323,6 +324,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     )?;
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
     Ok(SpartanSNARK {
       U,
       sc_proof_outer,
@@ -336,7 +338,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
-    let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
+    let (_verify_span, verify_t) = start_span!("spartan_snark_verify");
     let mut transcript = E::TE::new(b"SpartanSNARK");
 
     // append the digest of R1CS matrices
@@ -442,7 +444,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     )?;
     info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
 
-    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "r1cs_snark_verify");
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "spartan_snark_verify");
     Ok(self.U.public_values.clone())
   }
 }
