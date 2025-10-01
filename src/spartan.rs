@@ -523,11 +523,11 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    tracing_subscriber::fmt()
-    .with_target(false)
-    .with_ansi(true)                // no bold colour codes
-    .with_env_filter(EnvFilter::from_default_env())
-    .init();
+    let _ = tracing_subscriber::fmt()
+        .with_target(false)
+        .with_ansi(true) // no bold colour codes
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
 
     type E = crate::provider::PallasHyraxEngine;
     type S = SpartanSNARK<E>;
