@@ -32,6 +32,7 @@ pub mod errors;
 pub mod provider;
 pub mod sumcheck;
 pub mod traits;
+pub mod twist;
 
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge

@@ -242,6 +242,16 @@ macro_rules! impl_traits_no_dlog_ext {
         let bytes_arr: [u8; 64] = bytes.try_into().unwrap();
         $name::Scalar::from_uniform_bytes(&bytes_arr)
       }
+
+      fn from_i64(val: i64) -> Self {
+        if val.is_negative() {
+          let val = (-val) as u64;
+          -$name::Scalar::from(val)
+        } else {
+          let val = val as u64;
+          $name::Scalar::from(val)
+        }
+      }
     }
 
     impl<G: Group> TranscriptReprTrait<G> for $name::Scalar {
