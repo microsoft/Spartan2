@@ -290,7 +290,7 @@ impl<E: Engine> ReadWriteCheckingSNARK<E> {
       // Set up next round
       claim_per_round = uni_poly.evaluate(&r_i);
 
-      // TODO: This only works when init_val is all 0's; otherwise we would need to bind it
+      // This only works when init_val is all 0's; otherwise we would need to bind it
       C_row_0.truncate(K >> (round + 1));
       A.bind_poly_var_bot(&r_i);
       let (left_evals, right_evals) = D.split_at_mut(1 << round);
@@ -308,10 +308,7 @@ impl<E: Engine> ReadWriteCheckingSNARK<E> {
     // All address variables binded
     // compute val_r_address
     let mut val_r_address: Vec<E::Scalar> = vec![E::Scalar::ZERO; T];
-    for j in 0..T {
-      if j == 0 {
-        continue;
-      }
+    for j in 1..T {
       let (k, inc) = (write_addresses[j - 1], write_increments[j - 1]);
       val_r_address[j] = val_r_address[j - 1] + E::Scalar::from_i64(inc) * D[k];
     }
@@ -362,18 +359,23 @@ impl<E: Engine> ReadWriteCheckingSNARK<E> {
         claim_per_round - uni_poly_evals[0],
         uni_poly_evals[1],
         uni_poly_evals[2],
-      ])
-      .unwrap();
+      ])?;
       transcript.absorb(b"p", &uni_poly);
-      let r_i = transcript.squeeze(b"c").unwrap();
+      let r_i = transcript.squeeze(b"c")?;
       r_cycle.push(r_i);
       compressed_polys.push(uni_poly.compress());
       claim_per_round = uni_poly.evaluate(&r_i);
-      B.bind_poly_var_bot(&r_i);
-      ra.bind_poly_var_bot(&r_i);
-      val_r_address.bind_poly_var_bot(&r_i);
-      wa.bind_poly_var_bot(&r_i);
-      wv.bind_poly_var_bot(&r_i);
+      rayon::join(
+        || {
+          rayon::join(|| B.bind_poly_var_bot(&r_i), || ra.bind_poly_var_bot(&r_i));
+        },
+        || {
+          rayon::join(
+            || val_r_address.bind_poly_var_bot(&r_i),
+            || rayon::join(|| wa.bind_poly_var_bot(&r_i), || wv.bind_poly_var_bot(&r_i)),
+          );
+        },
+      );
     }
 
     assert_eq!(
@@ -540,7 +542,7 @@ pub fn prove_val_evaluation<E: Engine>(
     transcript.absorb(b"p", &univariate_poly);
     compressed_polys.push(compressed_poly);
 
-    let r_j = transcript.squeeze(b"c").unwrap();
+    let r_j = transcript.squeeze(b"c")?;
     r_cycle_prime.push(r_j);
 
     previous_claim = univariate_poly.evaluate(&r_j);
@@ -562,9 +564,12 @@ pub fn prove_val_evaluation<E: Engine>(
 
 #[cfg(test)]
 mod tests {
-  use crate::traits::transcript::TranscriptEngineTrait;
-  use crate::twist::{ReadWriteCheckingSNARK, TwistSNARK, prove_val_evaluation};
-  use crate::{math::Math, polys::multilinear::MultilinearPolynomial, traits::Engine};
+  use crate::{
+    math::Math,
+    polys::multilinear::MultilinearPolynomial,
+    traits::{Engine, transcript::TranscriptEngineTrait},
+    twist::{ReadWriteCheckingSNARK, TwistSNARK, prove_val_evaluation},
+  };
   use itertools::Itertools;
   use rand::{RngCore, SeedableRng, rngs::StdRng};
 
