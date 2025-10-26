@@ -1,6 +1,7 @@
 //! This library implements Spartan, a high-speed SNARK.
 //! We currently implement a non-preprocessing version of Spartan
 //! that is generic over the polynomial commitment and evaluation argument (i.e., a PCS).
+#![allow(non_snake_case)]
 #![deny(
   warnings,
   unused,
@@ -9,7 +10,6 @@
   rust_2018_idioms,
   missing_docs
 )]
-#![allow(non_snake_case)]
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
@@ -32,6 +32,7 @@ pub mod errors;
 pub mod provider;
 pub mod sumcheck;
 pub mod traits;
+pub mod twist;
 
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge

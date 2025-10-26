@@ -72,7 +72,8 @@ where
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SumcheckProof<E: Engine> {
-  compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
+  /// The message's the prover sends in each round of the sum-check protocol
+  pub compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
 }
 
 impl<E: Engine> SumcheckProof<E> {
