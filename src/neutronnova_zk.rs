@@ -234,7 +234,8 @@ where
     // Squeeze tau and rhos fresh inside this function (like ZK sum-check APIs)
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
     let tau = transcript.squeeze(b"tau")?;
-    let E_eq = PowPolynomial::new(&tau, ell_cons).split_evals(left, right);
+
+    let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
 
     let mut rhos = Vec::with_capacity(ell_b);
     for _ in 0..ell_b {
