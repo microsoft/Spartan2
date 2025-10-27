@@ -359,7 +359,7 @@ impl<E: Engine> SumcheckProof<E> {
   where
     F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let len = poly_A.Z.len() / 2;
+    let len = poly_B.Z.len() / 2;
     par_for(
       len,
       |i| {
@@ -823,7 +823,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// and returns the sequence of verifier challenges.
   pub fn prove_cubic_with_additive_term_batched_zk(
     num_rounds: usize,
-    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    pow_tau: &mut MultilinearPolynomial<E::Scalar>,
     poly_B_step: &mut MultilinearPolynomial<E::Scalar>,
     poly_B_core: &mut MultilinearPolynomial<E::Scalar>,
     poly_C_step: &mut MultilinearPolynomial<E::Scalar>,
@@ -837,6 +837,9 @@ impl<E: Engine> SumcheckProof<E> {
     transcript: &mut E::TE,
     start_round: usize,
   ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut base_tau = E::Scalar::ONE;
+    let mut len_pow_tau = pow_tau.Z.len();
+
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
 
     let mut claim_step = verifier_circuit.t_out_step;
@@ -848,26 +851,34 @@ impl<E: Engine> SumcheckProof<E> {
       };
 
       // step branch
-      let ((eval0_s, eval2_s, eval3_s), (eval0_c, eval2_c, eval3_c)) = rayon::join(
-        || {
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A,
-            poly_B_step,
-            poly_C_step,
-            poly_D_step,
-            &comb,
-          )
-        },
-        || {
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A,
-            poly_B_core,
-            poly_C_core,
-            poly_D_core,
-            &comb,
-          )
-        },
-      );
+      let ((mut eval0_s, mut eval2_s, mut eval3_s), (mut eval0_c, mut eval2_c, mut eval3_c)) =
+        rayon::join(
+          || {
+            Self::compute_eval_points_cubic_with_additive_term(
+              pow_tau,
+              poly_B_step,
+              poly_C_step,
+              poly_D_step,
+              &comb,
+            )
+          },
+          || {
+            Self::compute_eval_points_cubic_with_additive_term(
+              pow_tau,
+              poly_B_core,
+              poly_C_core,
+              poly_D_core,
+              &comb,
+            )
+          },
+        );
+
+      eval0_s *= base_tau;
+      eval2_s *= base_tau;
+      eval3_s *= base_tau;
+      eval0_c *= base_tau;
+      eval2_c *= base_tau;
+      eval3_c *= base_tau;
 
       let evals_s = vec![eval0_s, claim_step - eval0_s, eval2_s, eval3_s];
       let poly_s = UniPoly::from_evals(&evals_s)?;
@@ -908,35 +919,38 @@ impl<E: Engine> SumcheckProof<E> {
 
       // bind polynomials to the verifier's challenge
       rayon::join(
-        || poly_A.bind_poly_var_top(&r_i),
+        || {
+          rayon::join(
+            || poly_B_step.bind_poly_var_top(&r_i),
+            || poly_B_core.bind_poly_var_top(&r_i),
+          );
+        },
         || {
           rayon::join(
             || {
               rayon::join(
-                || poly_B_step.bind_poly_var_top(&r_i),
-                || poly_B_core.bind_poly_var_top(&r_i),
+                || poly_C_step.bind_poly_var_top(&r_i),
+                || poly_C_core.bind_poly_var_top(&r_i),
               );
             },
             || {
               rayon::join(
-                || {
-                  rayon::join(
-                    || poly_C_step.bind_poly_var_top(&r_i),
-                    || poly_C_core.bind_poly_var_top(&r_i),
-                  );
-                },
-                || {
-                  rayon::join(
-                    || poly_D_step.bind_poly_var_top(&r_i),
-                    || poly_D_core.bind_poly_var_top(&r_i),
-                  );
-                },
+                || poly_D_step.bind_poly_var_top(&r_i),
+                || poly_D_core.bind_poly_var_top(&r_i),
               );
             },
           );
         },
       );
+
+      // list power of tau (pow_tau) halves effectively
+      len_pow_tau >>= 1;
+      let one = E::Scalar::ONE;
+      let pow = pow_tau.Z[len_pow_tau];
+      base_tau *= (pow - one) * r_i + one;
     }
+
+    pow_tau.Z[0] = base_tau;
 
     Ok(r_x)
   }
