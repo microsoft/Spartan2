@@ -739,19 +739,13 @@ where
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
     let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
-    let (_ell, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
-    let (E1, E2) = E_eq.split_at(left);
-    let mut full_E = vec![E::Scalar::ONE; left * right];
-    full_E
-      .par_chunks_mut(left)
-      .enumerate()
-      .for_each(|(i, row)| {
-        let e2 = E2[i];
-        row.iter_mut().zip(E1.iter()).for_each(|(val, e1)| {
-          *val = e2 * *e1;
-        });
-      });
-    let mut poly_tau = MultilinearPolynomial::new(full_E);
+    let (_ell, left, _right) = compute_tensor_decomp(pk.S_step.num_cons);
+    let mut E1 = E_eq;
+    let E2 = E1.split_off(left);
+
+    let mut poly_tau_left = MultilinearPolynomial::new(E1);
+    let poly_tau_right = MultilinearPolynomial::new(E2);
+
     info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "compute_tensor_and_poly_tau");
 
     // outer sum-check preparation
@@ -787,7 +781,8 @@ where
     let (_sc_span, sc_t) = start_span!("outer_sumcheck_batched");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_batched_zk(
       num_rounds_x,
-      &mut poly_tau,
+      &mut poly_tau_left,
+      &poly_tau_right,
       &mut poly_Az_step,
       &mut poly_Az_core,
       &mut poly_Bz_step,
@@ -809,7 +804,7 @@ where
     vc.claim_Az_core = poly_Az_core[0];
     vc.claim_Bz_core = poly_Bz_core[0];
     vc.claim_Cz_core = poly_Cz_core[0];
-    vc.tau_at_rx = poly_tau[0];
+    vc.tau_at_rx = poly_tau_left[0];
 
     let chals = SatisfyingAssignment::<E>::process_round(
       &mut vc_state,
