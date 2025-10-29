@@ -54,7 +54,8 @@ impl<Scalar: PrimeField> PowPolynomial<Scalar> {
   }
 
   /// Computes two vectors such that their outer product equals the output of the `evals` function.
-  /// This code ensures
+  /// The left vector is 1, t, t^2, ..., t^{2^{ell/2}-1}
+  /// and the right vector is 1, t^{2^{ell/2}}, ..., t^{(2^{ell/2}-1) * 2^{ell/2}}.
   pub fn split_evals(t: Scalar, ell: usize, len_left: usize, len_right: usize) -> Vec<Scalar> {
     // Compute the number of elements in the left and right halves
     assert_eq!(len_left * len_right, 1 << ell);

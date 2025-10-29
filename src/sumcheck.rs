@@ -416,7 +416,7 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// This function computes three evaluation points (at 0, 2, and 3) for a univariate
   /// polynomial that represents the sum over a hypercube edge in the sum-check protocol
-  /// for a cubic combination of four multilinear polynomials.
+  /// for a cubic combination of three multilinear polynomials.
   ///
   /// # Arguments
   /// * `pow_tau_left` - The left part of the power of tau
