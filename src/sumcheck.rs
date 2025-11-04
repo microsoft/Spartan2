@@ -359,7 +359,7 @@ impl<E: Engine> SumcheckProof<E> {
   where
     F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let len = poly_A.Z.len() / 2;
+    let len = poly_B.Z.len() / 2;
     par_for(
       len,
       |i| {
@@ -399,6 +399,117 @@ impl<E: Engine> SumcheckProof<E> {
           &poly_D_bound_point,
         );
         (eval_point_0, eval_point_2, eval_point_3)
+      },
+      |mut acc, val| {
+        acc.0 += val.0;
+        acc.1 += val.1;
+        acc.2 += val.2;
+        acc
+      },
+      || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+    )
+  }
+
+  #[inline]
+  /// Computes evaluation points for a cubic polynomial with additive term.
+  /// The outer polynomial is the power of tau, which is an outer product of two polynomials left and right.
+  ///
+  /// This function computes three evaluation points (at 0, 2, and 3) for a univariate
+  /// polynomial that represents the sum over a hypercube edge in the sum-check protocol
+  /// for a cubic combination of three multilinear polynomials.
+  ///
+  /// # Arguments
+  /// * `pow_tau_left` - The left part of the power of tau
+  /// * `pow_tau_right` - The right part of the power of tau
+  /// * `poly_A` - First multilinear polynomial
+  /// * `poly_B` - Second multilinear polynomial  
+  /// * `poly_C` - Third multilinear polynomial
+  /// * `comb_func` - Function that combines evaluations of the four polynomials
+  ///
+  /// # Returns
+  /// A tuple containing the evaluations at points 0, 2, and 3.
+  fn compute_eval_points_cubic_with_additive_term_with_outer_pow<F>(
+    pow_tau_left: &MultilinearPolynomial<E::Scalar>,
+    pow_tau_right: &MultilinearPolynomial<E::Scalar>,
+    poly_A: &MultilinearPolynomial<E::Scalar>,
+    poly_B: &MultilinearPolynomial<E::Scalar>,
+    poly_C: &MultilinearPolynomial<E::Scalar>,
+    comb_func: &F,
+  ) -> (E::Scalar, E::Scalar, E::Scalar)
+  where
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+  {
+    let len = poly_A.Z.len() / 2;
+    let left = pow_tau_left.Z.len();
+
+    if len < left {
+      return Self::compute_eval_points_cubic_with_additive_term(
+        pow_tau_left,
+        poly_A,
+        poly_B,
+        poly_C,
+        comb_func,
+      );
+    }
+
+    let right = len / left;
+
+    par_for(
+      left,
+      |i| {
+        let pow_left = pow_tau_left[i];
+
+        let mut acc_0 = E::Scalar::ZERO;
+        let mut acc_2 = E::Scalar::ZERO;
+        let mut acc_3 = E::Scalar::ZERO;
+
+        for j in 0..right {
+          let low = i + j * left;
+          let high = low + len;
+
+          let tau_low_right = pow_tau_right[j];
+          let tau_high_right = pow_tau_right[j + right];
+
+          let a_low = poly_A[low];
+          let a_high = poly_A[high];
+          let b_low = poly_B[low];
+          let b_high = poly_B[high];
+          let c_low = poly_C[low];
+          let c_high = poly_C[high];
+
+          // eval 0: bound_func is A(low)
+          let eval_point_0 = comb_func(&tau_low_right, &a_low, &b_low, &c_low);
+
+          // eval 2: bound_func is -A(low) + 2*A(high)
+          let poly_tau_bound_point = tau_high_right + tau_high_right - tau_low_right;
+          let poly_A_bound_point = a_high + a_high - a_low;
+          let poly_B_bound_point = b_high + b_high - b_low;
+          let poly_C_bound_point = c_high + c_high - c_low;
+          let eval_point_2 = comb_func(
+            &poly_tau_bound_point,
+            &poly_A_bound_point,
+            &poly_B_bound_point,
+            &poly_C_bound_point,
+          );
+
+          // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
+          let poly_tau_bound_point = poly_tau_bound_point + tau_high_right - tau_low_right;
+          let poly_A_bound_point = poly_A_bound_point + a_high - a_low;
+          let poly_B_bound_point = poly_B_bound_point + b_high - b_low;
+          let poly_C_bound_point = poly_C_bound_point + c_high - c_low;
+          let eval_point_3 = comb_func(
+            &poly_tau_bound_point,
+            &poly_A_bound_point,
+            &poly_B_bound_point,
+            &poly_C_bound_point,
+          );
+
+          acc_0 += eval_point_0;
+          acc_2 += eval_point_2;
+          acc_3 += eval_point_3;
+        }
+
+        (acc_0 * pow_left, acc_2 * pow_left, acc_3 * pow_left)
       },
       |mut acc, val| {
         acc.0 += val.0;
@@ -823,13 +934,14 @@ impl<E: Engine> SumcheckProof<E> {
   /// and returns the sequence of verifier challenges.
   pub fn prove_cubic_with_additive_term_batched_zk(
     num_rounds: usize,
-    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    pow_tau_left: &mut MultilinearPolynomial<E::Scalar>,
+    pow_tau_right: &MultilinearPolynomial<E::Scalar>,
+    poly_A_step: &mut MultilinearPolynomial<E::Scalar>,
+    poly_A_core: &mut MultilinearPolynomial<E::Scalar>,
     poly_B_step: &mut MultilinearPolynomial<E::Scalar>,
     poly_B_core: &mut MultilinearPolynomial<E::Scalar>,
     poly_C_step: &mut MultilinearPolynomial<E::Scalar>,
     poly_C_core: &mut MultilinearPolynomial<E::Scalar>,
-    poly_D_step: &mut MultilinearPolynomial<E::Scalar>,
-    poly_D_core: &mut MultilinearPolynomial<E::Scalar>,
     verifier_circuit: &mut NeutronNovaVerifierCircuit<E>,
     state: &mut MultiRoundState<E>,
     vc_shape: &SplitMultiRoundR1CSShape<E>,
@@ -837,6 +949,9 @@ impl<E: Engine> SumcheckProof<E> {
     transcript: &mut E::TE,
     start_round: usize,
   ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let mut base_tau = E::Scalar::ONE;
+    let mut len_pow_tau = pow_tau_left.Z.len() * pow_tau_right.Z.len();
+
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
 
     let mut claim_step = verifier_circuit.t_out_step;
@@ -848,26 +963,36 @@ impl<E: Engine> SumcheckProof<E> {
       };
 
       // step branch
-      let ((eval0_s, eval2_s, eval3_s), (eval0_c, eval2_c, eval3_c)) = rayon::join(
-        || {
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A,
-            poly_B_step,
-            poly_C_step,
-            poly_D_step,
-            &comb,
-          )
-        },
-        || {
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A,
-            poly_B_core,
-            poly_C_core,
-            poly_D_core,
-            &comb,
-          )
-        },
-      );
+      let ((mut eval0_s, mut eval2_s, mut eval3_s), (mut eval0_c, mut eval2_c, mut eval3_c)) =
+        rayon::join(
+          || {
+            Self::compute_eval_points_cubic_with_additive_term_with_outer_pow(
+              pow_tau_left,
+              pow_tau_right,
+              poly_A_step,
+              poly_B_step,
+              poly_C_step,
+              &comb,
+            )
+          },
+          || {
+            Self::compute_eval_points_cubic_with_additive_term_with_outer_pow(
+              pow_tau_left,
+              pow_tau_right,
+              poly_A_core,
+              poly_B_core,
+              poly_C_core,
+              &comb,
+            )
+          },
+        );
+
+      eval0_s *= base_tau;
+      eval2_s *= base_tau;
+      eval3_s *= base_tau;
+      eval0_c *= base_tau;
+      eval2_c *= base_tau;
+      eval3_c *= base_tau;
 
       let evals_s = vec![eval0_s, claim_step - eval0_s, eval2_s, eval3_s];
       let poly_s = UniPoly::from_evals(&evals_s)?;
@@ -908,7 +1033,12 @@ impl<E: Engine> SumcheckProof<E> {
 
       // bind polynomials to the verifier's challenge
       rayon::join(
-        || poly_A.bind_poly_var_top(&r_i),
+        || {
+          rayon::join(
+            || poly_A_step.bind_poly_var_top(&r_i),
+            || poly_A_core.bind_poly_var_top(&r_i),
+          );
+        },
         || {
           rayon::join(
             || {
@@ -919,24 +1049,24 @@ impl<E: Engine> SumcheckProof<E> {
             },
             || {
               rayon::join(
-                || {
-                  rayon::join(
-                    || poly_C_step.bind_poly_var_top(&r_i),
-                    || poly_C_core.bind_poly_var_top(&r_i),
-                  );
-                },
-                || {
-                  rayon::join(
-                    || poly_D_step.bind_poly_var_top(&r_i),
-                    || poly_D_core.bind_poly_var_top(&r_i),
-                  );
-                },
+                || poly_C_step.bind_poly_var_top(&r_i),
+                || poly_C_core.bind_poly_var_top(&r_i),
               );
             },
           );
         },
       );
+
+      // bind polynomial power of tau
+      // list power of tau (pow_tau) halves effectively
+      len_pow_tau >>= 1;
+      let one = E::Scalar::ONE;
+      let left = pow_tau_left.Z.len();
+      let pow = pow_tau_left.Z[len_pow_tau % left] * pow_tau_right.Z[len_pow_tau / left];
+      base_tau *= (pow - one) * r_i + one;
     }
+
+    pow_tau_left.Z[0] = base_tau;
 
     Ok(r_x)
   }
