@@ -1165,6 +1165,12 @@ pub(crate) mod eq_sumcheck {
   }
 
   impl<E: Engine> EqSumCheckInstance<E> {
+    /// Creates a new EqSumCheckInstance for optimized sumcheck with equality polynomials.
+    ///
+    /// The algorithm splits the tau vector and precomputes equality polynomial evaluations
+    /// for efficient lookup during the sumcheck rounds. The round counter starts at 1 (not 0)
+    /// to simplify indexing into precomputed arrays, as the first evaluation happens before
+    /// any binding operations occur.
     pub fn new(taus: Vec<E::Scalar>) -> Self {
       let l = taus.len();
       let first_half = l / 2;
@@ -1191,7 +1197,10 @@ pub(crate) mod eq_sumcheck {
       };
 
       let (left_taus, right_taus) = taus.split_at(first_half);
-      // Skip the first element of left_taus as it's already processed in the eval_eq_left initialization
+      // Skip the first element of left_taus because the equality polynomial evaluation
+      // for the first variable is tracked separately in eval_eq_left (initialized to 1).
+      // This matches the Nova optimization approach where the left part is processed
+      // incrementally through the bound() method rather than via lookup tables.
       let left_taus = left_taus.iter().skip(1).rev().collect::<Vec<_>>();
       let right_taus = right_taus.iter().rev().collect::<Vec<_>>();
 
@@ -1216,7 +1225,7 @@ pub(crate) mod eq_sumcheck {
         init_num_vars: l,
         first_half,
         second_half: l - first_half,
-        round: 1,
+        round: 1, // Start at 1 to simplify array indexing (round-1 gives 0-based index)
         taus,
         eval_eq_left: E::Scalar::ONE,
         poly_eq_left,
@@ -1447,6 +1456,9 @@ pub(crate) mod eq_sumcheck {
     #[inline]
     fn poly_eqs_first_half(&self) -> (&Vec<E::Scalar>, &Vec<E::Scalar>, usize, usize) {
       let second_half = self.second_half;
+      // Safe indexing: This method is only called when in_first_half is true,
+      // which means self.round < self.first_half. Therefore self.first_half - self.round > 0
+      // and the index is valid. The poly_eq_left array has first_half+1 elements (0..=first_half).
       let poly_eq_left = &self.poly_eq_left[self.first_half - self.round];
       let poly_eq_right = &self.poly_eq_right[second_half];
 
@@ -1462,6 +1474,9 @@ pub(crate) mod eq_sumcheck {
 
     #[inline]
     fn poly_eq_right_last_half(&self) -> &Vec<E::Scalar> {
+      // Safe indexing: This method is only called when in_first_half is false,
+      // which means self.round >= self.first_half. The maximum value of self.round
+      // is init_num_vars (as we do init_num_vars rounds), so the index is always >= 0.
       &self.poly_eq_right[self.init_num_vars - self.round]
     }
   }
