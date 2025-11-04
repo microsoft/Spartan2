@@ -1191,6 +1191,7 @@ pub(crate) mod eq_sumcheck {
       };
 
       let (left_taus, right_taus) = taus.split_at(first_half);
+      // Skip the first element of left_taus as it's already processed in the eval_eq_left initialization
       let left_taus = left_taus.iter().skip(1).rev().collect::<Vec<_>>();
       let right_taus = right_taus.iter().rev().collect::<Vec<_>>();
 
@@ -1294,6 +1295,8 @@ pub(crate) mod eq_sumcheck {
     }
 
     /// Evaluate poly_A * poly_B - ONE
+    /// This method is provided for completeness and future use cases where
+    /// the sumcheck involves two polynomials with a constant term.
     #[inline]
     #[allow(dead_code)]
     pub fn evaluation_points_cubic_with_two_inputs(
@@ -1359,6 +1362,8 @@ pub(crate) mod eq_sumcheck {
     }
 
     /// Evaluate poly_A
+    /// This method is provided for completeness and future use cases where
+    /// the sumcheck involves only one polynomial.
     #[inline]
     #[allow(dead_code)]
     pub fn evaluation_points_cubic_with_one_input(
@@ -1418,6 +1423,8 @@ pub(crate) mod eq_sumcheck {
 
     #[inline]
     pub fn bound(&mut self, r: &E::Scalar) {
+      // Invariant: self.round is always >= 1 when bound is called
+      // as it's initialized to 1 in new() and only incremented here
       let tau = self.taus[self.round - 1];
       self.eval_eq_left *= E::Scalar::ONE - tau - r + (*r * tau).double();
       self.round += 1;
@@ -1426,6 +1433,7 @@ pub(crate) mod eq_sumcheck {
     #[inline]
     fn update_evals(&self, eval_0: &mut E::Scalar, eval_2: &mut E::Scalar, eval_3: &mut E::Scalar) {
       let p = self.eval_eq_left;
+      // Invariant: self.round is always >= 1 when this is called from evaluation_points methods
       let eq_tau_0_2_3 = self.eq_tau_0_2_3[self.round - 1];
       let eq_tau_0_p = eq_tau_0_2_3.0 * p;
       let eq_tau_2_p = eq_tau_0_2_3.1 * p;
@@ -1469,6 +1477,8 @@ pub(crate) mod eq_sumcheck {
     })
   }
 
+  /// Helper function for evaluating one case of cubic polynomial with one input
+  /// Used by evaluation_points_cubic_with_one_input
   #[inline]
   #[allow(dead_code)]
   fn eval_one_case_cubic_one_input<Scalar: PrimeField>(
@@ -1482,6 +1492,8 @@ pub(crate) mod eq_sumcheck {
     (*eval_0, eval_2, eval_3)
   }
 
+  /// Helper function for evaluating one case of cubic polynomial with two inputs
+  /// Used by evaluation_points_cubic_with_two_inputs
   #[inline]
   #[allow(dead_code)]
   fn eval_one_case_cubic_two_inputs<Scalar: PrimeField>(
