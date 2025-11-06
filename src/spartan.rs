@@ -192,11 +192,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     // outer sum-check preparation
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
-      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-
-    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
-    let mut poly_tau = MultilinearPolynomial::new(tau.evals());
-    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
+      .collect::<Result<Vec<_>, SpartanError>>()?;
 
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
@@ -218,26 +214,18 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     // outer sum-check
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
-    let comb_func_outer =
-      |poly_A_comp: &E::Scalar,
-       poly_B_comp: &E::Scalar,
-       poly_C_comp: &E::Scalar,
-       poly_D_comp: &E::Scalar|
-       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_additive_term(
+    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
       &E::Scalar::ZERO, // claim is zero
-      num_rounds_x,
-      &mut poly_tau,
+      tau,
       &mut poly_Az,
       &mut poly_Bz,
       &mut poly_Cz,
-      comb_func_outer,
       &mut transcript,
     )?;
 
     // claims from the end of sum-check
     let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[1], claims_outer[2], claims_outer[3]);
+      (claims_outer[0], claims_outer[1], claims_outer[2]);
     transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
     info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
 
