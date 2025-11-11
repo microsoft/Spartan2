@@ -230,7 +230,6 @@ where
     // Build Az, Bz, Cz tables for each (possibly padded) instance
     let (_matrix_span, matrix_t) =
       start_span!("matrix_vector_multiply_instances", instances = n_padded);
-    let chunk_len = left * right;
     let triples = (0..n_padded)
       .into_par_iter()
       .map(|i| {
@@ -268,23 +267,24 @@ where
       // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
       let pairs = m / 2;
 
-      let (e0, quad_coeff) = (0..pairs)
-        .into_par_iter()
-        .map(|pair_idx| {
-          let lo = 2 * pair_idx;
-          let hi = lo + 1;
-          let (a0, a_quad_coeff) = Self::prove_helper(
+      let (e0, quad_coeff) = A_layers
+        .par_chunks(2)
+        .zip(B_layers.par_chunks(2))
+        .zip(C_layers.par_chunks(2))
+        .enumerate()
+        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+          let (e0, quad_coeff) = Self::prove_helper(
             (left, right),
             &E_eq,
-            &A_layers[lo],
-            &B_layers[lo],
-            &C_layers[lo],
-            &A_layers[hi],
-            &B_layers[hi],
-            &C_layers[hi],
+            &pair_a[0],
+            &pair_b[0],
+            &pair_c[0],
+            &pair_a[1],
+            &pair_b[1],
+            &pair_c[1],
           );
           let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
-          (a0 * w, a_quad_coeff * w)
+          (e0 * w, quad_coeff * w)
         })
         .reduce(
           || (E::Scalar::ZERO, E::Scalar::ZERO),
@@ -322,40 +322,28 @@ where
       T_cur = poly_t.evaluate(&r_b);
 
       // Fold A/B/C layers for next round (weights 1-r_b, r_b)
-      let mut next_A: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
-      let mut next_B: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
-      let mut next_C: Vec<Vec<E::Scalar>> = Vec::with_capacity(pairs);
-      next_A.par_extend((0..pairs).into_par_iter().map(|i| {
-        let lo = 2 * i;
-        let hi = lo + 1;
-        let mut v = vec![E::Scalar::ZERO; chunk_len];
-        v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = A_layers[lo][k] + (A_layers[hi][k] - A_layers[lo][k]) * r_b;
-        });
-        v
-      }));
-      next_B.par_extend((0..pairs).into_par_iter().map(|i| {
-        let lo = 2 * i;
-        let hi = lo + 1;
-        let mut v = vec![E::Scalar::ZERO; chunk_len];
-        v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = B_layers[lo][k] + (B_layers[hi][k] - B_layers[lo][k]) * r_b;
-        });
-        v
-      }));
-      next_C.par_extend((0..pairs).into_par_iter().map(|i| {
-        let lo = 2 * i;
-        let hi = lo + 1;
-        let mut v = vec![E::Scalar::ZERO; chunk_len];
-        v.iter_mut().enumerate().for_each(|(k, val)| {
-          *val = C_layers[lo][k] + (C_layers[hi][k] - C_layers[lo][k]) * r_b;
-        });
-        v
-      }));
-
+      let mut next_A = vec![vec![]; m];
+      let mut next_B = vec![vec![]; m];
+      let mut next_C = vec![vec![]; m];
+      for i in 0..m {
+        let t = if i & 1 == 0 { i >> 1 } else { (i >> 1) + pairs };
+        next_A[t] = std::mem::take(&mut A_layers[i]);
+        next_B[t] = std::mem::take(&mut B_layers[i]);
+        next_C[t] = std::mem::take(&mut C_layers[i]);
+      }
       A_layers = next_A;
       B_layers = next_B;
       C_layers = next_C;
+
+      for matrix_layer in [&mut A_layers, &mut B_layers, &mut C_layers] {
+        let (low, high) = matrix_layer.split_at_mut(pairs);
+        low.iter_mut().zip(high.iter()).for_each(|(lo, hi)| {
+          lo.iter_mut().zip(hi.iter()).for_each(|(l, h)| {
+            *l += mul_opt(&(*h - *l), &r_b);
+          });
+        });
+        matrix_layer.truncate(pairs);
+      }
 
       // m becomes ceil(m/2)
       m = pairs;
