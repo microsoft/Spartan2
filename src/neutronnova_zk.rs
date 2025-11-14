@@ -95,6 +95,7 @@ where
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   #[inline]
   fn prove_helper(
+    round: usize,
     (left, right): (usize, usize),
     e: &[E::Scalar],
     Az1: &[E::Scalar],
@@ -116,50 +117,88 @@ where
     let comb_func = |c1: &E::Scalar, c2: &E::Scalar, c3: &E::Scalar, c4: &E::Scalar| -> E::Scalar {
       *c1 * (*c2 * *c3 - *c4)
     };
-    let (eval_at_0, quad_coeff) = (0..right)
-      .into_par_iter()
-      .map(|i| {
-        let (mut i_eval_at_0, mut i_quad_coeff) = (0..left)
-          .into_par_iter()
-          .map(|j| {
-            // Turn the two dimensional (i, j) into a single dimension index
-            let k = i * left + j;
-            let poly_e_bound_point = e[j];
 
-            // eval 0: bound_func is A(low)
-            let eval_point_0 = comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k]);
+    let (eval_at_0, quad_coeff) = if round == 0 {
+      let quad_coeff = (0..right)
+        .into_par_iter()
+        .map(|i| {
+          let mut i_quad_coeff = (0..left)
+            .into_par_iter()
+            .map(|j| {
+              // Turn the two dimensional (i, j) into a single dimension index
+              let k = i * left + j;
+              let poly_e_bound_point = e[j];
 
-            // quad coeff
-            let poly_Az_bound_point = Az2[k] - Az1[k];
-            let poly_Bz_bound_point = Bz2[k] - Bz1[k];
-            let quad_coeff = mul_opt(
-              &mul_opt(&poly_Az_bound_point, &poly_Bz_bound_point),
-              &poly_e_bound_point,
+              // quad coeff
+              let poly_Az_bound_point = Az2[k] - Az1[k];
+              let poly_Bz_bound_point = Bz2[k] - Bz1[k];
+              let quad_coeff = mul_opt(
+                &mul_opt(&poly_Az_bound_point, &poly_Bz_bound_point),
+                &poly_e_bound_point,
+              );
+
+              quad_coeff
+            })
+            .reduce(|| E::Scalar::ZERO, |a, b| a + b);
+
+          let f = &e[left..];
+
+          let poly_f_bound_point = f[i];
+
+          // quad coeff
+          i_quad_coeff *= poly_f_bound_point;
+
+          i_quad_coeff
+        })
+        .reduce(|| E::Scalar::ZERO, |a, b| a + b);
+
+      (E::Scalar::ZERO, quad_coeff)
+    } else {
+      (0..right)
+        .into_par_iter()
+        .map(|i| {
+          let (mut i_eval_at_0, mut i_quad_coeff) = (0..left)
+            .into_par_iter()
+            .map(|j| {
+              // Turn the two dimensional (i, j) into a single dimension index
+              let k = i * left + j;
+              let poly_e_bound_point = e[j];
+
+              // eval 0: bound_func is A(low)
+              let eval_point_0 = comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k]);
+
+              // quad coeff
+              let poly_Az_bound_point = Az2[k] - Az1[k];
+              let poly_Bz_bound_point = Bz2[k] - Bz1[k];
+              let quad_coeff = mul_opt(
+                &mul_opt(&poly_Az_bound_point, &poly_Bz_bound_point),
+                &poly_e_bound_point,
+              );
+
+              (eval_point_0, quad_coeff)
+            })
+            .reduce(
+              || (E::Scalar::ZERO, E::Scalar::ZERO),
+              |a, b| (a.0 + b.0, a.1 + b.1),
             );
 
-            (eval_point_0, quad_coeff)
-          })
-          .reduce(
-            || (E::Scalar::ZERO, E::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1),
-          );
+          let f = &e[left..];
 
-        let f = &e[left..];
+          let poly_f_bound_point = f[i];
 
-        let poly_f_bound_point = f[i];
+          // eval 0: bound_func is A(low)
+          i_eval_at_0 *= poly_f_bound_point;
 
-        // eval 0: bound_func is A(low)
-        i_eval_at_0 *= poly_f_bound_point;
+          // quad coeff
+          i_quad_coeff *= poly_f_bound_point;
 
-        // quad coeff
-        i_quad_coeff *= poly_f_bound_point;
-
-        (i_eval_at_0, i_quad_coeff)
-      })
-      .reduce(
-        || (E::Scalar::ZERO, E::Scalar::ZERO),
-        |a, b| (a.0 + b.0, a.1 + b.1),
-      );
+          (i_eval_at_0, i_quad_coeff)
+        })
+        .reduce(
+          || (E::Scalar::ZERO, E::Scalar::ZERO),
+          |a, b| (a.0 + b.0, a.1 + b.1),
+        )
+    };
 
     (eval_at_0, quad_coeff)
   }
@@ -275,6 +314,7 @@ where
         .enumerate()
         .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
           let (e0, quad_coeff) = Self::prove_helper(
+            t,
             (left, right),
             &E_eq,
             &pair_a[0],
