@@ -639,7 +639,7 @@ impl<E: Engine> SumcheckProof<E> {
         // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs(poly_A, poly_B, poly_C);
+          eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -1238,6 +1238,7 @@ pub(crate) mod eq_sumcheck {
     #[inline]
     pub fn evaluation_points_cubic_with_three_inputs(
       &self,
+      round: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
       poly_B: &MultilinearPolynomial<E::Scalar>,
       poly_C: &MultilinearPolynomial<E::Scalar>,
@@ -1263,7 +1264,7 @@ pub(crate) mod eq_sumcheck {
             let (zero_c, one_c) = c;
 
             let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(zero_a, one_a, zero_b, one_b, zero_c, one_c);
+              eval_one_case_cubic_three_inputs(round, zero_a, one_a, zero_b, one_b, zero_c, one_c);
 
             let factor = poly_eq_left[id >> second_half] * poly_eq_right[id & low_mask];
 
@@ -1286,7 +1287,7 @@ pub(crate) mod eq_sumcheck {
             let (zero_c, one_c) = c;
 
             let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(zero_a, one_a, zero_b, one_b, zero_c, one_c);
+              eval_one_case_cubic_three_inputs(round, zero_a, one_a, zero_b, one_b, zero_c, one_c);
 
             let factor = poly_eq_right;
 
@@ -1367,6 +1368,7 @@ pub(crate) mod eq_sumcheck {
 
   #[inline]
   fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
+    round: usize,
     zero_a: &Scalar,
     one_a: &Scalar,
     zero_b: &Scalar,
@@ -1374,7 +1376,11 @@ pub(crate) mod eq_sumcheck {
     zero_c: &Scalar,
     one_c: &Scalar,
   ) -> (Scalar, Scalar, Scalar) {
-    let eval_0 = *zero_a * *zero_b - *zero_c;
+    let eval_0 = if round == 0 {
+      Scalar::ZERO
+    } else {
+      *zero_a * *zero_b - *zero_c
+    };
 
     let double_one_a = one_a.double();
     let double_one_b = one_b.double();
