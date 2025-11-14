@@ -2,12 +2,11 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, start_span, zip_with, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial, zip_with_for_each};
 use core::ops::Index;
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
@@ -83,39 +82,6 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       })
       .collect()
   }
-
-  /// Evaluates the polynomial at the given point.
-  /// Returns Z(r) in O(n) time.
-  ///
-  /// The point must have a value for each variable.
-  pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
-    // r must have a value for each variable
-    let chis = EqPolynomial::evals_from_points(r);
-
-    zip_with!(
-      (chis.into_par_iter(), self.Z.par_iter()),
-      |chi_i, Z_i| chi_i * Z_i
-    )
-    .sum()
-  }
-
-  /// Evaluates the polynomial with the given evaluations and point.
-  pub fn evaluate_with(Z: &[Scalar], r: &[Scalar]) -> Scalar {
-    let (_eval_span, eval_t) =
-      start_span!("multilinear_evaluate_with", vars = r.len(), evals = Z.len());
-
-    let result = zip_with!(
-      (
-        EqPolynomial::evals_from_points(r).into_par_iter(),
-        Z.par_iter()
-      ),
-      |a, b| a * b
-    )
-    .sum();
-
-    info!(elapsed_ms = %eval_t.elapsed().as_millis(), vars = r.len(), evals = Z.len(), "multilinear_evaluate_with");
-    result
-  }
 }
 
 impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
@@ -164,8 +130,38 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::provider::pasta::pallas;
+  use crate::{provider::pasta::pallas, zip_with};
   use rand_core::{CryptoRng, OsRng, RngCore};
+
+  /// Evaluates the polynomial at the given point.
+  /// Returns Z(r) in O(n) time.
+  ///
+  /// The point must have a value for each variable.
+  pub fn evaluate<Scalar: PrimeField>(
+    poly: &MultilinearPolynomial<Scalar>,
+    r: &[Scalar],
+  ) -> Scalar {
+    // r must have a value for each variable
+    let chis = EqPolynomial::evals_from_points(r);
+
+    zip_with!(
+      (chis.into_par_iter(), poly.Z.par_iter()),
+      |chi_i, Z_i| chi_i * Z_i
+    )
+    .sum()
+  }
+
+  /// Evaluates the polynomial with the given evaluations and point.
+  pub fn evaluate_with<Scalar: PrimeField>(Z: &[Scalar], r: &[Scalar]) -> Scalar {
+    zip_with!(
+      (
+        EqPolynomial::evals_from_points(r).into_par_iter(),
+        Z.par_iter()
+      ),
+      |a, b| a * b
+    )
+    .sum()
+  }
 
   fn test_multilinear_polynomial_with<F: PrimeField>() {
     // Let the polynomial has 3 variables, p(x_1, x_2, x_3) = (x_1 + x_2) * x_3
@@ -186,9 +182,9 @@ mod tests {
     let m_poly = MultilinearPolynomial::<F>::new(Z.clone());
 
     let x = vec![F::ONE, F::ONE, F::ONE];
-    assert_eq!(m_poly.evaluate(x.as_slice()), TWO);
+    assert_eq!(evaluate(&m_poly, x.as_slice()), TWO);
 
-    let y = MultilinearPolynomial::<F>::evaluate_with(Z.as_slice(), x.as_slice());
+    let y = evaluate_with(Z.as_slice(), x.as_slice());
     assert_eq!(y, TWO);
   }
 
@@ -206,7 +202,7 @@ mod tests {
     // check evaluations
     assert_eq!(
       m_poly.evaluate(x.as_slice()),
-      m_poly_dense.evaluate(x.as_slice())
+      evaluate(&m_poly_dense, x.as_slice())
     );
   }
 
@@ -237,7 +233,7 @@ mod tests {
     // g(3, 4) = 8*(1 - 3)(1 - 4) + 8*(1-3)(4) + 8*(3)(1-4) + 8*(3)(4) = 48 + -64 + -72 + 96  = 8
     // g(5, 10) = 8*(1 - 5)(1 - 10) + 8*(1 - 5)(10) + 8*(5)(1-10) + 8*(5)(10) = 96 + -16 + -72 + 96  = 8
     assert_eq!(
-      dense_poly.evaluate(vec![F::from(3), F::from(4)].as_slice()),
+      evaluate(&dense_poly, vec![F::from(3), F::from(4)].as_slice()),
       F::from(8)
     );
   }
@@ -292,7 +288,7 @@ mod tests {
         .take(n)
         .collect();
       // this shows the order in which coordinates are evaluated
-      assert_eq!(poly.evaluate(&pt), bind_sequence(&poly, &pt).Z[0])
+      assert_eq!(evaluate(&poly, &pt), bind_sequence(&poly, &pt).Z[0])
     }
   }
 

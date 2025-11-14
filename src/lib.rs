@@ -21,6 +21,7 @@ mod math;
 mod nifs;
 mod polys;
 mod r1cs;
+mod sumcheck;
 mod zk;
 
 #[macro_use]
@@ -30,7 +31,6 @@ mod macros;
 pub mod bellpepper;
 pub mod errors;
 pub mod provider;
-pub mod sumcheck;
 pub mod traits;
 
 // public modules for different proof systems
