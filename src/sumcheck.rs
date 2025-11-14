@@ -515,7 +515,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// Zero-knowledge outer sum-check for the cubic-with-additive-term case.
   pub fn prove_cubic_with_additive_term_zk(
     num_rounds: usize,
-    poly_tau: &mut MultilinearPolynomial<E::Scalar>,
+    taus: &[E::Scalar],
     poly_Az: &mut MultilinearPolynomial<E::Scalar>,
     poly_Bz: &mut MultilinearPolynomial<E::Scalar>,
     poly_Cz: &mut MultilinearPolynomial<E::Scalar>,
@@ -527,16 +527,13 @@ impl<E: Engine> SumcheckProof<E> {
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_outer_round = E::Scalar::ZERO;
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.to_vec());
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
 
-      let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
-        *a * (*b * *c - *d)
-      };
-      let (eval0, eval2, eval3) = Self::compute_eval_points_cubic_with_additive_term(
-        poly_tau, poly_Az, poly_Bz, poly_Cz, &comb,
-      );
+      let (eval0, eval2, eval3) =
+        eq_instance.evaluation_points_cubic_with_three_inputs(i, poly_Az, poly_Bz, poly_Cz);
       let evals = vec![eval0, claim_outer_round - eval0, eval2, eval3];
       let poly = UniPoly::from_evals(&evals)?;
       verifier_circuit.outer_polys[i] = [
@@ -561,15 +558,15 @@ impl<E: Engine> SumcheckProof<E> {
       claim_outer_round = poly.evaluate(&chals[0]);
 
       rayon::join(
-        || poly_tau.bind_poly_var_top(&chals[0]),
+        || poly_Az.bind_poly_var_top(&chals[0]),
         || {
           rayon::join(
-            || poly_Az.bind_poly_var_top(&chals[0]),
             || poly_Bz.bind_poly_var_top(&chals[0]),
+            || poly_Cz.bind_poly_var_top(&chals[0]),
           );
-          poly_Cz.bind_poly_var_top(&chals[0]);
         },
       );
+      eq_instance.bound(&chals[0]);
     }
 
     Ok(r_x)
