@@ -251,88 +251,6 @@ impl<E: Engine> SumcheckProof<E> {
     ))
   }
 
-  /// Proves a batch of quadratic combinations of two multilinear polynomials.
-  pub fn prove_quad_batched<F>(
-    challenge: &E::Scalar,
-    claims: &[E::Scalar; 2],
-    num_rounds: usize,
-    poly_A_0: &mut MultilinearPolynomial<E::Scalar>,
-    poly_A_1: &mut MultilinearPolynomial<E::Scalar>,
-    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
-    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
-    comb_func: F,
-    transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
-  where
-    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
-    let mut r: Vec<E::Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
-
-    // compute the joint claim for both sum-check instances
-    let mut claim_per_round = claims[0] + *challenge * claims[1];
-
-    for round in 0..num_rounds {
-      let (_round_span, round_t) = start_span!("sumcheck_quad_round", round = round);
-
-      let poly = {
-        let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
-        let (eval_point_0_0, eval_point_2_0) =
-          Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb_func);
-        let (eval_point_0_1, eval_point_2_1) =
-          Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb_func);
-
-        let eval_point_0 = eval_point_0_0 + *challenge * eval_point_0_1;
-        let eval_point_2 = eval_point_2_0 + *challenge * eval_point_2_1;
-
-        if eval_t.elapsed().as_millis() > 0 {
-          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
-        }
-
-        let evals = vec![eval_point_0, claim_per_round - eval_point_0, eval_point_2];
-        UniPoly::from_evals(&evals)?
-      };
-
-      // append the prover's message to the transcript
-      transcript.absorb(b"p", &poly);
-
-      //derive the verifier's challenge for the next round
-      let r_i = transcript.squeeze(b"c")?;
-      r.push(r_i);
-      polys.push(poly.compress());
-
-      // Set up next round
-      claim_per_round = poly.evaluate(&r_i);
-
-      // bind all tables to the verifier's challenge
-      let (_bind_span, bind_t) = start_span!("bind_poly_vars_quad");
-      rayon::join(
-        || {
-          rayon::join(
-            || poly_A_0.bind_poly_var_top(&r_i),
-            || poly_B_0.bind_poly_var_top(&r_i),
-          )
-        },
-        || {
-          rayon::join(
-            || poly_A_1.bind_poly_var_top(&r_i),
-            || poly_B_1.bind_poly_var_top(&r_i),
-          )
-        },
-      );
-      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars_quad");
-      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_quad_round");
-    }
-
-    Ok((
-      SumcheckProof {
-        compressed_polys: polys,
-      },
-      r,
-      vec![poly_A_0[0], poly_A_1[0], poly_B_0[0], poly_B_1[0]],
-    ))
-  }
-
   #[inline]
   /// Computes evaluation points for a cubic polynomial with additive term.
   ///
@@ -521,100 +439,6 @@ impl<E: Engine> SumcheckProof<E> {
     )
   }
 
-  /// Generates a sum-check proof for a cubic combination with additive term of four multilinear polynomials.
-  ///
-  /// # Arguments
-  /// * `claim` - The claimed sum over the hypercube
-  /// * `num_rounds` - The number of variables/rounds in the sum-check
-  /// * `poly_A` - First multilinear polynomial (mutable, will be bound during protocol)
-  /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)
-  /// * `poly_C` - Third multilinear polynomial (mutable, will be bound during protocol)
-  /// * `poly_D` - Fourth multilinear polynomial (mutable, will be bound during protocol)
-  /// * `comb_func` - Function that combines evaluations of the four polynomials
-  /// * `transcript` - The transcript for generating randomness
-  ///
-  /// # Returns
-  /// A tuple containing the sum-check proof, the sequence of verifier challenges,
-  /// and the final evaluations of the polynomials.
-  pub fn prove_cubic_with_additive_term<F>(
-    claim: &E::Scalar,
-    num_rounds: usize,
-    poly_A: &mut MultilinearPolynomial<E::Scalar>,
-    poly_B: &mut MultilinearPolynomial<E::Scalar>,
-    poly_C: &mut MultilinearPolynomial<E::Scalar>,
-    poly_D: &mut MultilinearPolynomial<E::Scalar>,
-    comb_func: F,
-    transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
-  where
-    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
-    let mut r: Vec<E::Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
-    let mut claim_per_round = *claim;
-
-    for round in 0..num_rounds {
-      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
-
-      let poly = {
-        // Make an iterator returning the contributions to the evaluations
-        let (_eval_span, eval_t) = start_span!("compute_eval_points");
-        let (eval_point_0, eval_point_2, eval_point_3) =
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A, poly_B, poly_C, poly_D, &comb_func,
-          );
-        if eval_t.elapsed().as_millis() > 0 {
-          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
-        }
-        let evals = vec![
-          eval_point_0,
-          claim_per_round - eval_point_0,
-          eval_point_2,
-          eval_point_3,
-        ];
-        UniPoly::from_evals(&evals)?
-      };
-
-      // append the prover's message to the transcript
-      transcript.absorb(b"p", &poly);
-
-      //derive the verifier's challenge for the next round
-      let r_i = transcript.squeeze(b"c")?;
-      r.push(r_i);
-      polys.push(poly.compress());
-
-      // Set up next round
-      claim_per_round = poly.evaluate(&r_i);
-
-      // bound all tables to the verifier's challenge
-      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
-      rayon::join(
-        || {
-          rayon::join(
-            || poly_A.bind_poly_var_top(&r_i),
-            || poly_B.bind_poly_var_top(&r_i),
-          )
-        },
-        || {
-          rayon::join(
-            || poly_C.bind_poly_var_top(&r_i),
-            || poly_D.bind_poly_var_top(&r_i),
-          )
-        },
-      );
-      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
-      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
-    }
-
-    Ok((
-      SumcheckProof {
-        compressed_polys: polys,
-      },
-      r,
-      vec![poly_A[0], poly_B[0], poly_C[0], poly_D[0]],
-    ))
-  }
-
   /// Prove poly_A * poly_B - poly_C using optimized equality polynomial handling
   pub fn prove_cubic_with_three_inputs(
     claim: &E::Scalar,
@@ -639,7 +463,7 @@ impl<E: Engine> SumcheckProof<E> {
         // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs(poly_A, poly_B, poly_C);
+          eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -691,7 +515,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// Zero-knowledge outer sum-check for the cubic-with-additive-term case.
   pub fn prove_cubic_with_additive_term_zk(
     num_rounds: usize,
-    poly_tau: &mut MultilinearPolynomial<E::Scalar>,
+    taus: &[E::Scalar],
     poly_Az: &mut MultilinearPolynomial<E::Scalar>,
     poly_Bz: &mut MultilinearPolynomial<E::Scalar>,
     poly_Cz: &mut MultilinearPolynomial<E::Scalar>,
@@ -703,16 +527,13 @@ impl<E: Engine> SumcheckProof<E> {
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_outer_round = E::Scalar::ZERO;
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.to_vec());
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
 
-      let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
-        *a * (*b * *c - *d)
-      };
-      let (eval0, eval2, eval3) = Self::compute_eval_points_cubic_with_additive_term(
-        poly_tau, poly_Az, poly_Bz, poly_Cz, &comb,
-      );
+      let (eval0, eval2, eval3) =
+        eq_instance.evaluation_points_cubic_with_three_inputs(i, poly_Az, poly_Bz, poly_Cz);
       let evals = vec![eval0, claim_outer_round - eval0, eval2, eval3];
       let poly = UniPoly::from_evals(&evals)?;
       verifier_circuit.outer_polys[i] = [
@@ -737,15 +558,15 @@ impl<E: Engine> SumcheckProof<E> {
       claim_outer_round = poly.evaluate(&chals[0]);
 
       rayon::join(
-        || poly_tau.bind_poly_var_top(&chals[0]),
+        || poly_Az.bind_poly_var_top(&chals[0]),
         || {
           rayon::join(
-            || poly_Az.bind_poly_var_top(&chals[0]),
             || poly_Bz.bind_poly_var_top(&chals[0]),
+            || poly_Cz.bind_poly_var_top(&chals[0]),
           );
-          poly_Cz.bind_poly_var_top(&chals[0]);
         },
       );
+      eq_instance.bound(&chals[0]);
     }
 
     Ok(r_x)
@@ -799,125 +620,6 @@ impl<E: Engine> SumcheckProof<E> {
     }
 
     Ok((r_y, vec![poly_ABC[0], poly_z[0]]))
-  }
-
-  /// Generates a batched sum-check proof for a cubic combination with additive term of four multilinear polynomials.
-  pub fn prove_cubic_with_additive_term_batched<F>(
-    challenge: &E::Scalar,
-    claims: &[E::Scalar; 2],
-    num_rounds: usize,
-    poly_A: &mut MultilinearPolynomial<E::Scalar>,
-    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
-    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
-    poly_C_0: &mut MultilinearPolynomial<E::Scalar>,
-    poly_C_1: &mut MultilinearPolynomial<E::Scalar>,
-    poly_D_0: &mut MultilinearPolynomial<E::Scalar>,
-    poly_D_1: &mut MultilinearPolynomial<E::Scalar>,
-    comb_func: F,
-    transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
-  where
-    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
-    let mut r: Vec<E::Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
-
-    // compute the joint claim for both sum-check instances
-    let mut claim_per_round = claims[0] + *challenge * claims[1];
-
-    for round in 0..num_rounds {
-      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
-
-      let poly = {
-        // Make an iterator returning the contributions to the evaluations
-        let (_eval_span, eval_t) = start_span!("compute_eval_points");
-        let (eval_point_0_0, eval_point_2_0, eval_point_3_0) =
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A, poly_B_0, poly_C_0, poly_D_0, &comb_func,
-          );
-        let (eval_point_0_1, eval_point_2_1, eval_point_3_1) =
-          Self::compute_eval_points_cubic_with_additive_term(
-            poly_A, poly_B_1, poly_C_1, poly_D_1, &comb_func,
-          );
-
-        let eval_point_0 = eval_point_0_0 + *challenge * eval_point_0_1;
-        let eval_point_2 = eval_point_2_0 + *challenge * eval_point_2_1;
-        let eval_point_3 = eval_point_3_0 + *challenge * eval_point_3_1;
-
-        if eval_t.elapsed().as_millis() > 0 {
-          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
-        }
-        let evals = vec![
-          eval_point_0,
-          claim_per_round - eval_point_0,
-          eval_point_2,
-          eval_point_3,
-        ];
-        UniPoly::from_evals(&evals)?
-      };
-
-      // append the prover's message to the transcript
-      transcript.absorb(b"p", &poly);
-
-      //derive the verifier's challenge for the next round
-      let r_i = transcript.squeeze(b"c")?;
-      r.push(r_i);
-      polys.push(poly.compress());
-
-      // Set up next round
-      claim_per_round = poly.evaluate(&r_i);
-
-      // bound all tables to the verifier's challenge
-      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
-      rayon::join(
-        || {
-          rayon::join(
-            || poly_A.bind_poly_var_top(&r_i),
-            || poly_B_0.bind_poly_var_top(&r_i),
-          );
-        },
-        || {
-          rayon::join(
-            || {
-              rayon::join(
-                || poly_B_1.bind_poly_var_top(&r_i),
-                || poly_C_0.bind_poly_var_top(&r_i),
-              );
-            },
-            || {
-              rayon::join(
-                || poly_C_1.bind_poly_var_top(&r_i),
-                || {
-                  rayon::join(
-                    || poly_D_0.bind_poly_var_top(&r_i),
-                    || poly_D_1.bind_poly_var_top(&r_i),
-                  );
-                },
-              );
-            },
-          );
-        },
-      );
-
-      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
-      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
-    }
-
-    Ok((
-      SumcheckProof {
-        compressed_polys: polys,
-      },
-      r,
-      vec![
-        poly_A[0],
-        poly_B_0[0],
-        poly_B_1[0],
-        poly_C_0[0],
-        poly_C_1[0],
-        poly_D_0[0],
-        poly_D_1[0],
-      ],
-    ))
   }
 
   /// Executes a **quadratic** batched sum-check in zero-knowledge mode and returns the
@@ -1238,6 +940,7 @@ pub(crate) mod eq_sumcheck {
     #[inline]
     pub fn evaluation_points_cubic_with_three_inputs(
       &self,
+      round_idx: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
       poly_B: &MultilinearPolynomial<E::Scalar>,
       poly_C: &MultilinearPolynomial<E::Scalar>,
@@ -1262,8 +965,9 @@ pub(crate) mod eq_sumcheck {
             let (zero_b, one_b) = b;
             let (zero_c, one_c) = c;
 
-            let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(zero_a, one_a, zero_b, one_b, zero_c, one_c);
+            let (eval_0, eval_2, eval_3) = eval_one_case_cubic_three_inputs(
+              round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+            );
 
             let factor = poly_eq_left[id >> second_half] * poly_eq_right[id & low_mask];
 
@@ -1285,8 +989,9 @@ pub(crate) mod eq_sumcheck {
             let (zero_b, one_b) = b;
             let (zero_c, one_c) = c;
 
-            let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(zero_a, one_a, zero_b, one_b, zero_c, one_c);
+            let (eval_0, eval_2, eval_3) = eval_one_case_cubic_three_inputs(
+              round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+            );
 
             let factor = poly_eq_right;
 
@@ -1367,6 +1072,7 @@ pub(crate) mod eq_sumcheck {
 
   #[inline]
   fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
+    round_idx: usize,
     zero_a: &Scalar,
     one_a: &Scalar,
     zero_b: &Scalar,
@@ -1374,7 +1080,20 @@ pub(crate) mod eq_sumcheck {
     zero_c: &Scalar,
     one_c: &Scalar,
   ) -> (Scalar, Scalar, Scalar) {
-    let eval_0 = *zero_a * *zero_b - *zero_c;
+    // Optimization: In the first round (round == 0), eval_0 is always ZERO.
+    // This is mathematically correct because in round 0 of the sumcheck protocol with equality
+    // polynomials, when evaluating at point 0, the equality polynomial factor eq(tau, 0, ...)
+    // evaluates to (1 - tau_0) for the first variable. The sumcheck instance's update_evals
+    // method multiplies eval_0 by eq_tau_0_p, which for round 0 equals (1 - tau_0) * eval_eq_left.
+    // The contribution from eval_0 to the final sum is zero in this case due to the structure of
+    // the equality polynomial and how it combines with the cubic terms in the first round.
+    // This optimization avoids unnecessary computation of zero_a * zero_b - zero_c when the result
+    // will be zeroed out anyway by the equality polynomial evaluation at point 0 in round 0.
+    let eval_0 = if round_idx == 0 {
+      Scalar::ZERO
+    } else {
+      *zero_a * *zero_b - *zero_c
+    };
 
     let double_one_a = one_a.double();
     let double_one_b = one_b.double();

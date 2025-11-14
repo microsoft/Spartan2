@@ -95,6 +95,7 @@ where
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   #[inline]
   fn prove_helper(
+    round: usize,
     (left, right): (usize, usize),
     e: &[E::Scalar],
     Az1: &[E::Scalar],
@@ -116,6 +117,7 @@ where
     let comb_func = |c1: &E::Scalar, c2: &E::Scalar, c3: &E::Scalar, c4: &E::Scalar| -> E::Scalar {
       *c1 * (*c2 * *c3 - *c4)
     };
+
     let (eval_at_0, quad_coeff) = (0..right)
       .into_par_iter()
       .map(|i| {
@@ -127,7 +129,16 @@ where
             let poly_e_bound_point = e[j];
 
             // eval 0: bound_func is A(low)
-            let eval_point_0 = comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k]);
+            // Optimization: In round 0, the target value T_cur = 0. The sumcheck polynomial
+            // constructed from eval_point_0 and quad_coeff must satisfy T_cur when evaluated
+            // at rho_t. Since T_cur = 0 in the first round, we can skip computing eval_point_0
+            // (which would be e[j] * (Az1[k] * Bz1[k] - Cz1[k])) and use ZERO directly without
+            // affecting the correctness of the folding protocol.
+            let eval_point_0 = if round == 0 {
+              E::Scalar::ZERO
+            } else {
+              comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k])
+            };
 
             // quad coeff
             let poly_Az_bound_point = Az2[k] - Az1[k];
@@ -275,6 +286,7 @@ where
         .enumerate()
         .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
           let (e0, quad_coeff) = Self::prove_helper(
+            t,
             (left, right),
             &E_eq,
             &pair_a[0],

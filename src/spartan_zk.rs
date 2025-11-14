@@ -237,13 +237,12 @@ where
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (pk.S.num_cons.log_2(), num_vars.log_2() + 1);
 
-    // Build tau and Az/Bz/Cz polynomials
-    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
-    let tau = (0..num_rounds_x)
+    // Sample tau challenges used for the outer equality polynomial
+    let (_taus_span, taus_t) = start_span!("sample_taus");
+    let taus = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
-      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-    let mut poly_tau = MultilinearPolynomial::new(tau.evals());
-    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
+      .collect::<Result<Vec<_>, SpartanError>>()?;
+    info!(elapsed_ms = %taus_t.elapsed().as_millis(), "sample_taus");
 
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
@@ -268,7 +267,7 @@ where
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_zk(
       num_rounds_x,
-      &mut poly_tau,
+      &taus,
       &mut poly_Az,
       &mut poly_Bz,
       &mut poly_Cz,
@@ -284,7 +283,7 @@ where
     verifier_circuit.claim_Az = poly_Az[0];
     verifier_circuit.claim_Bz = poly_Bz[0];
     verifier_circuit.claim_Cz = poly_Cz[0];
-    verifier_circuit.tau_at_rx = poly_tau[0];
+    verifier_circuit.tau_at_rx = EqPolynomial::new(taus).evaluate(&r_x);
 
     // Process the "outer final" round in the circuit and capture challenge
     let chals = SatisfyingAssignment::<E>::process_round(
