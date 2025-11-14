@@ -129,6 +129,11 @@ where
             let poly_e_bound_point = e[j];
 
             // eval 0: bound_func is A(low)
+            // Optimization: In round 0, the target value T_cur = 0. The sumcheck polynomial
+            // constructed from eval_point_0 and quad_coeff must satisfy T_cur when evaluated
+            // at rho_t. Since T_cur = 0 in the first round, we can skip computing eval_point_0
+            // (which would be e[j] * (Az1[k] * Bz1[k] - Cz1[k])) and use ZERO directly without
+            // affecting the correctness of the folding protocol.
             let eval_point_0 = if round == 0 {
               E::Scalar::ZERO
             } else {

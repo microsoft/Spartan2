@@ -940,7 +940,7 @@ pub(crate) mod eq_sumcheck {
     #[inline]
     pub fn evaluation_points_cubic_with_three_inputs(
       &self,
-      round: usize,
+      round_idx: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
       poly_B: &MultilinearPolynomial<E::Scalar>,
       poly_C: &MultilinearPolynomial<E::Scalar>,
@@ -966,7 +966,7 @@ pub(crate) mod eq_sumcheck {
             let (zero_c, one_c) = c;
 
             let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(round, zero_a, one_a, zero_b, one_b, zero_c, one_c);
+              eval_one_case_cubic_three_inputs(round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c);
 
             let factor = poly_eq_left[id >> second_half] * poly_eq_right[id & low_mask];
 
@@ -989,7 +989,7 @@ pub(crate) mod eq_sumcheck {
             let (zero_c, one_c) = c;
 
             let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(round, zero_a, one_a, zero_b, one_b, zero_c, one_c);
+              eval_one_case_cubic_three_inputs(round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c);
 
             let factor = poly_eq_right;
 
@@ -1070,7 +1070,7 @@ pub(crate) mod eq_sumcheck {
 
   #[inline]
   fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
-    round: usize,
+    round_idx: usize,
     zero_a: &Scalar,
     one_a: &Scalar,
     zero_b: &Scalar,
@@ -1087,7 +1087,7 @@ pub(crate) mod eq_sumcheck {
     // the equality polynomial and how it combines with the cubic terms in the first round.
     // This optimization avoids unnecessary computation of zero_a * zero_b - zero_c when the result
     // will be zeroed out anyway by the equality polynomial evaluation at point 0 in round 0.
-    let eval_0 = if round == 0 {
+    let eval_0 = if round_idx == 0 {
       Scalar::ZERO
     } else {
       *zero_a * *zero_b - *zero_c
