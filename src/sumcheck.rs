@@ -965,8 +965,9 @@ pub(crate) mod eq_sumcheck {
             let (zero_b, one_b) = b;
             let (zero_c, one_c) = c;
 
-            let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c);
+            let (eval_0, eval_2, eval_3) = eval_one_case_cubic_three_inputs(
+              round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+            );
 
             let factor = poly_eq_left[id >> second_half] * poly_eq_right[id & low_mask];
 
@@ -988,8 +989,9 @@ pub(crate) mod eq_sumcheck {
             let (zero_b, one_b) = b;
             let (zero_c, one_c) = c;
 
-            let (eval_0, eval_2, eval_3) =
-              eval_one_case_cubic_three_inputs(round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c);
+            let (eval_0, eval_2, eval_3) = eval_one_case_cubic_three_inputs(
+              round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+            );
 
             let factor = poly_eq_right;
 
