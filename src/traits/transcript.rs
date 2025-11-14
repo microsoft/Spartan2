@@ -19,6 +19,20 @@ pub trait TranscriptEngineTrait<E: Engine>: Send + Sync {
   /// returns a scalar element of the group as a challenge
   fn squeeze(&mut self, label: &'static [u8]) -> Result<E::Scalar, SpartanError>;
 
+  /// returns a vector of scalar element's of the group as a challenge
+  fn squeeze_scalar_powers(
+    &mut self,
+    len: usize,
+    label: &'static [u8],
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
+    let r = self.squeeze(label)?;
+    let mut r_vec = vec![r; len];
+    for i in 1..len {
+      r_vec[i] = r_vec[i - 1] * r;
+    }
+    Ok(r_vec)
+  }
+
   /// absorbs any type that implements `TranscriptReprTrait` under a label
   fn absorb<T: TranscriptReprTrait<E::GE>>(&mut self, label: &'static [u8], o: &T);
 

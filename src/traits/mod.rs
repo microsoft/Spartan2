@@ -53,4 +53,7 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
 pub trait PrimeFieldExt: PrimeField {
   /// Returns a scalar representing the bytes
   fn from_uniform(bytes: &[u8]) -> Self;
+
+  /// Returns a scalar from an i64
+  fn from_i64(v: i64) -> Self;
 }
