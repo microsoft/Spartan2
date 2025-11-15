@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module implements NeutronNova's folding scheme for folding together a batch of R1CS instances
 //! This implementation focuses on a non-recursive version of NeutronNova and targets the case where the batch size is moderately large.
 //! Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding)

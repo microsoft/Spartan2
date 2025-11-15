@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module supports generating R1CS instance-witness pairs for test constraint systems.
 //! This currently does not support generating split R1CS instances, but it can be extended to do so.
 use crate::{

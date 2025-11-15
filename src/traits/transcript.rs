@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module provides the trait definitions for transcript functionality in the Spartan2 library.
 //! Transcripts are used for Fiat-Shamir transformations to make interactive proof systems non-interactive.
 use crate::{
