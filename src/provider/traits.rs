@@ -16,8 +16,8 @@
 //!
 //! Additionally, the module provides two macros for implementing these traits:
 //!
-//! - [`impl_traits_no_dlog_ext`]: Implements all traits except for `DlogGroupExt`
-//! - [`impl_traits`]: Implements all traits including `DlogGroupExt`
+//! - `impl_traits_no_dlog_ext!`: Implements all traits except for `DlogGroupExt`
+//! - `impl_traits!`: Implements all traits including `DlogGroupExt`
 //!
 //! These traits and macros provide a consistent interface for elliptic curve operations
 //! and other algebraic structures used throughout the Spartan proof system.
