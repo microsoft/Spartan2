@@ -74,6 +74,20 @@ impl<E: Engine> RelaxedR1CSWitness<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
+  /// Folds a relaxed R1CS witness with a regular R1CS witness using the challenge `r`.
+  ///
+  /// This computes the folded witness as:
+  /// - `W_new = W1 + r * W2`
+  /// - `E_new = E1 + r * T`
+  ///
+  /// # Arguments
+  /// * `W2` - The regular R1CS witness to fold with
+  /// * `T` - The cross-term vector
+  /// * `r_T` - The blinding factor for the cross-term
+  /// * `r` - The folding challenge
+  ///
+  /// # Returns
+  /// The folded relaxed R1CS witness, or an error if the dimensions don't match.
   pub fn fold(
     &self,
     W2: &R1CSWitness<E>,
@@ -125,6 +139,21 @@ impl<E: Engine> RelaxedR1CSInstance<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
+  /// Folds a relaxed R1CS instance with a regular R1CS instance using the challenge `r`.
+  ///
+  /// This computes the folded instance as:
+  /// - `comm_W_new = comm_W1 + r * comm_W2`
+  /// - `comm_E_new = comm_E1 + r * comm_T`
+  /// - `X_new = X1 + r * X2`
+  /// - `u_new = u1 + r`
+  ///
+  /// # Arguments
+  /// * `U2` - The regular R1CS instance to fold with
+  /// * `comm_T` - The commitment to the cross-term
+  /// * `r` - The folding challenge
+  ///
+  /// # Returns
+  /// The folded relaxed R1CS instance.
   pub fn fold(
     &self,
     U2: &R1CSInstance<E>,

@@ -4,7 +4,20 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
+//! Mathematical utility functions for Spartan.
+//!
+//! This module provides basic mathematical operations needed throughout the codebase,
+//! particularly for computing logarithms used in polynomial degree calculations.
+
+/// Trait providing mathematical utility functions.
 pub trait Math {
+  /// Computes the base-2 logarithm of the value.
+  ///
+  /// For powers of two, returns the exact logarithm.
+  /// For other values, returns the floor of the logarithm.
+  ///
+  /// # Panics
+  /// Panics if the value is zero.
   fn log_2(self) -> usize;
 }
 
