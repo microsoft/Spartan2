@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
 ///
-/// This is the dense representation of a multilinear poynomial.
+/// This is the dense representation of a multilinear polynomial.
 /// Let it be $\mathbb{G}(\cdot): \mathbb{F}^m \rightarrow \mathbb{F}$, it can be represented uniquely by the list of
 /// evaluations of $\mathbb{G}(\cdot)$ over the Boolean hypercube $\{0, 1\}^m$.
 ///
