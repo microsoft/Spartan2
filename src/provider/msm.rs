@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module provides a multi-scalar multiplication routine
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.

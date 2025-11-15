@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! examples/sha256.rs
 //! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
 //! circuit with varying message lengths

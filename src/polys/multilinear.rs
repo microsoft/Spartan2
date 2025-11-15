@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! Main components:
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.

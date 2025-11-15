@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module defines R1CS related types
 use crate::{
   Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, MULTIROUND_COMMITMENT_WIDTH, PCS,

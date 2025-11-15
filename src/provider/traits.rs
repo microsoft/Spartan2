@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! Provides traits and extensions for groups, discrete logarithm operations, and homomorphic commitments.
 //!
 //! This module defines several key traits that abstract over different cryptographic primitives:

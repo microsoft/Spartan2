@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! Support for generating R1CS using bellpepper.
 use crate::{
   Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, VerifierKey,

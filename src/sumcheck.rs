@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This module implements the sum-check protocol used in Spartan.
 //!
 //! The sum-check protocol allows a prover to convince a verifier that a claimed sum

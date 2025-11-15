@@ -1,3 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
 //! This library implements Spartan, a high-speed SNARK.
 //! We currently implement a non-preprocessing version of Spartan
 //! that is generic over the polynomial commitment and evaluation argument (i.e., a PCS).
