@@ -142,6 +142,18 @@ impl<E: Engine> SumcheckProof<E> {
     Ok((e, r))
   }
 
+  /// Computes evaluation points for a quadratic polynomial in the sum-check protocol.
+  ///
+  /// Given two multilinear polynomials A and B, computes evaluations at points 0 and 2
+  /// of the univariate polynomial formed by binding one variable using a combination function.
+  ///
+  /// # Arguments
+  /// * `poly_A` - First multilinear polynomial
+  /// * `poly_B` - Second multilinear polynomial
+  /// * `comb_func` - Function combining evaluations of A and B
+  ///
+  /// # Returns
+  /// A tuple `(eval_0, eval_2)` containing evaluations at points 0 and 2.
   #[inline]
   fn compute_eval_points_quad<F>(
     poly_A: &MultilinearPolynomial<E::Scalar>,
@@ -854,7 +866,7 @@ impl<E: Engine> SumcheckProof<E> {
 
 pub(crate) mod eq_sumcheck {
   //! This module implements the sumcheck optimization for equality polynomials.
-  //! The optimization is described in Section 5 of https://eprint.iacr.org/2025/1117 algorithm 5.
+  //! The optimization is described in Section 5 of <https://eprint.iacr.org/2025/1117> algorithm 5.
   use crate::{polys::multilinear::MultilinearPolynomial, traits::Engine};
   use ff::{Field, PrimeField};
   use rayon::{iter::ZipEq, prelude::*, slice::Iter};
@@ -1065,6 +1077,21 @@ pub(crate) mod eq_sumcheck {
     }
   }
 
+  /// Splits N slices in half and creates parallel zip iterators for each half.
+  ///
+  /// Helper function that takes an array of slices, splits each at the midpoint,
+  /// and returns an array of parallel zip iterators over the left and right halves.
+  ///
+  /// # Type Parameters
+  /// * `N` - Number of slices to split and zip
+  /// * `T` - Element type (must be `Sync` for parallel iteration)
+  ///
+  /// # Arguments
+  /// * `vec` - Array of slices to split
+  /// * `half_size` - Size of each half (should equal `vec[i].len() / 2`)
+  ///
+  /// # Returns
+  /// Array of parallel zip iterators, one for each input slice.
   #[inline]
   fn split_and_zip<const N: usize, T: Sync>(
     vec: [&[T]; N],
@@ -1076,6 +1103,20 @@ pub(crate) mod eq_sumcheck {
     })
   }
 
+  /// Evaluates a cubic polynomial at points 0, 2, and 3 for three-input case.
+  ///
+  /// Computes evaluation points for the sum-check protocol when combining three
+  /// multilinear polynomials using a cubic combination function. Uses cached
+  /// evaluations at 0 and 1 to efficiently compute the required evaluation points.
+  ///
+  /// # Arguments
+  /// * `round_idx` - Current round index in the sum-check protocol
+  /// * `zero_a`, `one_a` - Evaluations of polynomial A at 0 and 1
+  /// * `zero_b`, `one_b` - Evaluations of polynomial B at 0 and 1
+  /// * `zero_c`, `one_c` - Evaluations of polynomial C at 0 and 1
+  ///
+  /// # Returns
+  /// A tuple `(eval_0, eval_2, eval_3)` containing the evaluation points.
   #[inline]
   fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
     round_idx: usize,

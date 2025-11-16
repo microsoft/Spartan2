@@ -75,6 +75,16 @@ fn alloc_coeffs<E: Engine, CS: ConstraintSystem<E::Scalar>>(
     .collect::<Result<Vec<_>, _>>()
 }
 
+/// Enforces that the sum of polynomial coefficients equals the claimed value.
+///
+/// This constraint verifies that `poly[0] + poly[1] + ... + poly[n-1] + poly[0] = claim`.
+/// The doubling of `poly[0]` is intentional and corresponds to the sum-check protocol
+/// where the polynomial evaluated at 0 and 1 should sum to the claim.
+///
+/// # Arguments
+/// * `cs` - Constraint system for enforcing the constraint
+/// * `poly` - Polynomial coefficients as allocated numbers
+/// * `claim` - The claimed sum value
 fn enforce_sc_claim<E: Engine, CS: ConstraintSystem<E::Scalar>>(
   mut cs: CS,
   poly: &[AllocatedNum<E::Scalar>],
