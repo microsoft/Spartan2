@@ -37,6 +37,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "time"] }
 tikv-jemallocator = { version = "0.6.0", optional = true }
 
+# Dory-PC support via quarks-zk
+quarks-zk = { version = "0.1.2", optional = true }
+rand_chacha = { version = "0.3", optional = true }
+# ark crates for Dory serialization
+ark-serialize = { version = "0.4", optional = true }
+ark-ff = { version = "0.4", optional = true }
+ark-bls12-381 = { version = "0.4", optional = true }
+
 [target.wasm32-unknown-unknown.dependencies]
 # see https://github.com/rust-random/rand/pull/948
 getrandom = { version = "0.2.0", default-features = false, features = ["js"] }
@@ -47,11 +55,18 @@ hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
+criterion = "0.5"
+
+[[bench]]
+name = "pcs_comparison"
+harness = false
+required-features = ["dory"]
 
 
 [features]
 default = ["halo2curves/asm"]
 jem = ["tikv-jemallocator"]
+dory = ["quarks-zk", "rand_chacha", "ark-serialize", "ark-ff", "ark-bls12-381"]
 
 [profile.release]
 debug = 1

@@ -11,3 +11,7 @@ pub mod ipa;
 
 // implementations of polynomial commitment schemes
 pub mod hyrax_pc;
+
+/// Dory-PC polynomial commitment scheme adapter using quarks-zk
+#[cfg(feature = "dory")]
+pub mod dory_pc;

@@ -7,6 +7,7 @@
 //! This module implements Spartan's traits using the following several different combinations
 
 // public modules to be used as an commitment engine with Spartan
+pub mod bls12_381;
 pub mod keccak;
 pub mod pasta;
 pub mod pcs;
@@ -17,6 +18,7 @@ mod msm;
 
 use crate::{
   provider::{
+    bls12_381::g1,
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
     pcs::hyrax_pc::HyraxPCS,
@@ -26,6 +28,9 @@ use crate::{
 };
 use core::fmt::Debug;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "dory")]
+use crate::provider::pcs::dory_pc::DoryPCS;
 
 /// An implementation of the Spartan Engine trait with Pallas curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,6 +47,13 @@ pub struct P256HyraxEngine;
 /// An implementation of the Spartan Engine trait with T256 curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct T256HyraxEngine;
+
+/// An implementation of the Spartan Engine trait with BLS12-381 G1 curve and Hyrax commitment scheme
+///
+/// BLS12-381 is a pairing-friendly curve offering ~128 bits of security.
+/// This engine uses the G1 subgroup for commitments with Hyrax-PC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BLS12381HyraxEngine;
 
 impl Engine for PallasHyraxEngine {
   type Base = pallas::Base;
@@ -73,4 +85,29 @@ impl Engine for T256HyraxEngine {
   type GE = t256::Point;
   type TE = Keccak256Transcript<Self>;
   type PCS = HyraxPCS<Self>;
+}
+
+impl Engine for BLS12381HyraxEngine {
+  type Base = g1::Base;
+  type Scalar = g1::Scalar;
+  type GE = g1::Point;
+  type TE = Keccak256Transcript<Self>;
+  type PCS = HyraxPCS<Self>;
+}
+
+/// An implementation of the Spartan Engine trait with BLS12-381 curve and Dory commitment scheme
+///
+/// Dory-PC provides O(log n) verification complexity using pairings.
+/// This engine wraps quarks-zk's DoryPCS implementation.
+#[cfg(feature = "dory")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BLS12381DoryEngine;
+
+#[cfg(feature = "dory")]
+impl Engine for BLS12381DoryEngine {
+  type Base = g1::Base;
+  type Scalar = g1::Scalar;
+  type GE = g1::Point;
+  type TE = Keccak256Transcript<Self>;
+  type PCS = DoryPCS<Self>;
 }
