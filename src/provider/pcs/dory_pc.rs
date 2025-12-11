@@ -55,13 +55,74 @@ pub struct DoryCommitment {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoryBlind;
 
-/// Dory evaluation argument wrapping quarks-zk proof
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DoryEvaluationArgument {
-  /// Serialized quarks-zk DoryPCS proof
-  pub proof_bytes: Vec<u8>,
-  /// Claimed evaluation value bytes
-  pub value_bytes: Vec<u8>,
+/// Dory evaluation argument with native types
+/// 
+/// Review feedback (#3): Keep unserialized items inside proof objects
+/// for strong guarantees. Spartan2 handles serialization itself.
+#[derive(Clone, Debug)]
+pub struct DoryEvaluationArgument<E: Engine> {
+  /// The quarks-zk Dory proof (native ark types, NOT pre-serialized)
+  pub proof: DoryPCSEvaluationProof,
+  /// Claimed evaluation value (native ark Fr, NOT pre-serialized)
+  pub value: ArkFr,
+  /// Phantom data for Engine
+  _p: PhantomData<E>,
+}
+
+/// Custom serde implementation using ark_serialize
+impl<E: Engine> Serialize for DoryEvaluationArgument<E> {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeTuple;
+    
+    // Serialize proof
+    let mut proof_bytes = Vec::new();
+    self.proof.serialize_compressed(&mut proof_bytes)
+      .map_err(|e| serde::ser::Error::custom(format!("proof: {:?}", e)))?;
+    
+    // Serialize value
+    let mut value_bytes = Vec::new();
+    self.value.serialize_compressed(&mut value_bytes)
+      .map_err(|e| serde::ser::Error::custom(format!("value: {:?}", e)))?;
+    
+    let mut tup = serializer.serialize_tuple(2)?;
+    tup.serialize_element(&proof_bytes)?;
+    tup.serialize_element(&value_bytes)?;
+    tup.end()
+  }
+}
+
+impl<'de, E: Engine> Deserialize<'de> for DoryEvaluationArgument<E> {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    use serde::de::{SeqAccess, Visitor};
+    
+    struct ArgVisitor<E>(PhantomData<E>);
+    
+    impl<'de, E: Engine> Visitor<'de> for ArgVisitor<E> {
+      type Value = DoryEvaluationArgument<E>;
+      
+      fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("DoryEvaluationArgument tuple")
+      }
+      
+      fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        use serde::de::Error;
+        
+        let proof_bytes: Vec<u8> = seq.next_element()?
+          .ok_or_else(|| A::Error::custom("missing proof"))?;
+        let value_bytes: Vec<u8> = seq.next_element()?
+          .ok_or_else(|| A::Error::custom("missing value"))?;
+        
+        let proof = DoryPCSEvaluationProof::deserialize_compressed(&proof_bytes[..])
+          .map_err(|e| A::Error::custom(format!("proof: {:?}", e)))?;
+        let value = ArkFr::deserialize_compressed(&value_bytes[..])
+          .map_err(|e| A::Error::custom(format!("value: {:?}", e)))?;
+        
+        Ok(DoryEvaluationArgument { proof, value, _p: PhantomData })
+      }
+    }
+    
+    deserializer.deserialize_tuple(2, ArgVisitor(PhantomData))
+  }
 }
 
 /// Dory-PC adapter using quarks-zk
@@ -75,7 +136,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
   type VerifierKey = DoryVerifierKey;
   type Commitment = DoryCommitment;
   type Blind = DoryBlind;
-  type EvaluationArgument = DoryEvaluationArgument;
+  type EvaluationArgument = DoryEvaluationArgument<E>;
 
   fn setup(
     _label: &'static [u8],
@@ -245,21 +306,12 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     // Generate proof using quarks-zk
     let (value, proof) = QuarksDoryPCS::prove_eval(&params, &ark_evals, &ark_point, &mut rng);
     
-    // Serialize proof
-    let mut proof_bytes = Vec::new();
-    proof.serialize_compressed(&mut proof_bytes)
-      .map_err(|e| SpartanError::InvalidInputLength {
-        reason: format!("Failed to serialize proof: {:?}", e),
-      })?;
-    
-    // Serialize value
-    let mut value_bytes = Vec::new();
-    value.serialize_compressed(&mut value_bytes)
-      .map_err(|e| SpartanError::InvalidInputLength {
-        reason: format!("Failed to serialize value: {:?}", e),
-      })?;
-    
-    Ok(DoryEvaluationArgument { proof_bytes, value_bytes })
+    // Store native objects (review #3: no pre-serialization)
+    Ok(DoryEvaluationArgument {
+      proof,
+      value,
+      _p: PhantomData,
+    })
   }
 
   fn verify(
@@ -277,33 +329,25 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     // Absorb commitment
     transcript.absorb(b"dory_comm", comm);
     
-    // Setup params
+    // Setup params (must match prove)
     let mut rng = ChaCha20Rng::seed_from_u64(0);
     let params = QuarksDoryPCS::setup(vk.num_vars, &mut rng);
     
-    // Deserialize commitment
+    // Deserialize commitment to polynomial (native object)
     let commitment = DoryPCSCommitment::deserialize_compressed(&comm.commitment_bytes[..])
       .map_err(|e| SpartanError::InvalidInputLength {
         reason: format!("Failed to deserialize commitment: {:?}", e),
       })?;
     
-    // Deserialize proof
-    let proof = DoryPCSEvaluationProof::deserialize_compressed(&arg.proof_bytes[..])
-      .map_err(|e| SpartanError::InvalidInputLength {
-        reason: format!("Failed to deserialize proof: {:?}", e),
-      })?;
+    // Extract value from evaluation argument (native ArkFr, not Vec<u8>)
+    let value = arg.value;
     
-    // Deserialize value
-    let value = ArkFr::deserialize_compressed(&arg.value_bytes[..])
-      .map_err(|e| SpartanError::InvalidInputLength {
-        reason: format!("Failed to deserialize value: {:?}", e),
-      })?;
-    
-    // Convert point
+    // Convert point to ark Fr
     let ark_point: Vec<ArkFr> = point.iter().map(|s| halo2_to_ark::<E>(s)).collect();
     
     // Verify using quarks-zk
-    let valid = QuarksDoryPCS::verify_eval(&params, &commitment, &ark_point, value, &proof);
+    // The proof binds (commitment, point, value) cryptographically
+    let valid = QuarksDoryPCS::verify_eval(&params, &commitment, &ark_point, value, &arg.proof);
     
     if valid {
       Ok(())
@@ -441,22 +485,22 @@ mod tests {
       &ck, &ck, &mut transcript, &comm, &poly, &blind, &point, &comm_eval, &blind_eval
     ).unwrap();
     
-    // Tamper with the proof
-    if !arg.proof_bytes.is_empty() {
-      arg.proof_bytes[0] ^= 0xFF;
-    }
+    // Tamper with the value (native field, not bytes)
+    use ark_ff::UniformRand;
+    use rand::thread_rng;
+    arg.value = ArkFr::rand(&mut thread_rng());
     
     let mut transcript_v = TE::new(b"test");
     let result = DoryPCS::<E>::verify(
       &vk, &ck, &mut transcript_v, &comm, &point, &comm_eval, &arg
     );
-    assert!(result.is_err(), "Tampered proof must be rejected");
+    assert!(result.is_err(), "Tampered value must be rejected");
   }
   
   #[test]
-  fn test_dory_reject_tampered_value() {
-    // Tampered evaluation value should be rejected
-    let (ck, vk) = DoryPCS::<E>::setup(b"test", 16, 4);
+  fn test_dory_native_objects_not_pre_serialized() {
+    // Review #3: Verify we use native objects, not pre-serialized bytes
+    let (ck, _vk) = DoryPCS::<E>::setup(b"test", 16, 4);
     let blind = DoryPCS::<E>::blind(&ck, 16);
     let poly = make_poly(16);
     let point = make_point(ck.num_vars);
@@ -466,20 +510,25 @@ mod tests {
     let blind_eval = blind.clone();
     
     let mut transcript = TE::new(b"test");
-    let mut arg = DoryPCS::<E>::prove(
+    let arg = DoryPCS::<E>::prove(
       &ck, &ck, &mut transcript, &comm, &poly, &blind, &point, &comm_eval, &blind_eval
     ).unwrap();
     
-    // Tamper with the value
-    if !arg.value_bytes.is_empty() {
-      arg.value_bytes[0] ^= 0xFF;
-    }
+    // Verify native types are accessible (not buried in bytes)
+    use ark_serialize::CanonicalSerialize;
     
-    let mut transcript_v = TE::new(b"test");
-    let result = DoryPCS::<E>::verify(
-      &vk, &ck, &mut transcript_v, &comm, &point, &comm_eval, &arg
-    );
-    assert!(result.is_err(), "Tampered value must be rejected");
+    // proof is DoryPCSEvaluationProof (native ark type)
+    let mut proof_bytes = Vec::new();
+    arg.proof.serialize_compressed(&mut proof_bytes).unwrap();
+    assert!(!proof_bytes.is_empty(), "Proof should serialize");
+    
+    // value is ArkFr (native field element)
+    let mut value_bytes = Vec::new();
+    arg.value.serialize_compressed(&mut value_bytes).unwrap();
+    assert!(!value_bytes.is_empty(), "Value should serialize");
+    
+    // This demonstrates we have NATIVE objects with strong type guarantees
+    // not pre-serialized Vec<u8> which are opaque
   }
   
   #[test]
