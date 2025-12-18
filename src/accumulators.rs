@@ -11,11 +11,16 @@
 //! - [`SmallValueAccumulators`]: Collection of accumulators for all ℓ₀ rounds
 //! - [`CubicAccumulators`]: Type alias for Spartan's cubic sumcheck (D=3)
 
-// Allow dead code until later chunks use these types
-#![allow(dead_code)]
-
-use crate::lagrange::{UdHatPoint, UdTuple};
+use crate::{
+  accumulator_index::compute_idx4,
+  lagrange::{LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple},
+  polys::{
+    eq::{EqPolynomial, compute_suffix_eq_pyramid},
+    multilinear::MultilinearPolynomial,
+  },
+};
 use ff::PrimeField;
+use rayon::prelude::*;
 
 /// A single round's accumulator A_i(v, u) with flat contiguous storage.
 ///
@@ -176,11 +181,120 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   }
 }
 
+/// Procedure 9: Build accumulators A_i(v, u) for Spartan's first sum-check (Algorithm 6).
+///
+/// Computes accumulators for: g(X) = eq(τ, X) · (Az(X) · Bz(X) - Cz(X))
+///
+/// For Spartan, d = 3 (cubic polynomial: eq · Az · Bz contributes degree 3).
+///
+/// Parallelism strategy:
+/// - Outer parallel loop over x_out values (using Rayon fold-reduce)
+/// - Each thread maintains thread-local accumulators
+/// - Final reduction merges all thread-local results via element-wise addition
+///
+/// Important correctness points:
+/// - If any coordinate of β is ∞, drop the Cz term (eq·Cz is degree 2, so it has no X³ coefficient).
+/// - Do not double-count eq: E_in is applied inside the x_in loop; E_out is applied when distributing via idx4.
+pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
+  az: &MultilinearPolynomial<S>,
+  bz: &MultilinearPolynomial<S>,
+  cz: &MultilinearPolynomial<S>,
+  taus: &[S],
+  l0: usize,
+) -> SmallValueAccumulators<S, D> {
+  let base: usize = D + 1;
+  let l = az.Z.len().trailing_zeros() as usize;
+  assert_eq!(az.Z.len(), bz.Z.len());
+  assert_eq!(az.Z.len(), cz.Z.len());
+  assert_eq!(taus.len(), l, "taus must have length ℓ");
+
+  let half = l / 2;
+  let xout_vars = half.checked_sub(l0).expect("l0 must be <= ℓ/2");
+
+  let num_x_out = 1usize << xout_vars;
+  let num_x_in = 1usize << half;
+  let num_betas = base.pow(l0 as u32);
+
+  // Precompute eq tables
+  let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // |{0,1}|^{ℓ/2}
+  let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // |{0,1}|^{ℓ/2-ℓ0}
+  let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round
+
+  // Cache idx4 for every β
+  let beta_prefix_cache: Vec<Vec<_>> = (0..num_betas)
+    .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, l0), l0))
+    .collect();
+
+  // Parallel over x_out
+  (0..num_x_out)
+    .into_par_iter()
+    .fold(
+      || SmallValueAccumulators::<S, D>::new(l0),
+      |mut acc, x_out_bits| {
+        // tA[β]
+        let mut tA = vec![S::ZERO; num_betas];
+
+        // Inner loop over x_in
+        for x_in_bits in 0..num_x_in {
+          let suffix = (x_in_bits << xout_vars) | x_out_bits;
+
+          let az_pref = az.gather_prefix_evals(l0, suffix);
+          let bz_pref = bz.gather_prefix_evals(l0, suffix);
+          let cz_pref = cz.gather_prefix_evals(l0, suffix);
+
+          let az_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&az_pref);
+          let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&bz_pref);
+          let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&cz_pref);
+
+          let ein = e_in[x_in_bits];
+
+          for beta_idx in 0..num_betas {
+            let beta_tuple = az_ext.to_domain_tuple(beta_idx);
+            let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
+            // ∞ rule: drop Cz at ∞
+            let prod = if beta_tuple.has_infinity() {
+              ab
+            } else {
+              ab - cz_ext.get(beta_idx)
+            };
+            tA[beta_idx] += ein * prod;
+          }
+        }
+
+        // Distribute tA → A_i(v,u) via idx4
+        let ex = e_xout[x_out_bits];
+        for beta_idx in 0..num_betas {
+          let val = tA[beta_idx];
+          if val.is_zero().into() {
+            continue;
+          }
+          for pref in &beta_prefix_cache[beta_idx] {
+            let ey = e_y[pref.round_0idx()][pref.y_idx];
+            acc.accumulate(
+              pref.round_0idx(),
+              pref.v_idx,
+              pref.u.to_index(),
+              ey * ex * val,
+            );
+          }
+        }
+
+        acc
+      },
+    )
+    .reduce(
+      || SmallValueAccumulators::<S, D>::new(l0),
+      |mut a, b| {
+        a.merge(&b);
+        a
+      },
+    )
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::lagrange::UdPoint;
-  use crate::provider::pasta::pallas;
+  use crate::{lagrange::UdPoint, polys::eq::EqPolynomial, provider::pasta::pallas};
   use ff::Field;
 
   type Scalar = pallas::Scalar;
@@ -358,9 +472,208 @@ mod tests {
     // Total: 63
     let acc: CubicAccumulators<Scalar> = CubicAccumulators::new(3);
 
-    let total_elements: usize = (0..3)
-      .map(|i| acc.round(i).num_prefixes() * 3)
-      .sum();
+    let total_elements: usize = (0..3).map(|i| acc.round(i).num_prefixes() * 3).sum();
     assert_eq!(total_elements, 63);
+  }
+
+  /// End-to-end correctness for build_accumulators on a tiny instance.
+  ///
+  /// ℓ = 4, ℓ0 = 2, D = 3.
+  /// Verifies against a straightforward (non-parallel) implementation of Procedure 9.
+  #[test]
+  fn test_build_accumulators_matches_naive() {
+    const D: usize = 3;
+    let l0 = 2;
+    let l = 4;
+    let half = l / 2;
+
+    // Define deterministic Az, Bz, Cz over {0,1}^4
+    let eval = |bits: usize| -> Scalar {
+      // Simple affine: a0 x0 + a1 x1 + a2 x2 + a3 x3 + const
+      let x0 = (bits >> 3) & 1;
+      let x1 = (bits >> 2) & 1;
+      let x2 = (bits >> 1) & 1;
+      let x3 = bits & 1;
+      Scalar::from((x0 + 2 * x1 + 3 * x2 + 4 * x3 + 5) as u64)
+    };
+    let az_vals: Vec<Scalar> = (0..16).map(eval).collect();
+    let bz_vals: Vec<Scalar> = (0..16).map(|b| eval(b) + Scalar::from(7u64)).collect();
+    let cz_vals: Vec<Scalar> = (0..16)
+      .map(|b| eval(b) * Scalar::from(3u64) + Scalar::from(11u64))
+      .collect();
+
+    let az = MultilinearPolynomial::new(az_vals.clone());
+    let bz = MultilinearPolynomial::new(bz_vals.clone());
+    let cz = MultilinearPolynomial::new(cz_vals.clone());
+
+    // Taus (length ℓ)
+    let taus: Vec<Scalar> = vec![
+      Scalar::from(5u64),
+      Scalar::from(7u64),
+      Scalar::from(11u64),
+      Scalar::from(13u64),
+    ];
+
+    // Implementation under test
+    let acc_impl = build_accumulators::<Scalar, D>(&az, &bz, &cz, &taus, l0);
+
+    // Precompute eq tables for naive computation
+    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // τ[2..4]
+    let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // τ[4..] (empty -> [1])
+    let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0);
+
+    let num_betas = (D + 1).pow(l0 as u32);
+    let idx4_cache: Vec<Vec<_>> = (0..num_betas)
+      .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, l0), l0))
+      .collect();
+
+    // Naive accumulators
+    let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(l0);
+
+    // x_out domain size = 1 (xout_vars = 0)
+    let ex = e_xout[0];
+
+    for x_in_bits in 0..(1 << half) {
+      let suffix = x_in_bits; // x_out = 0
+
+      let az_pref = az.gather_prefix_evals(l0, suffix);
+      let bz_pref = bz.gather_prefix_evals(l0, suffix);
+      let cz_pref = cz.gather_prefix_evals(l0, suffix);
+
+      let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+      let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+      let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
+
+      let ein = e_in[x_in_bits];
+
+      for beta_idx in 0..num_betas {
+        let beta_tuple = az_ext.to_domain_tuple(beta_idx);
+        let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
+        let prod = if beta_tuple.has_infinity() {
+          ab
+        } else {
+          ab - cz_ext.get(beta_idx)
+        };
+        let val = ein * prod;
+
+        for pref in &idx4_cache[beta_idx] {
+          let ey = e_y[pref.round_0idx()][pref.y_idx];
+          acc_naive.accumulate(
+            pref.round_0idx(),
+            pref.v_idx,
+            pref.u.to_index(),
+            ey * ex * val,
+          );
+        }
+      }
+    }
+
+    // Compare all buckets
+    for round in 0..l0 {
+      let num_v = (D + 1).pow(round as u32);
+      for v_idx in 0..num_v {
+        for u_idx in 0..D {
+          let got = acc_impl.get(round, v_idx, u_idx);
+          let expect = acc_naive.get(round, v_idx, u_idx);
+          assert_eq!(
+            got, expect,
+            "Mismatch at round {}, v_idx {}, u_idx {}",
+            round, v_idx, u_idx
+          );
+        }
+      }
+    }
+  }
+
+  /// Check the ∞ rule: Cz must be dropped when any β coordinate is ∞.
+  ///
+  /// ℓ = 2, ℓ0 = 1, D = 3.
+  /// Az = 1, Bz = 1, Cz = const. Taus arbitrary.
+  /// Accumulator for u=∞ should equal Σ_xin e_in[xin] * (1) (drop Cz).
+  /// Accumulator for u=0 should equal Σ_xin e_in[xin] * (1 - Cz).
+  #[test]
+  fn test_infinity_drops_cz() {
+    const D: usize = 3;
+    let l0 = 1;
+    let l = 2;
+    let half = l / 2;
+
+    // Polys: Az=Bz=1 everywhere, Cz=const everywhere
+    let az_vals: Vec<Scalar> = vec![Scalar::ONE; 1 << l];
+    let bz_vals: Vec<Scalar> = vec![Scalar::ONE; 1 << l];
+    let cz_const = Scalar::from(2u64);
+    let cz_vals: Vec<Scalar> = vec![cz_const; 1 << l];
+
+    let az = MultilinearPolynomial::new(az_vals);
+    let bz = MultilinearPolynomial::new(bz_vals);
+    let cz = MultilinearPolynomial::new(cz_vals);
+
+    let taus: Vec<Scalar> = vec![Scalar::from(5u64), Scalar::from(7u64)];
+
+    // Build accumulators
+    let acc = build_accumulators::<Scalar, D>(&az, &bz, &cz, &taus, l0);
+
+    // Compute e_in sum = Σ eq(τ[l0..l0+half], xin), here half=1, l0=1 -> slice τ[1]
+    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]);
+    let ein_sum: Scalar = e_in.iter().copied().sum();
+
+    // Round 0, v_idx=0
+    let u_infinity_idx = UdHatPoint::<D>::Infinity.to_index(); // 0
+    let u_zero_idx = UdHatPoint::<D>::Finite(0).to_index(); // 1
+
+    let acc_inf = acc.get(0, 0, u_infinity_idx);
+    let acc_zero = acc.get(0, 0, u_zero_idx);
+
+    // At ∞: leading coefficient of constant poly is 0, Cz dropped
+    assert_eq!(acc_inf, Scalar::ZERO, "Cz should be dropped at ∞ (leading coeff of const poly is 0)");
+    // At 0: product = 1 - cz_const
+    assert_eq!(acc_zero, ein_sum * (Scalar::ONE - cz_const), "Cz should be subtracted at finite points");
+  }
+
+  /// Binary-β zero shortcut: Az=Bz=Cz=first variable (x0), so Az·Bz−Cz=0 on binary β.
+  /// Non-binary β (e.g., containing 2 or ∞) should yield non-zero in some bucket.
+  #[test]
+  fn test_binary_beta_zero_shortcut_behavior() {
+    const D: usize = 3;
+    // Use l0=1 so round 0 buckets are fed only by β of length 1 (easy to reason about).
+    let l0 = 1;
+    let l = 2;
+
+    // Az = Bz = Cz = top bit x0 (most significant of 2 bits)
+    let az_vals: Vec<Scalar> = (0..(1 << l))
+      .map(|bits| {
+        let x0 = (bits >> (l - 1)) & 1;
+        Scalar::from(x0 as u64)
+      })
+      .collect();
+    let bz_vals = az_vals.clone();
+    let cz_vals = az_vals.clone();
+
+    let az = MultilinearPolynomial::new(az_vals);
+    let bz = MultilinearPolynomial::new(bz_vals);
+    let cz = MultilinearPolynomial::new(cz_vals);
+
+    let taus: Vec<Scalar> = vec![Scalar::from(3u64), Scalar::from(5u64)];
+
+    let acc = build_accumulators::<Scalar, D>(&az, &bz, &cz, &taus, l0);
+
+    // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞,2}.
+    // Buckets for u = 0 should be zero (binary β), buckets for u = ∞ or 2 should be non-zero.
+    let u_inf = UdHatPoint::<D>::Infinity.to_index(); // 0
+    let u_zero = UdHatPoint::<D>::Finite(0).to_index(); // 1
+    let u_two = UdHatPoint::<D>::Finite(2).to_index(); // 2
+
+    assert!(
+      bool::from(acc.get(0, 0, u_zero).is_zero()),
+      "binary β should give zero for u=0"
+    );
+    assert!(
+      !bool::from(acc.get(0, 0, u_inf).is_zero()),
+      "non-binary β (∞) should give non-zero"
+    );
+    assert!(
+      !bool::from(acc.get(0, 0, u_two).is_zero()),
+      "non-binary β (2) should give non-zero"
+    );
   }
 }
