@@ -15,6 +15,7 @@
 // Allow dead code until later chunks use these types
 #![allow(dead_code)]
 
+use crate::polys::multilinear::MultilinearPolynomial;
 use ff::PrimeField;
 
 /// A point in the domain U_d = {∞, 0, 1, ..., d-1}
@@ -253,7 +254,7 @@ impl TryFrom<UdPoint> for UdHatPoint {
 
 /// A tuple β ∈ U_d^k — an index into the extended domain.
 ///
-/// Used to index into LagrangeEvals which stores evaluations over U_d^ℓ₀.
+/// Used to index into LagrangeEvaluatedMultilinearPolynomial which stores evaluations over U_d^ℓ₀.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UdTuple(pub Vec<UdPoint>);
 
@@ -295,6 +296,130 @@ impl UdTuple {
       idx /= base;
     }
     UdTuple(points)
+  }
+}
+
+// ============================================================================
+// Lagrange Extension (Procedure 6)
+// ============================================================================
+
+/// Evaluations of a multilinear polynomial over the Lagrange domain U_d^ℓ₀.
+///
+/// Extended from the boolean hypercube {0,1}^ℓ₀ to U_d^ℓ₀ = {∞, 0, 1, ..., d-1}^ℓ₀,
+/// enabling efficient round polynomial computation via Lagrange interpolation.
+pub struct LagrangeEvaluatedMultilinearPolynomial<Scalar: PrimeField> {
+  evals: Vec<Scalar>, // size (d+1)^num_vars
+  num_vars: usize,
+  d: usize,
+}
+
+impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
+  /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_d^ℓ₀.
+  ///
+  /// At each step j, we have evaluations over U_d^{j-1} × {0,1}^{ℓ₀-j+1}.
+  /// We extend the j-th coordinate from {0,1} to U_d.
+  ///
+  /// **Key insight:** After extending the first variable, the data layout changes.
+  /// We cannot simply split in half for subsequent extensions. Instead, we must
+  /// iterate over each (prefix, suffix) pair and extend the middle coordinate.
+  ///
+  /// # Arguments
+  /// * `poly` - Multilinear polynomial with evaluations over boolean hypercube
+  /// * `d` - Degree parameter for extended domain U_d
+  pub fn from_multilinear(poly: &MultilinearPolynomial<Scalar>, d: usize) -> Self {
+    let num_vars = poly.Z.len().trailing_zeros() as usize;
+    debug_assert_eq!(poly.Z.len(), 1 << num_vars, "Input size must be power of 2");
+
+    let d_plus_1 = d + 1;
+    let mut current = poly.Z.clone();
+
+    for j in 1..=num_vars {
+      // At step j:
+      // - prefix_count = (d+1)^{j-1} (number of extended prefix combinations)
+      // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
+      // - current has size = prefix_count × 2 × suffix_count
+      // - next will have size = prefix_count × (d+1) × suffix_count
+
+      let prefix_count = d_plus_1.pow((j - 1) as u32);
+      let suffix_count = 1usize << (num_vars - j);
+      let current_stride = 2 * suffix_count; // stride between prefixes in current
+      let next_stride = d_plus_1 * suffix_count; // stride between prefixes in next
+
+      let next_size = prefix_count * next_stride;
+      let mut next = vec![Scalar::ZERO; next_size];
+
+      for prefix_idx in 0..prefix_count {
+        for suffix_idx in 0..suffix_count {
+          // Read p(prefix, 0, suffix) and p(prefix, 1, suffix)
+          let base_current = prefix_idx * current_stride;
+          let p0 = current[base_current + suffix_idx];
+          let p1 = current[base_current + suffix_count + suffix_idx];
+
+          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_d
+          let diff = p1 - p0;
+          let base_next = prefix_idx * next_stride;
+
+          // γ = ∞ (index 0): leading coefficient
+          next[base_next + suffix_idx] = diff;
+
+          // γ = 0 (index 1): p(prefix, 0, suffix)
+          next[base_next + suffix_count + suffix_idx] = p0;
+
+          // γ = 1 (index 2): p(prefix, 1, suffix)
+          next[base_next + 2 * suffix_count + suffix_idx] = p1;
+
+          // γ = 2, 3, ..., d-1 (indices 3, 4, ..., d): extrapolate
+          for k in 2..d {
+            let k_scalar = Scalar::from(k as u64);
+            let val = p0 + k_scalar * diff;
+            next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
+          }
+        }
+      }
+
+      current = next;
+    }
+
+    Self {
+      evals: current,
+      num_vars,
+      d,
+    }
+  }
+
+  /// Base of the extended domain U_d (= d + 1)
+  #[inline]
+  fn base(&self) -> usize {
+    self.d + 1
+  }
+
+  /// Number of evaluations
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.evals.len()
+  }
+
+  /// Check if empty
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.evals.is_empty()
+  }
+
+  /// Get evaluation by flat index (performance path)
+  #[inline]
+  pub fn get(&self, idx: usize) -> Scalar {
+    self.evals[idx]
+  }
+
+  /// Get evaluation by domain tuple (type-safe path)
+  #[inline]
+  pub fn get_by_domain(&self, tuple: &UdTuple) -> Scalar {
+    self.evals[tuple.to_flat_index(self.base())]
+  }
+
+  /// Convert flat index to domain tuple (for debugging/clarity)
+  pub fn to_domain_tuple(&self, flat_idx: usize) -> UdTuple {
+    UdTuple::from_flat_index(flat_idx, self.base(), self.num_vars)
   }
 }
 
@@ -499,5 +624,207 @@ mod tests {
     // Reverse: 6 -> (0, 1, 2) -> (∞, 0, 1)
     let decoded = UdTuple::from_flat_index(6, 4, 3);
     assert_eq!(decoded, tuple);
+  }
+
+  // === extend_to_lagrange_domain tests ===
+
+  #[test]
+  fn test_extend_output_size() {
+    let d = 3;
+
+    for num_vars in 1..=4 {
+      let input_size = 1 << num_vars;
+      let input: Vec<Scalar> = (0..input_size).map(|i| Scalar::from(i as u64)).collect();
+      let poly = MultilinearPolynomial::new(input);
+
+      let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+      let expected_size = (d + 1).pow(num_vars as u32);
+      assert_eq!(extended.len(), expected_size);
+      assert_eq!(extended.num_vars, num_vars);
+      assert_eq!(extended.d, d);
+    }
+  }
+
+  #[test]
+  fn test_extend_preserves_boolean() {
+    use ff::Field;
+
+    let num_vars = 3;
+    let d = 3;
+    let base = d + 1;
+
+    let input: Vec<Scalar> =
+      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let poly = MultilinearPolynomial::new(input.clone());
+
+    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+    // In U_d indexing: 0 → index 1, 1 → index 2
+    for b in 0..(1 << num_vars) {
+      let mut ud_idx = 0;
+      for j in 0..num_vars {
+        let bit = (b >> (num_vars - 1 - j)) & 1;
+        let ud_val = bit + 1; // 0→1, 1→2
+        ud_idx = ud_idx * base + ud_val;
+      }
+
+      assert_eq!(extended.get(ud_idx), input[b]);
+    }
+  }
+
+  #[test]
+  fn test_extend_single_var() {
+    let d = 3;
+    let p0 = Scalar::from(7u64);
+    let p1 = Scalar::from(19u64);
+
+    let poly = MultilinearPolynomial::new(vec![p0, p1]);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+    // U_d = {∞, 0, 1, 2} with indices 0, 1, 2, 3
+    assert_eq!(extended.get(0), p1 - p0, "p(∞) = leading coeff");
+    assert_eq!(extended.get(1), p0, "p(0)");
+    assert_eq!(extended.get(2), p1, "p(1)");
+    assert_eq!(extended.get(3), p1.double() - p0, "p(2) = 2*p1 - p0");
+  }
+
+  #[test]
+  fn test_extend_matches_direct() {
+    use ff::Field;
+
+    let num_vars = 3;
+    let d = 3;
+    let base = d + 1;
+
+    let input: Vec<Scalar> =
+      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let poly = MultilinearPolynomial::new(input.clone());
+    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+    // Check all finite points via direct multilinear evaluation
+    for idx in 0..extended.len() {
+      let tuple = index_to_tuple(idx, base, num_vars);
+
+      // Skip infinity points (index 0 in any coordinate)
+      if tuple.iter().any(|&t| t == 0) {
+        continue;
+      }
+
+      // Convert U_d indices to field values: index k → value k-1
+      let point: Vec<Scalar> = tuple.iter().map(|&t| Scalar::from((t - 1) as u64)).collect();
+
+      let direct = evaluate_multilinear(&input, &point);
+      assert_eq!(extended.get(idx), direct);
+    }
+  }
+
+  #[test]
+  fn test_extend_infinity_leading_coeff() {
+    use ff::Field;
+
+    let num_vars = 3;
+    let d = 3;
+    let base = d + 1;
+
+    let input: Vec<Scalar> =
+      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let poly = MultilinearPolynomial::new(input.clone());
+    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+    // p(∞, y₂, y₃) = p(1, y₂, y₃) - p(0, y₂, y₃)
+    for y2 in 0..2usize {
+      for y3 in 0..2usize {
+        let idx_0 = (0 << 2) | (y2 << 1) | y3; // p(0, y2, y3)
+        let idx_1 = (1 << 2) | (y2 << 1) | y3; // p(1, y2, y3)
+
+        let expected = input[idx_1] - input[idx_0];
+        let ext_idx = 0 * base * base + (y2 + 1) * base + (y3 + 1);
+
+        assert_eq!(extended.get(ext_idx), expected);
+      }
+    }
+  }
+
+  #[test]
+  fn test_extend_known_polynomial() {
+    // p(X, Y, Z) = X + 2Y + 4Z
+    let d = 3;
+    let base = d + 1;
+
+    let mut input = Vec::with_capacity(8);
+    for x in 0..2u64 {
+      for y in 0..2u64 {
+        for z in 0..2u64 {
+          input.push(Scalar::from(x + 2 * y + 4 * z));
+        }
+      }
+    }
+    let poly = MultilinearPolynomial::new(input);
+
+    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+
+    // Finite points: p(a,b,c) = a + 2b + 4c
+    for a in 0..d {
+      for b in 0..d {
+        for c in 0..d {
+          let idx = (a + 1) * base * base + (b + 1) * base + (c + 1);
+          let expected = Scalar::from(a as u64 + 2 * b as u64 + 4 * c as u64);
+          assert_eq!(extended.get(idx), expected);
+        }
+      }
+    }
+
+    // Infinity points = variable coefficients
+    assert_eq!(
+      extended.get(0 * base * base + 1 * base + 1),
+      Scalar::ONE,
+      "p(∞,0,0) = coeff of X"
+    );
+    assert_eq!(
+      extended.get(1 * base * base + 0 * base + 1),
+      Scalar::from(2u64),
+      "p(0,∞,0) = coeff of Y"
+    );
+    assert_eq!(
+      extended.get(1 * base * base + 1 * base + 0),
+      Scalar::from(4u64),
+      "p(0,0,∞) = coeff of Z"
+    );
+    assert_eq!(
+      extended.get(0),
+      Scalar::ZERO,
+      "p(∞,∞,∞) = 0 (no XYZ term)"
+    );
+  }
+
+  // === Test helpers ===
+
+  fn index_to_tuple(mut idx: usize, base: usize, len: usize) -> Vec<usize> {
+    let mut tuple = vec![0; len];
+    for i in (0..len).rev() {
+      tuple[i] = idx % base;
+      idx /= base;
+    }
+    tuple
+  }
+
+  /// Direct multilinear evaluation: p(r) = Σ_x p(x) · eq(x, r)
+  fn evaluate_multilinear(evals: &[Scalar], point: &[Scalar]) -> Scalar {
+    let l = point.len();
+    let mut result = Scalar::ZERO;
+    for (i, &val) in evals.iter().enumerate() {
+      let mut eq_term = Scalar::ONE;
+      for j in 0..l {
+        let bit = (i >> (l - 1 - j)) & 1;
+        if bit == 1 {
+          eq_term *= point[j];
+        } else {
+          eq_term *= Scalar::ONE - point[j];
+        }
+      }
+      result += val * eq_term;
+    }
+    result
   }
 }
