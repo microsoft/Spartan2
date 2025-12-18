@@ -332,6 +332,23 @@ impl<const D: usize> UdTuple<D> {
     }
     UdTuple(points)
   }
+
+  /// Create a UdTuple from a binary index in {0,1}^num_bits.
+  ///
+  /// Each bit maps to a binary U_D point: 0 → Finite(0), 1 → Finite(1).
+  /// Bits are read MSB-first (high bit is first coordinate).
+  ///
+  /// # Example
+  /// `from_binary::<3>(0b101, 3)` → `(Finite(1), Finite(0), Finite(1))`
+  #[inline]
+  pub fn from_binary(bits: usize, num_bits: usize) -> Self {
+    let mut points = Vec::with_capacity(num_bits);
+    for j in 0..num_bits {
+      let bit = (bits >> (num_bits - 1 - j)) & 1;
+      points.push(UdPoint::Finite(bit));
+    }
+    UdTuple(points)
+  }
 }
 
 // ============================================================================
