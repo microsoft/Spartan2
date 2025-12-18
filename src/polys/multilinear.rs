@@ -88,6 +88,45 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       })
       .collect()
   }
+
+  /// Gathers prefix evaluations p(b, suffix) for all binary prefixes b ∈ {0,1}^ℓ₀.
+  ///
+  /// For a polynomial with ℓ variables, this extracts a strided slice where:
+  /// - First ℓ₀ variables form the "prefix" (high bits)
+  /// - Remaining ℓ-ℓ₀ variables form the "suffix" (low bits)
+  ///
+  /// Index layout: `index = (prefix << suffix_vars) | suffix`
+  ///
+  /// # Arguments
+  /// * `l0` - Number of prefix variables
+  /// * `suffix` - Fixed suffix value in range [0, 2^{ℓ-ℓ₀})
+  ///
+  /// # Returns
+  /// MultilinearPolynomial of size 2^ℓ₀ where result[prefix] = self[(prefix << suffix_vars) | suffix]
+  ///
+  /// # Example
+  /// For ℓ=4, ℓ₀=2, suffix=1:
+  /// - Returns polynomial with evals [self[1], self[5], self[9], self[13]]
+  /// - Indices: 0b0001, 0b0101, 0b1001, 0b1101 (prefix varies, suffix=01 fixed)
+  // Allow dead code until Chunk 7 (build_accumulators) uses this method
+  #[allow(dead_code)]
+  pub fn gather_prefix_evals(&self, l0: usize, suffix: usize) -> Self {
+    let l = self.Z.len().trailing_zeros() as usize;
+    debug_assert_eq!(self.Z.len(), 1 << l, "poly size must be power of 2");
+
+    let suffix_vars = l - l0;
+    let prefix_size = 1 << l0;
+
+    debug_assert!(suffix < (1 << suffix_vars), "suffix out of range");
+
+    let mut Z = Vec::with_capacity(prefix_size);
+    for prefix in 0..prefix_size {
+      let idx = (prefix << suffix_vars) | suffix;
+      Z.push(self.Z[idx]);
+    }
+
+    MultilinearPolynomial::new(Z)
+  }
 }
 
 impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
@@ -301,5 +340,110 @@ mod tests {
   #[test]
   fn test_bind_and_evaluate() {
     bind_and_evaluate_with::<pallas::Scalar>();
+  }
+
+  // === gather_prefix_evals tests ===
+
+  #[test]
+  fn test_gather_prefix_evals_all_suffixes() {
+    // ℓ=4, ℓ₀=2: 4 variables, first 2 are prefix
+    // poly[i] = i, so value equals index for easy verification
+    let l = 4;
+    let l0 = 2;
+    let size = 1 << l; // 16
+
+    let evals: Vec<pallas::Scalar> = (0..size).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let num_prefix = 1 << l0; // 4 prefix combinations
+    let suffix_vars = l - l0; // 2 suffix variables
+    let num_suffix = 1 << suffix_vars; // 4 suffix combinations
+
+    for suffix in 0..num_suffix {
+      let gathered = poly.gather_prefix_evals(l0, suffix);
+      assert_eq!(gathered.Z.len(), num_prefix);
+
+      for prefix in 0..num_prefix {
+        let expected_idx = (prefix << suffix_vars) | suffix;
+        let expected = pallas::Scalar::from(expected_idx as u64);
+        assert_eq!(
+          gathered[prefix], expected,
+          "Mismatch at suffix={}, prefix={}",
+          suffix, prefix
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn test_gather_prefix_l0_equals_l() {
+    // ℓ₀ = ℓ: no suffix variables, suffix must be 0
+    let l0 = 3;
+    let evals: Vec<pallas::Scalar> = (0..8).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let gathered = poly.gather_prefix_evals(l0, 0);
+
+    // Should return entire polynomial
+    assert_eq!(gathered.Z.len(), 8);
+    for i in 0..8 {
+      assert_eq!(gathered[i], pallas::Scalar::from(i as u64));
+    }
+  }
+
+  #[test]
+  fn test_gather_prefix_l0_equals_1() {
+    // ℓ₀ = 1: single prefix bit
+    let l0 = 1;
+    let evals: Vec<pallas::Scalar> = (0..16).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    // suffix = 5 (binary 101): should get indices 5, 13
+    let gathered = poly.gather_prefix_evals(l0, 5);
+    assert_eq!(gathered.Z.len(), 2);
+    assert_eq!(gathered[0], pallas::Scalar::from(5u64)); // prefix=0: 0*8 + 5 = 5
+    assert_eq!(gathered[1], pallas::Scalar::from(13u64)); // prefix=1: 1*8 + 5 = 13
+  }
+
+  #[test]
+  fn test_gather_then_extend_preserves_binary_points() {
+    use crate::lagrange::{LagrangeEvaluatedMultilinearPolynomial, UdTuple};
+    use ff::Field;
+
+    let l = 4;
+    let l0 = 2;
+
+    // Random polynomial
+    let evals: Vec<pallas::Scalar> = (0..(1 << l))
+      .map(|_| pallas::Scalar::random(&mut OsRng))
+      .collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let suffix_vars = l - l0;
+    let num_suffix = 1 << suffix_vars;
+
+    for suffix in 0..num_suffix {
+      let gathered = poly.gather_prefix_evals(l0, suffix);
+
+      // Extend to Lagrange domain
+      let extended = LagrangeEvaluatedMultilinearPolynomial::<_, 3>::from_multilinear(&gathered);
+
+      // Verify: at binary points, extended values match original poly values
+      for prefix_bits in 0..(1 << l0) {
+        let original_idx = (prefix_bits << suffix_vars) | suffix;
+        let original_val = poly[original_idx];
+
+        // Convert binary prefix to U_D^ℓ₀ tuple
+        let tuple = UdTuple::<3>::from_binary(prefix_bits, l0);
+
+        assert_eq!(
+          extended.get_by_domain(&tuple),
+          original_val,
+          "Mismatch at suffix={}, prefix_bits={}",
+          suffix,
+          prefix_bits
+        );
+      }
+    }
   }
 }
