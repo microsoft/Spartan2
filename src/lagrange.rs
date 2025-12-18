@@ -15,9 +15,6 @@
 //! All types are parameterized by `const D: usize` representing the degree bound.
 //! This enables compile-time type safety and debug assertions for bounds checking.
 
-// Allow dead code until later chunks use these types
-#![allow(dead_code)]
-
 use crate::polys::multilinear::MultilinearPolynomial;
 use ff::PrimeField;
 
@@ -42,16 +39,19 @@ impl<const D: usize> UdPoint<D> {
   // === Construction ===
 
   /// Create the infinity point
+  #[allow(dead_code)]
   pub const fn infinity() -> Self {
     UdPoint::Infinity
   }
 
   /// Create the zero point
+  #[allow(dead_code)]
   pub const fn zero() -> Self {
     UdPoint::Finite(0)
   }
 
   /// Create the one point
+  #[allow(dead_code)]
   pub const fn one() -> Self {
     UdPoint::Finite(1)
   }
@@ -60,6 +60,7 @@ impl<const D: usize> UdPoint<D> {
   ///
   /// # Panics (debug builds only)
   /// Panics if v >= D
+  #[allow(dead_code)]
   pub fn finite(v: usize) -> Self {
     debug_assert!(v < D, "UdPoint::finite({v}) out of bounds for D={D}");
     UdPoint::Finite(v)
@@ -95,12 +96,14 @@ impl<const D: usize> UdPoint<D> {
   // === Properties ===
 
   /// Check if this is the infinity point
+  #[allow(dead_code)]
   #[inline]
   pub fn is_infinity(self) -> bool {
     matches!(self, UdPoint::Infinity)
   }
 
   /// Check if this is the zero point
+  #[allow(dead_code)]
   #[inline]
   pub fn is_zero(self) -> bool {
     matches!(self, UdPoint::Finite(0))
@@ -165,11 +168,13 @@ impl<const D: usize> UdHatPoint<D> {
   // === Construction ===
 
   /// Create the infinity point
+  #[allow(dead_code)]
   pub const fn infinity() -> Self {
     UdHatPoint::Infinity
   }
 
   /// Create the zero point
+  #[allow(dead_code)]
   pub const fn zero() -> Self {
     UdHatPoint::Finite(0)
   }
@@ -227,6 +232,7 @@ impl<const D: usize> UdHatPoint<D> {
   }
 
   /// Convert to field element. Returns None for Infinity.
+  #[allow(dead_code)]
   #[inline]
   pub fn to_field<F: PrimeField>(self) -> Option<F> {
     match self {
@@ -238,12 +244,14 @@ impl<const D: usize> UdHatPoint<D> {
   // === Properties ===
 
   /// Is this the infinity point?
+  #[allow(dead_code)]
   #[inline]
   pub fn is_infinity(self) -> bool {
     matches!(self, UdHatPoint::Infinity)
   }
 
   /// Is this the zero point?
+  #[allow(dead_code)]
   #[inline]
   pub fn is_zero(self) -> bool {
     matches!(self, UdHatPoint::Finite(0))
@@ -296,6 +304,7 @@ impl<const D: usize> UdTuple<D> {
   }
 
   /// Check if empty
+  #[allow(dead_code)]
   pub fn is_empty(&self) -> bool {
     self.0.is_empty()
   }
@@ -447,6 +456,7 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
   }
 
   /// Check if empty
+  #[allow(dead_code)]
   #[inline]
   pub fn is_empty(&self) -> bool {
     self.evals.is_empty()

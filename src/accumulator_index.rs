@@ -11,9 +11,6 @@
 //! - [`compute_idx4`]: Maps evaluation prefixes β ∈ U_d^ℓ₀ to accumulator contributions
 //! - [`CubicAccumulatorPrefixIndex`]: Type alias for Spartan's cubic sumcheck (D=3)
 
-// Allow dead code until later chunks use these types
-#![allow(dead_code)]
-
 use crate::lagrange::{UdHatPoint, UdPoint, UdTuple};
 
 /// A single contribution from β to an accumulator A_i(v, u).
