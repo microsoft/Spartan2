@@ -68,16 +68,16 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
   /// * `u` - Point in Û_D
   /// * `value` - Value to accumulate
   #[inline]
-  pub fn accumulate_by_domain(&mut self, v: &UdTuple, u: UdHatPoint, value: Scalar) {
-    let v_idx = v.to_flat_index(Self::BASE);
+  pub fn accumulate_by_domain(&mut self, v: &UdTuple<D>, u: UdHatPoint<D>, value: Scalar) {
+    let v_idx = v.to_flat_index();
     let u_idx = u.to_index();
     self.data[v_idx][u_idx] += value;
   }
 
   /// Read by domain types (type-safe path).
   #[inline]
-  pub fn get_by_domain(&self, v: &UdTuple, u: UdHatPoint) -> Scalar {
-    let v_idx = v.to_flat_index(Self::BASE);
+  pub fn get_by_domain(&self, v: &UdTuple<D>, u: UdHatPoint<D>) -> Scalar {
+    let v_idx = v.to_flat_index();
     let u_idx = u.to_index();
     self.data[v_idx][u_idx]
   }
@@ -152,8 +152,8 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   pub fn accumulate_by_domain(
     &mut self,
     round: usize,
-    v: &UdTuple,
-    u: UdHatPoint,
+    v: &UdTuple<D>,
+    u: UdHatPoint<D>,
     value: Scalar,
   ) {
     self.rounds[round].accumulate_by_domain(v, u, value);
@@ -161,7 +161,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
 
   /// Read A_i(v, u) by domain types (type-safe path).
   #[inline]
-  pub fn get_by_domain(&self, round: usize, v: &UdTuple, u: UdHatPoint) -> Scalar {
+  pub fn get_by_domain(&self, round: usize, v: &UdTuple<D>, u: UdHatPoint<D>) -> Scalar {
     self.rounds[round].get_by_domain(v, u)
   }
 
@@ -256,8 +256,8 @@ mod tests {
     let mut acc: RoundAccumulator<Scalar, 3> = RoundAccumulator::new(1); // 4 prefixes
 
     // v = (Finite(1),) -> flat index = 2 (base 4: ∞=0, 0=1, 1=2, 2=3)
-    let v = UdTuple(vec![UdPoint::Finite(1)]);
-    let u = UdHatPoint::Infinity; // index 0
+    let v = UdTuple::<3>(vec![UdPoint::Finite(1)]);
+    let u = UdHatPoint::<3>::Infinity; // index 0
 
     let val = Scalar::from(42u64);
     acc.accumulate_by_domain(&v, u, val);
@@ -329,8 +329,8 @@ mod tests {
 
     // Round 1 has 4 prefixes (base^1)
     // v = (Finite(0),) -> flat index = 1 (∞=0, 0=1, 1=2, 2=3)
-    let v = UdTuple(vec![UdPoint::Finite(0)]);
-    let u = UdHatPoint::Finite(2); // index 2
+    let v = UdTuple::<3>(vec![UdPoint::Finite(0)]);
+    let u = UdHatPoint::<3>::Finite(2); // index 2
 
     let val = Scalar::from(99u64);
     acc.accumulate_by_domain(1, &v, u, val);

@@ -11,6 +11,9 @@
 //! - [`UdHatPoint`]: Points in Û_d = U_d \ {1} (reduced domain)
 //! - [`UdTuple`]: Tuples β ∈ U_d^k
 //! - [`ValueOneExcluded`]: Error for invalid conversions
+//!
+//! All types are parameterized by `const D: usize` representing the degree bound.
+//! This enables compile-time type safety and debug assertions for bounds checking.
 
 // Allow dead code until later chunks use these types
 #![allow(dead_code)]
@@ -22,15 +25,20 @@ use ff::PrimeField;
 ///
 /// The domain has d+1 points. The ∞ point represents evaluation of the
 /// leading coefficient (see Lemma 2.2 in the paper).
+///
+/// Type parameter `D` is the degree bound, so valid finite values are 0..D-1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum UdPoint {
+pub enum UdPoint<const D: usize> {
   /// The point at infinity — represents leading coefficient
   Infinity,
-  /// A finite field value 0, 1, ..., d-1
+  /// A finite field value 0, 1, ..., D-1
   Finite(usize),
 }
 
-impl UdPoint {
+impl<const D: usize> UdPoint<D> {
+  /// Base of the domain U_D (= D + 1 points)
+  pub const BASE: usize = D + 1;
+
   // === Construction ===
 
   /// Create the infinity point
@@ -48,8 +56,12 @@ impl UdPoint {
     UdPoint::Finite(1)
   }
 
-  /// Create a finite point from value v ∈ {0, 1, ..., d-1}
-  pub const fn finite(v: usize) -> Self {
+  /// Create a finite point from value v ∈ {0, 1, ..., D-1}
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if v >= D
+  pub fn finite(v: usize) -> Self {
+    debug_assert!(v < D, "UdPoint::finite({v}) out of bounds for D={D}");
     UdPoint::Finite(v)
   }
 
@@ -67,8 +79,12 @@ impl UdPoint {
 
   /// Convert from flat index.
   /// 0 → Infinity, k → Finite(k - 1)
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if idx > D
   #[inline]
   pub fn from_index(idx: usize) -> Self {
+    debug_assert!(idx <= D, "UdPoint::from_index({idx}) out of bounds for D={D}");
     if idx == 0 {
       UdPoint::Infinity
     } else {
@@ -111,7 +127,7 @@ impl UdPoint {
   ///
   /// Returns `None` for Finite(1) since 1 ∉ Û_d.
   #[inline]
-  pub fn to_ud_hat(self) -> Option<UdHatPoint> {
+  pub fn to_ud_hat(self) -> Option<UdHatPoint<D>> {
     UdHatPoint::try_from(self).ok()
   }
 }
@@ -135,15 +151,17 @@ impl std::error::Error for ValueOneExcluded {}
 ///
 /// This domain has d elements (one less than U_d).
 /// Value 1 is excluded because s(1) can be recovered from s(0) + s(1) = claim.
+///
+/// Type parameter `D` is the degree bound (size of Û_d).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum UdHatPoint {
+pub enum UdHatPoint<const D: usize> {
   /// The point at infinity — represents leading coefficient
   Infinity,
   /// A finite field value: 0, 2, 3, ... (never 1)
   Finite(usize),
 }
 
-impl UdHatPoint {
+impl<const D: usize> UdHatPoint<D> {
   // === Construction ===
 
   /// Create the infinity point
@@ -157,10 +175,14 @@ impl UdHatPoint {
   }
 
   /// Create a finite point. Returns None for v=1 (not in Û_d).
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if v >= D (and v != 1)
   pub fn finite(v: usize) -> Option<Self> {
     if v == 1 {
       None
     } else {
+      debug_assert!(v < D, "UdHatPoint::finite({v}) out of bounds for D={D}");
       Some(UdHatPoint::Finite(v))
     }
   }
@@ -180,8 +202,12 @@ impl UdHatPoint {
 
   /// Create from array index.
   /// Mapping: 0 → ∞, 1 → 0, 2 → 2, 3 → 3, ...
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if idx >= D
   #[inline]
   pub fn from_index(idx: usize) -> Self {
+    debug_assert!(idx < D, "UdHatPoint::from_index({idx}) out of bounds for D={D}");
     match idx {
       0 => UdHatPoint::Infinity,
       1 => UdHatPoint::Finite(0),
@@ -193,7 +219,7 @@ impl UdHatPoint {
 
   /// Convert to UdPoint (U_d point)
   #[inline]
-  pub fn to_ud_point(self) -> UdPoint {
+  pub fn to_ud_point(self) -> UdPoint<D> {
     match self {
       UdHatPoint::Infinity => UdPoint::Infinity,
       UdHatPoint::Finite(v) => UdPoint::Finite(v),
@@ -225,25 +251,25 @@ impl UdHatPoint {
 
   // === Iteration ===
 
-  /// Iterate over all points in Û_d for degree d.
-  /// Yields: ∞, 0, 2, 3, ..., d-1 (total of d elements)
-  pub fn iter(d: usize) -> impl Iterator<Item = UdHatPoint> {
-    (0..d).map(UdHatPoint::from_index)
+  /// Iterate over all points in Û_d.
+  /// Yields: ∞, 0, 2, 3, ..., D-1 (total of D elements)
+  pub fn iter() -> impl Iterator<Item = UdHatPoint<D>> {
+    (0..D).map(UdHatPoint::from_index)
   }
 }
 
 // === Trait Implementations ===
 
-impl From<UdHatPoint> for UdPoint {
-  fn from(p: UdHatPoint) -> Self {
+impl<const D: usize> From<UdHatPoint<D>> for UdPoint<D> {
+  fn from(p: UdHatPoint<D>) -> Self {
     p.to_ud_point()
   }
 }
 
-impl TryFrom<UdPoint> for UdHatPoint {
+impl<const D: usize> TryFrom<UdPoint<D>> for UdHatPoint<D> {
   type Error = ValueOneExcluded;
 
-  fn try_from(p: UdPoint) -> Result<Self, Self::Error> {
+  fn try_from(p: UdPoint<D>) -> Result<Self, Self::Error> {
     match p {
       UdPoint::Infinity => Ok(UdHatPoint::Infinity),
       UdPoint::Finite(1) => Err(ValueOneExcluded),
@@ -255,10 +281,15 @@ impl TryFrom<UdPoint> for UdHatPoint {
 /// A tuple β ∈ U_d^k — an index into the extended domain.
 ///
 /// Used to index into LagrangeEvaluatedMultilinearPolynomial which stores evaluations over U_d^ℓ₀.
+///
+/// Type parameter `D` is the degree bound (U_D has D+1 points).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UdTuple(pub Vec<UdPoint>);
+pub struct UdTuple<const D: usize>(pub Vec<UdPoint<D>>);
 
-impl UdTuple {
+impl<const D: usize> UdTuple<D> {
+  /// Base of the domain U_D (= D + 1)
+  pub const BASE: usize = D + 1;
+
   /// Number of coordinates
   pub fn len(&self) -> usize {
     self.0.len()
@@ -284,16 +315,20 @@ impl UdTuple {
   }
 
   /// Convert to flat index for array access (mixed-radix encoding)
-  pub fn to_flat_index(&self, base: usize) -> usize {
-    self.0.iter().fold(0, |acc, p| acc * base + p.to_index())
+  ///
+  /// Uses compile-time BASE = D + 1
+  pub fn to_flat_index(&self) -> usize {
+    self.0.iter().fold(0, |acc, p| acc * Self::BASE + p.to_index())
   }
 
   /// Convert from flat index (mixed-radix decoding)
-  pub fn from_flat_index(mut idx: usize, base: usize, len: usize) -> Self {
+  ///
+  /// Uses compile-time BASE = D + 1
+  pub fn from_flat_index(mut idx: usize, len: usize) -> Self {
     let mut points = vec![UdPoint::Infinity; len];
     for i in (0..len).rev() {
-      points[i] = UdPoint::from_index(idx % base);
-      idx /= base;
+      points[i] = UdPoint::from_index(idx % Self::BASE);
+      idx /= Self::BASE;
     }
     UdTuple(points)
   }
@@ -307,17 +342,21 @@ impl UdTuple {
 ///
 /// Extended from the boolean hypercube {0,1}^ℓ₀ to U_d^ℓ₀ = {∞, 0, 1, ..., d-1}^ℓ₀,
 /// enabling efficient round polynomial computation via Lagrange interpolation.
-pub struct LagrangeEvaluatedMultilinearPolynomial<Scalar: PrimeField> {
-  evals: Vec<Scalar>, // size (d+1)^num_vars
+///
+/// Type parameter `D` is the degree bound (U_D has D+1 points).
+pub struct LagrangeEvaluatedMultilinearPolynomial<Scalar: PrimeField, const D: usize> {
+  evals: Vec<Scalar>, // size (D+1)^num_vars
   num_vars: usize,
-  d: usize,
 }
 
-impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
-  /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_d^ℓ₀.
+impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<Scalar, D> {
+  /// Base of the extended domain U_D (= D + 1)
+  const BASE: usize = D + 1;
+
+  /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_D^ℓ₀.
   ///
-  /// At each step j, we have evaluations over U_d^{j-1} × {0,1}^{ℓ₀-j+1}.
-  /// We extend the j-th coordinate from {0,1} to U_d.
+  /// At each step j, we have evaluations over U_D^{j-1} × {0,1}^{ℓ₀-j+1}.
+  /// We extend the j-th coordinate from {0,1} to U_D.
   ///
   /// **Key insight:** After extending the first variable, the data layout changes.
   /// We cannot simply split in half for subsequent extensions. Instead, we must
@@ -325,25 +364,23 @@ impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
   ///
   /// # Arguments
   /// * `poly` - Multilinear polynomial with evaluations over boolean hypercube
-  /// * `d` - Degree parameter for extended domain U_d
-  pub fn from_multilinear(poly: &MultilinearPolynomial<Scalar>, d: usize) -> Self {
+  pub fn from_multilinear(poly: &MultilinearPolynomial<Scalar>) -> Self {
     let num_vars = poly.Z.len().trailing_zeros() as usize;
     debug_assert_eq!(poly.Z.len(), 1 << num_vars, "Input size must be power of 2");
 
-    let d_plus_1 = d + 1;
     let mut current = poly.Z.clone();
 
     for j in 1..=num_vars {
       // At step j:
-      // - prefix_count = (d+1)^{j-1} (number of extended prefix combinations)
+      // - prefix_count = (D+1)^{j-1} (number of extended prefix combinations)
       // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
       // - current has size = prefix_count × 2 × suffix_count
-      // - next will have size = prefix_count × (d+1) × suffix_count
+      // - next will have size = prefix_count × (D+1) × suffix_count
 
-      let prefix_count = d_plus_1.pow((j - 1) as u32);
+      let prefix_count = Self::BASE.pow((j - 1) as u32);
       let suffix_count = 1usize << (num_vars - j);
       let current_stride = 2 * suffix_count; // stride between prefixes in current
-      let next_stride = d_plus_1 * suffix_count; // stride between prefixes in next
+      let next_stride = Self::BASE * suffix_count; // stride between prefixes in next
 
       let next_size = prefix_count * next_stride;
       let mut next = vec![Scalar::ZERO; next_size];
@@ -355,7 +392,7 @@ impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
           let p0 = current[base_current + suffix_idx];
           let p1 = current[base_current + suffix_count + suffix_idx];
 
-          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_d
+          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_D
           let diff = p1 - p0;
           let base_next = prefix_idx * next_stride;
 
@@ -368,8 +405,8 @@ impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
           // γ = 1 (index 2): p(prefix, 1, suffix)
           next[base_next + 2 * suffix_count + suffix_idx] = p1;
 
-          // γ = 2, 3, ..., d-1 (indices 3, 4, ..., d): extrapolate
-          for k in 2..d {
+          // γ = 2, 3, ..., D-1 (indices 3, 4, ..., D): extrapolate
+          for k in 2..D {
             let k_scalar = Scalar::from(k as u64);
             let val = p0 + k_scalar * diff;
             next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
@@ -383,14 +420,7 @@ impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
     Self {
       evals: current,
       num_vars,
-      d,
     }
-  }
-
-  /// Base of the extended domain U_d (= d + 1)
-  #[inline]
-  fn base(&self) -> usize {
-    self.d + 1
   }
 
   /// Number of evaluations
@@ -413,13 +443,18 @@ impl<Scalar: PrimeField> LagrangeEvaluatedMultilinearPolynomial<Scalar> {
 
   /// Get evaluation by domain tuple (type-safe path)
   #[inline]
-  pub fn get_by_domain(&self, tuple: &UdTuple) -> Scalar {
-    self.evals[tuple.to_flat_index(self.base())]
+  pub fn get_by_domain(&self, tuple: &UdTuple<D>) -> Scalar {
+    self.evals[tuple.to_flat_index()]
   }
 
   /// Convert flat index to domain tuple (for debugging/clarity)
-  pub fn to_domain_tuple(&self, flat_idx: usize) -> UdTuple {
-    UdTuple::from_flat_index(flat_idx, self.base(), self.num_vars)
+  pub fn to_domain_tuple(&self, flat_idx: usize) -> UdTuple<D> {
+    UdTuple::from_flat_index(flat_idx, self.num_vars)
+  }
+
+  /// Number of variables
+  pub fn num_vars(&self) -> usize {
+    self.num_vars
   }
 }
 
@@ -435,46 +470,57 @@ mod tests {
 
   #[test]
   fn test_ud_point_index_roundtrip() {
-    // Test all points for d=4 (indices 0..5)
+    // Test all points for D=4 (indices 0..5)
     for idx in 0..5 {
-      let p = UdPoint::from_index(idx);
+      let p = UdPoint::<4>::from_index(idx);
       assert_eq!(p.to_index(), idx);
     }
 
     // Test specific values
-    assert_eq!(UdPoint::Infinity.to_index(), 0);
-    assert_eq!(UdPoint::Finite(0).to_index(), 1);
-    assert_eq!(UdPoint::Finite(1).to_index(), 2);
-    assert_eq!(UdPoint::Finite(2).to_index(), 3);
+    assert_eq!(UdPoint::<3>::Infinity.to_index(), 0);
+    assert_eq!(UdPoint::<3>::Finite(0).to_index(), 1);
+    assert_eq!(UdPoint::<3>::Finite(1).to_index(), 2);
+    assert_eq!(UdPoint::<3>::Finite(2).to_index(), 3);
   }
 
   #[test]
   fn test_ud_point_is_binary() {
-    assert!(!UdPoint::Infinity.is_binary());
-    assert!(UdPoint::Finite(0).is_binary());
-    assert!(UdPoint::Finite(1).is_binary());
-    assert!(!UdPoint::Finite(2).is_binary());
-    assert!(!UdPoint::Finite(3).is_binary());
+    assert!(!UdPoint::<3>::Infinity.is_binary());
+    assert!(UdPoint::<3>::Finite(0).is_binary());
+    assert!(UdPoint::<3>::Finite(1).is_binary());
+    assert!(!UdPoint::<3>::Finite(2).is_binary());
   }
 
   #[test]
   fn test_ud_point_to_field() {
-    assert_eq!(UdPoint::Infinity.to_field::<Scalar>(), None);
-    assert_eq!(UdPoint::Finite(0).to_field::<Scalar>(), Some(Scalar::ZERO));
-    assert_eq!(UdPoint::Finite(1).to_field::<Scalar>(), Some(Scalar::ONE));
+    assert_eq!(UdPoint::<3>::Infinity.to_field::<Scalar>(), None);
     assert_eq!(
-      UdPoint::Finite(2).to_field::<Scalar>(),
+      UdPoint::<3>::Finite(0).to_field::<Scalar>(),
+      Some(Scalar::ZERO)
+    );
+    assert_eq!(
+      UdPoint::<3>::Finite(1).to_field::<Scalar>(),
+      Some(Scalar::ONE)
+    );
+    assert_eq!(
+      UdPoint::<3>::Finite(2).to_field::<Scalar>(),
       Some(Scalar::from(2u64))
     );
+  }
+
+  #[test]
+  fn test_ud_point_base_const() {
+    assert_eq!(UdPoint::<3>::BASE, 4);
+    assert_eq!(UdPoint::<4>::BASE, 5);
   }
 
   // === UdHatPoint tests ===
 
   #[test]
   fn test_ud_hat_index_roundtrip() {
-    // Test all points for d=4 (indices 0..4)
-    for idx in 0..5 {
-      let p = UdHatPoint::from_index(idx);
+    // Test all points for D=4 (indices 0..4)
+    for idx in 0..4 {
+      let p = UdHatPoint::<4>::from_index(idx);
       assert_eq!(p.to_index(), idx);
     }
   }
@@ -482,22 +528,22 @@ mod tests {
   #[test]
   fn test_ud_hat_index_mapping() {
     // Verify exact mapping: ∞→0, 0→1, 2→2, 3→3
-    assert_eq!(UdHatPoint::Infinity.to_index(), 0);
-    assert_eq!(UdHatPoint::Finite(0).to_index(), 1);
-    assert_eq!(UdHatPoint::Finite(2).to_index(), 2);
-    assert_eq!(UdHatPoint::Finite(3).to_index(), 3);
+    assert_eq!(UdHatPoint::<4>::Infinity.to_index(), 0);
+    assert_eq!(UdHatPoint::<4>::Finite(0).to_index(), 1);
+    assert_eq!(UdHatPoint::<4>::Finite(2).to_index(), 2);
+    assert_eq!(UdHatPoint::<4>::Finite(3).to_index(), 3);
 
     // Reverse mapping
-    assert_eq!(UdHatPoint::from_index(0), UdHatPoint::Infinity);
-    assert_eq!(UdHatPoint::from_index(1), UdHatPoint::Finite(0));
-    assert_eq!(UdHatPoint::from_index(2), UdHatPoint::Finite(2));
-    assert_eq!(UdHatPoint::from_index(3), UdHatPoint::Finite(3));
+    assert_eq!(UdHatPoint::<4>::from_index(0), UdHatPoint::Infinity);
+    assert_eq!(UdHatPoint::<4>::from_index(1), UdHatPoint::Finite(0));
+    assert_eq!(UdHatPoint::<4>::from_index(2), UdHatPoint::Finite(2));
+    assert_eq!(UdHatPoint::<4>::from_index(3), UdHatPoint::Finite(3));
   }
 
   #[test]
   fn test_ud_hat_iter() {
-    // For d=3, Û_d = {∞, 0, 2}
-    let points: Vec<_> = UdHatPoint::iter(3).collect();
+    // For D=3, Û_d = {∞, 0, 2}
+    let points: Vec<_> = UdHatPoint::<3>::iter().collect();
     assert_eq!(points.len(), 3);
     assert_eq!(points[0], UdHatPoint::Infinity);
     assert_eq!(points[1], UdHatPoint::Finite(0));
@@ -506,10 +552,9 @@ mod tests {
 
   #[test]
   fn test_ud_hat_finite_one_rejected() {
-    assert!(UdHatPoint::finite(0).is_some());
-    assert!(UdHatPoint::finite(1).is_none()); // 1 not in Û_d
-    assert!(UdHatPoint::finite(2).is_some());
-    assert!(UdHatPoint::finite(3).is_some());
+    assert!(UdHatPoint::<3>::finite(0).is_some());
+    assert!(UdHatPoint::<3>::finite(1).is_none()); // 1 not in Û_d
+    assert!(UdHatPoint::<3>::finite(2).is_some());
   }
 
   // === Conversion tests ===
@@ -517,19 +562,19 @@ mod tests {
   #[test]
   fn test_ud_to_ud_hat() {
     assert_eq!(
-      UdHatPoint::try_from(UdPoint::Infinity),
+      UdHatPoint::<3>::try_from(UdPoint::<3>::Infinity),
       Ok(UdHatPoint::Infinity)
     );
     assert_eq!(
-      UdHatPoint::try_from(UdPoint::Finite(0)),
+      UdHatPoint::<3>::try_from(UdPoint::<3>::Finite(0)),
       Ok(UdHatPoint::Finite(0))
     );
     assert_eq!(
-      UdHatPoint::try_from(UdPoint::Finite(1)),
+      UdHatPoint::<3>::try_from(UdPoint::<3>::Finite(1)),
       Err(ValueOneExcluded)
     );
     assert_eq!(
-      UdHatPoint::try_from(UdPoint::Finite(2)),
+      UdHatPoint::<3>::try_from(UdPoint::<3>::Finite(2)),
       Ok(UdHatPoint::Finite(2))
     );
   }
@@ -537,12 +582,25 @@ mod tests {
   #[test]
   fn test_ud_hat_to_ud() {
     // Via From trait
-    assert_eq!(UdPoint::from(UdHatPoint::Infinity), UdPoint::Infinity);
-    assert_eq!(UdPoint::from(UdHatPoint::Finite(0)), UdPoint::Finite(0));
-    assert_eq!(UdPoint::from(UdHatPoint::Finite(2)), UdPoint::Finite(2));
+    assert_eq!(
+      UdPoint::<3>::from(UdHatPoint::<3>::Infinity),
+      UdPoint::Infinity
+    );
+    assert_eq!(
+      UdPoint::<3>::from(UdHatPoint::<3>::Finite(0)),
+      UdPoint::Finite(0)
+    );
+    assert_eq!(
+      UdPoint::<3>::from(UdHatPoint::<3>::Finite(2)),
+      UdPoint::Finite(2)
+    );
 
     // Roundtrip for valid points
-    let valid_points = [UdPoint::Infinity, UdPoint::Finite(0), UdPoint::Finite(2)];
+    let valid_points = [
+      UdPoint::<3>::Infinity,
+      UdPoint::<3>::Finite(0),
+      UdPoint::<3>::Finite(2),
+    ];
     for p in valid_points {
       let hat = UdHatPoint::try_from(p).unwrap();
       assert_eq!(UdPoint::from(hat), p);
@@ -553,21 +611,26 @@ mod tests {
 
   #[test]
   fn test_tuple_flat_index_roundtrip() {
-    let base: usize = 4; // d+1 for d=3
     let len: usize = 3;
 
-    // Test all tuples in U_4^3
-    for idx in 0..base.pow(len as u32) {
-      let tuple = UdTuple::from_flat_index(idx, base, len);
-      assert_eq!(tuple.to_flat_index(base), idx);
+    // Test all tuples in U_4^3 (D=3, BASE=4)
+    for idx in 0..UdTuple::<3>::BASE.pow(len as u32) {
+      let tuple = UdTuple::<3>::from_flat_index(idx, len);
+      assert_eq!(tuple.to_flat_index(), idx);
       assert_eq!(tuple.len(), len);
     }
   }
 
   #[test]
+  fn test_tuple_base_const() {
+    assert_eq!(UdTuple::<3>::BASE, 4);
+    assert_eq!(UdTuple::<4>::BASE, 5);
+  }
+
+  #[test]
   fn test_tuple_is_all_binary() {
     // [0, 1, 0] - all binary
-    let binary = UdTuple(vec![
+    let binary = UdTuple::<3>(vec![
       UdPoint::Finite(0),
       UdPoint::Finite(1),
       UdPoint::Finite(0),
@@ -575,7 +638,7 @@ mod tests {
     assert!(binary.is_all_binary());
 
     // [0, ∞, 1] - has infinity
-    let has_inf = UdTuple(vec![
+    let has_inf = UdTuple::<3>(vec![
       UdPoint::Finite(0),
       UdPoint::Infinity,
       UdPoint::Finite(1),
@@ -583,7 +646,7 @@ mod tests {
     assert!(!has_inf.is_all_binary());
 
     // [0, 2, 1] - has non-binary finite
-    let has_two = UdTuple(vec![
+    let has_two = UdTuple::<3>(vec![
       UdPoint::Finite(0),
       UdPoint::Finite(2),
       UdPoint::Finite(1),
@@ -594,7 +657,7 @@ mod tests {
   #[test]
   fn test_tuple_has_infinity() {
     // [0, ∞, 1] - has infinity
-    let has_inf = UdTuple(vec![
+    let has_inf = UdTuple::<3>(vec![
       UdPoint::Finite(0),
       UdPoint::Infinity,
       UdPoint::Finite(1),
@@ -602,7 +665,7 @@ mod tests {
     assert!(has_inf.has_infinity());
 
     // [0, 1, 2] - no infinity
-    let no_inf = UdTuple(vec![
+    let no_inf = UdTuple::<3>(vec![
       UdPoint::Finite(0),
       UdPoint::Finite(1),
       UdPoint::Finite(2),
@@ -612,17 +675,17 @@ mod tests {
 
   #[test]
   fn test_tuple_specific_encoding() {
-    // For base=4 (d=3), test specific encodings
+    // For D=3 (BASE=4), test specific encodings
     // Tuple (∞, 0, 1) = (idx 0, idx 1, idx 2) -> 0*16 + 1*4 + 2 = 6
-    let tuple = UdTuple(vec![
+    let tuple = UdTuple::<3>(vec![
       UdPoint::Infinity,
       UdPoint::Finite(0),
       UdPoint::Finite(1),
     ]);
-    assert_eq!(tuple.to_flat_index(4), 6);
+    assert_eq!(tuple.to_flat_index(), 6);
 
     // Reverse: 6 -> (0, 1, 2) -> (∞, 0, 1)
-    let decoded = UdTuple::from_flat_index(6, 4, 3);
+    let decoded = UdTuple::<3>::from_flat_index(6, 3);
     assert_eq!(decoded, tuple);
   }
 
@@ -630,19 +693,16 @@ mod tests {
 
   #[test]
   fn test_extend_output_size() {
-    let d = 3;
-
     for num_vars in 1..=4 {
       let input_size = 1 << num_vars;
       let input: Vec<Scalar> = (0..input_size).map(|i| Scalar::from(i as u64)).collect();
       let poly = MultilinearPolynomial::new(input);
 
-      let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+      let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
 
-      let expected_size = (d + 1).pow(num_vars as u32);
+      let expected_size = 4usize.pow(num_vars as u32); // (D+1)^num_vars = 4^num_vars
       assert_eq!(extended.len(), expected_size);
-      assert_eq!(extended.num_vars, num_vars);
-      assert_eq!(extended.d, d);
+      assert_eq!(extended.num_vars(), num_vars);
     }
   }
 
@@ -651,14 +711,14 @@ mod tests {
     use ff::Field;
 
     let num_vars = 3;
-    let d = 3;
-    let base = d + 1;
+    const D: usize = 3;
+    let base = D + 1;
 
     let input: Vec<Scalar> =
       (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
     let poly = MultilinearPolynomial::new(input.clone());
 
-    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // In U_d indexing: 0 → index 1, 1 → index 2
     for b in 0..(1 << num_vars) {
@@ -675,12 +735,11 @@ mod tests {
 
   #[test]
   fn test_extend_single_var() {
-    let d = 3;
     let p0 = Scalar::from(7u64);
     let p1 = Scalar::from(19u64);
 
     let poly = MultilinearPolynomial::new(vec![p0, p1]);
-    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
 
     // U_d = {∞, 0, 1, 2} with indices 0, 1, 2, 3
     assert_eq!(extended.get(0), p1 - p0, "p(∞) = leading coeff");
@@ -694,13 +753,13 @@ mod tests {
     use ff::Field;
 
     let num_vars = 3;
-    let d = 3;
-    let base = d + 1;
+    const D: usize = 3;
+    let base = D + 1;
 
     let input: Vec<Scalar> =
       (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
     let poly = MultilinearPolynomial::new(input.clone());
-    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // Check all finite points via direct multilinear evaluation
     for idx in 0..extended.len() {
@@ -724,13 +783,13 @@ mod tests {
     use ff::Field;
 
     let num_vars = 3;
-    let d = 3;
-    let base = d + 1;
+    const D: usize = 3;
+    let base = D + 1;
 
     let input: Vec<Scalar> =
       (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
     let poly = MultilinearPolynomial::new(input.clone());
-    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // p(∞, y₂, y₃) = p(1, y₂, y₃) - p(0, y₂, y₃)
     for y2 in 0..2usize {
@@ -749,8 +808,8 @@ mod tests {
   #[test]
   fn test_extend_known_polynomial() {
     // p(X, Y, Z) = X + 2Y + 4Z
-    let d = 3;
-    let base = d + 1;
+    const D: usize = 3;
+    let base = D + 1;
 
     let mut input = Vec::with_capacity(8);
     for x in 0..2u64 {
@@ -762,12 +821,12 @@ mod tests {
     }
     let poly = MultilinearPolynomial::new(input);
 
-    let extended = LagrangeEvaluatedMultilinearPolynomial::from_multilinear(&poly, d);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // Finite points: p(a,b,c) = a + 2b + 4c
-    for a in 0..d {
-      for b in 0..d {
-        for c in 0..d {
+    for a in 0..D {
+      for b in 0..D {
+        for c in 0..D {
           let idx = (a + 1) * base * base + (b + 1) * base + (c + 1);
           let expected = Scalar::from(a as u64 + 2 * b as u64 + 4 * c as u64);
           assert_eq!(extended.get(idx), expected);
@@ -796,6 +855,24 @@ mod tests {
       Scalar::ZERO,
       "p(∞,∞,∞) = 0 (no XYZ term)"
     );
+  }
+
+  #[test]
+  fn test_get_by_domain() {
+    let p0 = Scalar::from(7u64);
+    let p1 = Scalar::from(19u64);
+
+    let poly = MultilinearPolynomial::new(vec![p0, p1]);
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
+
+    // Test type-safe access
+    let tuple_inf = UdTuple::<3>(vec![UdPoint::Infinity]);
+    let tuple_zero = UdTuple::<3>(vec![UdPoint::Finite(0)]);
+    let tuple_one = UdTuple::<3>(vec![UdPoint::Finite(1)]);
+
+    assert_eq!(extended.get_by_domain(&tuple_inf), p1 - p0);
+    assert_eq!(extended.get_by_domain(&tuple_zero), p0);
+    assert_eq!(extended.get_by_domain(&tuple_one), p1);
   }
 
   // === Test helpers ===
