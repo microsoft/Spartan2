@@ -155,6 +155,7 @@ pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Ve
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ff::Field;
   use crate::provider::pasta::pallas;
 
   fn test_eq_polynomial_with<F: PrimeField>() {
@@ -301,5 +302,44 @@ mod tests {
 
     // E_y[2] = eq([], ·) = [1]
     assert_eq!(pyramid[2][0], pallas::Scalar::ONE);
+  }
+
+  /// Ensure evals_from_points uses MSB-first indexing and matches direct product formula.
+  #[test]
+  fn test_eq_table_index_convention() {
+    let r = vec![
+      pallas::Scalar::from(2u64),
+      pallas::Scalar::from(3u64),
+      pallas::Scalar::from(5u64),
+    ];
+    let m = r.len();
+    let evals = EqPolynomial::evals_from_points(&r);
+    assert_eq!(evals.len(), 1 << m);
+
+    for idx in 0..(1usize << m) {
+      let mut expected = pallas::Scalar::ONE;
+      for j in 0..m {
+        // MSB-first: bit j of idx (from left) corresponds to variable j
+        let bit = (idx >> (m - 1 - j)) & 1;
+        expected *= if bit == 1 { r[j] } else { pallas::Scalar::ONE - r[j] };
+      }
+      assert_eq!(
+        evals[idx], expected,
+        "Mismatch at idx {}: got {:?}, expected {:?}", idx, evals[idx], expected
+      );
+    }
+  }
+
+  /// Spot-check specific values to catch bit-order flips.
+  #[test]
+  fn test_eq_table_specific_values() {
+    // m=2, r = [2,3]; MSB-first convention
+    let r = vec![pallas::Scalar::from(2u64), pallas::Scalar::from(3u64)];
+    let evals = EqPolynomial::evals_from_points(&r);
+
+    assert_eq!(evals[0], pallas::Scalar::from(2u64)); // (1-2)(1-3) = 2
+    assert_eq!(evals[1], -pallas::Scalar::from(3u64)); // (1-2)*3 = -3
+    assert_eq!(evals[2], -pallas::Scalar::from(4u64)); // 2*(1-3) = -4
+    assert_eq!(evals[3], pallas::Scalar::from(6u64)); // 2*3 = 6
   }
 }
