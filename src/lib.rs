@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 // private modules
+mod accumulators;
 mod digest;
 mod lagrange;
 mod math;
