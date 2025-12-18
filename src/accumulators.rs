@@ -3,6 +3,7 @@
 // This file is part of the Spartan2 project.
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
+#![allow(dead_code)]
 
 //! Accumulator data structures for Algorithm 6 small-value sumcheck optimization.
 //!

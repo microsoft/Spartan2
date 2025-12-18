@@ -176,7 +176,9 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 mod tests {
   use super::*;
   use crate::{provider::pasta::pallas, zip_with};
+  use ff::Field;
   use rand_core::{CryptoRng, OsRng, RngCore};
+  use pallas::Scalar;
 
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.
@@ -340,6 +342,53 @@ mod tests {
   #[test]
   fn test_bind_and_evaluate() {
     bind_and_evaluate_with::<pallas::Scalar>();
+  }
+
+  /// Explicit check that bind_poly_var_top matches manual linear interpolation on the MSB.
+  #[test]
+  fn test_bind_matches_direct_evaluation_explicit() {
+    // ℓ=3, poly[i] = i^2 + 1
+    let l = 3;
+    let size = 1 << l;
+    let vals: Vec<Scalar> = (0..size).map(|i| Scalar::from((i * i + 1) as u64)).collect();
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+
+    let r = Scalar::from(7u64);
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), size / 2);
+
+    // Bound variable is the MSB: new[j] = (1-r)*vals[j] + r*vals[j+4]
+    for j in 0..(size / 2) {
+      let expected = (Scalar::ONE - r) * vals[j] + r * vals[j + size / 2];
+      assert_eq!(poly.Z[j], expected, "Mismatch at j={}", j);
+    }
+  }
+
+  /// Ensure "top" refers to the MSB (high-order variable), not the LSB.
+  #[test]
+  fn test_bind_top_is_msb_not_lsb() {
+    // ℓ=2, values encode (x0,x1) with x0 as MSB: [p(0,0), p(0,1), p(1,0), p(1,1)]
+    let vals = vec![
+      Scalar::from(1u64), // (0,0)
+      Scalar::from(2u64), // (0,1)
+      Scalar::from(3u64), // (1,0)
+      Scalar::from(4u64), // (1,1)
+    ];
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+    let r = Scalar::from(5u64);
+
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), 2);
+
+    // Expected with MSB binding:
+    // new[0] = (1-r)*p(0,0) + r*p(1,0) = (1-5)*1 + 5*3 = 11
+    // new[1] = (1-r)*p(0,1) + r*p(1,1) = (1-5)*2 + 5*4 = 12
+    assert_eq!(poly.Z[0], Scalar::from(11u64));
+    assert_eq!(poly.Z[1], Scalar::from(12u64));
+
+    // If LSB were bound, results would differ (6 and 8 respectively).
+    assert_ne!(poly.Z[0], Scalar::from(6u64));
+    assert_ne!(poly.Z[1], Scalar::from(8u64));
   }
 
   // === gather_prefix_evals tests ===
