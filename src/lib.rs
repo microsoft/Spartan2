@@ -23,6 +23,7 @@
 
 // private modules
 mod digest;
+mod lagrange;
 mod math;
 mod nifs;
 mod polys;
