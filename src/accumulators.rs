@@ -213,7 +213,6 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
   let xout_vars = half.checked_sub(l0).expect("l0 must be <= ℓ/2");
 
   let num_x_out = 1usize << xout_vars;
-  let num_x_in = 1usize << half;
   let num_betas = base.pow(l0 as u32);
 
   // Precompute eq tables
@@ -236,7 +235,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
         let mut tA = vec![S::ZERO; num_betas];
 
         // Inner loop over x_in
-        for x_in_bits in 0..num_x_in {
+        for (x_in_bits, &ein) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           let az_pref = az.gather_prefix_evals(l0, suffix);
@@ -247,9 +246,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&bz_pref);
           let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&cz_pref);
 
-          let ein = e_in[x_in_bits];
-
-          for beta_idx in 0..num_betas {
+          for (beta_idx, tA_slot) in tA.iter_mut().enumerate() {
             let beta_tuple = az_ext.to_domain_tuple(beta_idx);
             let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
             // ∞ rule: drop Cz at ∞
@@ -258,14 +255,13 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
             } else {
               ab - cz_ext.get(beta_idx)
             };
-            tA[beta_idx] += ein * prod;
+            *tA_slot += ein * prod;
           }
         }
 
         // Distribute tA → A_i(v,u) via idx4
         let ex = e_xout[x_out_bits];
-        for beta_idx in 0..num_betas {
-          let val = tA[beta_idx];
+        for (beta_idx, &val) in tA.iter().enumerate() {
           if val.is_zero().into() {
             continue;
           }

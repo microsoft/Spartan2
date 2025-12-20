@@ -443,7 +443,7 @@ impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
 impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   /// Construct the domain using an embedding from indices to field elements.
   pub fn new(embed: impl Fn(usize) -> F) -> Self {
-    let finite_points = std::array::from_fn(|i| embed(i));
+    let finite_points = std::array::from_fn(embed);
     let weights = Self::weights_general(&finite_points);
 
     Self {
@@ -521,11 +521,11 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
     let denoms = std::array::from_fn(|k| {
       let xk = points[k];
       let mut denom = F::ONE;
-      for m in 0..D {
+      for (m, &xm) in points.iter().enumerate() {
         if m == k {
           continue;
         }
-        denom *= xk - points[m];
+        denom *= xk - xm;
       }
       denom
     });
