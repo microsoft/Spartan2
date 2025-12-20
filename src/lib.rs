@@ -25,6 +25,7 @@
 mod accumulator_index;
 mod accumulators;
 mod digest;
+mod eq_linear;
 mod lagrange;
 mod math;
 mod nifs;
