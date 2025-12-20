@@ -203,7 +203,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `claim` - The claimed sum over the hypercube
   /// * `num_rounds` - The number of variables/rounds in the sum-check
   /// * `poly_A` - First multilinear polynomial (mutable, will be bound during protocol)
-  /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)  
+  /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)
   /// * `comb_func` - Function that combines evaluations of the two polynomials
   /// * `transcript` - The transcript for generating randomness
   ///
@@ -278,7 +278,7 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Arguments
   /// * `poly_A` - First multilinear polynomial
-  /// * `poly_B` - Second multilinear polynomial  
+  /// * `poly_B` - Second multilinear polynomial
   /// * `poly_C` - Third multilinear polynomial
   /// * `poly_D` - Fourth multilinear polynomial
   /// * `comb_func` - Function that combines evaluations of the four polynomials
@@ -358,7 +358,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `pow_tau_left` - The left part of the power of tau
   /// * `pow_tau_right` - The right part of the power of tau
   /// * `poly_A` - First multilinear polynomial
-  /// * `poly_B` - Second multilinear polynomial  
+  /// * `poly_B` - Second multilinear polynomial
   /// * `poly_C` - Third multilinear polynomial
   /// * `comb_func` - Function that combines evaluations of the four polynomials
   ///
@@ -1162,5 +1162,105 @@ pub(crate) mod eq_sumcheck {
     };
 
     (eval_0, eval_2, eval_3)
+  }
+}
+
+pub(crate) mod lagrange_sumcheck {
+  #![allow(dead_code)]
+
+  use crate::{eq_linear::EqRoundValues, polys::univariate::UniPoly};
+  use ff::PrimeField;
+
+  /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
+  pub(crate) fn build_univariate_round_polynomial<F: PrimeField>(
+    li: &EqRoundValues<F>,
+    t0: F,
+    t1: F,
+    t_inf: F,
+  ) -> UniPoly<F> {
+    // Reconstruct t_i(X) = aX^2 + bX + c using:
+    // - a = t_i(∞) (leading coefficient for degree-2 polynomials)
+    // - c = t_i(0)
+    // - t_i(1) = a + b + c ⇒ b = t_i(1) − a − c
+    let a = t_inf;
+    let c = t0;
+    let b = t1 - a - c;
+
+    // Multiply s_i(X) = ℓ_i(X)·t_i(X) with ℓ_i(X)=ℓ_∞X+ℓ_0 and collect coefficients.
+    let s3 = li.linf * a;
+    let s2 = li.linf * b + li.l0 * a;
+    let s1 = li.linf * c + li.l0 * b;
+    let s0 = li.l0 * c;
+
+    UniPoly {
+      coeffs: vec![s0, s1, s2, s3],
+    }
+  }
+
+  /// Build s_i(0), s_i(1), s_i(2), s_i(3) for testing against the coefficient form.
+  pub(crate) fn build_univariate_round_evals<F: PrimeField>(
+    li: &EqRoundValues<F>,
+    t0: F,
+    t1: F,
+    t_inf: F,
+  ) -> [F; 4] {
+    // Reconstruct t_i(X) = aX^2 + bX + c from t_i(∞), t_i(1), t_i(0).
+    let a = t_inf;
+    let c = t0;
+    let b = t1 - a - c;
+
+    // Evaluate t_i(2) = a(2)^2 + b(2) + c = 4a + 2b + c and t_i(3) = 9a + 3b + c efficiently.
+    let four_a = a.double().double();
+    let two_b = b.double();
+    let t2 = four_a + two_b + c;
+
+    // t_i(3) = a(3)^2 + b(3) + c = 9a + 3b + c with 9a = 8a + a and 3b = 2b + b.
+    let eight_a = four_a.double();
+    let nine_a = eight_a + a;
+    let three_b = b.double() + b;
+    let t3 = nine_a + three_b + c;
+
+    // Evaluate ℓ_i(2) and ℓ_i(3) from ℓ_i(X) = ℓ_∞X + ℓ_0.
+    let l2 = li.linf.double() + li.l0;
+    let l3 = l2 + li.linf;
+
+    // Use s_i(u) = ℓ_i(u)·t_i(u) for u ∈ {0, 1, 2, 3}.
+    let s0 = li.l0 * t0;
+    let s1 = li.l1 * t1;
+    let s2 = l2 * t2;
+    let s3 = l3 * t3;
+
+    [s0, s1, s2, s3]
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+    use crate::provider::pasta::pallas;
+    use ff::Field;
+
+    type F = pallas::Scalar;
+
+    #[test]
+    fn test_round_polynomial_matches_evals() {
+      let l0 = F::from(2u64);
+      let linf = F::from(5u64);
+      let li = EqRoundValues {
+        l0,
+        l1: l0 + linf,
+        linf,
+      };
+      let t0 = F::from(7u64);
+      let t1 = F::from(11u64);
+      let t_inf = F::from(13u64);
+
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+      let evals = build_univariate_round_evals(&li, t0, t1, t_inf);
+
+      assert_eq!(poly.evaluate(&F::ZERO), evals[0]);
+      assert_eq!(poly.evaluate(&F::ONE), evals[1]);
+      assert_eq!(poly.evaluate(&F::from(2u64)), evals[2]);
+      assert_eq!(poly.evaluate(&F::from(3u64)), evals[3]);
+    }
   }
 }

@@ -14,7 +14,7 @@
 
 use crate::{
   accumulator_index::compute_idx4,
-  lagrange::{LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple},
+  lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple},
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
@@ -86,6 +86,35 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
     let v_idx = v.to_flat_index();
     let u_idx = u.to_index();
     self.data[v_idx][u_idx]
+  }
+
+  /// Evaluate t_i(u) = ⟨R_i, A_i(·, u)⟩ for this round.
+  pub fn eval_t_at_u(&self, coeff: &LagrangeCoeff<Scalar, D>, u: UdHatPoint<D>) -> Scalar {
+    debug_assert_eq!(
+      self.data.len(),
+      coeff.len(),
+      "R_i length must match number of prefixes"
+    );
+    let u_idx = u.to_index();
+    coeff
+      .as_slice()
+      .iter()
+      .zip(self.data.iter())
+      .map(|(c, row)| *c * row[u_idx])
+      .sum()
+  }
+
+  /// Evaluate t_i(u) for all u ∈ Û_D in a single pass.
+  pub fn eval_t_all_u(&self, coeff: &LagrangeCoeff<Scalar, D>) -> [Scalar; D] {
+    debug_assert_eq!(self.data.len(), coeff.len());
+    let mut acc = [Scalar::ZERO; D];
+    for (c, row) in coeff.as_slice().iter().zip(self.data.iter()) {
+      let scaled = *c;
+      for i in 0..D {
+        acc[i] += scaled * row[i];
+      }
+    }
+    acc
   }
 
   /// Element-wise merge (tight loop, compiler can vectorize).

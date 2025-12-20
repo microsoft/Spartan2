@@ -25,6 +25,13 @@ impl<F: PrimeField> EqRoundValues<F> {
   pub(crate) fn eval_at(&self, u: F) -> F {
     self.linf * u + self.l0
   }
+
+  /// Derives t_i(1) using the sumcheck relation and ℓ_i(1).
+  pub(crate) fn derive_t1(&self, claim_prev: F, t0: F) -> Option<F> {
+    let s0 = self.l0 * t0;
+    let s1 = claim_prev - s0;
+    self.l1.invert().into_option().map(|inv| s1 * inv)
+  }
 }
 
 /// Tracks α_i = eqe(w_{<i}, r_{<i}) to build ℓ_i values each round.
@@ -165,5 +172,37 @@ mod tests {
 
     assert_eq!(v.linf, F::ZERO);
     assert_eq!(v.l0 + v.l1, F::ONE);
+  }
+
+  // derive_t1 should return s1 / l1 for non-zero l1.
+  #[test]
+  fn test_derive_t1_returns_value() {
+    let li = EqRoundValues {
+      l0: F::from(2u64),
+      l1: F::from(5u64),
+      linf: F::from(7u64),
+    };
+    let t0 = F::from(11u64);
+    let claim = F::from(97u64);
+
+    let s0 = li.l0 * t0;
+    let s1 = claim - s0;
+    let expected = s1 * li.l1.invert().unwrap();
+
+    assert_eq!(li.derive_t1(claim, t0), Some(expected));
+  }
+
+  // derive_t1 should return None when l1 == 0.
+  #[test]
+  fn test_derive_t1_returns_none_on_zero_l1() {
+    let li = EqRoundValues {
+      l0: F::from(3u64),
+      l1: F::ZERO,
+      linf: F::from(9u64),
+    };
+    let t0 = F::from(4u64);
+    let claim = F::from(10u64);
+
+    assert_eq!(li.derive_t1(claim, t0), None);
   }
 }
