@@ -1168,8 +1168,52 @@ pub(crate) mod eq_sumcheck {
 pub(crate) mod lagrange_sumcheck {
   #![allow(dead_code)]
 
-  use crate::{eq_linear::EqRoundValues, polys::univariate::UniPoly};
+  use crate::{
+    accumulators::SmallValueAccumulators,
+    eq_linear::{EqRoundFactor, EqRoundValues},
+    lagrange::{LagrangeBasisFactory, LagrangeCoeff},
+    polys::univariate::UniPoly,
+  };
   use ff::PrimeField;
+
+  /// Tracks the small-value sum-check state for the first ℓ₀ rounds.
+  pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
+    accumulators: SmallValueAccumulators<Scalar, D>,
+    coeff: LagrangeCoeff<Scalar, D>,
+    eq_factor: EqRoundFactor<Scalar>,
+    basis_factory: LagrangeBasisFactory<Scalar, D>,
+  }
+
+  impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
+    /// Create a new small-value round tracker with precomputed accumulators.
+    pub(crate) fn new(
+      accumulators: SmallValueAccumulators<Scalar, D>,
+      basis_factory: LagrangeBasisFactory<Scalar, D>,
+    ) -> Self {
+      Self {
+        accumulators,
+        coeff: LagrangeCoeff::new(),
+        eq_factor: EqRoundFactor::new(),
+        basis_factory,
+      }
+    }
+
+    /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
+    pub(crate) fn eval_t_all_u(&self, round: usize) -> [Scalar; D] {
+      self.accumulators.round(round).eval_t_all_u(&self.coeff)
+    }
+
+    /// Compute ℓ_i values for the provided w_i.
+    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> EqRoundValues<Scalar> {
+      self.eq_factor.values(w_i)
+    }
+
+    /// Advance the round state with the verifier challenge r_i.
+    pub(crate) fn advance(&mut self, li: &EqRoundValues<Scalar>, r_i: Scalar) {
+      self.eq_factor.advance_from_values(li, r_i);
+      self.coeff.extend(&self.basis_factory.basis_at(r_i));
+    }
+  }
 
   /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
   pub(crate) fn build_univariate_round_polynomial<F: PrimeField>(
@@ -1236,10 +1280,18 @@ pub(crate) mod lagrange_sumcheck {
   #[cfg(test)]
   mod tests {
     use super::*;
-    use crate::provider::pasta::pallas;
+    use crate::{
+      accumulators::build_accumulators,
+      lagrange::{LagrangeBasisFactory, UdHatPoint},
+      polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
+      provider::PallasHyraxEngine,
+      sumcheck::eq_sumcheck::EqSumCheckInstance,
+      traits::Engine,
+    };
     use ff::Field;
 
-    type F = pallas::Scalar;
+    type E = PallasHyraxEngine;
+    type F = <E as Engine>::Scalar;
 
     #[test]
     fn test_round_polynomial_matches_evals() {
@@ -1261,6 +1313,73 @@ pub(crate) mod lagrange_sumcheck {
       assert_eq!(poly.evaluate(&F::ONE), evals[1]);
       assert_eq!(poly.evaluate(&F::from(2u64)), evals[2]);
       assert_eq!(poly.evaluate(&F::from(3u64)), evals[3]);
+    }
+
+    #[test]
+    fn test_smallvalue_round_matches_eq_instance_evals() {
+      const NUM_VARS: usize = 6;
+      const SMALL_VALUE_ROUNDS: usize = 3;
+      const T_DEGREE: usize = 2;
+
+      let n = 1usize << NUM_VARS;
+      let taus = (0..NUM_VARS)
+        .map(|i| F::from((i + 2) as u64))
+        .collect::<Vec<_>>();
+
+      let az_vals = (0..n).map(|i| F::from((i + 1) as u64)).collect::<Vec<_>>();
+      let bz_vals = (0..n).map(|i| F::from((i + 3) as u64)).collect::<Vec<_>>();
+      let cz_vals = az_vals
+        .iter()
+        .zip(bz_vals.iter())
+        .map(|(a, b)| *a * *b)
+        .collect::<Vec<_>>();
+
+      let az = MultilinearPolynomial::new(az_vals.clone());
+      let bz = MultilinearPolynomial::new(bz_vals.clone());
+      let cz = MultilinearPolynomial::new(cz_vals.clone());
+
+      let eq_evals = EqPolynomial::evals_from_points(&taus);
+      let mut claim = F::ZERO;
+      for i in 0..n {
+        claim += eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]);
+      }
+
+      let accs = build_accumulators::<F, T_DEGREE>(&az, &bz, &cz, &taus, SMALL_VALUE_ROUNDS);
+      let basis = LagrangeBasisFactory::<F, T_DEGREE>::new(|i| F::from(i as u64));
+      let mut small_value = SmallValueSumCheck::new(accs, basis);
+
+      let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
+      let mut poly_A = MultilinearPolynomial::new(az_vals);
+      let mut poly_B = MultilinearPolynomial::new(bz_vals);
+      let mut poly_C = MultilinearPolynomial::new(cz_vals);
+
+      for round in 0..SMALL_VALUE_ROUNDS {
+        let (expected_eval_0, expected_eval_2, expected_eval_3) =
+          eq_instance.evaluation_points_cubic_with_three_inputs(round, &poly_A, &poly_B, &poly_C);
+
+        let li = small_value.eq_round_values(taus[round]);
+        let t_all = small_value.eval_t_all_u(round);
+        let t_inf = t_all[UdHatPoint::<T_DEGREE>::Infinity.to_index()];
+        let t0 = t_all[UdHatPoint::<T_DEGREE>::Finite(0).to_index()];
+        let t1 = li
+          .derive_t1(claim, t0)
+          .expect("l1 should be non-zero for chosen taus");
+
+        let s_evals = build_univariate_round_evals(&li, t0, t1, t_inf);
+        assert_eq!(s_evals[0], expected_eval_0);
+        assert_eq!(s_evals[2], expected_eval_2);
+        assert_eq!(s_evals[3], expected_eval_3);
+
+        let r_i = F::from((round + 7) as u64);
+        let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+        claim = poly.evaluate(&r_i);
+
+        poly_A.bind_poly_var_top(&r_i);
+        poly_B.bind_poly_var_top(&r_i);
+        poly_C.bind_poly_var_top(&r_i);
+        eq_instance.bound(&r_i);
+        small_value.advance(&li, r_i);
+      }
     }
   }
 }
