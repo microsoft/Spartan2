@@ -303,26 +303,34 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
         // tA[β]
         let mut tA = vec![S::ZERO; num_betas];
 
+        // Pre-allocate buffers outside inner loop (reused across iterations)
+        let mut az_pref = vec![S::ZERO; prefix_size];
+        let mut bz_pref = vec![S::ZERO; prefix_size];
+        let mut cz_pref = vec![S::ZERO; prefix_size];
+        let ext_size = (D + 1).pow(l0 as u32);
+        let mut buf_a = vec![S::ZERO; ext_size];
+        let mut buf_b = vec![S::ZERO; ext_size];
+
         // Inner loop over x_in
         for (x_in_bits, &ein) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-          let mut az_pref = Vec::with_capacity(prefix_size);
-          let mut bz_pref = Vec::with_capacity(prefix_size);
-          let mut cz_pref = Vec::with_capacity(prefix_size);
+          // Fill by index assignment (no allocation)
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
-            az_pref.push(az.Z[idx]);
-            bz_pref.push(bz.Z[idx]);
-            cz_pref.push(cz.Z[idx]);
+            az_pref[prefix] = az.Z[idx];
+            bz_pref[prefix] = bz.Z[idx];
+            cz_pref[prefix] = cz.Z[idx];
           }
 
+          // Extend to Lagrange domain using ping-pong buffers. This reduces allocations
+          // from O(num_x_in × num_x_out) to O(num_threads) by reusing buf_a/buf_b.
           let az_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(az_pref));
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_boolean_evals_with_buffer_reusing(&az_pref, &mut buf_a, &mut buf_b);
           let bz_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(bz_pref));
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_boolean_evals_with_buffer_reusing(&bz_pref, &mut buf_a, &mut buf_b);
           let cz_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(cz_pref));
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_boolean_evals_with_buffer_reusing(&cz_pref, &mut buf_a, &mut buf_b);
 
           for (beta_idx, tA_slot) in tA.iter_mut().enumerate() {
             let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
