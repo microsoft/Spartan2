@@ -24,6 +24,10 @@ use crate::{
 use ff::PrimeField;
 use rayon::prelude::*;
 
+/// Polynomial degree D for Spartan's small-value sumcheck.
+/// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
+pub const SPARTAN_T_DEGREE: usize = 2;
+
 /// A single round's accumulator A_i(v, u) with flat contiguous storage.
 ///
 /// For round i (0-indexed), this stores:
@@ -160,7 +164,7 @@ struct CachedPrefixIndex {
 ///
 /// For quadratic polynomials, we evaluate at U_2 = {∞, 0, 1} (3 points)
 /// and store Û_2 = {∞, 0} (2 points, excluding 1).
-pub type QuadraticTAccumulators<Scalar> = SmallValueAccumulators<Scalar, 2>;
+pub type QuadraticTAccumulators<Scalar> = SmallValueAccumulators<Scalar, SPARTAN_T_DEGREE>;
 
 impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   /// Create a fresh accumulator (used per-thread in fold).
@@ -365,6 +369,9 @@ mod tests {
 
   type Scalar = pallas::Scalar;
 
+  // Use the shared constant for polynomial degree in tests
+  const D: usize = SPARTAN_T_DEGREE;
+
   // === RoundAccumulator tests ===
 
   #[test]
@@ -455,7 +462,7 @@ mod tests {
     // Round 0: 3^0 = 1 prefix
     // Round 1: 3^1 = 3 prefixes
     // Round 2: 3^2 = 9 prefixes
-    let acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
+    let acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
 
     assert_eq!(acc.num_rounds(), 3);
     assert_eq!(acc.round(0).num_prefixes(), 1);
@@ -465,7 +472,7 @@ mod tests {
 
   #[test]
   fn test_small_value_accumulators_accumulate_get() {
-    let mut acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
+    let mut acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
 
     let val1 = Scalar::from(19u64);
     let val2 = Scalar::from(23u64);
@@ -483,8 +490,8 @@ mod tests {
 
   #[test]
   fn test_small_value_accumulators_merge() {
-    let mut acc1: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
-    let mut acc2: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
+    let mut acc1: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
+    let mut acc2: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
 
     let val1 = Scalar::from(7u64);
     let val2 = Scalar::from(11u64);
@@ -505,12 +512,12 @@ mod tests {
 
   #[test]
   fn test_small_value_accumulators_domain_methods() {
-    let mut acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(2);
+    let mut acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(2);
 
     // Round 1 has 3 prefixes (base^1)
     // v = (Finite(0),) -> flat index = 1 (∞=0, 0=1, 1=2)
     let v = UdTuple::<2>(vec![UdPoint::Finite(0)]);
-    let u = UdHatPoint::<2>::Infinity; // index 0
+    let u = UdHatPoint::<D>::Infinity; // index 0
 
     let val = Scalar::from(99u64);
     acc.accumulate_by_domain(1, &v, u, val);
@@ -536,7 +543,7 @@ mod tests {
     // Round 1: 3 * 2 = 6
     // Round 2: 9 * 2 = 18
     // Total: 26
-    let acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
+    let acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
 
     let total_elements: usize = (0..3).map(|i| acc.round(i).num_prefixes() * 2).sum();
     assert_eq!(total_elements, 26);
@@ -548,7 +555,6 @@ mod tests {
   /// Verifies against a straightforward (non-parallel) implementation of Procedure 9.
   #[test]
   fn test_build_accumulators_matches_naive() {
-    const D: usize = 2;
     let l0 = 2;
     let l = 4;
     let half = l / 2;
@@ -659,7 +665,6 @@ mod tests {
   /// Accumulator for u=0 should equal Σ_xin e_in[xin] * (1 - Cz).
   #[test]
   fn test_infinity_drops_cz() {
-    const D: usize = 2;
     let l0 = 1;
     let l = 2;
     let half = l / 2;
@@ -700,7 +705,6 @@ mod tests {
   /// Non-binary β (∞) should yield non-zero in some bucket.
   #[test]
   fn test_binary_beta_zero_shortcut_behavior() {
-    const D: usize = 2;
     // Use l0=1 so round 0 buckets are fed only by β of length 1 (easy to reason about).
     let l0 = 1;
     let l = 2;

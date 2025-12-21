@@ -12,6 +12,7 @@
 //! - [`compute_idx4`]: Maps evaluation prefixes β ∈ U_d^ℓ₀ to accumulator contributions
 //! - [`QuadraticTAccumulatorPrefixIndex`]: Type alias for Spartan's t_i sumcheck (D=2)
 
+use crate::accumulators::SPARTAN_T_DEGREE;
 use crate::lagrange::{UdHatPoint, UdPoint, UdTuple};
 
 /// A single contribution from β to an accumulator A_i(v, u).
@@ -64,7 +65,7 @@ impl<const D: usize> AccumulatorPrefixIndex<D> {
 }
 
 /// Type alias for Spartan's quadratic t_i sumcheck index mapping (D=2).
-pub type QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex<2>;
+pub type QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex<SPARTAN_T_DEGREE>;
 
 /// Computes accumulator indices for β ∈ U_d^ℓ₀ (Definition A.5).
 ///

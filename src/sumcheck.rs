@@ -12,11 +12,13 @@
 
 use crate::{
   CommitmentKey,
+  accumulators::{build_accumulators, SPARTAN_T_DEGREE},
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
   errors::SpartanError,
+  lagrange::UdHatPoint,
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -507,6 +509,168 @@ impl<E: Engine> SumcheckProof<E> {
       claim_per_round = poly.evaluate(&r_i);
 
       // bound all tables to the verifier's challenge
+      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+      rayon::join(
+        || poly_A.bind_poly_var_top(&r_i),
+        || poly_B.bind_poly_var_top(&r_i),
+      );
+      rayon::join(
+        || poly_C.bind_poly_var_top(&r_i),
+        || eq_instance.bound(&r_i),
+      );
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+    }
+
+    Ok((
+      SumcheckProof {
+        compressed_polys: polys,
+      },
+      r,
+      vec![poly_A[0], poly_B[0], poly_C[0]],
+    ))
+  }
+
+  /// Default number of small-value rounds (ℓ₀) for Algorithm 6.
+  /// Optimal value from paper analysis for Spartan with D=2.
+  #[allow(dead_code)]
+  const DEFAULT_SMALL_VALUE_ROUNDS: usize = 3;
+
+  /// Prove poly_A * poly_B - poly_C using Algorithm 6 (EqPoly-SmallValueSC).
+  ///
+  /// This method combines small-value optimization (Algorithm 4) for the first ℓ₀ rounds
+  /// with eq-poly optimization (Algorithm 5) for the remaining rounds.
+  ///
+  /// The output is identical to `prove_cubic_with_three_inputs` but with better
+  /// performance for large polynomials due to reduced field multiplications.
+  #[allow(dead_code)]
+  pub fn prove_cubic_with_three_inputs_small_value(
+    claim: &E::Scalar,
+    taus: Vec<E::Scalar>,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C: &mut MultilinearPolynomial<E::Scalar>,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
+    let mut claim_per_round = *claim;
+
+    let num_rounds = taus.len();
+
+    // Determine ℓ₀: must satisfy l0 <= num_rounds / 2
+    let l0 = std::cmp::min(Self::DEFAULT_SMALL_VALUE_ROUNDS, num_rounds / 2);
+
+    // If l0 is 0, fall back to standard algorithm
+    if l0 == 0 {
+      return Self::prove_cubic_with_three_inputs(claim, taus, poly_A, poly_B, poly_C, transcript);
+    }
+
+    // ===== Pre-computation Phase =====
+    // Build accumulators A_i(v, u) for all i ∈ [ℓ₀]
+    let accumulators =
+      build_accumulators::<E::Scalar, SPARTAN_T_DEGREE>(poly_A, poly_B, poly_C, &taus, l0);
+    let mut small_value =
+      lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(
+        accumulators,
+      );
+
+    // ===== Small-Value Rounds (0 to ℓ₀-1) =====
+    // During these rounds, we use the precomputed accumulators. Polynomials are NOT bound
+    // during these rounds - that will happen in the transition phase.
+    for round in 0..l0 {
+      let (_round_span, round_t) = start_span!("sumcheck_smallvalue_round", round = round);
+
+      // 1. Get t_i evaluations from accumulators
+      let t_all = small_value.eval_t_all_u(round);
+      let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
+      let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
+
+      // 2. Get eq factor values ℓ_i(0), ℓ_i(1), ℓ_i(∞)
+      let li = small_value.eq_round_values(taus[round]);
+
+      // 3. Derive t(1) from sumcheck constraint: s(0) + s(1) = claim
+      let t1 = li
+        .derive_t1(claim_per_round, t0)
+        .ok_or(SpartanError::InvalidSumcheckProof)?;
+
+      // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
+      let poly = lagrange_sumcheck::build_univariate_round_polynomial(&li, t0, t1, t_inf);
+
+      // 5. Transcript interaction
+      transcript.absorb(b"p", &poly);
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // 6. Update claim
+      claim_per_round = poly.evaluate(&r_i);
+
+      // 7. Advance small-value state (updates R_{i+1} and eq_factor)
+      small_value.advance(&li, r_i);
+
+      info!(
+        elapsed_ms = %round_t.elapsed().as_millis(),
+        round = round,
+        "sumcheck_smallvalue_round"
+      );
+    }
+
+    // ===== Transition Phase =====
+    // Create EqSumCheckInstance with ALL taus and advance it by l0 rounds.
+    // This ensures the internal partition and state matches the standard method exactly.
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.clone());
+
+    // Bind all three polynomials to challenges r[0..l0] and advance eq_instance
+    // This brings everything to the same state as if we had run the standard method for l0 rounds
+    let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
+    for i in 0..l0 {
+      rayon::join(
+        || poly_A.bind_poly_var_top(&r[i]),
+        || poly_B.bind_poly_var_top(&r[i]),
+      );
+      rayon::join(
+        || poly_C.bind_poly_var_top(&r[i]),
+        || eq_instance.bound(&r[i]),
+      );
+    }
+    info!(
+      elapsed_ms = %bind_t.elapsed().as_millis(),
+      "bind_poly_vars_transition"
+    );
+
+    // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
+    // Continue using the same eq_instance which is now in the correct state
+    for round in l0..num_rounds {
+      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+      let poly = {
+        let (_eval_span, eval_t) = start_span!("compute_eval_points");
+        let (eval_point_0, eval_point_2, eval_point_3) =
+          eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
+
+        let evals = vec![
+          eval_point_0,
+          claim_per_round - eval_point_0,
+          eval_point_2,
+          eval_point_3,
+        ];
+        UniPoly::from_evals(&evals)?
+      };
+
+      // Transcript interaction
+      transcript.absorb(b"p", &poly);
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // Update claim
+      claim_per_round = poly.evaluate(&r_i);
+
+      // Bind polynomials and advance eq instance
       let (_bind_span, bind_t) = start_span!("bind_poly_vars");
       rayon::join(
         || poly_A.bind_poly_var_top(&r_i),
@@ -1119,7 +1283,7 @@ pub(crate) mod eq_sumcheck {
   /// A tuple `(eval_0, eval_2, eval_3)` containing the evaluation points.
   #[inline]
   fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
-    round_idx: usize,
+    _round_idx: usize,
     zero_a: &Scalar,
     one_a: &Scalar,
     zero_b: &Scalar,
@@ -1127,20 +1291,10 @@ pub(crate) mod eq_sumcheck {
     zero_c: &Scalar,
     one_c: &Scalar,
   ) -> (Scalar, Scalar, Scalar) {
-    // Optimization: In the first round (round == 0), eval_0 is always ZERO.
-    // This is mathematically correct because in round 0 of the sumcheck protocol with equality
-    // polynomials, when evaluating at point 0, the equality polynomial factor eq(tau, 0, ...)
-    // evaluates to (1 - tau_0) for the first variable. The sumcheck instance's update_evals
-    // method multiplies eval_0 by eq_tau_0_p, which for round 0 equals (1 - tau_0) * eval_eq_left.
-    // The contribution from eval_0 to the final sum is zero in this case due to the structure of
-    // the equality polynomial and how it combines with the cubic terms in the first round.
-    // This optimization avoids unnecessary computation of zero_a * zero_b - zero_c when the result
-    // will be zeroed out anyway by the equality polynomial evaluation at point 0 in round 0.
-    let eval_0 = if round_idx == 0 {
-      Scalar::ZERO
-    } else {
-      *zero_a * *zero_b - *zero_c
-    };
+    // Compute the evaluation at point 0
+    // Note: The small-value optimization (Algorithm 6) requires the full eval_0 computation
+    // to produce transcript-equivalent proofs.
+    let eval_0 = *zero_a * *zero_b - *zero_c;
 
     let double_one_a = one_a.double();
     let double_one_b = one_b.double();
@@ -1219,6 +1373,11 @@ pub(crate) mod lagrange_sumcheck {
       self.eq_factor.advance_from_values(li, r_i);
       self.coeff.extend(&self.basis_factory.basis_at(r_i));
     }
+
+    /// Returns the accumulated eq factor α_i = eq(τ_{<i}, r_{<i}).
+    pub(crate) fn eq_factor_alpha(&self) -> Scalar {
+      self.eq_factor.alpha()
+    }
   }
 
   /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
@@ -1287,7 +1446,7 @@ pub(crate) mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      accumulators::build_accumulators,
+      accumulators::{build_accumulators, SPARTAN_T_DEGREE},
       lagrange::UdHatPoint,
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
@@ -1325,7 +1484,6 @@ pub(crate) mod lagrange_sumcheck {
     fn test_smallvalue_round_matches_eq_instance_evals() {
       const NUM_VARS: usize = 6;
       const SMALL_VALUE_ROUNDS: usize = 3;
-      const T_DEGREE: usize = 2;
 
       let n = 1usize << NUM_VARS;
       let taus = (0..NUM_VARS)
@@ -1350,7 +1508,8 @@ pub(crate) mod lagrange_sumcheck {
         claim += eq_evals[i] * (az.Z[i] * bz.Z[i] - cz.Z[i]);
       }
 
-      let accs = build_accumulators::<F, T_DEGREE>(&az, &bz, &cz, &taus, SMALL_VALUE_ROUNDS);
+      let accs =
+        build_accumulators::<F, SPARTAN_T_DEGREE>(&az, &bz, &cz, &taus, SMALL_VALUE_ROUNDS);
       let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
       let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -1364,8 +1523,8 @@ pub(crate) mod lagrange_sumcheck {
 
         let li = small_value.eq_round_values(taus[round]);
         let t_all = small_value.eval_t_all_u(round);
-        let t_inf = t_all[UdHatPoint::<T_DEGREE>::Infinity.to_index()];
-        let t0 = t_all[UdHatPoint::<T_DEGREE>::Finite(0).to_index()];
+        let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
+        let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
         let t1 = li
           .derive_t1(claim, t0)
           .expect("l1 should be non-zero for chosen taus");
@@ -1385,6 +1544,165 @@ pub(crate) mod lagrange_sumcheck {
         eq_instance.bound(&r_i);
         small_value.advance(&li, r_i);
       }
+    }
+
+    /// Test that prove_cubic_with_three_inputs_small_value produces identical
+    /// output to prove_cubic_with_three_inputs for various sizes.
+    fn run_equivalence_test(num_vars: usize) {
+      use crate::{sumcheck::SumcheckProof, traits::transcript::TranscriptEngineTrait};
+
+      let n = 1usize << num_vars;
+
+      // Deterministic polynomials for reproducibility
+      let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
+      let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
+      let cz_vals: Vec<F> = az_vals
+        .iter()
+        .zip(&bz_vals)
+        .map(|(a, b)| *a * *b - F::from(5u64))
+        .collect();
+
+      let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
+
+      // Compute claim = Σ eq(τ, x) · (Az·Bz - Cz)
+      let eq_evals = EqPolynomial::evals_from_points(&taus);
+      let claim: F = (0..n)
+        .map(|i| eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]))
+        .sum();
+
+      // Clone polynomials for both runs
+      let mut az1 = MultilinearPolynomial::new(az_vals.clone());
+      let mut bz1 = MultilinearPolynomial::new(bz_vals.clone());
+      let mut cz1 = MultilinearPolynomial::new(cz_vals.clone());
+
+      let mut az2 = MultilinearPolynomial::new(az_vals);
+      let mut bz2 = MultilinearPolynomial::new(bz_vals);
+      let mut cz2 = MultilinearPolynomial::new(cz_vals);
+
+      // Fresh transcripts with same seed
+      let mut transcript1 = <E as Engine>::TE::new(b"test");
+      let mut transcript2 = <E as Engine>::TE::new(b"test");
+
+      // Run standard method
+      let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &claim,
+        taus.clone(),
+        &mut az1,
+        &mut bz1,
+        &mut cz1,
+        &mut transcript1,
+      )
+      .unwrap();
+
+      // Run small-value method
+      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+        &claim,
+        taus,
+        &mut az2,
+        &mut bz2,
+        &mut cz2,
+        &mut transcript2,
+      )
+      .unwrap();
+
+      // Verify all outputs match
+      assert_eq!(r1, r2, "challenges must match for num_vars={}", num_vars);
+      assert_eq!(
+        proof1.compressed_polys, proof2.compressed_polys,
+        "compressed_polys must match for num_vars={}",
+        num_vars
+      );
+      assert_eq!(
+        evals1, evals2,
+        "final evals must match for num_vars={}",
+        num_vars
+      );
+    }
+
+    /// Debug test to compare first polynomial only
+    #[test]
+    fn test_small_value_polynomial_and_eq_instance_equivalence() {
+      const NUM_VARS: usize = 10; // Same as equivalence test
+      let n = 1usize << NUM_VARS;
+
+      // Use same polynomials as equivalence test (non-zero claim)
+      let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
+      let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
+      let cz_vals: Vec<F> = az_vals
+        .iter()
+        .zip(&bz_vals)
+        .map(|(a, b)| *a * *b - F::from(5u64))
+        .collect();
+
+      let taus: Vec<F> = (0..NUM_VARS).map(|i| F::from((i + 2) as u64)).collect();
+
+      // Compute claim
+      let eq_evals = EqPolynomial::evals_from_points(&taus);
+      let claim: F = (0..n)
+        .map(|i| eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]))
+        .sum();
+
+      // Create polynomials for standard method
+      let az1 = MultilinearPolynomial::new(az_vals.clone());
+      let bz1 = MultilinearPolynomial::new(bz_vals.clone());
+      let cz1 = MultilinearPolynomial::new(cz_vals.clone());
+
+      // Create polynomials for small-value method
+      let az2 = MultilinearPolynomial::new(az_vals);
+      let bz2 = MultilinearPolynomial::new(bz_vals);
+      let cz2 = MultilinearPolynomial::new(cz_vals);
+
+      // Run standard method - just get first polynomial's evaluations
+      let eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
+      let (eval_0_std, eval_2_std, eval_3_std) =
+        eq_instance.evaluation_points_cubic_with_three_inputs(0, &az1, &bz1, &cz1);
+      let evals_std = vec![eval_0_std, claim - eval_0_std, eval_2_std, eval_3_std];
+
+      // Run small-value method - get first polynomial's evaluations
+      let l0 = 3usize;
+      let accumulators =
+        build_accumulators::<F, SPARTAN_T_DEGREE>(&az2, &bz2, &cz2, &taus, l0);
+      let small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
+
+      let t_all = small_value.eval_t_all_u(0);
+      let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
+      let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
+      let li = small_value.eq_round_values(taus[0]);
+      let t1 = li.derive_t1(claim, t0).expect("l1 non-zero");
+
+      let evals_sv = build_univariate_round_evals(&li, t0, t1, t_inf);
+
+      // Compare evaluations
+      assert_eq!(
+        evals_sv[0], evals_std[0],
+        "s(0) must match: sv={:?}, std={:?}",
+        evals_sv[0], evals_std[0]
+      );
+      assert_eq!(
+        evals_sv[1], evals_std[1],
+        "s(1) must match: sv={:?}, std={:?}",
+        evals_sv[1], evals_std[1]
+      );
+      assert_eq!(
+        evals_sv[2], evals_std[2],
+        "s(2) must match: sv={:?}, std={:?}",
+        evals_sv[2], evals_std[2]
+      );
+      assert_eq!(
+        evals_sv[3], evals_std[3],
+        "s(3) must match: sv={:?}, std={:?}",
+        evals_sv[3], evals_std[3]
+      );
+    }
+
+    #[test]
+    fn test_small_value_equivalence_l10() {
+      run_equivalence_test(10); // 2^10 = 1024 elements, l0 = 3
+    }
+
+    #[test]
+    fn test_small_value_equivalence_l16() {
+      run_equivalence_test(16); // 2^16 = 65536 elements, l0 = 3 (must be even ℓ)
     }
   }
 }

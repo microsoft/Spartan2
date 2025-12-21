@@ -30,10 +30,12 @@ mod eq_linear;
 mod lagrange;
 mod math;
 mod nifs;
-mod polys;
 mod r1cs;
-mod sumcheck;
 mod zk;
+
+// modules with some public items for benchmarking
+pub mod polys;
+pub mod sumcheck;
 
 #[macro_use]
 mod macros;
