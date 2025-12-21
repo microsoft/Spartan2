@@ -16,7 +16,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use spartan2::{
-  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
+  polys::multilinear::MultilinearPolynomial,
   provider::PallasHyraxEngine,
   sumcheck::SumcheckProof,
   traits::{transcript::TranscriptEngineTrait, Engine},
@@ -33,21 +33,15 @@ fn run_single_benchmark(num_vars: usize) -> (u128, u128) {
   let _span = info_span!("benchmark", num_vars).entered();
   let n = 1usize << num_vars;
 
-  // Setup: deterministic polynomials
+  // Setup: deterministic polynomials with satisfying witness (Cz = Az * Bz)
+  // build_accumulators_spartan assumes Az·Bz = Cz on binary points
   let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
   let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
-  let cz_vals: Vec<F> = az_vals
-    .iter()
-    .zip(&bz_vals)
-    .map(|(a, b)| *a * *b - F::from(5u64))
-    .collect();
+  let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
   let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
 
-  // Compute claim
-  let eq_evals = EqPolynomial::evals_from_points(&taus);
-  let claim: F = (0..n)
-    .map(|i| eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]))
-    .sum();
+  // Claim = 0 for satisfying witness
+  let claim: F = F::from(0u64);
 
   // ===== ORIGINAL METHOD =====
   let mut az1 = MultilinearPolynomial::new(az_vals.clone());

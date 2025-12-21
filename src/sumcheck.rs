@@ -12,7 +12,7 @@
 
 use crate::{
   CommitmentKey,
-  accumulators::{build_accumulators, SPARTAN_T_DEGREE},
+  accumulators::{build_accumulators_spartan, SPARTAN_T_DEGREE},
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
@@ -568,8 +568,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     // ===== Pre-computation Phase =====
     // Build accumulators A_i(v, u) for all i ∈ [ℓ₀]
-    let accumulators =
-      build_accumulators::<E::Scalar, SPARTAN_T_DEGREE>(poly_A, poly_B, poly_C, &taus, l0);
+    let accumulators = build_accumulators_spartan(poly_A, poly_B, &taus, l0);
     let mut small_value =
       lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(
         accumulators,
@@ -1446,7 +1445,7 @@ pub(crate) mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      accumulators::{build_accumulators, SPARTAN_T_DEGREE},
+      accumulators::{build_accumulators_spartan, SPARTAN_T_DEGREE},
       lagrange::UdHatPoint,
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
@@ -1508,8 +1507,7 @@ pub(crate) mod lagrange_sumcheck {
         claim += eq_evals[i] * (az.Z[i] * bz.Z[i] - cz.Z[i]);
       }
 
-      let accs =
-        build_accumulators::<F, SPARTAN_T_DEGREE>(&az, &bz, &cz, &taus, SMALL_VALUE_ROUNDS);
+      let accs = build_accumulators_spartan(&az, &bz, &taus, SMALL_VALUE_ROUNDS);
       let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
       let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -1554,21 +1552,16 @@ pub(crate) mod lagrange_sumcheck {
       let n = 1usize << num_vars;
 
       // Deterministic polynomials for reproducibility
+      // Use satisfying witness: Cz = Az * Bz (so Az·Bz - Cz = 0 on boolean hypercube)
+      // This is required for build_accumulators_spartan which assumes satisfaction.
       let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
       let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
-      let cz_vals: Vec<F> = az_vals
-        .iter()
-        .zip(&bz_vals)
-        .map(|(a, b)| *a * *b - F::from(5u64))
-        .collect();
+      let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
 
       let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
 
-      // Compute claim = Σ eq(τ, x) · (Az·Bz - Cz)
-      let eq_evals = EqPolynomial::evals_from_points(&taus);
-      let claim: F = (0..n)
-        .map(|i| eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]))
-        .sum();
+      // Claim = 0 for satisfying witness (Az·Bz = Cz on {0,1}^n)
+      let claim: F = F::ZERO;
 
       // Clone polynomials for both runs
       let mut az1 = MultilinearPolynomial::new(az_vals.clone());
@@ -1625,32 +1618,24 @@ pub(crate) mod lagrange_sumcheck {
       const NUM_VARS: usize = 10; // Same as equivalence test
       let n = 1usize << NUM_VARS;
 
-      // Use same polynomials as equivalence test (non-zero claim)
+      // Use satisfying witness: Cz = Az * Bz (required for build_accumulators_spartan)
       let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
       let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
-      let cz_vals: Vec<F> = az_vals
-        .iter()
-        .zip(&bz_vals)
-        .map(|(a, b)| *a * *b - F::from(5u64))
-        .collect();
+      let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
 
       let taus: Vec<F> = (0..NUM_VARS).map(|i| F::from((i + 2) as u64)).collect();
 
-      // Compute claim
-      let eq_evals = EqPolynomial::evals_from_points(&taus);
-      let claim: F = (0..n)
-        .map(|i| eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]))
-        .sum();
+      // Claim = 0 for satisfying witness
+      let claim: F = F::ZERO;
 
       // Create polynomials for standard method
       let az1 = MultilinearPolynomial::new(az_vals.clone());
       let bz1 = MultilinearPolynomial::new(bz_vals.clone());
-      let cz1 = MultilinearPolynomial::new(cz_vals.clone());
+      let cz1 = MultilinearPolynomial::new(cz_vals);
 
       // Create polynomials for small-value method
       let az2 = MultilinearPolynomial::new(az_vals);
       let bz2 = MultilinearPolynomial::new(bz_vals);
-      let cz2 = MultilinearPolynomial::new(cz_vals);
 
       // Run standard method - just get first polynomial's evaluations
       let eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -1660,8 +1645,7 @@ pub(crate) mod lagrange_sumcheck {
 
       // Run small-value method - get first polynomial's evaluations
       let l0 = 3usize;
-      let accumulators =
-        build_accumulators::<F, SPARTAN_T_DEGREE>(&az2, &bz2, &cz2, &taus, l0);
+      let accumulators = build_accumulators_spartan(&az2, &bz2, &taus, l0);
       let small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
 
       let t_all = small_value.eval_t_all_u(0);
