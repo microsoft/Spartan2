@@ -14,6 +14,7 @@
 
 use crate::{
   accumulator_index::compute_idx4,
+  csr::Csr,
   lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple},
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
@@ -274,21 +275,19 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
     })
     .collect();
 
-  let mut beta_prefix_offsets = Vec::with_capacity(num_betas + 1);
-  let mut beta_prefix_entries = Vec::new();
-  beta_prefix_offsets.push(0);
+  let mut beta_prefix_cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
   for b in 0..num_betas {
     let beta = UdTuple::<D>::from_flat_index(b, l0);
-    let entries = compute_idx4(&beta, l0);
-    for entry in entries {
-      beta_prefix_entries.push(CachedPrefixIndex {
+    let entries: Vec<_> = compute_idx4(&beta, l0)
+      .into_iter()
+      .map(|entry| CachedPrefixIndex {
         round_0: entry.round_0idx(),
         v_idx: entry.v_idx,
         u_idx: entry.u.to_index(),
         y_idx: entry.y_idx,
-      });
-    }
-    beta_prefix_offsets.push(beta_prefix_entries.len());
+      })
+      .collect();
+    beta_prefix_cache.push(&entries);
   }
 
   // Parallel over x_out
@@ -340,9 +339,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
             continue;
           }
           let ex_val = ex * val;
-          let start = beta_prefix_offsets[beta_idx];
-          let end = beta_prefix_offsets[beta_idx + 1];
-          for pref in &beta_prefix_entries[start..end] {
+          for pref in &beta_prefix_cache[beta_idx] {
             let ey = e_y[pref.round_0][pref.y_idx];
             acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }

@@ -24,6 +24,7 @@
 // private modules
 mod accumulator_index;
 mod accumulators;
+mod csr;
 mod digest;
 mod eq_linear;
 mod lagrange;
