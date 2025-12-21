@@ -1198,6 +1198,12 @@ pub(crate) mod lagrange_sumcheck {
       }
     }
 
+    /// Create from accumulators with the standard Lagrange basis (0, 1, 2, ...).
+    pub(crate) fn from_accumulators(accumulators: SmallValueAccumulators<Scalar, D>) -> Self {
+      let basis_factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
+      Self::new(accumulators, basis_factory)
+    }
+
     /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
     pub(crate) fn eval_t_all_u(&self, round: usize) -> [Scalar; D] {
       self.accumulators.round(round).eval_t_all_u(&self.coeff)
@@ -1282,7 +1288,7 @@ pub(crate) mod lagrange_sumcheck {
     use super::*;
     use crate::{
       accumulators::build_accumulators,
-      lagrange::{LagrangeBasisFactory, UdHatPoint},
+      lagrange::UdHatPoint,
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,
@@ -1334,24 +1340,23 @@ pub(crate) mod lagrange_sumcheck {
         .map(|(a, b)| *a * *b)
         .collect::<Vec<_>>();
 
-      let az = MultilinearPolynomial::new(az_vals.clone());
-      let bz = MultilinearPolynomial::new(bz_vals.clone());
-      let cz = MultilinearPolynomial::new(cz_vals.clone());
+      let az = MultilinearPolynomial::new(az_vals);
+      let bz = MultilinearPolynomial::new(bz_vals);
+      let cz = MultilinearPolynomial::new(cz_vals);
 
       let eq_evals = EqPolynomial::evals_from_points(&taus);
       let mut claim = F::ZERO;
       for i in 0..n {
-        claim += eq_evals[i] * (az_vals[i] * bz_vals[i] - cz_vals[i]);
+        claim += eq_evals[i] * (az.Z[i] * bz.Z[i] - cz.Z[i]);
       }
 
       let accs = build_accumulators::<F, T_DEGREE>(&az, &bz, &cz, &taus, SMALL_VALUE_ROUNDS);
-      let basis = LagrangeBasisFactory::<F, T_DEGREE>::new(|i| F::from(i as u64));
-      let mut small_value = SmallValueSumCheck::new(accs, basis);
+      let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
       let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
-      let mut poly_A = MultilinearPolynomial::new(az_vals);
-      let mut poly_B = MultilinearPolynomial::new(bz_vals);
-      let mut poly_C = MultilinearPolynomial::new(cz_vals);
+      let mut poly_A = az.clone();
+      let mut poly_B = bz.clone();
+      let mut poly_C = cz.clone();
 
       for round in 0..SMALL_VALUE_ROUNDS {
         let (expected_eval_0, expected_eval_2, expected_eval_3) =
