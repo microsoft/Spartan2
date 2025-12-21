@@ -443,6 +443,62 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   }
 }
 
+impl<E: Engine> SpartanSNARK<E> {
+  /// Extract the Az, Bz, Cz polynomials and tau challenges from a circuit.
+  ///
+  /// This is useful for testing sumcheck methods with real circuit-derived data.
+  /// Returns `(Az, Bz, Cz, tau)` where Az, Bz, Cz are the matrix-vector products
+  /// and tau are the random challenges for the outer sum-check.
+  pub fn extract_outer_sumcheck_inputs<C: SpartanCircuit<E>>(
+    pk: &SpartanProverKey<E>,
+    circuit: C,
+    prep_snark: &SpartanPrepSNARK<E>,
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let mut prep_snark = prep_snark.clone();
+
+    let mut transcript = E::TE::new(b"SpartanSNARK");
+    transcript.absorb(b"vk", &pk.vk_digest);
+
+    let public_values = circuit
+      .public_values()
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })?;
+
+    transcript.absorb(b"public_values", &public_values.as_slice());
+
+    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps,
+      &pk.S,
+      &pk.ck,
+      &circuit,
+      true, // is_small
+      &mut transcript,
+    )?;
+
+    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
+    let z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
+
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+
+    // Generate tau challenges
+    let tau = (0..num_rounds_x)
+      .map(|_i| transcript.squeeze(b"t"))
+      .collect::<Result<Vec<_>, SpartanError>>()?;
+
+    // Compute Az, Bz, Cz
+    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
+
+    Ok((Az, Bz, Cz, tau))
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

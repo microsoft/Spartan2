@@ -77,7 +77,7 @@ where
 ///
 /// This struct contains the compressed univariate polynomials that constitute
 /// the prover's messages in each round of the sum-check protocol.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "")]
 pub struct SumcheckProof<E: Engine> {
   compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
