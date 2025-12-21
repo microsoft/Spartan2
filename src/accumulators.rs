@@ -10,7 +10,7 @@
 //! This module defines:
 //! - [`RoundAccumulator`]: Single round accumulator A_i(v, u) with flat storage
 //! - [`SmallValueAccumulators`]: Collection of accumulators for all ℓ₀ rounds
-//! - [`CubicAccumulators`]: Type alias for Spartan's cubic sumcheck (D=3)
+//! - [`QuadraticTAccumulators`]: Type alias for Spartan's t_i sumcheck (D=2)
 
 use crate::{
   accumulator_index::compute_idx4,
@@ -139,7 +139,7 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
 /// Each thread gets its own copy during parallel execution.
 /// After processing, thread-local copies are merged via `merge()`.
 ///
-/// Type parameter D is the degree bound (D=3 for Spartan cubic).
+/// Type parameter D is the degree bound for t_i(X) (D=2 for Spartan).
 pub struct SmallValueAccumulators<Scalar: PrimeField, const D: usize> {
   /// Number of rounds using small-value optimization
   l0: usize,
@@ -147,11 +147,19 @@ pub struct SmallValueAccumulators<Scalar: PrimeField, const D: usize> {
   rounds: Vec<RoundAccumulator<Scalar, D>>,
 }
 
-/// Type alias for Spartan's cubic sumcheck (d=3).
+#[derive(Clone, Copy)]
+struct CachedPrefixIndex {
+  round_0: usize,
+  v_idx: usize,
+  u_idx: usize,
+  y_idx: usize,
+}
+
+/// Type alias for Spartan's quadratic t_i sumcheck (D=2).
 ///
-/// For cubic polynomials, we evaluate at U_3 = {∞, 0, 1, 2} (4 points)
-/// and store Û_3 = {∞, 0, 2} (3 points, excluding 1).
-pub type CubicAccumulators<Scalar> = SmallValueAccumulators<Scalar, 3>;
+/// For quadratic polynomials, we evaluate at U_2 = {∞, 0, 1} (3 points)
+/// and store Û_2 = {∞, 0} (2 points, excluding 1).
+pub type QuadraticTAccumulators<Scalar> = SmallValueAccumulators<Scalar, 2>;
 
 impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   /// Create a fresh accumulator (used per-thread in fold).
@@ -215,7 +223,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
 ///
 /// Computes accumulators for: g(X) = eq(τ, X) · (Az(X) · Bz(X) - Cz(X))
 ///
-/// For Spartan, d = 3 (cubic polynomial: eq · Az · Bz contributes degree 3).
+/// D is the degree bound of t_i(X) (not s_i); for Spartan, D = 2.
 ///
 /// Parallelism strategy:
 /// - Outer parallel loop over x_out values (using Rayon fold-reduce)
@@ -234,25 +242,54 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
 ) -> SmallValueAccumulators<S, D> {
   let base: usize = D + 1;
   let l = az.Z.len().trailing_zeros() as usize;
-  assert_eq!(az.Z.len(), bz.Z.len());
-  assert_eq!(az.Z.len(), cz.Z.len());
-  assert_eq!(taus.len(), l, "taus must have length ℓ");
+  debug_assert_eq!(az.Z.len(), 1usize << l, "poly size must be power of 2");
+  debug_assert_eq!(az.Z.len(), bz.Z.len());
+  debug_assert_eq!(az.Z.len(), cz.Z.len());
+  debug_assert_eq!(taus.len(), l, "taus must have length ℓ");
+  debug_assert_eq!(l % 2, 0, "Algorithm 6 split expects even ℓ");
 
   let half = l / 2;
   let xout_vars = half.checked_sub(l0).expect("l0 must be <= ℓ/2");
+  debug_assert!(l0 <= half, "l0 must be <= ℓ/2");
 
   let num_x_out = 1usize << xout_vars;
   let num_betas = base.pow(l0 as u32);
+  let suffix_vars = l - l0;
+  let prefix_size = 1usize << l0;
 
   // Precompute eq tables
   let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // |{0,1}|^{ℓ/2}
   let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // |{0,1}|^{ℓ/2-ℓ0}
   let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round
 
-  // Cache idx4 for every β
-  let beta_prefix_cache: Vec<Vec<_>> = (0..num_betas)
-    .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, l0), l0))
+  let beta_has_infinity: Vec<bool> = (0..num_betas)
+    .map(|mut t| {
+      for _ in 0..l0 {
+        if t % base == 0 {
+          return true;
+        }
+        t /= base;
+      }
+      false
+    })
     .collect();
+
+  let mut beta_prefix_offsets = Vec::with_capacity(num_betas + 1);
+  let mut beta_prefix_entries = Vec::new();
+  beta_prefix_offsets.push(0);
+  for b in 0..num_betas {
+    let beta = UdTuple::<D>::from_flat_index(b, l0);
+    let entries = compute_idx4(&beta, l0);
+    for entry in entries {
+      beta_prefix_entries.push(CachedPrefixIndex {
+        round_0: entry.round_0idx(),
+        v_idx: entry.v_idx,
+        u_idx: entry.u.to_index(),
+        y_idx: entry.y_idx,
+      });
+    }
+    beta_prefix_offsets.push(beta_prefix_entries.len());
+  }
 
   // Parallel over x_out
   (0..num_x_out)
@@ -267,19 +304,27 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
         for (x_in_bits, &ein) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-          let az_pref = az.gather_prefix_evals(l0, suffix);
-          let bz_pref = bz.gather_prefix_evals(l0, suffix);
-          let cz_pref = cz.gather_prefix_evals(l0, suffix);
+          let mut az_pref = Vec::with_capacity(prefix_size);
+          let mut bz_pref = Vec::with_capacity(prefix_size);
+          let mut cz_pref = Vec::with_capacity(prefix_size);
+          for prefix in 0..prefix_size {
+            let idx = (prefix << suffix_vars) | suffix;
+            az_pref.push(az.Z[idx]);
+            bz_pref.push(bz.Z[idx]);
+            cz_pref.push(cz.Z[idx]);
+          }
 
-          let az_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&az_pref);
-          let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&bz_pref);
-          let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&cz_pref);
+          let az_ext =
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(az_pref));
+          let bz_ext =
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(bz_pref));
+          let cz_ext =
+            LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_multilinear(&MultilinearPolynomial::new(cz_pref));
 
           for (beta_idx, tA_slot) in tA.iter_mut().enumerate() {
-            let beta_tuple = az_ext.to_domain_tuple(beta_idx);
             let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
             // ∞ rule: drop Cz at ∞
-            let prod = if beta_tuple.has_infinity() {
+            let prod = if beta_has_infinity[beta_idx] {
               ab
             } else {
               ab - cz_ext.get(beta_idx)
@@ -294,14 +339,12 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           if val.is_zero().into() {
             continue;
           }
-          for pref in &beta_prefix_cache[beta_idx] {
-            let ey = e_y[pref.round_0idx()][pref.y_idx];
-            acc.accumulate(
-              pref.round_0idx(),
-              pref.v_idx,
-              pref.u.to_index(),
-              ey * ex * val,
-            );
+          let ex_val = ex * val;
+          let start = beta_prefix_offsets[beta_idx];
+          let end = beta_prefix_offsets[beta_idx + 1];
+          for pref in &beta_prefix_entries[start..end] {
+            let ey = e_y[pref.round_0][pref.y_idx];
+            acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }
         }
 
@@ -411,21 +454,21 @@ mod tests {
 
   #[test]
   fn test_small_value_accumulators_new() {
-    // For D=3 (base=4), ℓ₀=3
-    // Round 0: 4^0 = 1 prefix
-    // Round 1: 4^1 = 4 prefixes
-    // Round 2: 4^2 = 16 prefixes
-    let acc: SmallValueAccumulators<Scalar, 3> = SmallValueAccumulators::new(3);
+    // For D=2 (base=3), ℓ₀=3
+    // Round 0: 3^0 = 1 prefix
+    // Round 1: 3^1 = 3 prefixes
+    // Round 2: 3^2 = 9 prefixes
+    let acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
 
     assert_eq!(acc.num_rounds(), 3);
     assert_eq!(acc.round(0).num_prefixes(), 1);
-    assert_eq!(acc.round(1).num_prefixes(), 4);
-    assert_eq!(acc.round(2).num_prefixes(), 16);
+    assert_eq!(acc.round(1).num_prefixes(), 3);
+    assert_eq!(acc.round(2).num_prefixes(), 9);
   }
 
   #[test]
   fn test_small_value_accumulators_accumulate_get() {
-    let mut acc: SmallValueAccumulators<Scalar, 3> = SmallValueAccumulators::new(3);
+    let mut acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
 
     let val1 = Scalar::from(19u64);
     let val2 = Scalar::from(23u64);
@@ -433,18 +476,18 @@ mod tests {
     // Accumulate into different rounds
     acc.accumulate(0, 0, 0, val1);
     acc.accumulate(1, 2, 1, val2);
-    acc.accumulate(2, 10, 2, val1);
+    acc.accumulate(2, 6, 1, val1);
 
     assert_eq!(acc.get(0, 0, 0), val1);
     assert_eq!(acc.get(1, 2, 1), val2);
-    assert_eq!(acc.get(2, 10, 2), val1);
+    assert_eq!(acc.get(2, 6, 1), val1);
     assert_eq!(acc.get(2, 0, 0), Scalar::ZERO);
   }
 
   #[test]
   fn test_small_value_accumulators_merge() {
-    let mut acc1: SmallValueAccumulators<Scalar, 3> = SmallValueAccumulators::new(3);
-    let mut acc2: SmallValueAccumulators<Scalar, 3> = SmallValueAccumulators::new(3);
+    let mut acc1: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
+    let mut acc2: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
 
     let val1 = Scalar::from(7u64);
     let val2 = Scalar::from(11u64);
@@ -454,61 +497,61 @@ mod tests {
     acc1.accumulate(1, 1, 0, val2);
 
     acc2.accumulate(0, 0, 0, val3);
-    acc2.accumulate(2, 5, 1, val1);
+    acc2.accumulate(2, 4, 1, val1);
 
     acc1.merge(&acc2);
 
     assert_eq!(acc1.get(0, 0, 0), val1 + val3);
     assert_eq!(acc1.get(1, 1, 0), val2);
-    assert_eq!(acc1.get(2, 5, 1), val1);
+    assert_eq!(acc1.get(2, 4, 1), val1);
   }
 
   #[test]
   fn test_small_value_accumulators_domain_methods() {
-    let mut acc: SmallValueAccumulators<Scalar, 3> = SmallValueAccumulators::new(2);
+    let mut acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(2);
 
-    // Round 1 has 4 prefixes (base^1)
-    // v = (Finite(0),) -> flat index = 1 (∞=0, 0=1, 1=2, 2=3)
-    let v = UdTuple::<3>(vec![UdPoint::Finite(0)]);
-    let u = UdHatPoint::<3>::Finite(2); // index 2
+    // Round 1 has 3 prefixes (base^1)
+    // v = (Finite(0),) -> flat index = 1 (∞=0, 0=1, 1=2)
+    let v = UdTuple::<2>(vec![UdPoint::Finite(0)]);
+    let u = UdHatPoint::<2>::Infinity; // index 0
 
     let val = Scalar::from(99u64);
     acc.accumulate_by_domain(1, &v, u, val);
 
     assert_eq!(acc.get_by_domain(1, &v, u), val);
     // Verify same via raw indices
-    assert_eq!(acc.get(1, 1, 2), val);
+    assert_eq!(acc.get(1, 1, 0), val);
   }
 
   #[test]
-  fn test_cubic_accumulators_alias() {
+  fn test_quadratic_t_accumulators_alias() {
     // Verify the type alias works
-    let acc: CubicAccumulators<Scalar> = CubicAccumulators::new(2);
+    let acc: QuadraticTAccumulators<Scalar> = QuadraticTAccumulators::new(2);
     assert_eq!(acc.num_rounds(), 2);
-    assert_eq!(acc.round(0).num_prefixes(), 1); // 4^0
-    assert_eq!(acc.round(1).num_prefixes(), 4); // 4^1
+    assert_eq!(acc.round(0).num_prefixes(), 1); // 3^0
+    assert_eq!(acc.round(1).num_prefixes(), 3); // 3^1
   }
 
   #[test]
   fn test_accumulator_sizes_match_spec() {
-    // From the spec: d=3, ℓ₀=3 should have total 63 elements
-    // Round 0: 1 * 3 = 3
-    // Round 1: 4 * 3 = 12
-    // Round 2: 16 * 3 = 48
-    // Total: 63
-    let acc: CubicAccumulators<Scalar> = CubicAccumulators::new(3);
+    // For D=2, ℓ₀=3 should have total 26 elements
+    // Round 0: 1 * 2 = 2
+    // Round 1: 3 * 2 = 6
+    // Round 2: 9 * 2 = 18
+    // Total: 26
+    let acc: SmallValueAccumulators<Scalar, 2> = SmallValueAccumulators::new(3);
 
-    let total_elements: usize = (0..3).map(|i| acc.round(i).num_prefixes() * 3).sum();
-    assert_eq!(total_elements, 63);
+    let total_elements: usize = (0..3).map(|i| acc.round(i).num_prefixes() * 2).sum();
+    assert_eq!(total_elements, 26);
   }
 
   /// End-to-end correctness for build_accumulators on a tiny instance.
   ///
-  /// ℓ = 4, ℓ0 = 2, D = 3.
+  /// ℓ = 4, ℓ0 = 2, D = 2.
   /// Verifies against a straightforward (non-parallel) implementation of Procedure 9.
   #[test]
   fn test_build_accumulators_matches_naive() {
-    const D: usize = 3;
+    const D: usize = 2;
     let l0 = 2;
     let l = 4;
     let half = l / 2;
@@ -613,13 +656,13 @@ mod tests {
 
   /// Check the ∞ rule: Cz must be dropped when any β coordinate is ∞.
   ///
-  /// ℓ = 2, ℓ0 = 1, D = 3.
+  /// ℓ = 2, ℓ0 = 1, D = 2.
   /// Az = 1, Bz = 1, Cz = const. Taus arbitrary.
   /// Accumulator for u=∞ should equal Σ_xin e_in[xin] * (1) (drop Cz).
   /// Accumulator for u=0 should equal Σ_xin e_in[xin] * (1 - Cz).
   #[test]
   fn test_infinity_drops_cz() {
-    const D: usize = 3;
+    const D: usize = 2;
     let l0 = 1;
     let l = 2;
     let half = l / 2;
@@ -657,10 +700,10 @@ mod tests {
   }
 
   /// Binary-β zero shortcut: Az=Bz=Cz=first variable (x0), so Az·Bz−Cz=0 on binary β.
-  /// Non-binary β (e.g., containing 2 or ∞) should yield non-zero in some bucket.
+  /// Non-binary β (∞) should yield non-zero in some bucket.
   #[test]
   fn test_binary_beta_zero_shortcut_behavior() {
-    const D: usize = 3;
+    const D: usize = 2;
     // Use l0=1 so round 0 buckets are fed only by β of length 1 (easy to reason about).
     let l0 = 1;
     let l = 2;
@@ -683,11 +726,10 @@ mod tests {
 
     let acc = build_accumulators::<Scalar, D>(&az, &bz, &cz, &taus, l0);
 
-    // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞,2}.
-    // Buckets for u = 0 should be zero (binary β), buckets for u = ∞ or 2 should be non-zero.
+    // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞}.
+    // Buckets for u = 0 should be zero (binary β), bucket for u = ∞ should be non-zero.
     let u_inf = UdHatPoint::<D>::Infinity.to_index(); // 0
     let u_zero = UdHatPoint::<D>::Finite(0).to_index(); // 1
-    let u_two = UdHatPoint::<D>::Finite(2).to_index(); // 2
 
     assert!(
       bool::from(acc.get(0, 0, u_zero).is_zero()),
@@ -696,10 +738,6 @@ mod tests {
     assert!(
       !bool::from(acc.get(0, 0, u_inf).is_zero()),
       "non-binary β (∞) should give non-zero"
-    );
-    assert!(
-      !bool::from(acc.get(0, 0, u_two).is_zero()),
-      "non-binary β (2) should give non-zero"
     );
   }
 }

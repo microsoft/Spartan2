@@ -10,7 +10,7 @@
 //! This module defines:
 //! - [`AccumulatorPrefixIndex`]: Describes how an evaluation prefix β contributes to accumulators
 //! - [`compute_idx4`]: Maps evaluation prefixes β ∈ U_d^ℓ₀ to accumulator contributions
-//! - [`CubicAccumulatorPrefixIndex`]: Type alias for Spartan's cubic sumcheck (D=3)
+//! - [`QuadraticTAccumulatorPrefixIndex`]: Type alias for Spartan's t_i sumcheck (D=2)
 
 use crate::lagrange::{UdHatPoint, UdPoint, UdTuple};
 
@@ -63,8 +63,8 @@ impl<const D: usize> AccumulatorPrefixIndex<D> {
   }
 }
 
-/// Type alias for Spartan's cubic sumcheck index mapping (D=3).
-pub type CubicAccumulatorPrefixIndex = AccumulatorPrefixIndex<3>;
+/// Type alias for Spartan's quadratic t_i sumcheck index mapping (D=2).
+pub type QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex<2>;
 
 /// Computes accumulator indices for β ∈ U_d^ℓ₀ (Definition A.5).
 ///
@@ -93,39 +93,43 @@ pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>, l0: usize) -> Vec<Accumul
   debug_assert_eq!(beta.len(), l0, "β length must equal l0");
 
   let mut result = Vec::new();
+  let base = UdPoint::<D>::BASE;
+
+  let mut prefix_idx = vec![0usize; l0 + 1];
+  for i in 0..l0 {
+    prefix_idx[i + 1] = prefix_idx[i] * base + beta.0[i].to_index();
+  }
+
+  let mut suffix_is_binary = vec![true; l0 + 1];
+  let mut suffix_idx = vec![0usize; l0 + 1];
+  for i in (0..l0).rev() {
+    let point = beta.0[i];
+    if !point.is_binary() {
+      suffix_is_binary[i] = false;
+      continue;
+    }
+    suffix_is_binary[i] = suffix_is_binary[i + 1];
+    let bit = match point {
+      UdPoint::Finite(0) => 0,
+      UdPoint::Finite(1) => 1,
+      _ => unreachable!("binary points must be 0 or 1"),
+    };
+    let shift = l0 - 1 - i;
+    suffix_idx[i] = suffix_idx[i + 1] | (bit << shift);
+  }
 
   for i in 1..=l0 {
-    // Check if suffix β[i..] is all binary
-    // Binary means the value is Finite(0) or Finite(1)
-    let suffix_is_binary = beta.0[i..].iter().all(|p| p.is_binary());
-
-    if !suffix_is_binary {
+    if !suffix_is_binary[i] {
       continue;
     }
 
-    // u = β[i-1] — try to convert to Û_d point
-    // If u = Finite(1), to_ud_hat() returns None and we skip this round
     let u = beta.0[i - 1];
     let Some(u_hat) = u.to_ud_hat() else {
       continue; // u = Finite(1), not in Û_d
     };
 
-    // v = prefix β[0..i-1] as flat index
-    let prefix = UdTuple(beta.0[0..(i - 1)].to_vec());
-    let v_idx = prefix.to_flat_index();
-
-    // y = suffix converted to binary index
-    // Finite(0) → bit 0, Finite(1) → bit 1
-    // MSB-first encoding: leftmost suffix element is MSB
-    let suffix = &beta.0[i..];
-    let y_idx = suffix.iter().fold(0usize, |acc, p| {
-      let bit = match p {
-        UdPoint::Finite(0) => 0,
-        UdPoint::Finite(1) => 1,
-        _ => unreachable!("suffix should be binary"),
-      };
-      (acc << 1) | bit
-    });
+    let v_idx = prefix_idx[i - 1];
+    let y_idx = suffix_idx[i];
 
     result.push(AccumulatorPrefixIndex {
       l0,
@@ -559,9 +563,9 @@ mod tests {
   }
 
   #[test]
-  fn test_cubic_accumulator_prefix_index_alias() {
+  fn test_quadratic_t_accumulator_prefix_index_alias() {
     // Verify the type alias works
-    let idx: CubicAccumulatorPrefixIndex = AccumulatorPrefixIndex {
+    let idx: QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex {
       l0: 3,
       round: 2,
       v_idx: 5,

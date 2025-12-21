@@ -471,13 +471,14 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
     let diffs: [F; D] = std::array::from_fn(|i| r - self.finite_points[i]);
 
     // prefix[k] = ∏_{j < k} diffs[j]
-    let mut prefix: Vec<F> = vec![F::ONE; D + 1];
+    let base = UdPoint::<D>::BASE;
+    let mut prefix = vec![F::ONE; base];
     for i in 0..D {
       prefix[i + 1] = prefix[i] * diffs[i];
     }
 
     // suffix[k] = ∏_{j > k} diffs[j]
-    let mut suffix: Vec<F> = vec![F::ONE; D + 1];
+    let mut suffix = vec![F::ONE; base];
     for i in (0..D).rev() {
       suffix[i] = suffix[i + 1] * diffs[i];
     }
