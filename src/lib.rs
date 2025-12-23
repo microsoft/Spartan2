@@ -35,6 +35,7 @@ mod zk;
 
 // modules with some public items for benchmarking
 pub mod polys;
+pub mod small_field;
 pub mod sumcheck;
 
 #[macro_use]
@@ -49,7 +50,7 @@ pub mod traits;
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
-pub mod spartan_zk; // Spartan with zero-knowledge 
+pub mod spartan_zk; // Spartan with zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

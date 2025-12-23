@@ -26,16 +26,17 @@ use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
   polys::multilinear::MultilinearPolynomial,
-  provider::T256HyraxEngine,
+  provider::PallasHyraxEngine,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
   traits::{circuit::SpartanCircuit, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait, Engine},
 };
 use std::{marker::PhantomData, time::Instant};
 use tracing::{info, info_span};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::time::uptime, EnvFilter};
 
-type E = T256HyraxEngine;
+// Use PallasHyraxEngine which has Barrett-optimized SmallLargeMul for Fq
+type E = PallasHyraxEngine;
 
 /// SHA-256 circuit for testing sumcheck equivalence
 #[derive(Clone, Debug)]
@@ -169,6 +170,7 @@ fn main() {
   tracing_subscriber::fmt()
     .with_target(false)
     .with_ansi(true)
+    .with_timer(uptime())
     .with_env_filter(EnvFilter::from_default_env())
     .init();
 
@@ -201,24 +203,24 @@ fn main() {
   let num_vars = tau.len();
   info!(num_vars = num_vars, az_len = az.len(), "Extracted polynomials");
 
-  // Clone data for both methods
+  // Create field-element polynomials for the original method
   let mut az1 = MultilinearPolynomial::new(az.clone());
   let mut bz1 = MultilinearPolynomial::new(bz.clone());
   let mut cz1 = MultilinearPolynomial::new(cz.clone());
 
-  let mut az2 = MultilinearPolynomial::new(az);
-  let mut bz2 = MultilinearPolynomial::new(bz);
-  let mut cz2 = MultilinearPolynomial::new(cz);
-
-  // Fresh transcripts with same seed for deterministic challenges
-  let mut transcript1 = <E as Engine>::TE::new(b"test_equivalence");
-  let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
+  // Try to create small-value polynomials for the optimized method
+  // This will return None if any witness value is too large to fit in i32
+  let az_poly = MultilinearPolynomial::new(az.clone());
+  let bz_poly = MultilinearPolynomial::new(bz.clone());
+  let az_small_opt = MultilinearPolynomial::<i32>::try_from_field(&az_poly);
+  let bz_small_opt = MultilinearPolynomial::<i32>::try_from_field(&bz_poly);
 
   // Claim is zero for satisfying R1CS (Az * Bz = Cz)
   let claim = <E as Engine>::Scalar::ZERO;
 
   // ===== ORIGINAL METHOD =====
   info!("Running prove_cubic_with_three_inputs (original method)...");
+  let mut transcript1 = <E as Engine>::TE::new(b"test_equivalence");
   let t0 = Instant::now();
   let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
     &claim,
@@ -233,44 +235,66 @@ fn main() {
   info!(elapsed_us = original_us, "prove_cubic_with_three_inputs");
 
   // ===== SMALL-VALUE METHOD (Algorithm 6) =====
-  info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
-  let t0 = Instant::now();
-  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-    &claim,
-    tau,
-    &mut az2,
-    &mut bz2,
-    &mut cz2,
-    &mut transcript2,
-  )
-  .expect("prove_cubic_with_three_inputs_small_value failed");
-  let smallvalue_us = t0.elapsed().as_micros();
-  info!(elapsed_us = smallvalue_us, "prove_cubic_with_three_inputs_small_value");
+  // Only run if witness values fit in i64
+  match (az_small_opt, bz_small_opt) {
+    (Some(az_small), Some(bz_small)) => {
+      info!("Witness values fit in i64, running small-value optimization...");
 
-  // ===== VERIFY EQUIVALENCE =====
-  info!("Verifying equivalence...");
+      let mut az2 = MultilinearPolynomial::new(az);
+      let mut bz2 = MultilinearPolynomial::new(bz);
+      let mut cz2 = MultilinearPolynomial::new(cz);
+      let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
 
-  // Check challenges match
-  assert_eq!(r1, r2, "Challenges must match!");
-  info!("Challenges match (len={})", r1.len());
+      info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
+      let t0 = Instant::now();
+      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+        &claim,
+        tau,
+        &az_small,
+        &bz_small,
+        &mut az2,
+        &mut bz2,
+        &mut cz2,
+        &mut transcript2,
+      )
+      .expect("prove_cubic_with_three_inputs_small_value failed");
+      let smallvalue_us = t0.elapsed().as_micros();
+      info!(elapsed_us = smallvalue_us, "prove_cubic_with_three_inputs_small_value");
 
-  // Check round polynomials match
-  assert_eq!(proof1, proof2, "Round polynomials must match!");
-  info!("Round polynomials match");
+      // ===== VERIFY EQUIVALENCE =====
+      info!("Verifying equivalence...");
 
-  // Check final evaluations match
-  assert_eq!(evals1, evals2, "Final evaluations must match!");
-  info!("Final evaluations match");
+      // Check challenges match
+      assert_eq!(r1, r2, "Challenges must match!");
+      info!("Challenges match (len={})", r1.len());
 
-  // Calculate speedup
-  let speedup = if smallvalue_us > 0 {
-    original_us as f64 / smallvalue_us as f64
-  } else {
-    f64::INFINITY
-  };
+      // Check round polynomials match
+      assert_eq!(proof1, proof2, "Round polynomials must match!");
+      info!("Round polynomials match");
 
-  info!(
-    "SUCCESS! Both methods produce identical proofs. Original: {} us, Small-value: {} us, Speedup: {:.2}x",
-    original_us, smallvalue_us, speedup
-  );
+      // Check final evaluations match
+      assert_eq!(evals1, evals2, "Final evaluations must match!");
+      info!("Final evaluations match");
+
+      // Calculate speedup
+      let speedup = if smallvalue_us > 0 {
+        original_us as f64 / smallvalue_us as f64
+      } else {
+        f64::INFINITY
+      };
+
+      info!(
+        "SUCCESS! Both methods produce identical proofs. Original: {} us, Small-value: {} us, Speedup: {:.2}x",
+        original_us, smallvalue_us, speedup
+      );
+    }
+    _ => {
+      panic!(
+        "Az/Bz values too large for small-value optimization (don't fit in i32). \
+         This is caused by bellpepper's SHA-256 gadget construction, which produces \
+         constraint coefficients around 2^237 for certain equality-check constraints. \
+         The small-value optimization requires all Az and Bz values to fit in i32."
+      );
+    }
+  }
 }

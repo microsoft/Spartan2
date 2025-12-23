@@ -8,9 +8,9 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial, small_field::SmallValueField, zip_with_for_each};
 use core::ops::Index;
-use ff::PrimeField;
+use ff::{Field, PrimeField};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -30,24 +30,30 @@ use serde::{Deserialize, Serialize};
 /// $$
 ///
 /// Vector $Z$ indicates $Z(e)$ where $e$ ranges from $0$ to $2^m-1$.
+///
+/// The type parameter `T` is the coefficient type. Typically this is a field element,
+/// but can also be any type with ring operations (add, sub, mul, zero).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MultilinearPolynomial<Scalar: PrimeField> {
-  pub(crate) Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
+pub struct MultilinearPolynomial<T> {
+  pub(crate) Z: Vec<T>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
 }
 
-impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
+impl<T> MultilinearPolynomial<T> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
   ///
   /// # Panics
   /// The number of evaluations must be a power of two.
-  pub fn new(Z: Vec<Scalar>) -> Self {
+  pub fn new(Z: Vec<T>) -> Self {
     MultilinearPolynomial { Z }
   }
+}
 
+impl<T: Field> MultilinearPolynomial<T> {
   /// Binds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
-  pub fn bind_poly_var_top(&mut self, r: &Scalar) {
+  /// Formula: new[i] = old[i] + r * (old[i + n] - old[i])
+  pub fn bind_poly_var_top(&mut self, r: &T) {
     assert!(
       self.Z.len() >= 2,
       "Vector Z must have at least two elements to bind the top variable."
@@ -58,14 +64,15 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     let (left, right) = self.Z.split_at_mut(n);
 
     zip_with_for_each!((left.par_iter_mut(), right.par_iter()), |a, b| {
+      // Field types implement Copy, so no cloning needed
       *a += *r * (*b - *a);
     });
 
     self.Z.truncate(n);
   }
 
-  /// binds the polynomial's top variables using the given scalars.
-  pub fn bind_with(poly: &[Scalar], L: &[Scalar], r_len: usize) -> Vec<Scalar> {
+  /// Binds the polynomial's top variables using the given scalars.
+  pub fn bind_with(poly: &[T], L: &[T], r_len: usize) -> Vec<T> {
     assert_eq!(
       poly.len(),
       L.len() * r_len,
@@ -79,7 +86,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     (0..r_len)
       .into_par_iter()
       .map(|i| {
-        let mut acc = Scalar::ZERO;
+        let mut acc = T::ZERO;
         for j in 0..L.len() {
           // row-major: index = j * r_len + i
           acc += L[j] * poly[j * r_len + i];
@@ -88,7 +95,9 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
       })
       .collect()
   }
+}
 
+impl<T: Copy> MultilinearPolynomial<T> {
   /// Gathers prefix evaluations p(b, suffix) for all binary prefixes b ∈ {0,1}^ℓ₀.
   ///
   /// For a polynomial with ℓ variables, this extracts a strided slice where:
@@ -122,18 +131,43 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     let mut Z = Vec::with_capacity(prefix_size);
     for prefix in 0..prefix_size {
       let idx = (prefix << suffix_vars) | suffix;
-      Z.push(self.Z[idx]);
+      Z.push(self.Z[idx]); // Copy, no clone needed
     }
 
     MultilinearPolynomial::new(Z)
   }
 }
 
-impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
-  type Output = Scalar;
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i32>)
+// ============================================================================
+
+impl MultilinearPolynomial<i32> {
+  /// Try to create from a field-element polynomial.
+  /// Returns None if any value doesn't fit in i32.
+  pub fn try_from_field<F: SmallValueField<SmallValue = i32>>(
+    poly: &MultilinearPolynomial<F>,
+  ) -> Option<Self> {
+    let evals: Option<Vec<i32>> = poly.Z.iter().map(|f| F::try_field_to_small(f)).collect();
+    evals.map(Self::new)
+  }
+
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<SmallValue = i32>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
+  }
+}
+
+impl<T> Index<usize> for MultilinearPolynomial<T> {
+  type Output = T;
 
   #[inline(always)]
-  fn index(&self, _index: usize) -> &Scalar {
+  fn index(&self, _index: usize) -> &T {
     &(self.Z[_index])
   }
 }

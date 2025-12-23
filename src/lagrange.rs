@@ -17,7 +17,9 @@
 //! This enables compile-time type safety and debug assertions for bounds checking.
 
 use crate::polys::multilinear::MultilinearPolynomial;
+use crate::small_field::SmallValueField;
 use ff::PrimeField;
+use std::ops::{Add, Sub};
 
 /// A point in the domain U_d = {∞, 0, 1, ..., d-1}
 ///
@@ -561,12 +563,19 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
 /// enabling efficient round polynomial computation via Lagrange interpolation.
 ///
 /// Type parameter `D` is the degree bound (U_D has D+1 points).
-pub struct LagrangeEvaluatedMultilinearPolynomial<Scalar: PrimeField, const D: usize> {
-  evals: Vec<Scalar>, // size (D+1)^num_vars
+/// Type parameter `T` is the element type (field elements or i32 for small-value optimization).
+pub struct LagrangeEvaluatedMultilinearPolynomial<T, const D: usize>
+where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
+  evals: Vec<T>, // size (D+1)^num_vars
   num_vars: usize,
 }
 
-impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<Scalar, D> {
+impl<T, const D: usize> LagrangeEvaluatedMultilinearPolynomial<T, D>
+where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
   /// Base of the extended domain U_D (= D + 1)
   const BASE: usize = D + 1;
 
@@ -575,17 +584,13 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
   /// At each step j, we have evaluations over U_D^{j-1} × {0,1}^{ℓ₀-j+1}.
   /// We extend the j-th coordinate from {0,1} to U_D.
   ///
-  /// **Key insight:** After extending the first variable, the data layout changes.
-  /// We cannot simply split in half for subsequent extensions. Instead, we must
-  /// iterate over each (prefix, suffix) pair and extend the middle coordinate.
-  ///
   /// # Arguments
-  /// * `poly` - Multilinear polynomial with evaluations over boolean hypercube
-  pub fn from_multilinear(poly: &MultilinearPolynomial<Scalar>) -> Self {
-    let num_vars = poly.Z.len().trailing_zeros() as usize;
-    debug_assert_eq!(poly.Z.len(), 1 << num_vars, "Input size must be power of 2");
+  /// * `input` - Boolean hypercube evaluations (length must be power of 2)
+  pub fn from_boolean_evals(input: &[T]) -> Self {
+    let num_vars = input.len().trailing_zeros() as usize;
+    debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
 
-    let mut current = poly.Z.clone();
+    let mut current = input.to_vec();
 
     for j in 1..=num_vars {
       // At step j:
@@ -600,7 +605,7 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
       let next_stride = Self::BASE * suffix_count; // stride between prefixes in next
 
       let next_size = prefix_count * next_stride;
-      let mut next = vec![Scalar::ZERO; next_size];
+      let mut next = vec![T::default(); next_size];
 
       for prefix_idx in 0..prefix_count {
         for suffix_idx in 0..suffix_count {
@@ -623,10 +628,11 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
             // γ = 1 (index 2): p(prefix, 1, suffix)
             next[base_next + 2 * suffix_count + suffix_idx] = p1;
 
-            // γ = 2, 3, ..., D-1 (indices 3, 4, ..., D): extrapolate
+            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
+            // val starts at p1 = p0 + 1*diff, then we add diff each iteration
+            let mut val = p1;
             for k in 2..D {
-              let k_scalar = Scalar::from(k as u64);
-              let val = p0 + k_scalar * diff;
+              val = val + diff; // val = p0 + k*diff
               next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
             }
           }
@@ -649,9 +655,9 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
   /// * `input` - Boolean hypercube evaluations (read-only slice, length must be power of 2)
   /// * `buf_a`, `buf_b` - Scratch buffers, will be resized if needed to (D+1)^num_vars
   pub fn from_boolean_evals_with_buffer_reusing(
-    input: &[Scalar],
-    buf_a: &mut Vec<Scalar>,
-    buf_b: &mut Vec<Scalar>,
+    input: &[T],
+    buf_a: &mut Vec<T>,
+    buf_b: &mut Vec<T>,
   ) -> Self {
     let num_vars = input.len().trailing_zeros() as usize;
     debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
@@ -667,10 +673,10 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
 
     // Ensure buffers are large enough
     if buf_a.len() < final_size {
-      buf_a.resize(final_size, Scalar::ZERO);
+      buf_a.resize(final_size, T::default());
     }
     if buf_b.len() < final_size {
-      buf_b.resize(final_size, Scalar::ZERO);
+      buf_b.resize(final_size, T::default());
     }
 
     // Copy input into buf_a to start
@@ -716,10 +722,10 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
             // γ = 1 (index 2): p(prefix, 1, suffix)
             dst[base_next + 2 * suffix_count + suffix_idx] = p1;
 
-            // γ = 2, 3, ..., D-1 (indices 3, 4, ..., D): extrapolate
+            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
+            let mut val = p1;
             for k in 2..D {
-              let k_scalar = Scalar::from(k as u64);
-              let val = p0 + k_scalar * diff;
+              val = val + diff; // val = p0 + k*diff
               dst[base_next + (k + 1) * suffix_count + suffix_idx] = val;
             }
           }
@@ -750,13 +756,13 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
 
   /// Get evaluation by flat index (performance path)
   #[inline]
-  pub fn get(&self, idx: usize) -> Scalar {
+  pub fn get(&self, idx: usize) -> T {
     self.evals[idx]
   }
 
   /// Get evaluation by domain tuple (type-safe path)
   #[inline]
-  pub fn get_by_domain(&self, tuple: &UdTuple<D>) -> Scalar {
+  pub fn get_by_domain(&self, tuple: &UdTuple<D>) -> T {
     self.evals[tuple.to_flat_index()]
   }
 
@@ -768,6 +774,27 @@ impl<Scalar: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<
   /// Number of variables
   pub fn num_vars(&self) -> usize {
     self.num_vars
+  }
+}
+
+// PrimeField-specific methods
+impl<F: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+  /// Create from a MultilinearPolynomial (convenience wrapper for field elements)
+  pub fn from_multilinear(poly: &MultilinearPolynomial<F>) -> Self {
+    Self::from_boolean_evals(&poly.Z)
+  }
+}
+
+// i32-specific methods for small-value optimization
+impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
+  /// Convert i32 evaluations to field elements
+  pub fn to_field<F: SmallValueField<SmallValue = i32>>(
+    &self,
+  ) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+    LagrangeEvaluatedMultilinearPolynomial {
+      evals: self.evals.iter().map(|&v| F::small_to_field(v)).collect(),
+      num_vars: self.num_vars,
+    }
   }
 }
 
@@ -1508,5 +1535,124 @@ mod tests {
       .iter()
       .zip(chis.iter())
       .fold(Scalar::ZERO, |acc, (z, chi)| acc + *z * *chi)
+  }
+
+  // === SmallLagrangePolynomial tests ===
+
+  #[test]
+  fn test_small_lagrange_matches_field_version() {
+    use crate::small_field::SmallValueField;
+
+    const D: usize = 3;
+    let num_vars = 3;
+
+    // Create input as small values (using SmallValueField trait)
+    let input_small: Vec<i32> = (0..(1 << num_vars))
+      .map(|i| Scalar::small_from_i32(i as i32 + 1))
+      .collect();
+
+    // Create same input as field elements
+    let input_field: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|i| Scalar::from((i + 1) as u64))
+      .collect();
+    let poly = MultilinearPolynomial::new(input_field);
+
+    // Extend using both methods
+    let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input_small);
+    let field_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+
+    // Verify they match
+    assert_eq!(small_ext.len(), field_ext.len());
+    for i in 0..small_ext.len() {
+      let small_as_field: Scalar = Scalar::small_to_field(small_ext.get(i));
+      assert_eq!(small_as_field, field_ext.get(i), "mismatch at index {i}");
+    }
+  }
+
+  #[test]
+  fn test_small_lagrange_single_var() {
+    use crate::small_field::SmallValueField;
+
+    let p0: i32 = Scalar::small_from_i32(7);
+    let p1: i32 = Scalar::small_from_i32(19);
+
+    let input = vec![p0, p1];
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 3>::from_boolean_evals(&input);
+
+    // U_d = {∞, 0, 1, 2} with indices 0, 1, 2, 3
+    assert_eq!(extended.get(0), p1 - p0, "p(∞) = leading coeff");
+    assert_eq!(extended.get(1), p0, "p(0)");
+    assert_eq!(extended.get(2), p1, "p(1)");
+    // p(2) = p0 + 2 * (p1 - p0) = 2*p1 - p0 = 2*19 - 7 = 31
+    assert_eq!(extended.get(3), 31i32, "p(2) = 2*p1 - p0");
+  }
+
+  #[test]
+  fn test_small_lagrange_buffer_reusing() {
+    use crate::small_field::SmallValueField;
+
+    const D: usize = 2;
+    let num_vars = 3;
+
+    let input: Vec<i32> = (0..(1 << num_vars))
+      .map(|i| Scalar::small_from_i32(i as i32 * 2 + 1))
+      .collect();
+
+    // Extend without buffer reuse
+    let ext1 = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
+
+    // Extend with buffer reuse
+    let mut buf_a = Vec::new();
+    let mut buf_b = Vec::new();
+    let ext2 =
+      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals_with_buffer_reusing(&input, &mut buf_a, &mut buf_b);
+
+    // Verify they match
+    assert_eq!(ext1.len(), ext2.len());
+    for i in 0..ext1.len() {
+      assert_eq!(ext1.get(i), ext2.get(i), "mismatch at index {i}");
+    }
+  }
+
+  #[test]
+  fn test_small_lagrange_to_field() {
+    use crate::small_field::SmallValueField;
+
+    const D: usize = 2;
+    let num_vars = 2;
+
+    let input: Vec<i32> = (0..(1 << num_vars))
+      .map(|i| Scalar::small_from_i32(i as i32 + 1))
+      .collect();
+
+    let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
+    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> = small_ext.to_field::<Scalar>();
+
+    // Verify conversion
+    for i in 0..small_ext.len() {
+      let expected: Scalar = Scalar::small_to_field(small_ext.get(i));
+      assert_eq!(field_ext.get(i), expected);
+    }
+  }
+
+  #[test]
+  fn test_small_lagrange_negative_values() {
+    use crate::small_field::SmallValueField;
+
+    // Test with negative differences (p0 > p1)
+    let p0: i32 = Scalar::small_from_i32(100);
+    let p1: i32 = Scalar::small_from_i32(50);
+
+    let input = vec![p0, p1];
+    let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 2>::from_boolean_evals(&input);
+
+    // p(∞) = p1 - p0 = -50
+    assert_eq!(extended.get(0), -50i32);
+    assert_eq!(extended.get(1), p0);
+    assert_eq!(extended.get(2), p1);
+
+    // Verify field conversion handles negatives correctly
+    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, 2> = extended.to_field::<Scalar>();
+    assert_eq!(field_ext.get(0), -Scalar::from(50u64));
   }
 }

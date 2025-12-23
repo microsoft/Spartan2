@@ -15,14 +15,85 @@
 use crate::{
   accumulator_index::compute_idx4,
   csr::Csr,
-  lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple},
+  lagrange::{
+    LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple,
+  },
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
   },
+  small_field::SmallValueField,
 };
 use ff::PrimeField;
 use rayon::prelude::*;
+use std::ops::{Add, Sub};
+
+/// Trait for witness polynomials used in Spartan accumulator building.
+/// Abstracts over field-element witnesses vs small-value (i32) witnesses.
+pub trait SpartanAccumulatorInput<S: PrimeField>: Sync {
+  /// The witness value type (S for field, i32 for small)
+  type Value: Copy + Default + Add<Output = Self::Value> + Sub<Output = Self::Value> + Send + Sync;
+
+  /// The product type (S for field, i64 for small)
+  type Product;
+
+  /// Get witness value at index
+  fn get(&self, idx: usize) -> Self::Value;
+
+  /// Get polynomial length
+  fn len(&self) -> usize;
+
+  /// Multiply two witness values: a × b
+  fn multiply_witnesses(a: Self::Value, b: Self::Value) -> Self::Product;
+
+  /// Accumulate eq-weighted product: sum += ein * prod
+  fn accumulate_eq_product(prod: Self::Product, ein: &S, sum: &mut S);
+}
+
+impl<S: PrimeField + Sync> SpartanAccumulatorInput<S> for MultilinearPolynomial<S> {
+  type Value = S;
+  type Product = S;
+
+  fn get(&self, idx: usize) -> S {
+    self.Z[idx]
+  }
+
+  fn len(&self) -> usize {
+    self.Z.len()
+  }
+
+  fn multiply_witnesses(a: S, b: S) -> S {
+    a * b
+  }
+
+  fn accumulate_eq_product(prod: S, ein: &S, sum: &mut S) {
+    *sum += *ein * prod;
+  }
+}
+
+impl<S> SpartanAccumulatorInput<S> for MultilinearPolynomial<i32>
+where
+  S: SmallValueField<SmallValue = i32, IntermediateSmallValue = i64> + Sync,
+{
+  type Value = i32;
+  type Product = i64;
+
+  fn get(&self, idx: usize) -> i32 {
+    self.Z[idx]
+  }
+
+  fn len(&self) -> usize {
+    self.Z.len()
+  }
+
+  fn multiply_witnesses(a: i32, b: i32) -> i64 {
+    (a as i64) * (b as i64)
+  }
+
+  fn accumulate_eq_product(prod: i64, ein: &S, sum: &mut S) {
+    *sum += S::isl_mul(prod, ein);
+  }
+}
 
 /// Polynomial degree D for Spartan's small-value sumcheck.
 /// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
@@ -239,16 +310,20 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
 /// - Skip cz_ext entirely: for binary betas, use cz_pref directly
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so they contribute 0
 /// - Only process betas with ∞ (where Cz doesn't contribute anyway)
-pub fn build_accumulators_spartan<S: PrimeField + Send + Sync>(
-  az: &MultilinearPolynomial<S>,
-  bz: &MultilinearPolynomial<S>,
+pub fn build_accumulators_spartan<S, P>(
+  az: &P,
+  bz: &P,
   taus: &[S],
   l0: usize,
-) -> SmallValueAccumulators<S, 2> {
+) -> SmallValueAccumulators<S, 2>
+where
+  S: PrimeField + Send + Sync,
+  P: SpartanAccumulatorInput<S>,
+{
   let base: usize = 3; // D + 1 = 2 + 1 = 3
-  let l = az.Z.len().trailing_zeros() as usize;
-  debug_assert_eq!(az.Z.len(), 1usize << l, "poly size must be power of 2");
-  debug_assert_eq!(az.Z.len(), bz.Z.len());
+  let l = az.len().trailing_zeros() as usize;
+  debug_assert_eq!(az.len(), 1usize << l, "poly size must be power of 2");
+  debug_assert_eq!(az.len(), bz.len());
   debug_assert_eq!(taus.len(), l, "taus must have length ℓ");
   debug_assert_eq!(l % 2, 0, "Algorithm 6 split expects even ℓ");
 
@@ -304,11 +379,11 @@ pub fn build_accumulators_spartan<S: PrimeField + Send + Sync>(
 
         // Pre-allocate buffers outside inner loop (reused across iterations)
         // Note: cz_pref not needed - we skip binary betas entirely
-        let mut az_pref = vec![S::ZERO; prefix_size];
-        let mut bz_pref = vec![S::ZERO; prefix_size];
+        let mut az_pref = vec![P::Value::default(); prefix_size];
+        let mut bz_pref = vec![P::Value::default(); prefix_size];
         let ext_size = base.pow(l0 as u32); // (D+1)^l0
-        let mut buf_a = vec![S::ZERO; ext_size];
-        let mut buf_b = vec![S::ZERO; ext_size];
+        let mut buf_a = vec![P::Value::default(); ext_size];
+        let mut buf_b = vec![P::Value::default(); ext_size];
 
         // Inner loop over x_in
         for (x_in_bits, &ein) in e_in.iter().enumerate() {
@@ -316,20 +391,21 @@ pub fn build_accumulators_spartan<S: PrimeField + Send + Sync>(
 
           // Fill by index assignment (no allocation)
           // Note: only az and bz needed - cz is skipped
+          #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
-            az_pref[prefix] = az.Z[idx];
-            bz_pref[prefix] = bz.Z[idx];
+            az_pref[prefix] = az.get(idx);
+            bz_pref[prefix] = bz.get(idx);
           }
 
           // Extend Az and Bz to Lagrange domain using ping-pong buffers.
           // Skip Cz extension entirely - binary betas yield 0, ∞ betas don't use Cz.
           let az_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<S, 2>::from_boolean_evals_with_buffer_reusing(
+            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::from_boolean_evals_with_buffer_reusing(
               &az_pref, &mut buf_a, &mut buf_b,
             );
           let bz_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<S, 2>::from_boolean_evals_with_buffer_reusing(
+            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::from_boolean_evals_with_buffer_reusing(
               &bz_pref, &mut buf_a, &mut buf_b,
             );
 
@@ -340,8 +416,8 @@ pub fn build_accumulators_spartan<S: PrimeField + Send + Sync>(
               continue; // Skip binary betas - they contribute 0
             }
             // For ∞ betas: Cz doesn't contribute, just compute Az·Bz
-            let prod = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
-            *sum += ein * prod;
+            let prod = P::multiply_witnesses(az_ext.get(beta_idx), bz_ext.get(beta_idx));
+            P::accumulate_eq_product(prod, &ein, sum);
           }
         }
 
@@ -454,6 +530,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           // Fill all d prefix buffers by index assignment
+          #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
             for (k, poly) in polys.iter().enumerate() {
@@ -978,6 +1055,124 @@ mod tests {
         for u_idx in 0..D {
           let got = acc_impl.get(round, v_idx, u_idx);
           let expect = acc_naive.get(round, v_idx, u_idx);
+          assert_eq!(
+            got, expect,
+            "Mismatch at round {}, v_idx {}, u_idx {}",
+            round, v_idx, u_idx
+          );
+        }
+      }
+    }
+  }
+
+  /// Test that build_accumulators_spartan with i32 witnesses matches field witnesses.
+  ///
+  /// Uses the same setup as test_build_accumulators_spartan_matches_naive but
+  /// compares the small-value version against the original field-element version.
+  #[test]
+  fn test_build_accumulators_spartan_small_matches_field() {
+    let l0 = 2;
+
+    // Define deterministic Az, Bz over {0,1}^4 using small values
+    // Values must fit in i32 for the small-value optimization
+    let eval = |bits: usize| -> i32 {
+      let x0 = (bits >> 3) & 1;
+      let x1 = (bits >> 2) & 1;
+      let x2 = (bits >> 1) & 1;
+      let x3 = bits & 1;
+      (x0 + 2 * x1 + 3 * x2 + 4 * x3 + 5) as i32
+    };
+
+    // Create small-value polynomials
+    let az_small_vals: Vec<i32> = (0..16).map(|b| eval(b)).collect();
+    let bz_small_vals: Vec<i32> = (0..16).map(|b| eval(b) + 7).collect();
+
+    let az_small = MultilinearPolynomial::new(az_small_vals);
+    let bz_small = MultilinearPolynomial::new(bz_small_vals);
+
+    // Create field-element polynomials (same values)
+    let az_field_vals: Vec<Scalar> = (0..16).map(|b| Scalar::from(eval(b) as u64)).collect();
+    let bz_field_vals: Vec<Scalar> = (0..16)
+      .map(|b| Scalar::from((eval(b) + 7) as u64))
+      .collect();
+
+    let az_field = MultilinearPolynomial::new(az_field_vals);
+    let bz_field = MultilinearPolynomial::new(bz_field_vals);
+
+    // Taus (length ℓ)
+    let taus: Vec<Scalar> = vec![
+      Scalar::from(5u64),
+      Scalar::from(7u64),
+      Scalar::from(11u64),
+      Scalar::from(13u64),
+    ];
+
+    // Build accumulators using both versions (unified function, different input types)
+    let acc_small = build_accumulators_spartan(&az_small, &bz_small, &taus, l0);
+    let acc_field = build_accumulators_spartan(&az_field, &bz_field, &taus, l0);
+
+    // Compare all buckets
+    for round in 0..l0 {
+      let num_v = (D + 1).pow(round as u32);
+      for v_idx in 0..num_v {
+        for u_idx in 0..D {
+          let got = acc_small.get(round, v_idx, u_idx);
+          let expect = acc_field.get(round, v_idx, u_idx);
+          assert_eq!(
+            got, expect,
+            "Mismatch at round {}, v_idx {}, u_idx {}",
+            round, v_idx, u_idx
+          );
+        }
+      }
+    }
+  }
+
+  /// Test build_accumulators_spartan with i32 witnesses using larger inputs to stress test.
+  #[test]
+  fn test_build_accumulators_spartan_small_larger() {
+    use crate::small_field::SmallValueField;
+
+    let l0 = 3;
+    let l = 10;
+    let n = 1 << l;
+
+    // Create polynomials with varying small values
+    let az_vals: Vec<i32> = (0..n).map(|i| (i as i32 % 1000) + 1).collect();
+    let bz_vals: Vec<i32> = (0..n).map(|i| ((i as i32 * 7) % 1000) + 1).collect();
+
+    let az_small = MultilinearPolynomial::new(az_vals.clone());
+    let bz_small = MultilinearPolynomial::new(bz_vals.clone());
+
+    // Create field-element versions
+    let az_field = MultilinearPolynomial::new(
+      az_vals
+        .iter()
+        .map(|&s| Scalar::small_to_field(s))
+        .collect(),
+    );
+    let bz_field = MultilinearPolynomial::new(
+      bz_vals
+        .iter()
+        .map(|&s| Scalar::small_to_field(s))
+        .collect(),
+    );
+
+    // Random-looking taus
+    let taus: Vec<Scalar> = (0..l)
+      .map(|i| Scalar::from((i * 7 + 3) as u64))
+      .collect();
+
+    // Build and compare (unified function, different input types)
+    let acc_small = build_accumulators_spartan(&az_small, &bz_small, &taus, l0);
+    let acc_field = build_accumulators_spartan(&az_field, &bz_field, &taus, l0);
+
+    for round in 0..l0 {
+      let num_v = (D + 1).pow(round as u32);
+      for v_idx in 0..num_v {
+        for u_idx in 0..D {
+          let got = acc_small.get(round, v_idx, u_idx);
+          let expect = acc_field.get(round, v_idx, u_idx);
           assert_eq!(
             got, expect,
             "Mismatch at round {}, v_idx {}, u_idx {}",

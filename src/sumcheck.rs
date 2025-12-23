@@ -24,6 +24,7 @@ use crate::{
     univariate::{CompressedUniPoly, UniPoly},
   },
   r1cs::SplitMultiRoundR1CSShape,
+  small_field::SmallValueField,
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
@@ -541,17 +542,33 @@ impl<E: Engine> SumcheckProof<E> {
   /// This method combines small-value optimization (Algorithm 4) for the first ℓ₀ rounds
   /// with eq-poly optimization (Algorithm 5) for the remaining rounds.
   ///
-  /// The output is identical to `prove_cubic_with_three_inputs` but with better
-  /// performance for large polynomials due to reduced field multiplications.
+  /// # Arguments
+  /// * `claim` - The claimed sum
+  /// * `taus` - Random challenges for the eq polynomial
+  /// * `poly_A_small` - Small-value polynomial (evaluations must fit in i32)
+  /// * `poly_B_small` - Small-value polynomial (evaluations must fit in i32)
+  /// * `poly_A` - Field-element polynomial (same values as poly_A_small, for binding)
+  /// * `poly_B` - Field-element polynomial (same values as poly_B_small, for binding)
+  /// * `poly_C` - Field-element polynomial for the subtractive term
+  /// * `transcript` - The transcript for Fiat-Shamir
+  ///
+  /// The small-value polynomials are used for efficient ss/sl multiplications in
+  /// the accumulator building phase. The field-element polynomials are used for
+  /// binding after the small-value rounds.
   #[allow(dead_code)]
   pub fn prove_cubic_with_three_inputs_small_value(
     claim: &E::Scalar,
     taus: Vec<E::Scalar>,
+    poly_A_small: &MultilinearPolynomial<i32>,
+    poly_B_small: &MultilinearPolynomial<i32>,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,
     poly_B: &mut MultilinearPolynomial<E::Scalar>,
     poly_C: &mut MultilinearPolynomial<E::Scalar>,
     transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    E::Scalar: SmallValueField<SmallValue = i32, IntermediateSmallValue = i64>,
+  {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
     let mut claim_per_round = *claim;
@@ -567,8 +584,10 @@ impl<E: Engine> SumcheckProof<E> {
     }
 
     // ===== Pre-computation Phase =====
-    // Build accumulators A_i(v, u) for all i ∈ [ℓ₀]
-    let accumulators = build_accumulators_spartan(poly_A, poly_B, &taus, l0);
+    // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic
+    // ss: i32 × i32 → i64 for polynomial products
+    // isl: i64 × field for eq weighting
+    let accumulators = build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
     let mut small_value =
       lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(
         accumulators,
@@ -577,6 +596,7 @@ impl<E: Engine> SumcheckProof<E> {
     // ===== Small-Value Rounds (0 to ℓ₀-1) =====
     // During these rounds, we use the precomputed accumulators. Polynomials are NOT bound
     // during these rounds - that will happen in the transition phase.
+    #[allow(clippy::needless_range_loop)]
     for round in 0..l0 {
       let (_round_span, round_t) = start_span!("sumcheck_smallvalue_round", round = round);
 
@@ -623,6 +643,7 @@ impl<E: Engine> SumcheckProof<E> {
     // Bind all three polynomials to challenges r[0..l0] and advance eq_instance
     // This brings everything to the same state as if we had run the standard method for l0 rounds
     let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
+    #[allow(clippy::needless_range_loop)]
     for i in 0..l0 {
       rayon::join(
         || poly_A.bind_poly_var_top(&r[i]),
@@ -1554,8 +1575,14 @@ pub(crate) mod lagrange_sumcheck {
       // Deterministic polynomials for reproducibility
       // Use satisfying witness: Cz = Az * Bz (so Az·Bz - Cz = 0 on boolean hypercube)
       // This is required for build_accumulators_spartan which assumes satisfaction.
-      let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
-      let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
+      //
+      // Create small i32 values
+      let az_i32: Vec<i32> = (0..n).map(|i| (i + 1) as i32).collect();
+      let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
+
+      // Create field-element polynomials
+      let az_vals: Vec<F> = az_i32.iter().map(|&v| F::from(v as u64)).collect();
+      let bz_vals: Vec<F> = bz_i32.iter().map(|&v| F::from(v as u64)).collect();
       let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
 
       let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
@@ -1563,11 +1590,16 @@ pub(crate) mod lagrange_sumcheck {
       // Claim = 0 for satisfying witness (Az·Bz = Cz on {0,1}^n)
       let claim: F = F::ZERO;
 
-      // Clone polynomials for both runs
+      // Polynomials for standard method
       let mut az1 = MultilinearPolynomial::new(az_vals.clone());
       let mut bz1 = MultilinearPolynomial::new(bz_vals.clone());
       let mut cz1 = MultilinearPolynomial::new(cz_vals.clone());
 
+      // Small-value polynomials (use native integer arithmetic)
+      let az_small = MultilinearPolynomial::new(az_i32);
+      let bz_small = MultilinearPolynomial::new(bz_i32);
+
+      // Field-element polynomials for binding
       let mut az2 = MultilinearPolynomial::new(az_vals);
       let mut bz2 = MultilinearPolynomial::new(bz_vals);
       let mut cz2 = MultilinearPolynomial::new(cz_vals);
@@ -1591,6 +1623,8 @@ pub(crate) mod lagrange_sumcheck {
       let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
         &claim,
         taus,
+        &az_small,
+        &bz_small,
         &mut az2,
         &mut bz2,
         &mut cz2,

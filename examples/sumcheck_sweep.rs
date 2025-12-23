@@ -35,8 +35,14 @@ fn run_single_benchmark(num_vars: usize) -> (u128, u128) {
 
   // Setup: deterministic polynomials with satisfying witness (Cz = Az * Bz)
   // build_accumulators_spartan assumes Az·Bz = Cz on binary points
-  let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
-  let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
+  //
+  // Create small i32 values and field element values
+  let az_i32: Vec<i32> = (0..n).map(|i| (i + 1) as i32).collect();
+  let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
+
+  // Create field-element polynomials from the same values
+  let az_vals: Vec<F> = az_i32.iter().map(|&v| F::from(v as u64)).collect();
+  let bz_vals: Vec<F> = bz_i32.iter().map(|&v| F::from(v as u64)).collect();
   let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
   let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
 
@@ -63,6 +69,12 @@ fn run_single_benchmark(num_vars: usize) -> (u128, u128) {
   info!(elapsed_us = original_us, "prove_cubic_with_three_inputs");
 
   // ===== SMALL-VALUE METHOD =====
+  // Create small-value polynomials directly from i32 (no field conversion!)
+  // This is the key optimization: ss multiplications use native i64 arithmetic
+  let az_small = MultilinearPolynomial::new(az_i32);
+  let bz_small = MultilinearPolynomial::new(bz_i32);
+
+  // Also need field-element polynomials for binding in later rounds
   let mut az2 = MultilinearPolynomial::new(az_vals);
   let mut bz2 = MultilinearPolynomial::new(bz_vals);
   let mut cz2 = MultilinearPolynomial::new(cz_vals);
@@ -72,6 +84,8 @@ fn run_single_benchmark(num_vars: usize) -> (u128, u128) {
   let (_proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
     &claim,
     taus,
+    &az_small,
+    &bz_small,
     &mut az2,
     &mut bz2,
     &mut cz2,
