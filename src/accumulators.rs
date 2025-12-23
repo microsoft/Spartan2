@@ -18,82 +18,14 @@ use crate::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
   },
-  small_field::SmallValueField,
+  spartan_accumulator_input_polynomial::SpartanAccumulatorInputPolynomial,
   thread_state_accumulators::{GenericThreadState, SpartanThreadState},
 };
 use ff::PrimeField;
 use rayon::prelude::*;
-use std::ops::{Add, Sub};
 
 #[cfg(test)]
 use crate::lagrange::UdHatPoint;
-
-/// Trait for witness polynomials used in Spartan accumulator building.
-/// Abstracts over field-element witnesses vs small-value (i32) witnesses.
-pub trait SpartanAccumulatorInput<S: PrimeField>: Sync {
-  /// The witness value type (S for field, i32 for small)
-  type Value: Copy + Default + Add<Output = Self::Value> + Sub<Output = Self::Value> + Send + Sync;
-
-  /// The product type (S for field, i64 for small)
-  type Product;
-
-  /// Get witness value at index
-  fn get(&self, idx: usize) -> Self::Value;
-
-  /// Get polynomial length
-  fn len(&self) -> usize;
-
-  /// Multiply two witness values: a × b
-  fn multiply_witnesses(a: Self::Value, b: Self::Value) -> Self::Product;
-
-  /// Accumulate eq-weighted product: sum += ein * prod
-  fn accumulate_eq_product(prod: Self::Product, ein: &S, sum: &mut S);
-}
-
-impl<S: PrimeField + Sync> SpartanAccumulatorInput<S> for MultilinearPolynomial<S> {
-  type Value = S;
-  type Product = S;
-
-  fn get(&self, idx: usize) -> S {
-    self.Z[idx]
-  }
-
-  fn len(&self) -> usize {
-    self.Z.len()
-  }
-
-  fn multiply_witnesses(a: S, b: S) -> S {
-    a * b
-  }
-
-  fn accumulate_eq_product(prod: S, ein: &S, sum: &mut S) {
-    *sum += *ein * prod;
-  }
-}
-
-impl<S> SpartanAccumulatorInput<S> for MultilinearPolynomial<i32>
-where
-  S: SmallValueField<SmallValue = i32, IntermediateSmallValue = i64> + Sync,
-{
-  type Value = i32;
-  type Product = i64;
-
-  fn get(&self, idx: usize) -> i32 {
-    self.Z[idx]
-  }
-
-  fn len(&self) -> usize {
-    self.Z.len()
-  }
-
-  fn multiply_witnesses(a: i32, b: i32) -> i64 {
-    (a as i64) * (b as i64)
-  }
-
-  fn accumulate_eq_product(prod: i64, ein: &S, sum: &mut S) {
-    *sum += S::isl_mul(prod, ein);
-  }
-}
 
 /// Polynomial degree D for Spartan's small-value sumcheck.
 /// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
@@ -289,7 +221,7 @@ pub fn build_accumulators_spartan<S, P>(
 ) -> SmallValueAccumulators<S, 2>
 where
   S: PrimeField + Send + Sync,
-  P: SpartanAccumulatorInput<S>,
+  P: SpartanAccumulatorInputPolynomial<S>,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let l = az.len().trailing_zeros() as usize;
