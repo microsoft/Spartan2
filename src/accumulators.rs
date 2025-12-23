@@ -19,6 +19,7 @@ use crate::{
     multilinear::MultilinearPolynomial,
   },
   small_field::SmallValueField,
+  thread_state_accumulators::{GenericThreadState, SpartanThreadState},
 };
 use ff::PrimeField;
 use rayon::prelude::*;
@@ -338,75 +339,81 @@ where
     beta_prefix_cache.push(&entries);
   }
 
-  // Parallel over x_out
+  let ext_size = base.pow(l0 as u32); // (D+1)^l0
+
+  // Parallel over x_out with thread-local state (zero per-iteration allocations)
   (0..num_x_out)
     .into_par_iter()
     .fold(
-      || SmallValueAccumulators::<S, 2>::new(l0),
-      |mut acc, x_out_bits| {
-        // Partial sums indexed by β, accumulated over x_in loop
-        let mut beta_partial_sums = vec![S::ZERO; num_betas];
-
-        // Pre-allocate buffers outside inner loop (reused across iterations)
-        // Note: cz_pref not needed - we skip binary betas entirely
-        let mut az_pref = vec![P::Value::default(); prefix_size];
-        let mut bz_pref = vec![P::Value::default(); prefix_size];
-        let ext_size = base.pow(l0 as u32); // (D+1)^l0
-        let mut buf_a = vec![P::Value::default(); ext_size];
-        let mut buf_b = vec![P::Value::default(); ext_size];
+      || SpartanThreadState::<S, P::Value, 2>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state, x_out_bits| {
+        // Reset partial sums for this x_out iteration
+        state.reset_partial_sums();
 
         // Inner loop over x_in
         for (x_in_bits, &ein) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-          // Fill by index assignment (no allocation)
-          // Note: only az and bz needed - cz is skipped
+          // Fill prefix buffers by index assignment (no allocation)
           #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
-            az_pref[prefix] = az.get(idx);
-            bz_pref[prefix] = bz.get(idx);
+            state.az_pref[prefix] = az.get(idx);
+            state.bz_pref[prefix] = bz.get(idx);
           }
 
-          // Extend Az and Bz to Lagrange domain using ping-pong buffers.
-          // Skip Cz extension entirely - binary betas yield 0, ∞ betas don't use Cz.
-          let az_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::from_boolean_evals_with_buffer_reusing(
-              &az_pref, &mut buf_a, &mut buf_b,
+          // Extend Az and Bz to Lagrange domain in-place (zero allocation)
+          let (az_buf_idx, az_size) =
+            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
+              &state.az_pref,
+              &mut state.az_buf_a,
+              &mut state.az_buf_b,
             );
-          let bz_ext =
-            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::from_boolean_evals_with_buffer_reusing(
-              &bz_pref, &mut buf_a, &mut buf_b,
+          let az_ext = if az_buf_idx == 0 {
+            &state.az_buf_a[..az_size]
+          } else {
+            &state.az_buf_b[..az_size]
+          };
+
+          let (bz_buf_idx, bz_size) =
+            LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
+              &state.bz_pref,
+              &mut state.bz_buf_a,
+              &mut state.bz_buf_b,
             );
+          let bz_ext = if bz_buf_idx == 0 {
+            &state.bz_buf_a[..bz_size]
+          } else {
+            &state.bz_buf_b[..bz_size]
+          };
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
-          // (Az·Bz = Cz on {0,1}^n). For ∞ betas, Cz doesn't contribute anyway.
-          for (beta_idx, sum) in beta_partial_sums.iter_mut().enumerate() {
+          for (beta_idx, sum) in state.beta_partial_sums.iter_mut().enumerate() {
             if !beta_has_infinity[beta_idx] {
-              continue; // Skip binary betas - they contribute 0
+              continue;
             }
-            // For ∞ betas: Cz doesn't contribute, just compute Az·Bz
-            let prod = P::multiply_witnesses(az_ext.get(beta_idx), bz_ext.get(beta_idx));
+            let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
             P::accumulate_eq_product(prod, &ein, sum);
           }
         }
 
         // Distribute beta_partial_sums → A_i(v,u) via idx4
         let ex = e_xout[x_out_bits];
-        for (beta_idx, &val) in beta_partial_sums.iter().enumerate() {
+        for (beta_idx, &val) in state.beta_partial_sums.iter().enumerate() {
           if val.is_zero().into() {
             continue;
           }
           let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
             let ey = e_y[pref.round_0][pref.y_idx];
-            acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+            state.acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }
         }
 
-        acc
+        state
       },
     )
+    .map(|state| state.acc)
     .reduce(
       || SmallValueAccumulators::<S, 2>::new(l0),
       |mut a, b| {
@@ -481,20 +488,16 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
     beta_prefix_cache.push(&entries);
   }
 
-  // Parallel over x_out
+  let ext_size = base.pow(l0 as u32);
+
+  // Parallel over x_out with thread-local state (zero per-iteration allocations)
   (0..num_x_out)
     .into_par_iter()
     .fold(
-      || SmallValueAccumulators::<S, D>::new(l0),
-      |mut acc, x_out_bits| {
-        // Partial sums indexed by β, accumulated over x_in loop
-        let mut beta_partial_sums = vec![S::ZERO; num_betas];
-
-        // Pre-allocate buffers outside inner loop (reused across iterations)
-        let mut poly_prefs: Vec<Vec<S>> = (0..d).map(|_| vec![S::ZERO; prefix_size]).collect();
-        let ext_size = base.pow(l0 as u32);
-        let mut scratch_buf_a = vec![S::ZERO; ext_size];
-        let mut scratch_buf_b = vec![S::ZERO; ext_size];
+      || GenericThreadState::<S, D>::new(l0, num_betas, prefix_size, ext_size, d),
+      |mut state, x_out_bits| {
+        // Reset partial sums for this x_out iteration
+        state.reset_partial_sums();
 
         // Inner loop over x_in
         for (x_in_bits, &ein) in e_in.iter().enumerate() {
@@ -505,45 +508,55 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
             for (k, poly) in polys.iter().enumerate() {
-              poly_prefs[k][prefix] = poly.Z[idx];
+              state.poly_prefs[k][prefix] = poly.Z[idx];
             }
           }
 
-          // Extend all d polynomials using shared scratch buffers
-          let exts: Vec<_> = poly_prefs
+          // Extend all d polynomials in-place (zero allocation)
+          // Collect buffer indices and sizes for each polynomial
+          let ext_results: Vec<(usize, usize)> = state
+            .poly_prefs
             .iter()
-            .map(|pref| {
-              LagrangeEvaluatedMultilinearPolynomial::<S, D>::from_boolean_evals_with_buffer_reusing(
-                pref,
-                &mut scratch_buf_a,
-                &mut scratch_buf_b,
-              )
+            .zip(state.buf_pairs.iter_mut())
+            .map(|(pref, (buf_a, buf_b))| {
+              LagrangeEvaluatedMultilinearPolynomial::<S, D>::extend_in_place(pref, buf_a, buf_b)
             })
             .collect();
 
           // Compute ∏ p_k(β) for each beta
-          for (beta_idx, sum) in beta_partial_sums.iter_mut().enumerate() {
-            let prod: S = exts.iter().map(|ext| ext.get(beta_idx)).product();
+          for (beta_idx, sum) in state.beta_partial_sums.iter_mut().enumerate() {
+            let prod: S = ext_results
+              .iter()
+              .zip(state.buf_pairs.iter())
+              .map(|((buf_idx, _size), (buf_a, buf_b))| {
+                if *buf_idx == 0 {
+                  buf_a[beta_idx]
+                } else {
+                  buf_b[beta_idx]
+                }
+              })
+              .product();
             *sum += ein * prod;
           }
         }
 
         // Distribute beta_partial_sums → A_i(v,u) via idx4
         let ex = e_xout[x_out_bits];
-        for (beta_idx, &val) in beta_partial_sums.iter().enumerate() {
+        for (beta_idx, &val) in state.beta_partial_sums.iter().enumerate() {
           if val.is_zero().into() {
             continue;
           }
           let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
             let ey = e_y[pref.round_0][pref.y_idx];
-            acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+            state.acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }
         }
 
-        acc
+        state
       },
     )
+    .map(|state| state.acc)
     .reduce(
       || SmallValueAccumulators::<S, D>::new(l0),
       |mut a, b| {

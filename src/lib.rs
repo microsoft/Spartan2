@@ -24,6 +24,7 @@
 mod accumulator_index;
 mod accumulators;
 mod csr;
+mod thread_state_accumulators;
 mod digest;
 mod eq_linear;
 mod lagrange;

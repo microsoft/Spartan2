@@ -560,6 +560,7 @@ pub struct LagrangeEvaluatedMultilinearPolynomial<T, const D: usize>
 where
   T: Copy + Default + Add<Output = T> + Sub<Output = T>,
 {
+  #[allow(dead_code)] // Used by test-only methods (get, get_by_domain, len)
   evals: Vec<T>, // size (D+1)^num_vars
   #[allow(dead_code)] // Used by test-only num_vars() method
   num_vars: usize,
@@ -572,25 +573,31 @@ where
   /// Base of the extended domain U_D (= D + 1)
   const BASE: usize = D + 1;
 
-  /// Extend boolean hypercube evaluations to Lagrange domain using caller-provided buffers.
-  /// Zero allocations in the hot loop - reuses buf_a and buf_b as ping-pong scratch space.
+  /// Extend boolean hypercube evaluations to Lagrange domain in-place.
+  /// Returns (result_buffer_index, final_size) where:
+  /// - result_buffer_index: 0 means result is in buf_a, 1 means result is in buf_b
+  /// - final_size: number of valid elements in the result buffer
+  ///
+  /// This is the zero-allocation version - caller reads results directly from the buffer.
   ///
   /// # Arguments
   /// * `input` - Boolean hypercube evaluations (read-only slice, length must be power of 2)
   /// * `buf_a`, `buf_b` - Scratch buffers, will be resized if needed to (D+1)^num_vars
-  pub fn from_boolean_evals_with_buffer_reusing(
+  pub fn extend_in_place(
     input: &[T],
     buf_a: &mut Vec<T>,
     buf_b: &mut Vec<T>,
-  ) -> Self {
+  ) -> (usize, usize) {
     let num_vars = input.len().trailing_zeros() as usize;
     debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
 
     if num_vars == 0 {
-      return Self {
-        evals: input.to_vec(),
-        num_vars: 0,
-      };
+      // Single element: copy to buf_a and return
+      if buf_a.is_empty() {
+        buf_a.push(T::default());
+      }
+      buf_a[0] = input[0];
+      return (0, 1);
     }
 
     let final_size = Self::BASE.pow(num_vars as u32);
@@ -607,12 +614,6 @@ where
     buf_a[..input.len()].copy_from_slice(input);
 
     for j in 1..=num_vars {
-      // At step j:
-      // - prefix_count = (D+1)^{j-1} (number of extended prefix combinations)
-      // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
-      // - src has size = prefix_count × 2 × suffix_count
-      // - dst will have size = prefix_count × (D+1) × suffix_count
-
       let prefix_count = Self::BASE.pow((j - 1) as u32);
       let suffix_count = 1usize << (num_vars - j);
       let current_stride = 2 * suffix_count;
@@ -627,12 +628,10 @@ where
 
       for prefix_idx in 0..prefix_count {
         for suffix_idx in 0..suffix_count {
-          // Read p(prefix, 0, suffix) and p(prefix, 1, suffix)
           let base_current = prefix_idx * current_stride;
           let p0 = src[base_current + suffix_idx];
           let p1 = src[base_current + suffix_count + suffix_idx];
 
-          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_D
           let diff = p1 - p0;
           let base_next = prefix_idx * next_stride;
 
@@ -646,10 +645,10 @@ where
             // γ = 1 (index 2): p(prefix, 1, suffix)
             dst[base_next + 2 * suffix_count + suffix_idx] = p1;
 
-            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
+            // γ = 2, 3, ..., D-1: extrapolate
             let mut val = p1;
             for k in 2..D {
-              val = val + diff; // val = p0 + k*diff
+              val = val + diff;
               dst[base_next + (k + 1) * suffix_count + suffix_idx] = val;
             }
           }
@@ -658,21 +657,8 @@ where
     }
 
     // Result is in whichever buffer was the last destination
-    let final_buf = if num_vars % 2 == 1 {
-      &buf_b[..]
-    } else {
-      &buf_a[..]
-    };
-    Self {
-      evals: final_buf[..final_size].to_vec(),
-      num_vars,
-    }
-  }
-
-  /// Get evaluation by flat index (performance path)
-  #[inline]
-  pub fn get(&self, idx: usize) -> T {
-    self.evals[idx]
+    let result_buf = if num_vars % 2 == 1 { 1 } else { 0 };
+    (result_buf, final_size)
   }
 }
 
@@ -743,6 +729,12 @@ where
       evals: current,
       num_vars,
     }
+  }
+
+  /// Get evaluation by flat index (performance path)
+  #[inline]
+  pub fn get(&self, idx: usize) -> T {
+    self.evals[idx]
   }
 
   /// Number of evaluations
@@ -1588,7 +1580,7 @@ mod tests {
   }
 
   #[test]
-  fn test_small_lagrange_buffer_reusing() {
+  fn test_small_lagrange_extend_in_place() {
     use crate::small_field::SmallValueField;
 
     const D: usize = 2;
@@ -1598,21 +1590,20 @@ mod tests {
       .map(|i| Scalar::small_from_i32(i as i32 * 2 + 1))
       .collect();
 
-    // Extend without buffer reuse
+    // Extend using allocating version
     let ext1 = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
 
-    // Extend with buffer reuse
+    // Extend in-place (zero allocation after initial buffer setup)
     let mut buf_a = Vec::new();
     let mut buf_b = Vec::new();
-    let ext2 =
-      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals_with_buffer_reusing(
-        &input, &mut buf_a, &mut buf_b,
-      );
+    let (result_buf, final_size) =
+      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::extend_in_place(&input, &mut buf_a, &mut buf_b);
+    let ext2 = if result_buf == 0 { &buf_a[..final_size] } else { &buf_b[..final_size] };
 
     // Verify they match
-    assert_eq!(ext1.len(), ext2.len());
+    assert_eq!(ext1.len(), final_size);
     for i in 0..ext1.len() {
-      assert_eq!(ext1.get(i), ext2.get(i), "mismatch at index {i}");
+      assert_eq!(ext1.get(i), ext2[i], "mismatch at index {i}");
     }
   }
 
