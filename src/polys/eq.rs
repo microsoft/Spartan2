@@ -105,7 +105,6 @@ impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
 /// # Complexity
 /// O(2^ℓ₀) total field multiplications (vs O(ℓ₀ · 2^ℓ₀) naive)
 // Allow dead code until later chunks use this function
-#[allow(dead_code)]
 pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Vec<S>> {
   // Handle l0 == 0: no suffix tables needed (small-value optimization disabled)
   if l0 == 0 {
@@ -155,8 +154,8 @@ pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Ve
 #[cfg(test)]
 mod tests {
   use super::*;
-  use ff::Field;
   use crate::provider::pasta::pallas;
+  use ff::Field;
 
   fn test_eq_polynomial_with<F: PrimeField>() {
     let eq_poly = EqPolynomial::<F>::new(vec![F::ONE, F::ZERO, F::ONE]);
@@ -185,8 +184,7 @@ mod tests {
 
   #[test]
   fn test_suffix_pyramid_l0_zero() {
-    let taus: Vec<pallas::Scalar> =
-      vec![pallas::Scalar::from(1), pallas::Scalar::from(2)];
+    let taus: Vec<pallas::Scalar> = vec![pallas::Scalar::from(1), pallas::Scalar::from(2)];
     let pyramid = compute_suffix_eq_pyramid(&taus, 0);
     assert!(pyramid.is_empty());
   }
@@ -194,8 +192,9 @@ mod tests {
   #[test]
   fn test_suffix_pyramid_sizes() {
     let l0 = 4;
-    let taus: Vec<pallas::Scalar> =
-      (0..l0).map(|i| pallas::Scalar::from(i as u64 + 2)).collect();
+    let taus: Vec<pallas::Scalar> = (0..l0)
+      .map(|i| pallas::Scalar::from(i as u64 + 2))
+      .collect();
     let pyramid = compute_suffix_eq_pyramid(&taus, l0);
 
     assert_eq!(pyramid.len(), l0);
@@ -321,11 +320,16 @@ mod tests {
       for j in 0..m {
         // MSB-first: bit j of idx (from left) corresponds to variable j
         let bit = (idx >> (m - 1 - j)) & 1;
-        expected *= if bit == 1 { r[j] } else { pallas::Scalar::ONE - r[j] };
+        expected *= if bit == 1 {
+          r[j]
+        } else {
+          pallas::Scalar::ONE - r[j]
+        };
       }
       assert_eq!(
         evals[idx], expected,
-        "Mismatch at idx {}: got {:?}, expected {:?}", idx, evals[idx], expected
+        "Mismatch at idx {}: got {:?}, expected {:?}",
+        idx, evals[idx], expected
       );
     }
   }

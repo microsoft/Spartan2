@@ -9,7 +9,6 @@
 //! that is generic over the polynomial commitment and evaluation argument (i.e., a PCS).
 #![deny(
   warnings,
-  unused,
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,

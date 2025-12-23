@@ -3,16 +3,13 @@
 // This file is part of the Spartan2 project.
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
-#![allow(dead_code)]
 
 //! Index mapping for Algorithm 6 small-value sumcheck optimization (Definition A.5).
 //!
 //! This module defines:
 //! - [`AccumulatorPrefixIndex`]: Describes how an evaluation prefix β contributes to accumulators
 //! - [`compute_idx4`]: Maps evaluation prefixes β ∈ U_d^ℓ₀ to accumulator contributions
-//! - [`QuadraticTAccumulatorPrefixIndex`]: Type alias for Spartan's t_i sumcheck (D=2)
 
-use crate::accumulators::SPARTAN_T_DEGREE;
 use crate::lagrange::{UdHatPoint, UdPoint, UdTuple};
 
 /// A single contribution from β to an accumulator A_i(v, u).
@@ -50,22 +47,50 @@ impl<const D: usize> AccumulatorPrefixIndex<D> {
   pub fn round_0idx(&self) -> usize {
     self.round - 1
   }
+}
 
-  /// Length of prefix v
+/// Test-only helper methods for verifying index computations.
+#[cfg(test)]
+impl<const D: usize> AccumulatorPrefixIndex<D> {
+  /// Length of prefix v: i - 1
   #[inline]
   pub fn prefix_len(&self) -> usize {
     self.round - 1
   }
 
-  /// Length of binary suffix y
+  /// Length of binary suffix y: ℓ₀ - i
   #[inline]
   pub fn suffix_len(&self) -> usize {
     self.l0 - self.round
   }
 }
 
-/// Type alias for Spartan's quadratic t_i sumcheck index mapping (D=2).
-pub type QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex<SPARTAN_T_DEGREE>;
+/// Pre-computed flat indices for O(1) accumulator access in inner loops.
+///
+/// Derived from [`AccumulatorPrefixIndex`] with all type-safe conversions pre-applied.
+/// This avoids repeated method calls and enum matching in hot loops.
+#[derive(Clone, Copy)]
+pub struct CachedPrefixIndex {
+  /// Round as 0-indexed (for array access)
+  pub round_0: usize,
+  /// Prefix v as flat index
+  pub v_idx: usize,
+  /// Coordinate u as flat index in Û_d
+  pub u_idx: usize,
+  /// Binary suffix y as flat index
+  pub y_idx: usize,
+}
+
+impl<const D: usize> From<&AccumulatorPrefixIndex<D>> for CachedPrefixIndex {
+  fn from(idx: &AccumulatorPrefixIndex<D>) -> Self {
+    Self {
+      round_0: idx.round_0idx(),
+      v_idx: idx.v_idx,
+      u_idx: idx.u.to_index(),
+      y_idx: idx.y_idx,
+    }
+  }
+}
 
 /// Computes accumulator indices for β ∈ U_d^ℓ₀ (Definition A.5).
 ///
@@ -90,7 +115,10 @@ pub type QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex<SPARTAN_T_DEG
 /// - Round 1: v=(), u=Finite(0)∈Û_d, suffix=(1,0) binary → contributes
 /// - Round 2: v=(0,), u=Finite(1)∉Û_d → filtered out
 /// - Round 3: v=(0,1), u=Finite(0)∈Û_d, suffix=() binary → contributes
-pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>, l0: usize) -> Vec<AccumulatorPrefixIndex<D>> {
+pub fn compute_idx4<const D: usize>(
+  beta: &UdTuple<D>,
+  l0: usize,
+) -> Vec<AccumulatorPrefixIndex<D>> {
   debug_assert_eq!(beta.len(), l0, "β length must equal l0");
 
   let mut result = Vec::new();
@@ -338,11 +366,7 @@ mod tests {
       let contributions = compute_idx4(&beta, l0);
 
       // Count how many positions have Finite(1) (value 1)
-      let num_ones = beta
-        .0
-        .iter()
-        .filter(|&&p| p == UdPoint::Finite(1))
-        .count();
+      let num_ones = beta.0.iter().filter(|&&p| p == UdPoint::Finite(1)).count();
 
       // Expected contributions = l0 - num_ones (each position with value 1 filters that round)
       let expected_len = l0 - num_ones;
@@ -362,7 +386,11 @@ mod tests {
 
         if u == UdPoint::Finite(1) {
           // u = 1 ∉ Û_d → round should be filtered
-          assert!(!has_round, "β={:?} should NOT have round {} (u=1)", beta, round);
+          assert!(
+            !has_round,
+            "β={:?} should NOT have round {} (u=1)",
+            beta, round
+          );
         } else {
           // u ∈ Û_d → round should be present (suffix is always binary for binary β)
           assert!(has_round, "β={:?} should have round {} (u≠1)", beta, round);
@@ -563,19 +591,4 @@ mod tests {
     assert!(contributions.iter().any(|c| c.round == 3));
   }
 
-  #[test]
-  fn test_quadratic_t_accumulator_prefix_index_alias() {
-    // Verify the type alias works
-    let idx: QuadraticTAccumulatorPrefixIndex = AccumulatorPrefixIndex {
-      l0: 3,
-      round: 2,
-      v_idx: 5,
-      u: UdHatPoint::Infinity,
-      y_idx: 1,
-    };
-
-    assert_eq!(idx.round_0idx(), 1);
-    assert_eq!(idx.prefix_len(), 1);
-    assert_eq!(idx.suffix_len(), 1);
-  }
 }

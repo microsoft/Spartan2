@@ -5,7 +5,6 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! Utilities for computing the per-round linear equality factor in sum-check.
-#![allow(dead_code)]
 
 use crate::lagrange::UdEvaluations;
 use ff::PrimeField;
@@ -30,11 +29,6 @@ impl<F: PrimeField> EqRoundFactor<F> {
     Self { alpha: F::ONE }
   }
 
-  /// Returns the current prefix product α_i.
-  pub(crate) fn alpha(&self) -> F {
-    self.alpha
-  }
-
   /// Returns ℓ_i evaluated at U_2 = {∞, 0, 1} for the provided w_i.
   ///
   /// - `infinity` = ℓ_i(∞) = α_i · (2w_i − 1)
@@ -50,6 +44,15 @@ impl<F: PrimeField> EqRoundFactor<F> {
   /// Advances α using ℓ_i(r_i) = linf * r_i + l0.
   pub(crate) fn advance(&mut self, li: &UdEvaluations<F, 2>, r_i: F) {
     self.alpha = li.eval_linear_at(r_i);
+  }
+}
+
+/// Test-only helper methods for EqRoundFactor.
+#[cfg(test)]
+impl<F: PrimeField> EqRoundFactor<F> {
+  /// Returns the current prefix product α_i.
+  pub(crate) fn alpha(&self) -> F {
+    self.alpha
   }
 }
 
@@ -102,7 +105,10 @@ mod tests {
 
     assert_eq!(v.eval_linear_at(F::ZERO), v.at_zero());
     assert_eq!(v.eval_linear_at(F::ONE), v.at_one());
-    assert_eq!(v.eval_linear_at(F::from(2u64)), v.at_infinity().double() + v.at_zero());
+    assert_eq!(
+      v.eval_linear_at(F::from(2u64)),
+      v.at_infinity().double() + v.at_zero()
+    );
   }
 
   // advance should update alpha by eqe(w, r).

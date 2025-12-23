@@ -3,21 +3,17 @@
 // This file is part of the Spartan2 project.
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
-#![allow(dead_code)]
 
 //! Accumulator data structures for Algorithm 6 small-value sumcheck optimization.
 //!
 //! This module defines:
 //! - [`RoundAccumulator`]: Single round accumulator A_i(v, u) with flat storage
 //! - [`SmallValueAccumulators`]: Collection of accumulators for all ℓ₀ rounds
-//! - [`QuadraticTAccumulators`]: Type alias for Spartan's t_i sumcheck (D=2)
 
 use crate::{
-  accumulator_index::compute_idx4,
+  accumulator_index::{CachedPrefixIndex, compute_idx4},
   csr::Csr,
-  lagrange::{
-    LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatEvaluations, UdHatPoint, UdTuple,
-  },
+  lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatEvaluations, UdTuple},
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
@@ -27,6 +23,9 @@ use crate::{
 use ff::PrimeField;
 use rayon::prelude::*;
 use std::ops::{Add, Sub};
+
+#[cfg(test)]
+use crate::lagrange::UdHatPoint;
 
 /// Trait for witness polynomials used in Spartan accumulator building.
 /// Abstracts over field-element witnesses vs small-value (i32) witnesses.
@@ -137,49 +136,6 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
     self.data[v_idx][u_idx] += value;
   }
 
-  /// O(1) indexed read from bucket (v_idx, u_idx).
-  #[inline]
-  pub fn get(&self, v_idx: usize, u_idx: usize) -> Scalar {
-    self.data[v_idx][u_idx]
-  }
-
-  /// Accumulate by domain types (type-safe path).
-  ///
-  /// # Arguments
-  /// * `v` - Prefix tuple in U_D^i
-  /// * `u` - Point in Û_D
-  /// * `value` - Value to accumulate
-  #[inline]
-  pub fn accumulate_by_domain(&mut self, v: &UdTuple<D>, u: UdHatPoint<D>, value: Scalar) {
-    let v_idx = v.to_flat_index();
-    let u_idx = u.to_index();
-    self.data[v_idx][u_idx] += value;
-  }
-
-  /// Read by domain types (type-safe path).
-  #[inline]
-  pub fn get_by_domain(&self, v: &UdTuple<D>, u: UdHatPoint<D>) -> Scalar {
-    let v_idx = v.to_flat_index();
-    let u_idx = u.to_index();
-    self.data[v_idx][u_idx]
-  }
-
-  /// Evaluate t_i(u) = ⟨R_i, A_i(·, u)⟩ for this round.
-  pub fn eval_t_at_u(&self, coeff: &LagrangeCoeff<Scalar, D>, u: UdHatPoint<D>) -> Scalar {
-    debug_assert_eq!(
-      self.data.len(),
-      coeff.len(),
-      "R_i length must match number of prefixes"
-    );
-    let u_idx = u.to_index();
-    coeff
-      .as_slice()
-      .iter()
-      .zip(self.data.iter())
-      .map(|(c, row)| *c * row[u_idx])
-      .sum()
-  }
-
   /// Evaluate t_i(u) for all u ∈ Û_D in a single pass.
   pub fn eval_t_all_u(&self, coeff: &LagrangeCoeff<Scalar, D>) -> UdHatEvaluations<Scalar, D> {
     debug_assert_eq!(self.data.len(), coeff.len());
@@ -203,6 +159,32 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
       }
     }
   }
+}
+
+/// Test-only helper methods for RoundAccumulator.
+#[cfg(test)]
+impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
+  /// O(1) indexed read from bucket (v_idx, u_idx).
+  #[inline]
+  pub fn get(&self, v_idx: usize, u_idx: usize) -> Scalar {
+    self.data[v_idx][u_idx]
+  }
+
+  /// Accumulate by domain types (type-safe path).
+  #[inline]
+  pub fn accumulate_by_domain(&mut self, v: &UdTuple<D>, u: UdHatPoint<D>, value: Scalar) {
+    let v_idx = v.to_flat_index();
+    let u_idx = u.to_index();
+    self.data[v_idx][u_idx] += value;
+  }
+
+  /// Read by domain types (type-safe path).
+  #[inline]
+  pub fn get_by_domain(&self, v: &UdTuple<D>, u: UdHatPoint<D>) -> Scalar {
+    let v_idx = v.to_flat_index();
+    let u_idx = u.to_index();
+    self.data[v_idx][u_idx]
+  }
 
   /// Number of prefix entries.
   pub fn num_prefixes(&self) -> usize {
@@ -217,25 +199,9 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
 ///
 /// Type parameter D is the degree bound for t_i(X) (D=2 for Spartan).
 pub struct SmallValueAccumulators<Scalar: PrimeField, const D: usize> {
-  /// Number of rounds using small-value optimization
-  l0: usize,
   /// rounds[i] contains A_{i+1} (the accumulator for 1-indexed round i+1)
   rounds: Vec<RoundAccumulator<Scalar, D>>,
 }
-
-#[derive(Clone, Copy)]
-struct CachedPrefixIndex {
-  round_0: usize,
-  v_idx: usize,
-  u_idx: usize,
-  y_idx: usize,
-}
-
-/// Type alias for Spartan's quadratic t_i sumcheck (D=2).
-///
-/// For quadratic polynomials, we evaluate at U_2 = {∞, 0, 1} (3 points)
-/// and store Û_2 = {∞, 0} (2 points, excluding 1).
-pub type QuadraticTAccumulators<Scalar> = SmallValueAccumulators<Scalar, SPARTAN_T_DEGREE>;
 
 impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   /// Create a fresh accumulator (used per-thread in fold).
@@ -244,7 +210,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   /// * `l0` - Number of rounds using small-value optimization
   pub fn new(l0: usize) -> Self {
     let rounds = (0..l0).map(RoundAccumulator::new).collect();
-    Self { l0, rounds }
+    Self { rounds }
   }
 
   /// O(1) accumulation into bucket (round, v_idx, u_idx).
@@ -253,17 +219,26 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
     self.rounds[round].accumulate(v_idx, u_idx, value);
   }
 
-  /// Read A_i(v, u).
-  #[inline]
-  pub fn get(&self, round: usize, v_idx: usize, u_idx: usize) -> Scalar {
-    self.rounds[round].get(v_idx, u_idx)
-  }
-
   /// Merge another accumulator into this one (for reduce phase).
   pub fn merge(&mut self, other: &Self) {
     for (self_round, other_round) in self.rounds.iter_mut().zip(&other.rounds) {
       self_round.merge(other_round);
     }
+  }
+
+  /// Get read-only access to a specific round's accumulator.
+  pub fn round(&self, i: usize) -> &RoundAccumulator<Scalar, D> {
+    &self.rounds[i]
+  }
+}
+
+/// Test-only helper methods for SmallValueAccumulators.
+#[cfg(test)]
+impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
+  /// Read A_i(v, u).
+  #[inline]
+  pub fn get(&self, round: usize, v_idx: usize, u_idx: usize) -> Scalar {
+    self.rounds[round].get(v_idx, u_idx)
   }
 
   /// Accumulate by domain types (type-safe path).
@@ -286,12 +261,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
 
   /// Number of rounds.
   pub fn num_rounds(&self) -> usize {
-    self.l0
-  }
-
-  /// Get read-only access to a specific round's accumulator.
-  pub fn round(&self, i: usize) -> &RoundAccumulator<Scalar, D> {
-    &self.rounds[i]
+    self.rounds.len()
   }
 }
 
@@ -457,6 +427,7 @@ where
 /// * `polys` - Slice of multilinear polynomials to multiply
 /// * `taus` - Random challenge points (length ℓ)
 /// * `l0` - Number of small-value rounds
+#[allow(dead_code)]
 pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
   polys: &[&MultilinearPolynomial<S>],
   taus: &[S],
@@ -749,15 +720,6 @@ mod tests {
   }
 
   #[test]
-  fn test_quadratic_t_accumulators_alias() {
-    // Verify the type alias works
-    let acc: QuadraticTAccumulators<Scalar> = QuadraticTAccumulators::new(2);
-    assert_eq!(acc.num_rounds(), 2);
-    assert_eq!(acc.round(0).num_prefixes(), 1); // 3^0
-    assert_eq!(acc.round(1).num_prefixes(), 3); // 3^1
-  }
-
-  #[test]
   fn test_accumulator_sizes_match_spec() {
     // For D=2, ℓ₀=3 should have total 26 elements
     // Round 0: 1 * 2 = 2
@@ -978,7 +940,7 @@ mod tests {
   #[test]
   fn test_build_accumulators_product_of_three() {
     use ff::Field;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     const L: usize = 10;
     const L0: usize = 3;
@@ -1028,9 +990,12 @@ mod tests {
         let p2_pref = p2.gather_prefix_evals(L0, suffix);
         let p3_pref = p3.gather_prefix_evals(L0, suffix);
 
-        let p1_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p1_pref);
-        let p2_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p2_pref);
-        let p3_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p3_pref);
+        let p1_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p1_pref);
+        let p2_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p2_pref);
+        let p3_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p3_pref);
 
         let ein = e_in[x_in_bits];
 
@@ -1042,7 +1007,12 @@ mod tests {
           // Distribute to accumulators via idx4
           for pref in &idx4_cache[beta_idx] {
             let ey = e_y[pref.round_0idx()][pref.y_idx];
-            acc_naive.accumulate(pref.round_0idx(), pref.v_idx, pref.u.to_index(), ey * ex * val);
+            acc_naive.accumulate(
+              pref.round_0idx(),
+              pref.v_idx,
+              pref.u.to_index(),
+              ey * ex * val,
+            );
           }
         }
       }
@@ -1145,23 +1115,13 @@ mod tests {
     let bz_small = MultilinearPolynomial::new(bz_vals.clone());
 
     // Create field-element versions
-    let az_field = MultilinearPolynomial::new(
-      az_vals
-        .iter()
-        .map(|&s| Scalar::small_to_field(s))
-        .collect(),
-    );
-    let bz_field = MultilinearPolynomial::new(
-      bz_vals
-        .iter()
-        .map(|&s| Scalar::small_to_field(s))
-        .collect(),
-    );
+    let az_field =
+      MultilinearPolynomial::new(az_vals.iter().map(|&s| Scalar::small_to_field(s)).collect());
+    let bz_field =
+      MultilinearPolynomial::new(bz_vals.iter().map(|&s| Scalar::small_to_field(s)).collect());
 
     // Random-looking taus
-    let taus: Vec<Scalar> = (0..l)
-      .map(|i| Scalar::from((i * 7 + 3) as u64))
-      .collect();
+    let taus: Vec<Scalar> = (0..l).map(|i| Scalar::from((i * 7 + 3) as u64)).collect();
 
     // Build and compare (unified function, different input types)
     let acc_small = build_accumulators_spartan(&az_small, &bz_small, &taus, l0);

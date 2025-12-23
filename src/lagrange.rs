@@ -3,7 +3,6 @@
 // This file is part of the Spartan2 project.
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
-#![allow(dead_code)]
 
 //! Domain types for the Algorithm 6 small-value sum-check optimization.
 //!
@@ -16,10 +15,11 @@
 //! All types are parameterized by `const D: usize` representing the degree bound.
 //! This enables compile-time type safety and debug assertions for bounds checking.
 
-use crate::polys::multilinear::MultilinearPolynomial;
-use crate::small_field::SmallValueField;
 use ff::PrimeField;
 use std::ops::{Add, Sub};
+
+#[cfg(test)]
+use crate::{polys::multilinear::MultilinearPolynomial, small_field::SmallValueField};
 
 /// A point in the domain U_d = {∞, 0, 1, ..., d-1}
 ///
@@ -39,38 +39,6 @@ impl<const D: usize> UdPoint<D> {
   /// Base of the domain U_D (= D + 1 points)
   pub const BASE: usize = D + 1;
 
-  // === Construction ===
-
-  /// Create the infinity point
-  #[allow(dead_code)]
-  pub const fn infinity() -> Self {
-    UdPoint::Infinity
-  }
-
-  /// Create the zero point
-  #[allow(dead_code)]
-  pub const fn zero() -> Self {
-    UdPoint::Finite(0)
-  }
-
-  /// Create the one point
-  #[allow(dead_code)]
-  pub const fn one() -> Self {
-    UdPoint::Finite(1)
-  }
-
-  /// Create a finite point from value v ∈ {0, 1, ..., D-1}
-  ///
-  /// # Panics (debug builds only)
-  /// Panics if v >= D
-  #[allow(dead_code)]
-  pub fn finite(v: usize) -> Self {
-    debug_assert!(v < D, "UdPoint::finite({v}) out of bounds for D={D}");
-    UdPoint::Finite(v)
-  }
-
-  // === Index Conversion ===
-
   /// Convert to flat index for array access.
   /// Infinity → 0, Finite(v) → v + 1
   #[inline]
@@ -88,28 +56,15 @@ impl<const D: usize> UdPoint<D> {
   /// Panics if idx > D
   #[inline]
   pub fn from_index(idx: usize) -> Self {
-    debug_assert!(idx <= D, "UdPoint::from_index({idx}) out of bounds for D={D}");
+    debug_assert!(
+      idx <= D,
+      "UdPoint::from_index({idx}) out of bounds for D={D}"
+    );
     if idx == 0 {
       UdPoint::Infinity
     } else {
       UdPoint::Finite(idx - 1)
     }
-  }
-
-  // === Properties ===
-
-  /// Check if this is the infinity point
-  #[allow(dead_code)]
-  #[inline]
-  pub fn is_infinity(self) -> bool {
-    matches!(self, UdPoint::Infinity)
-  }
-
-  /// Check if this is the zero point
-  #[allow(dead_code)]
-  #[inline]
-  pub fn is_zero(self) -> bool {
-    matches!(self, UdPoint::Finite(0))
   }
 
   /// Is this a binary point (0 or 1)?
@@ -118,8 +73,18 @@ impl<const D: usize> UdPoint<D> {
     matches!(self, UdPoint::Finite(0) | UdPoint::Finite(1))
   }
 
-  // === Domain Conversion ===
+  /// Convert to Û_d point (the reduced domain excluding value 1).
+  ///
+  /// Returns `None` for Finite(1) since 1 ∉ Û_d.
+  #[inline]
+  pub fn to_ud_hat(self) -> Option<UdHatPoint<D>> {
+    UdHatPoint::try_from(self).ok()
+  }
+}
 
+/// Test-only helper methods for UdPoint.
+#[cfg(test)]
+impl<const D: usize> UdPoint<D> {
   /// Convert to field element. Returns `None` for Infinity.
   #[inline]
   pub fn to_field<F: PrimeField>(self) -> Option<F> {
@@ -127,14 +92,6 @@ impl<const D: usize> UdPoint<D> {
       UdPoint::Infinity => None,
       UdPoint::Finite(v) => Some(F::from(v as u64)),
     }
-  }
-
-  /// Convert to Û_d point (the reduced domain excluding value 1).
-  ///
-  /// Returns `None` for Finite(1) since 1 ∉ Û_d.
-  #[inline]
-  pub fn to_ud_hat(self) -> Option<UdHatPoint<D>> {
-    UdHatPoint::try_from(self).ok()
   }
 }
 
@@ -168,35 +125,6 @@ pub enum UdHatPoint<const D: usize> {
 }
 
 impl<const D: usize> UdHatPoint<D> {
-  // === Construction ===
-
-  /// Create the infinity point
-  #[allow(dead_code)]
-  pub const fn infinity() -> Self {
-    UdHatPoint::Infinity
-  }
-
-  /// Create the zero point
-  #[allow(dead_code)]
-  pub const fn zero() -> Self {
-    UdHatPoint::Finite(0)
-  }
-
-  /// Create a finite point. Returns None for v=1 (not in Û_d).
-  ///
-  /// # Panics (debug builds only)
-  /// Panics if v >= D (and v != 1)
-  pub fn finite(v: usize) -> Option<Self> {
-    if v == 1 {
-      None
-    } else {
-      debug_assert!(v < D, "UdHatPoint::finite({v}) out of bounds for D={D}");
-      Some(UdHatPoint::Finite(v))
-    }
-  }
-
-  // === Index Conversion ===
-
   /// Convert to array index.
   /// Mapping: ∞ → 0, 0 → 1, 2 → 2, 3 → 3, ...
   #[inline]
@@ -208,23 +136,6 @@ impl<const D: usize> UdHatPoint<D> {
     }
   }
 
-  /// Create from array index.
-  /// Mapping: 0 → ∞, 1 → 0, 2 → 2, 3 → 3, ...
-  ///
-  /// # Panics (debug builds only)
-  /// Panics if idx >= D
-  #[inline]
-  pub fn from_index(idx: usize) -> Self {
-    debug_assert!(idx < D, "UdHatPoint::from_index({idx}) out of bounds for D={D}");
-    match idx {
-      0 => UdHatPoint::Infinity,
-      1 => UdHatPoint::Finite(0),
-      k => UdHatPoint::Finite(k),
-    }
-  }
-
-  // === Domain Conversion ===
-
   /// Convert to UdPoint (U_d point)
   #[inline]
   pub fn to_ud_point(self) -> UdPoint<D> {
@@ -233,34 +144,35 @@ impl<const D: usize> UdHatPoint<D> {
       UdHatPoint::Finite(v) => UdPoint::Finite(v),
     }
   }
+}
 
-  /// Convert to field element. Returns None for Infinity.
-  #[allow(dead_code)]
-  #[inline]
-  pub fn to_field<F: PrimeField>(self) -> Option<F> {
-    match self {
-      UdHatPoint::Infinity => None,
-      UdHatPoint::Finite(v) => Some(F::from(v as u64)),
+/// Test-only helper methods for UdHatPoint.
+#[cfg(test)]
+impl<const D: usize> UdHatPoint<D> {
+  /// Create a finite point. Returns None for v=1 (not in Û_d).
+  pub fn finite(v: usize) -> Option<Self> {
+    if v == 1 {
+      None
+    } else {
+      debug_assert!(v < D, "UdHatPoint::finite({v}) out of bounds for D={D}");
+      Some(UdHatPoint::Finite(v))
     }
   }
 
-  // === Properties ===
-
-  /// Is this the infinity point?
-  #[allow(dead_code)]
+  /// Create from array index.
+  /// Mapping: 0 → ∞, 1 → 0, 2 → 2, 3 → 3, ...
   #[inline]
-  pub fn is_infinity(self) -> bool {
-    matches!(self, UdHatPoint::Infinity)
+  pub fn from_index(idx: usize) -> Self {
+    debug_assert!(
+      idx < D,
+      "UdHatPoint::from_index({idx}) out of bounds for D={D}"
+    );
+    match idx {
+      0 => UdHatPoint::Infinity,
+      1 => UdHatPoint::Finite(0),
+      k => UdHatPoint::Finite(k),
+    }
   }
-
-  /// Is this the zero point?
-  #[allow(dead_code)]
-  #[inline]
-  pub fn is_zero(self) -> bool {
-    matches!(self, UdHatPoint::Finite(0))
-  }
-
-  // === Iteration ===
 
   /// Iterate over all points in Û_d.
   /// Yields: ∞, 0, 2, 3, ..., D-1 (total of D elements)
@@ -306,33 +218,6 @@ impl<const D: usize> UdTuple<D> {
     self.0.len()
   }
 
-  /// Check if empty
-  #[allow(dead_code)]
-  pub fn is_empty(&self) -> bool {
-    self.0.is_empty()
-  }
-
-  /// Check if all coordinates are binary (0 or 1, no ∞)
-  ///
-  /// Useful for Spartan optimization: binary points yield zero by R1CS relation.
-  pub fn is_all_binary(&self) -> bool {
-    self.0.iter().all(|p| p.is_binary())
-  }
-
-  /// Check if any coordinate is ∞
-  ///
-  /// Useful for Spartan optimization: Cz term vanishes when any coord is ∞.
-  pub fn has_infinity(&self) -> bool {
-    self.0.iter().any(|p| matches!(p, UdPoint::Infinity))
-  }
-
-  /// Convert to flat index for array access (mixed-radix encoding)
-  ///
-  /// Uses compile-time BASE = D + 1
-  pub fn to_flat_index(&self) -> usize {
-    self.0.iter().fold(0, |acc, p| acc * Self::BASE + p.to_index())
-  }
-
   /// Convert from flat index (mixed-radix decoding)
   ///
   /// Uses compile-time BASE = D + 1
@@ -344,14 +229,32 @@ impl<const D: usize> UdTuple<D> {
     }
     UdTuple(points)
   }
+}
+
+/// Test-only helper methods for UdTuple.
+#[cfg(test)]
+impl<const D: usize> UdTuple<D> {
+  /// Convert to flat index for array access (mixed-radix encoding)
+  ///
+  /// Uses compile-time BASE = D + 1
+  pub fn to_flat_index(&self) -> usize {
+    self
+      .0
+      .iter()
+      .fold(0, |acc, p| acc * Self::BASE + p.to_index())
+  }
+
+  /// Check if all coordinates are binary (0 or 1, no ∞)
+  pub fn is_all_binary(&self) -> bool {
+    self.0.iter().all(|p| p.is_binary())
+  }
+
+  /// Check if any coordinate is ∞
+  pub fn has_infinity(&self) -> bool {
+    self.0.iter().any(|p| matches!(p, UdPoint::Infinity))
+  }
 
   /// Create a UdTuple from a binary index in {0,1}^num_bits.
-  ///
-  /// Each bit maps to a binary U_D point: 0 → Finite(0), 1 → Finite(1).
-  /// Bits are read MSB-first (high bit is first coordinate).
-  ///
-  /// # Example
-  /// `from_binary::<3>(0b101, 3)` → `(Finite(1), Finite(0), Finite(1))`
   #[inline]
   pub fn from_binary(bits: usize, num_bits: usize) -> Self {
     let mut points = Vec::with_capacity(num_bits);
@@ -381,11 +284,7 @@ pub struct LagrangeBasisFactory<F, const D: usize> {
 }
 
 /// Evaluated Lagrange basis at a single r, stored in UdPoint order.
-///
-/// Type alias for [`UdEvaluations`]:
-/// - `infinity` (was `l_inf`) corresponds to UdPoint::Infinity
-/// - `finite[k]` corresponds to UdPoint::Finite(k)
-pub type LagrangeBasisEval<F, const D: usize> = UdEvaluations<F, D>;
+type LagrangeBasisEval<F, const D: usize> = UdEvaluations<F, D>;
 
 // ========================================================================
 // Evaluation containers for U_d and Û_d domains
@@ -408,24 +307,6 @@ impl<T: Copy, const D: usize> UdEvaluations<T, D> {
   #[inline]
   pub fn new(infinity: T, finite: [T; D]) -> Self {
     Self { infinity, finite }
-  }
-
-  /// Get value at a domain point.
-  #[inline]
-  pub fn get(&self, p: UdPoint<D>) -> T {
-    match p {
-      UdPoint::Infinity => self.infinity,
-      UdPoint::Finite(k) => self.finite[k],
-    }
-  }
-
-  /// Get mutable reference to value at a domain point.
-  #[inline]
-  pub fn get_mut(&mut self, p: UdPoint<D>) -> &mut T {
-    match p {
-      UdPoint::Infinity => &mut self.infinity,
-      UdPoint::Finite(k) => &mut self.finite[k],
-    }
   }
 
   /// Get value at infinity.
@@ -453,6 +334,19 @@ impl<T: Copy, const D: usize> UdEvaluations<T, D> {
   /// Iterate values in U_d order: [∞, 0, 1, ..., D-1].
   pub fn iter_ud_order(&self) -> impl Iterator<Item = T> + '_ {
     std::iter::once(self.infinity).chain(self.finite.iter().copied())
+  }
+}
+
+/// Test-only helper methods for UdEvaluations.
+#[cfg(test)]
+impl<T: Copy, const D: usize> UdEvaluations<T, D> {
+  /// Get value at a domain point.
+  #[inline]
+  pub fn get(&self, p: UdPoint<D>) -> T {
+    match p {
+      UdPoint::Infinity => self.infinity,
+      UdPoint::Finite(k) => self.finite[k],
+    }
   }
 }
 
@@ -485,18 +379,6 @@ impl<T: Copy, const D: usize> UdHatEvaluations<T, D> {
     Self { data }
   }
 
-  /// Get value at a domain point.
-  #[inline]
-  pub fn get(&self, p: UdHatPoint<D>) -> T {
-    self.data[p.to_index()]
-  }
-
-  /// Get mutable reference to value at a domain point.
-  #[inline]
-  pub fn get_mut(&mut self, p: UdHatPoint<D>) -> &mut T {
-    &mut self.data[p.to_index()]
-  }
-
   /// Get value at infinity (index 0).
   #[inline]
   pub fn at_infinity(&self) -> T {
@@ -507,23 +389,6 @@ impl<T: Copy, const D: usize> UdHatEvaluations<T, D> {
   #[inline]
   pub fn at_zero(&self) -> T {
     self.data[1]
-  }
-
-  /// Get underlying array.
-  #[inline]
-  pub fn as_array(&self) -> &[T; D] {
-    &self.data
-  }
-
-  /// Get mutable reference to underlying array.
-  #[inline]
-  pub fn as_array_mut(&mut self) -> &mut [T; D] {
-    &mut self.data
-  }
-
-  /// Iterate values in Û_d order.
-  pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
-    self.data.iter().copied()
   }
 }
 
@@ -537,15 +402,13 @@ pub struct LagrangeCoeff<F, const D: usize> {
 impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
   /// Initialize R_1 = [1].
   pub fn new() -> Self {
-    Self { coeffs: vec![F::ONE] }
+    Self {
+      coeffs: vec![F::ONE],
+    }
   }
 
   pub fn len(&self) -> usize {
     self.coeffs.len()
-  }
-
-  pub fn get(&self, idx: usize) -> F {
-    self.coeffs[idx]
   }
 
   pub fn as_slice(&self) -> &[F] {
@@ -562,6 +425,14 @@ impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
       }
     }
     self.coeffs = next;
+  }
+}
+
+/// Test-only helper methods for LagrangeCoeff.
+#[cfg(test)]
+impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
+  pub fn get(&self, idx: usize) -> F {
+    self.coeffs[idx]
   }
 }
 
@@ -616,27 +487,6 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
     UdEvaluations::new(prod, finite)
   }
 
-  /// Evaluate an extended polynomial at r using the tensor-product Lagrange basis.
-  pub fn eval_extended(
-    &self,
-    extended: &LagrangeEvaluatedMultilinearPolynomial<F, D>,
-    r: &[F],
-  ) -> F {
-    assert_eq!(extended.num_vars(), r.len());
-
-    let mut coeff = LagrangeCoeff::<F, D>::new();
-    for &ri in r {
-      let basis = self.basis_at(ri);
-      coeff.extend(&basis);
-    }
-
-    let mut acc = F::ZERO;
-    for idx in 0..extended.len() {
-      acc += coeff.get(idx) * extended.get(idx);
-    }
-    acc
-  }
-
   fn weights_general(points: &[F; D]) -> [F; D] {
     let denoms = std::array::from_fn(|k| {
       let xk = points[k];
@@ -670,6 +520,31 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   }
 }
 
+/// Test-only helper methods for LagrangeBasisFactory.
+#[cfg(test)]
+impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
+  /// Evaluate an extended polynomial at r using the tensor-product Lagrange basis.
+  pub fn eval_extended(
+    &self,
+    extended: &LagrangeEvaluatedMultilinearPolynomial<F, D>,
+    r: &[F],
+  ) -> F {
+    assert_eq!(extended.num_vars(), r.len());
+
+    let mut coeff = LagrangeCoeff::<F, D>::new();
+    for &ri in r {
+      let basis = self.basis_at(ri);
+      coeff.extend(&basis);
+    }
+
+    let mut acc = F::ZERO;
+    for idx in 0..extended.len() {
+      acc += coeff.get(idx) * extended.get(idx);
+    }
+    acc
+  }
+}
+
 // ============================================================================
 // Lagrange Extension (Procedure 6)
 // ============================================================================
@@ -686,6 +561,7 @@ where
   T: Copy + Default + Add<Output = T> + Sub<Output = T>,
 {
   evals: Vec<T>, // size (D+1)^num_vars
+  #[allow(dead_code)] // Used by test-only num_vars() method
   num_vars: usize,
 }
 
@@ -695,75 +571,6 @@ where
 {
   /// Base of the extended domain U_D (= D + 1)
   const BASE: usize = D + 1;
-
-  /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_D^ℓ₀.
-  ///
-  /// At each step j, we have evaluations over U_D^{j-1} × {0,1}^{ℓ₀-j+1}.
-  /// We extend the j-th coordinate from {0,1} to U_D.
-  ///
-  /// # Arguments
-  /// * `input` - Boolean hypercube evaluations (length must be power of 2)
-  pub fn from_boolean_evals(input: &[T]) -> Self {
-    let num_vars = input.len().trailing_zeros() as usize;
-    debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
-
-    let mut current = input.to_vec();
-
-    for j in 1..=num_vars {
-      // At step j:
-      // - prefix_count = (D+1)^{j-1} (number of extended prefix combinations)
-      // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
-      // - current has size = prefix_count × 2 × suffix_count
-      // - next will have size = prefix_count × (D+1) × suffix_count
-
-      let prefix_count = Self::BASE.pow((j - 1) as u32);
-      let suffix_count = 1usize << (num_vars - j);
-      let current_stride = 2 * suffix_count; // stride between prefixes in current
-      let next_stride = Self::BASE * suffix_count; // stride between prefixes in next
-
-      let next_size = prefix_count * next_stride;
-      let mut next = vec![T::default(); next_size];
-
-      for prefix_idx in 0..prefix_count {
-        for suffix_idx in 0..suffix_count {
-          // Read p(prefix, 0, suffix) and p(prefix, 1, suffix)
-          let base_current = prefix_idx * current_stride;
-          let p0 = current[base_current + suffix_idx];
-          let p1 = current[base_current + suffix_count + suffix_idx];
-
-          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_D
-          let diff = p1 - p0;
-          let base_next = prefix_idx * next_stride;
-
-          // γ = ∞ (index 0): leading coefficient
-          next[base_next + suffix_idx] = diff;
-
-          // γ = 0 (index 1): p(prefix, 0, suffix)
-          next[base_next + suffix_count + suffix_idx] = p0;
-
-          if D >= 2 {
-            // γ = 1 (index 2): p(prefix, 1, suffix)
-            next[base_next + 2 * suffix_count + suffix_idx] = p1;
-
-            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
-            // val starts at p1 = p0 + 1*diff, then we add diff each iteration
-            let mut val = p1;
-            for k in 2..D {
-              val = val + diff; // val = p0 + k*diff
-              next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
-            }
-          }
-        }
-      }
-
-      current = next;
-    }
-
-    Self {
-      evals: current,
-      num_vars,
-    }
-  }
 
   /// Extend boolean hypercube evaluations to Lagrange domain using caller-provided buffers.
   /// Zero allocations in the hot loop - reuses buf_a and buf_b as ping-pong scratch space.
@@ -851,9 +658,89 @@ where
     }
 
     // Result is in whichever buffer was the last destination
-    let final_buf = if num_vars % 2 == 1 { &buf_b[..] } else { &buf_a[..] };
+    let final_buf = if num_vars % 2 == 1 {
+      &buf_b[..]
+    } else {
+      &buf_a[..]
+    };
     Self {
       evals: final_buf[..final_size].to_vec(),
+      num_vars,
+    }
+  }
+
+  /// Get evaluation by flat index (performance path)
+  #[inline]
+  pub fn get(&self, idx: usize) -> T {
+    self.evals[idx]
+  }
+}
+
+/// Test-only helper methods for LagrangeEvaluatedMultilinearPolynomial.
+#[cfg(test)]
+impl<T, const D: usize> LagrangeEvaluatedMultilinearPolynomial<T, D>
+where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
+  /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_D^ℓ₀.
+  pub fn from_boolean_evals(input: &[T]) -> Self {
+    let num_vars = input.len().trailing_zeros() as usize;
+    debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
+
+    let mut current = input.to_vec();
+
+    for j in 1..=num_vars {
+      // At step j:
+      // - prefix_count = (D+1)^{j-1} (number of extended prefix combinations)
+      // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
+      // - current has size = prefix_count × 2 × suffix_count
+      // - next will have size = prefix_count × (D+1) × suffix_count
+
+      let prefix_count = Self::BASE.pow((j - 1) as u32);
+      let suffix_count = 1usize << (num_vars - j);
+      let current_stride = 2 * suffix_count; // stride between prefixes in current
+      let next_stride = Self::BASE * suffix_count; // stride between prefixes in next
+
+      let next_size = prefix_count * next_stride;
+      let mut next = vec![T::default(); next_size];
+
+      for prefix_idx in 0..prefix_count {
+        for suffix_idx in 0..suffix_count {
+          // Read p(prefix, 0, suffix) and p(prefix, 1, suffix)
+          let base_current = prefix_idx * current_stride;
+          let p0 = current[base_current + suffix_idx];
+          let p1 = current[base_current + suffix_count + suffix_idx];
+
+          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_D
+          let diff = p1 - p0;
+          let base_next = prefix_idx * next_stride;
+
+          // γ = ∞ (index 0): leading coefficient
+          next[base_next + suffix_idx] = diff;
+
+          // γ = 0 (index 1): p(prefix, 0, suffix)
+          next[base_next + suffix_count + suffix_idx] = p0;
+
+          if D >= 2 {
+            // γ = 1 (index 2): p(prefix, 1, suffix)
+            next[base_next + 2 * suffix_count + suffix_idx] = p1;
+
+            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
+            // val starts at p1 = p0 + 1*diff, then we add diff each iteration
+            let mut val = p1;
+            for k in 2..D {
+              val = val + diff; // val = p0 + k*diff
+              next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
+            }
+          }
+        }
+      }
+
+      current = next;
+    }
+
+    Self {
+      evals: current,
       num_vars,
     }
   }
@@ -864,47 +751,34 @@ where
     self.evals.len()
   }
 
-  /// Check if empty
-  #[allow(dead_code)]
-  #[inline]
-  pub fn is_empty(&self) -> bool {
-    self.evals.is_empty()
-  }
-
-  /// Get evaluation by flat index (performance path)
-  #[inline]
-  pub fn get(&self, idx: usize) -> T {
-    self.evals[idx]
-  }
-
   /// Get evaluation by domain tuple (type-safe path)
   #[inline]
   pub fn get_by_domain(&self, tuple: &UdTuple<D>) -> T {
     self.evals[tuple.to_flat_index()]
   }
 
-  /// Convert flat index to domain tuple (for debugging/clarity)
-  pub fn to_domain_tuple(&self, flat_idx: usize) -> UdTuple<D> {
-    UdTuple::from_flat_index(flat_idx, self.num_vars)
-  }
-
   /// Number of variables
   pub fn num_vars(&self) -> usize {
     self.num_vars
   }
+
+  /// Convert flat index to domain tuple
+  pub fn to_domain_tuple(&self, flat_idx: usize) -> UdTuple<D> {
+    UdTuple::from_flat_index(flat_idx, self.num_vars)
+  }
 }
 
-// PrimeField-specific methods
+/// Test-only: Create from a MultilinearPolynomial.
+#[cfg(test)]
 impl<F: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<F, D> {
-  /// Create from a MultilinearPolynomial (convenience wrapper for field elements)
   pub fn from_multilinear(poly: &MultilinearPolynomial<F>) -> Self {
     Self::from_boolean_evals(&poly.Z)
   }
 }
 
-// i32-specific methods for small-value optimization
+/// Test-only: Convert i32 evaluations to field elements.
+#[cfg(test)]
 impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
-  /// Convert i32 evaluations to field elements
   pub fn to_field<F: SmallValueField<SmallValue = i32>>(
     &self,
   ) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
@@ -1273,10 +1147,8 @@ mod tests {
     }
     for r in rs {
       let basis = factory.basis_at(r);
-      let reconstructed = s_inf * basis.infinity
-        + s0 * basis.finite[0]
-        + s1 * basis.finite[1]
-        + s2 * basis.finite[2];
+      let reconstructed =
+        s_inf * basis.infinity + s0 * basis.finite[0] + s1 * basis.finite[1] + s2 * basis.finite[2];
       assert_eq!(reconstructed, eval(r));
     }
   }
@@ -1324,7 +1196,11 @@ mod tests {
     );
     let basis2 = UdEvaluations::<Scalar, D>::new(
       Scalar::from(11u64),
-      [Scalar::from(13u64), Scalar::from(17u64), Scalar::from(19u64)],
+      [
+        Scalar::from(13u64),
+        Scalar::from(17u64),
+        Scalar::from(19u64),
+      ],
     );
 
     let mut coeff = LagrangeCoeff::<Scalar, D>::new();
@@ -1348,8 +1224,9 @@ mod tests {
     let num_vars = 4;
     let mut rng = rand_core::OsRng;
 
-    let evals: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rng)).collect();
+    let evals: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rng))
+      .collect();
     let poly = MultilinearPolynomial::new(evals.clone());
     let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
     let factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
@@ -1382,12 +1259,15 @@ mod tests {
     let num_vars = 4;
     let mut rng = rand_core::OsRng;
 
-    let evals1: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rng)).collect();
-    let evals2: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rng)).collect();
-    let evals3: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rng)).collect();
+    let evals1: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rng))
+      .collect();
+    let evals2: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rng))
+      .collect();
+    let evals3: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rng))
+      .collect();
 
     let p1 = MultilinearPolynomial::new(evals1.clone());
     let p2 = MultilinearPolynomial::new(evals2.clone());
@@ -1470,8 +1350,9 @@ mod tests {
     const D: usize = 3;
     let base = D + 1;
 
-    let input: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let input: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rand_core::OsRng))
+      .collect();
     let poly = MultilinearPolynomial::new(input.clone());
 
     let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
@@ -1512,8 +1393,9 @@ mod tests {
     const D: usize = 3;
     let base = D + 1;
 
-    let input: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let input: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rand_core::OsRng))
+      .collect();
     let poly = MultilinearPolynomial::new(input.clone());
     let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
@@ -1527,7 +1409,10 @@ mod tests {
       }
 
       // Convert U_d indices to field values: index k → value k-1
-      let point: Vec<Scalar> = tuple.iter().map(|&t| Scalar::from((t - 1) as u64)).collect();
+      let point: Vec<Scalar> = tuple
+        .iter()
+        .map(|&t| Scalar::from((t - 1) as u64))
+        .collect();
 
       let direct = evaluate_multilinear(&input, &point);
       assert_eq!(extended.get(idx), direct);
@@ -1542,8 +1427,9 @@ mod tests {
     const D: usize = 3;
     let base = D + 1;
 
-    let input: Vec<Scalar> =
-      (0..(1 << num_vars)).map(|_| Scalar::random(&mut rand_core::OsRng)).collect();
+    let input: Vec<Scalar> = (0..(1 << num_vars))
+      .map(|_| Scalar::random(&mut rand_core::OsRng))
+      .collect();
     let poly = MultilinearPolynomial::new(input.clone());
     let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
@@ -1606,11 +1492,7 @@ mod tests {
       Scalar::from(4u64),
       "p(0,0,∞) = coeff of Z"
     );
-    assert_eq!(
-      extended.get(0),
-      Scalar::ZERO,
-      "p(∞,∞,∞) = 0 (no XYZ term)"
-    );
+    assert_eq!(extended.get(0), Scalar::ZERO, "p(∞,∞,∞) = 0 (no XYZ term)");
   }
 
   #[test]
@@ -1675,7 +1557,8 @@ mod tests {
     let poly = MultilinearPolynomial::new(input_field);
 
     // Extend using both methods
-    let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input_small);
+    let small_ext =
+      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input_small);
     let field_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // Verify they match
@@ -1722,7 +1605,9 @@ mod tests {
     let mut buf_a = Vec::new();
     let mut buf_b = Vec::new();
     let ext2 =
-      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals_with_buffer_reusing(&input, &mut buf_a, &mut buf_b);
+      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals_with_buffer_reusing(
+        &input, &mut buf_a, &mut buf_b,
+      );
 
     // Verify they match
     assert_eq!(ext1.len(), ext2.len());
@@ -1743,7 +1628,8 @@ mod tests {
       .collect();
 
     let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
-    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> = small_ext.to_field::<Scalar>();
+    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> =
+      small_ext.to_field::<Scalar>();
 
     // Verify conversion
     for i in 0..small_ext.len() {
@@ -1769,7 +1655,8 @@ mod tests {
     assert_eq!(extended.get(2), p1);
 
     // Verify field conversion handles negatives correctly
-    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, 2> = extended.to_field::<Scalar>();
+    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, 2> =
+      extended.to_field::<Scalar>();
     assert_eq!(field_ext.get(0), -Scalar::from(50u64));
   }
 }

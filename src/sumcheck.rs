@@ -12,7 +12,7 @@
 
 use crate::{
   CommitmentKey,
-  accumulators::{build_accumulators_spartan, SPARTAN_T_DEGREE},
+  accumulators::{SPARTAN_T_DEGREE, build_accumulators_spartan},
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
@@ -534,7 +534,6 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Default number of small-value rounds (ℓ₀) for Algorithm 6.
   /// Optimal value from paper analysis for Spartan with D=2.
-  #[allow(dead_code)]
   const DEFAULT_SMALL_VALUE_ROUNDS: usize = 3;
 
   /// Prove poly_A * poly_B - poly_C using Algorithm 6 (EqPoly-SmallValueSC).
@@ -1339,7 +1338,6 @@ pub(crate) mod eq_sumcheck {
 }
 
 pub(crate) mod lagrange_sumcheck {
-  #![allow(dead_code)]
 
   use crate::{
     accumulators::SmallValueAccumulators,
@@ -1396,11 +1394,6 @@ pub(crate) mod lagrange_sumcheck {
       self.eq_factor.advance(li, r_i);
       self.coeff.extend(&self.basis_factory.basis_at(r_i));
     }
-
-    /// Returns the accumulated eq factor α_i = eq(τ_{<i}, r_{<i}).
-    pub(crate) fn eq_factor_alpha(&self) -> Scalar {
-      self.eq_factor.alpha()
-    }
   }
 
   /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
@@ -1433,6 +1426,7 @@ pub(crate) mod lagrange_sumcheck {
   }
 
   /// Build s_i(0), s_i(1), s_i(2), s_i(3) for testing against the coefficient form.
+  #[allow(dead_code)]
   pub(crate) fn build_univariate_round_evals<F: PrimeField>(
     li: &UdEvaluations<F, 2>,
     t0: F,
@@ -1476,7 +1470,7 @@ pub(crate) mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      accumulators::{build_accumulators_spartan, SPARTAN_T_DEGREE},
+      accumulators::{SPARTAN_T_DEGREE, build_accumulators_spartan},
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,
