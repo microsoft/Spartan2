@@ -7,31 +7,16 @@
 //! Utilities for computing the per-round linear equality factor in sum-check.
 #![allow(dead_code)]
 
+use crate::lagrange::UdEvaluations;
 use ff::PrimeField;
 
-/// The per-round linear equality factor values ℓ_i(0), ℓ_i(1), and ℓ_i(∞).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EqRoundValues<F: PrimeField> {
-  /// ℓ_i(0) = α_i · (1 − w_i).
-  pub(crate) l0: F,
-  /// ℓ_i(1) = α_i · w_i.
-  pub(crate) l1: F,
-  /// ℓ_i(∞) = α_i · (2w_i − 1).
-  pub(crate) linf: F,
-}
-
-impl<F: PrimeField> EqRoundValues<F> {
-  /// Evaluates ℓ_i at an arbitrary point u.
-  pub(crate) fn eval_at(&self, u: F) -> F {
-    self.linf * u + self.l0
-  }
-
-  /// Derives t_i(1) using the sumcheck relation and ℓ_i(1).
-  pub(crate) fn derive_t1(&self, claim_prev: F, t0: F) -> Option<F> {
-    let s0 = self.l0 * t0;
-    let s1 = claim_prev - s0;
-    self.l1.invert().into_option().map(|inv| s1 * inv)
-  }
+/// Derives t_i(1) using the sumcheck relation: claim = ℓ_i(0)·t(0) + ℓ_i(1)·t(1).
+///
+/// Returns `None` if `l1` is zero (non-invertible).
+pub(crate) fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
+  let s0 = l0 * t0;
+  let s1 = claim_prev - s0;
+  l1.invert().into_option().map(|inv| s1 * inv)
 }
 
 /// Tracks α_i = eqe(w_{<i}, r_{<i}) to build ℓ_i values each round.
@@ -50,17 +35,21 @@ impl<F: PrimeField> EqRoundFactor<F> {
     self.alpha
   }
 
-  /// Returns ℓ_i(0), ℓ_i(1), ℓ_i(∞) for the provided w_i.
-  pub(crate) fn values(&self, w_i: F) -> EqRoundValues<F> {
+  /// Returns ℓ_i evaluated at U_2 = {∞, 0, 1} for the provided w_i.
+  ///
+  /// - `infinity` = ℓ_i(∞) = α_i · (2w_i − 1)
+  /// - `finite[0]` = ℓ_i(0) = α_i · (1 − w_i)
+  /// - `finite[1]` = ℓ_i(1) = α_i · w_i
+  pub(crate) fn values(&self, w_i: F) -> UdEvaluations<F, 2> {
     let l0 = self.alpha * (F::ONE - w_i);
     let l1 = self.alpha * w_i;
     let linf = self.alpha * (w_i.double() - F::ONE);
-    EqRoundValues { l0, l1, linf }
+    UdEvaluations::new(linf, [l0, l1])
   }
 
-  /// Advances α using ℓ_i values and the verifier challenge r_i.
-  pub(crate) fn advance_from_values(&mut self, li: &EqRoundValues<F>, r_i: F) {
-    self.alpha = li.eval_at(r_i);
+  /// Advances α using ℓ_i(r_i) = linf * r_i + l0.
+  pub(crate) fn advance(&mut self, li: &UdEvaluations<F, 2>, r_i: F) {
+    self.alpha = li.eval_linear_at(r_i);
   }
 }
 
@@ -83,9 +72,9 @@ mod tests {
     let tracker = EqRoundFactor::new();
     let v = tracker.values(w);
 
-    assert_eq!(v.l0, F::ONE - w);
-    assert_eq!(v.l1, w);
-    assert_eq!(v.linf, w.double() - F::ONE);
+    assert_eq!(v.at_zero(), F::ONE - w);
+    assert_eq!(v.at_one(), w);
+    assert_eq!(v.at_infinity(), w.double() - F::ONE);
   }
 
   // Invariants: l0 + l1 = alpha and linf = l1 - l0 after one advance.
@@ -97,26 +86,26 @@ mod tests {
     let mut tracker = EqRoundFactor::new();
 
     let v0 = tracker.values(w0);
-    tracker.advance_from_values(&v0, r0);
+    tracker.advance(&v0, r0);
 
     let v1 = tracker.values(w1);
-    assert_eq!(v1.l0 + v1.l1, tracker.alpha());
-    assert_eq!(v1.linf, v1.l1 - v1.l0);
+    assert_eq!(v1.at_zero() + v1.at_one(), tracker.alpha());
+    assert_eq!(v1.at_infinity(), v1.at_one() - v1.at_zero());
   }
 
-  // eval_at(u) should agree with stored points and derived l(2).
+  // eval_linear_at(u) should agree with stored points and derived l(2).
   #[test]
   fn test_li_at_matches_values() {
     let w = F::from(11u64);
     let tracker = EqRoundFactor::new();
     let v = tracker.values(w);
 
-    assert_eq!(v.eval_at(F::ZERO), v.l0);
-    assert_eq!(v.eval_at(F::ONE), v.l1);
-    assert_eq!(v.eval_at(F::from(2u64)), v.linf.double() + v.l0);
+    assert_eq!(v.eval_linear_at(F::ZERO), v.at_zero());
+    assert_eq!(v.eval_linear_at(F::ONE), v.at_one());
+    assert_eq!(v.eval_linear_at(F::from(2u64)), v.at_infinity().double() + v.at_zero());
   }
 
-  // advance_from_values should update alpha by eqe(w, r).
+  // advance should update alpha by eqe(w, r).
   #[test]
   fn test_advance_updates_alpha() {
     let w0 = F::from(4u64);
@@ -125,7 +114,7 @@ mod tests {
     let alpha0 = tracker.alpha();
 
     let v0 = tracker.values(w0);
-    tracker.advance_from_values(&v0, r0);
+    tracker.advance(&v0, r0);
 
     let expected = alpha0 * eqe_bit(w0, r0);
     assert_eq!(tracker.alpha(), expected);
@@ -141,7 +130,7 @@ mod tests {
     let mut expected = F::ONE;
     for (tau, r) in taus.into_iter().zip(rs.into_iter()) {
       let v = tracker.values(tau);
-      tracker.advance_from_values(&v, r);
+      tracker.advance(&v, r);
       expected *= eqe_bit(tau, r);
       assert_eq!(tracker.alpha(), expected);
     }
@@ -153,14 +142,14 @@ mod tests {
     let tracker = EqRoundFactor::<F>::new();
 
     let v0 = tracker.values(F::ZERO);
-    assert_eq!(v0.l0, F::ONE);
-    assert_eq!(v0.l1, F::ZERO);
-    assert_eq!(v0.linf, -F::ONE);
+    assert_eq!(v0.at_zero(), F::ONE);
+    assert_eq!(v0.at_one(), F::ZERO);
+    assert_eq!(v0.at_infinity(), -F::ONE);
 
     let v1 = tracker.values(F::ONE);
-    assert_eq!(v1.l0, F::ZERO);
-    assert_eq!(v1.l1, F::ONE);
-    assert_eq!(v1.linf, F::ONE);
+    assert_eq!(v1.at_zero(), F::ZERO);
+    assert_eq!(v1.at_one(), F::ONE);
+    assert_eq!(v1.at_infinity(), F::ONE);
   }
 
   // For w = 1/2, slope should be zero (linf = 0).
@@ -170,39 +159,33 @@ mod tests {
     let tracker = EqRoundFactor::new();
     let v = tracker.values(half);
 
-    assert_eq!(v.linf, F::ZERO);
-    assert_eq!(v.l0 + v.l1, F::ONE);
+    assert_eq!(v.at_infinity(), F::ZERO);
+    assert_eq!(v.at_zero() + v.at_one(), F::ONE);
   }
 
   // derive_t1 should return s1 / l1 for non-zero l1.
   #[test]
   fn test_derive_t1_returns_value() {
-    let li = EqRoundValues {
-      l0: F::from(2u64),
-      l1: F::from(5u64),
-      linf: F::from(7u64),
-    };
+    let l0 = F::from(2u64);
+    let l1 = F::from(5u64);
     let t0 = F::from(11u64);
     let claim = F::from(97u64);
 
-    let s0 = li.l0 * t0;
+    let s0 = l0 * t0;
     let s1 = claim - s0;
-    let expected = s1 * li.l1.invert().unwrap();
+    let expected = s1 * l1.invert().unwrap();
 
-    assert_eq!(li.derive_t1(claim, t0), Some(expected));
+    assert_eq!(derive_t1(l0, l1, claim, t0), Some(expected));
   }
 
   // derive_t1 should return None when l1 == 0.
   #[test]
   fn test_derive_t1_returns_none_on_zero_l1() {
-    let li = EqRoundValues {
-      l0: F::from(3u64),
-      l1: F::ZERO,
-      linf: F::from(9u64),
-    };
+    let l0 = F::from(3u64);
+    let l1 = F::ZERO;
     let t0 = F::from(4u64);
     let claim = F::from(10u64);
 
-    assert_eq!(li.derive_t1(claim, t0), None);
+    assert_eq!(derive_t1(l0, l1, claim, t0), None);
   }
 }

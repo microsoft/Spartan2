@@ -16,7 +16,7 @@ use crate::{
   accumulator_index::compute_idx4,
   csr::Csr,
   lagrange::{
-    LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatPoint, UdTuple,
+    LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatEvaluations, UdHatPoint, UdTuple,
   },
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
@@ -181,7 +181,7 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
   }
 
   /// Evaluate t_i(u) for all u ∈ Û_D in a single pass.
-  pub fn eval_t_all_u(&self, coeff: &LagrangeCoeff<Scalar, D>) -> [Scalar; D] {
+  pub fn eval_t_all_u(&self, coeff: &LagrangeCoeff<Scalar, D>) -> UdHatEvaluations<Scalar, D> {
     debug_assert_eq!(self.data.len(), coeff.len());
     let mut acc = [Scalar::ZERO; D];
     for (c, row) in coeff.as_slice().iter().zip(self.data.iter()) {
@@ -190,7 +190,7 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
         acc[i] += scaled * row[i];
       }
     }
-    acc
+    UdHatEvaluations::from_array(acc)
   }
 
   /// Element-wise merge (tight loop, compiler can vectorize).

@@ -17,8 +17,8 @@ use crate::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
+  eq_linear,
   errors::SpartanError,
-  lagrange::UdHatPoint,
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -602,15 +602,14 @@ impl<E: Engine> SumcheckProof<E> {
 
       // 1. Get t_i evaluations from accumulators
       let t_all = small_value.eval_t_all_u(round);
-      let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
-      let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
+      let t_inf = t_all.at_infinity();
+      let t0 = t_all.at_zero();
 
       // 2. Get eq factor values ℓ_i(0), ℓ_i(1), ℓ_i(∞)
       let li = small_value.eq_round_values(taus[round]);
 
       // 3. Derive t(1) from sumcheck constraint: s(0) + s(1) = claim
-      let t1 = li
-        .derive_t1(claim_per_round, t0)
+      let t1 = eq_linear::derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0)
         .ok_or(SpartanError::InvalidSumcheckProof)?;
 
       // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
@@ -1344,11 +1343,15 @@ pub(crate) mod lagrange_sumcheck {
 
   use crate::{
     accumulators::SmallValueAccumulators,
-    eq_linear::{EqRoundFactor, EqRoundValues},
-    lagrange::{LagrangeBasisFactory, LagrangeCoeff},
+    eq_linear::EqRoundFactor,
+    lagrange::{LagrangeBasisFactory, LagrangeCoeff, UdEvaluations, UdHatEvaluations},
     polys::univariate::UniPoly,
   };
   use ff::PrimeField;
+
+  // Re-export for tests
+  #[cfg(test)]
+  pub(crate) use crate::eq_linear::derive_t1;
 
   /// Tracks the small-value sum-check state for the first ℓ₀ rounds.
   pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
@@ -1379,18 +1382,18 @@ pub(crate) mod lagrange_sumcheck {
     }
 
     /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
-    pub(crate) fn eval_t_all_u(&self, round: usize) -> [Scalar; D] {
+    pub(crate) fn eval_t_all_u(&self, round: usize) -> UdHatEvaluations<Scalar, D> {
       self.accumulators.round(round).eval_t_all_u(&self.coeff)
     }
 
     /// Compute ℓ_i values for the provided w_i.
-    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> EqRoundValues<Scalar> {
+    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> UdEvaluations<Scalar, 2> {
       self.eq_factor.values(w_i)
     }
 
     /// Advance the round state with the verifier challenge r_i.
-    pub(crate) fn advance(&mut self, li: &EqRoundValues<Scalar>, r_i: Scalar) {
-      self.eq_factor.advance_from_values(li, r_i);
+    pub(crate) fn advance(&mut self, li: &UdEvaluations<Scalar, 2>, r_i: Scalar) {
+      self.eq_factor.advance(li, r_i);
       self.coeff.extend(&self.basis_factory.basis_at(r_i));
     }
 
@@ -1402,7 +1405,7 @@ pub(crate) mod lagrange_sumcheck {
 
   /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
   pub(crate) fn build_univariate_round_polynomial<F: PrimeField>(
-    li: &EqRoundValues<F>,
+    li: &UdEvaluations<F, 2>,
     t0: F,
     t1: F,
     t_inf: F,
@@ -1415,11 +1418,14 @@ pub(crate) mod lagrange_sumcheck {
     let c = t0;
     let b = t1 - a - c;
 
+    let linf = li.at_infinity();
+    let l0 = li.at_zero();
+
     // Multiply s_i(X) = ℓ_i(X)·t_i(X) with ℓ_i(X)=ℓ_∞X+ℓ_0 and collect coefficients.
-    let s3 = li.linf * a;
-    let s2 = li.linf * b + li.l0 * a;
-    let s1 = li.linf * c + li.l0 * b;
-    let s0 = li.l0 * c;
+    let s3 = linf * a;
+    let s2 = linf * b + l0 * a;
+    let s1 = linf * c + l0 * b;
+    let s0 = l0 * c;
 
     UniPoly {
       coeffs: vec![s0, s1, s2, s3],
@@ -1428,7 +1434,7 @@ pub(crate) mod lagrange_sumcheck {
 
   /// Build s_i(0), s_i(1), s_i(2), s_i(3) for testing against the coefficient form.
   pub(crate) fn build_univariate_round_evals<F: PrimeField>(
-    li: &EqRoundValues<F>,
+    li: &UdEvaluations<F, 2>,
     t0: F,
     t1: F,
     t_inf: F,
@@ -1449,13 +1455,17 @@ pub(crate) mod lagrange_sumcheck {
     let three_b = b.double() + b;
     let t3 = nine_a + three_b + c;
 
+    let linf = li.at_infinity();
+    let l0 = li.at_zero();
+    let l1 = li.at_one();
+
     // Evaluate ℓ_i(2) and ℓ_i(3) from ℓ_i(X) = ℓ_∞X + ℓ_0.
-    let l2 = li.linf.double() + li.l0;
-    let l3 = l2 + li.linf;
+    let l2 = linf.double() + l0;
+    let l3 = l2 + linf;
 
     // Use s_i(u) = ℓ_i(u)·t_i(u) for u ∈ {0, 1, 2, 3}.
-    let s0 = li.l0 * t0;
-    let s1 = li.l1 * t1;
+    let s0 = l0 * t0;
+    let s1 = l1 * t1;
     let s2 = l2 * t2;
     let s3 = l3 * t3;
 
@@ -1467,7 +1477,6 @@ pub(crate) mod lagrange_sumcheck {
     use super::*;
     use crate::{
       accumulators::{build_accumulators_spartan, SPARTAN_T_DEGREE},
-      lagrange::UdHatPoint,
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,
@@ -1482,11 +1491,9 @@ pub(crate) mod lagrange_sumcheck {
     fn test_round_polynomial_matches_evals() {
       let l0 = F::from(2u64);
       let linf = F::from(5u64);
-      let li = EqRoundValues {
-        l0,
-        l1: l0 + linf,
-        linf,
-      };
+      let l1 = l0 + linf;
+      let li = UdEvaluations::new(linf, [l0, l1]);
+
       let t0 = F::from(7u64);
       let t1 = F::from(11u64);
       let t_inf = F::from(13u64);
@@ -1542,10 +1549,9 @@ pub(crate) mod lagrange_sumcheck {
 
         let li = small_value.eq_round_values(taus[round]);
         let t_all = small_value.eval_t_all_u(round);
-        let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
-        let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
-        let t1 = li
-          .derive_t1(claim, t0)
+        let t_inf = t_all.at_infinity();
+        let t0 = t_all.at_zero();
+        let t1 = derive_t1(li.at_zero(), li.at_one(), claim, t0)
           .expect("l1 should be non-zero for chosen taus");
 
         let s_evals = build_univariate_round_evals(&li, t0, t1, t_inf);
@@ -1683,10 +1689,10 @@ pub(crate) mod lagrange_sumcheck {
       let small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
 
       let t_all = small_value.eval_t_all_u(0);
-      let t_inf = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Infinity.to_index()];
-      let t0 = t_all[UdHatPoint::<SPARTAN_T_DEGREE>::Finite(0).to_index()];
+      let t_inf = t_all.at_infinity();
+      let t0 = t_all.at_zero();
       let li = small_value.eq_round_values(taus[0]);
-      let t1 = li.derive_t1(claim, t0).expect("l1 non-zero");
+      let t1 = derive_t1(li.at_zero(), li.at_one(), claim, t0).expect("l1 non-zero");
 
       let evals_sv = build_univariate_round_evals(&li, t0, t1, t_inf);
 

@@ -382,11 +382,149 @@ pub struct LagrangeBasisFactory<F, const D: usize> {
 
 /// Evaluated Lagrange basis at a single r, stored in UdPoint order.
 ///
-/// - `l_inf` corresponds to UdPoint::Infinity.
-/// - `finite[k]` corresponds to UdPoint::Finite(k).
-pub struct LagrangeBasisEval<F, const D: usize> {
-  pub l_inf: F,
-  pub finite: [F; D],
+/// Type alias for [`UdEvaluations`]:
+/// - `infinity` (was `l_inf`) corresponds to UdPoint::Infinity
+/// - `finite[k]` corresponds to UdPoint::Finite(k)
+pub type LagrangeBasisEval<F, const D: usize> = UdEvaluations<F, D>;
+
+// ========================================================================
+// Evaluation containers for U_d and Û_d domains
+// ========================================================================
+
+/// Evaluations at all D+1 points of U_d = {∞, 0, 1, ..., D-1}.
+///
+/// This type stores values indexed by [`UdPoint<D>`], with the infinity
+/// point stored separately from the D finite points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdEvaluations<T, const D: usize> {
+  /// Value at the infinity point
+  pub infinity: T,
+  /// Values at finite points 0, 1, ..., D-1
+  pub finite: [T; D],
+}
+
+impl<T: Copy, const D: usize> UdEvaluations<T, D> {
+  /// Create new evaluations from infinity and finite values.
+  #[inline]
+  pub fn new(infinity: T, finite: [T; D]) -> Self {
+    Self { infinity, finite }
+  }
+
+  /// Get value at a domain point.
+  #[inline]
+  pub fn get(&self, p: UdPoint<D>) -> T {
+    match p {
+      UdPoint::Infinity => self.infinity,
+      UdPoint::Finite(k) => self.finite[k],
+    }
+  }
+
+  /// Get mutable reference to value at a domain point.
+  #[inline]
+  pub fn get_mut(&mut self, p: UdPoint<D>) -> &mut T {
+    match p {
+      UdPoint::Infinity => &mut self.infinity,
+      UdPoint::Finite(k) => &mut self.finite[k],
+    }
+  }
+
+  /// Get value at infinity.
+  #[inline]
+  pub fn at_infinity(&self) -> T {
+    self.infinity
+  }
+
+  /// Get value at zero (finite point 0).
+  #[inline]
+  pub fn at_zero(&self) -> T {
+    self.finite[0]
+  }
+
+  /// Get value at one (finite point 1).
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if D < 2.
+  #[inline]
+  pub fn at_one(&self) -> T {
+    debug_assert!(D >= 2, "at_one() requires D >= 2");
+    self.finite[1]
+  }
+
+  /// Iterate values in U_d order: [∞, 0, 1, ..., D-1].
+  pub fn iter_ud_order(&self) -> impl Iterator<Item = T> + '_ {
+    std::iter::once(self.infinity).chain(self.finite.iter().copied())
+  }
+}
+
+impl<F: PrimeField> UdEvaluations<F, 2> {
+  /// Evaluate linear polynomial at u: L(u) = infinity * u + finite[0].
+  ///
+  /// For evaluations of a degree-1 polynomial over U_2 = {∞, 0, 1},
+  /// this computes L(u) = l_∞ · u + l_0.
+  #[inline]
+  pub fn eval_linear_at(&self, u: F) -> F {
+    self.infinity * u + self.finite[0]
+  }
+}
+
+/// Evaluations at all D points of Û_d = U_d \ {1} = {∞, 0, 2, ..., D-1}.
+///
+/// This reduced domain excludes point 1 because s(1) can be recovered
+/// from the sum-check constraint s(0) + s(1) = claim.
+///
+/// Indexing follows [`UdHatPoint::to_index()`]: ∞→0, 0→1, 2→2, 3→3, ...
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdHatEvaluations<T, const D: usize> {
+  data: [T; D],
+}
+
+impl<T: Copy, const D: usize> UdHatEvaluations<T, D> {
+  /// Create from array indexed by `UdHatPoint::to_index()`.
+  #[inline]
+  pub fn from_array(data: [T; D]) -> Self {
+    Self { data }
+  }
+
+  /// Get value at a domain point.
+  #[inline]
+  pub fn get(&self, p: UdHatPoint<D>) -> T {
+    self.data[p.to_index()]
+  }
+
+  /// Get mutable reference to value at a domain point.
+  #[inline]
+  pub fn get_mut(&mut self, p: UdHatPoint<D>) -> &mut T {
+    &mut self.data[p.to_index()]
+  }
+
+  /// Get value at infinity (index 0).
+  #[inline]
+  pub fn at_infinity(&self) -> T {
+    self.data[0]
+  }
+
+  /// Get value at zero (index 1).
+  #[inline]
+  pub fn at_zero(&self) -> T {
+    self.data[1]
+  }
+
+  /// Get underlying array.
+  #[inline]
+  pub fn as_array(&self) -> &[T; D] {
+    &self.data
+  }
+
+  /// Get mutable reference to underlying array.
+  #[inline]
+  pub fn as_array_mut(&mut self) -> &mut [T; D] {
+    &mut self.data
+  }
+
+  /// Iterate values in Û_d order.
+  pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+    self.data.iter().copied()
+  }
 }
 
 /// R_i tensor coefficients used in Algorithm 6.
@@ -394,21 +532,6 @@ pub struct LagrangeBasisEval<F, const D: usize> {
 /// Indexing matches UdTuple::to_flat_index() over U_d^{i-1}.
 pub struct LagrangeCoeff<F, const D: usize> {
   coeffs: Vec<F>,
-}
-
-impl<F: PrimeField, const D: usize> LagrangeBasisEval<F, D> {
-  /// Iterate basis values in UdPoint index order: [∞, 0, 1, 2, ...].
-  pub fn iter_ud_order(&self) -> impl Iterator<Item = F> + '_ {
-    std::iter::once(self.l_inf).chain(self.finite.iter().copied())
-  }
-
-  /// Get basis value by UdPoint.
-  pub fn get(&self, p: UdPoint<D>) -> F {
-    match p {
-      UdPoint::Infinity => self.l_inf,
-      UdPoint::Finite(k) => self.finite[k],
-    }
-  }
 }
 
 impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
@@ -463,10 +586,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
       if r == xk {
         let mut finite = [F::ZERO; D];
         finite[k] = F::ONE;
-        return LagrangeBasisEval {
-          l_inf: F::ZERO,
-          finite,
-        };
+        return UdEvaluations::new(F::ZERO, finite);
       }
     }
 
@@ -493,10 +613,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
       finite[k] = numer * self.weights[k];
     }
 
-    LagrangeBasisEval {
-      l_inf: prod,
-      finite,
-    }
+    UdEvaluations::new(prod, finite)
   }
 
   /// Evaluate an extended polynomial at r using the tensor-product Lagrange basis.
@@ -1043,7 +1160,7 @@ mod tests {
       let r = Scalar::from(k as u64);
       let basis = factory.basis_at(r);
 
-      assert_eq!(basis.l_inf, Scalar::ZERO);
+      assert_eq!(basis.infinity, Scalar::ZERO);
       for j in 0..D {
         let expected = if j == k { Scalar::ONE } else { Scalar::ZERO };
         assert_eq!(basis.finite[j], expected);
@@ -1062,7 +1179,7 @@ mod tests {
     let basis = factory.basis_at(r);
 
     let expected = (0..D).fold(Scalar::ONE, |acc, k| acc * (r - Scalar::from(k as u64)));
-    assert_eq!(basis.l_inf, expected);
+    assert_eq!(basis.infinity, expected);
   }
 
   // Property: Σ_k L_k(r) = 1 for any r (constant polynomial).
@@ -1085,10 +1202,10 @@ mod tests {
   fn test_basis_eval_order_and_get() {
     const D: usize = 3;
 
-    let eval = LagrangeBasisEval::<Scalar, D> {
-      l_inf: Scalar::from(2u64),
-      finite: [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
-    };
+    let eval = UdEvaluations::<Scalar, D>::new(
+      Scalar::from(2u64),
+      [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
+    );
 
     let vals: Vec<_> = eval.iter_ud_order().collect();
     assert_eq!(
@@ -1125,7 +1242,7 @@ mod tests {
     }
     for r in rs {
       let basis = factory.basis_at(r);
-      let reconstructed = s_inf * basis.l_inf + s0 * basis.finite[0] + s1 * basis.finite[1];
+      let reconstructed = s_inf * basis.infinity + s0 * basis.finite[0] + s1 * basis.finite[1];
       assert_eq!(reconstructed, eval(r));
     }
   }
@@ -1156,7 +1273,7 @@ mod tests {
     }
     for r in rs {
       let basis = factory.basis_at(r);
-      let reconstructed = s_inf * basis.l_inf
+      let reconstructed = s_inf * basis.infinity
         + s0 * basis.finite[0]
         + s1 * basis.finite[1]
         + s2 * basis.finite[2];
@@ -1176,10 +1293,10 @@ mod tests {
     assert_eq!(coeff.len(), 1);
     assert_eq!(coeff.get(0), Scalar::ONE);
 
-    let basis = LagrangeBasisEval::<Scalar, D> {
-      l_inf: Scalar::from(2u64),
-      finite: [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
-    };
+    let basis = UdEvaluations::<Scalar, D>::new(
+      Scalar::from(2u64),
+      [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
+    );
 
     coeff.extend(&basis);
     assert_eq!(coeff.len(), D + 1);
@@ -1201,14 +1318,14 @@ mod tests {
     const D: usize = 3;
     let base = D + 1;
 
-    let basis1 = LagrangeBasisEval::<Scalar, D> {
-      l_inf: Scalar::from(2u64),
-      finite: [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
-    };
-    let basis2 = LagrangeBasisEval::<Scalar, D> {
-      l_inf: Scalar::from(11u64),
-      finite: [Scalar::from(13u64), Scalar::from(17u64), Scalar::from(19u64)],
-    };
+    let basis1 = UdEvaluations::<Scalar, D>::new(
+      Scalar::from(2u64),
+      [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
+    );
+    let basis2 = UdEvaluations::<Scalar, D>::new(
+      Scalar::from(11u64),
+      [Scalar::from(13u64), Scalar::from(17u64), Scalar::from(19u64)],
+    );
 
     let mut coeff = LagrangeCoeff::<Scalar, D>::new();
     coeff.extend(&basis1);
