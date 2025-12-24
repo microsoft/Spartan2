@@ -98,28 +98,9 @@ impl<const D: usize> From<&AccumulatorPrefixIndex<D>> for CachedPrefixIndex {
 /// 1. The suffix β[i..] is binary (values in {0,1})
 /// 2. The coordinate u = β[i-1] is in Û_d (i.e., u ≠ 1)
 ///
-/// Returns a list of `AccumulatorPrefixIndex` describing contributions.
-///
-/// # Type-Safe API
-///
-/// This function accepts `UdTuple<D>` for type safety. For performance-critical
-/// code using flat indices, convert via `UdTuple::from_flat_index`.
-///
-/// # Arguments
-/// * `beta` - Tuple in U_d^ℓ₀ as a UdTuple
-/// * `l0` - Number of small-value rounds
-///
-/// # Example
-///
-/// For β = (Finite(0), Finite(1), Finite(0)) with l0=3, d=3:
-/// - Round 1: v=(), u=Finite(0)∈Û_d, suffix=(1,0) binary → contributes
-/// - Round 2: v=(0,), u=Finite(1)∉Û_d → filtered out
-/// - Round 3: v=(0,1), u=Finite(0)∈Û_d, suffix=() binary → contributes
-pub fn compute_idx4<const D: usize>(
-  beta: &UdTuple<D>,
-  l0: usize,
-) -> Vec<AccumulatorPrefixIndex<D>> {
-  debug_assert_eq!(beta.len(), l0, "β length must equal l0");
+/// Returns contributions as `AccumulatorPrefixIndex`.
+pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixIndex<D>> {
+  let l0 = beta.len();
 
   let mut result = Vec::new();
   let base = UdPoint::<D>::BASE;
@@ -201,10 +182,8 @@ mod tests {
   fn test_compute_idx4_example_mixed_binary() {
     // β = (Finite(0), Finite(1), Finite(0)) → point (0, 1, 0)
     // Round 2 filtered because u = value 1 ∉ Û_d
-    let l0 = 3;
-
     let beta = tuple_from_indices::<3>(&[1, 2, 1]); // indices → (0, 1, 0)
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), 2); // Round 2 filtered
 
@@ -232,10 +211,8 @@ mod tests {
   fn test_compute_idx4_example_with_infinity() {
     // β = (∞, 0, 1) → point (∞, 0, 1)
     // Round 3 filtered because u = value 1 ∉ Û_d
-    let l0 = 3;
-
     let beta = tuple_from_indices::<3>(&[0, 1, 2]); // indices → (∞, 0, 1)
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), 2); // Round 3 filtered
 
@@ -259,10 +236,8 @@ mod tests {
   fn test_compute_idx4_example_double_infinity() {
     // β = (∞, ∞, 0) → point (∞, ∞, 0)
     // Round 1 skipped because suffix contains ∞
-    let l0 = 3;
-
     let beta = tuple_from_indices::<3>(&[0, 0, 1]); // indices → (∞, ∞, 0)
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), 2);
 
@@ -286,10 +261,8 @@ mod tests {
   fn test_compute_idx4_example_all_extrapolated() {
     // β = (Finite(2), Finite(2), Finite(2)) → point (2, 2, 2)
     // Only last round (empty suffix is vacuously binary)
-    let l0 = 3;
-
     let beta = tuple_from_indices::<3>(&[3, 3, 3]); // indices → (2, 2, 2)
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), 1);
 
@@ -305,10 +278,8 @@ mod tests {
   fn test_compute_idx4_all_ones_has_no_contributions() {
     // β = (Finite(1), Finite(1), Finite(1)) → point (1, 1, 1)
     // ALL rounds filtered because u = value 1 ∉ Û_d at every position
-    let l0 = 3;
-
     let beta = tuple_from_indices::<3>(&[2, 2, 2]); // indices → (1, 1, 1)
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert!(
       contributions.is_empty(),
@@ -329,7 +300,7 @@ mod tests {
 
     for beta_idx in 0..prefix_ud_size {
       let beta = UdTuple::<D>::from_flat_index(beta_idx, l0);
-      let contributions = compute_idx4(&beta, l0);
+      let contributions = compute_idx4(&beta);
 
       // All contributions should have correct l0
       for c in &contributions {
@@ -363,7 +334,7 @@ mod tests {
         .collect();
       let beta = tuple_from_indices::<D>(&indices);
 
-      let contributions = compute_idx4(&beta, l0);
+      let contributions = compute_idx4(&beta);
 
       // Count how many positions have Finite(1) (value 1)
       let num_ones = beta.0.iter().filter(|&&p| p == UdPoint::Finite(1)).count();
@@ -408,7 +379,7 @@ mod tests {
 
     for beta_idx in 0..prefix_ud_size {
       let beta = UdTuple::<D>::from_flat_index(beta_idx, l0);
-      let contributions = compute_idx4(&beta, l0);
+      let contributions = compute_idx4(&beta);
 
       for c in contributions {
         // l0 should match
@@ -454,12 +425,9 @@ mod tests {
 
   #[test]
   fn test_compute_idx4_v_u_decode() {
-    let l0 = 3;
-    const D: usize = 3;
-
     // Test cases that have at least some contributions
     // Note: all Finite(1) has NO contributions so we exclude it
-    let test_cases: Vec<UdTuple<D>> = vec![
+    let test_cases: Vec<UdTuple<3>> = vec![
       tuple_from_indices(&[1, 1, 1]), // all u=Finite(0), 3 contributions
       tuple_from_indices(&[0, 1, 1]), // u=∞,Finite(0),Finite(0), 3 contributions
       tuple_from_indices(&[3, 0, 1]), // u=Finite(2),∞,Finite(0), 3 contributions
@@ -467,7 +435,7 @@ mod tests {
     ];
 
     for beta in test_cases {
-      let contributions = compute_idx4(&beta, l0);
+      let contributions = compute_idx4(&beta);
 
       for c in contributions {
         // v should be β[0..round-1]
@@ -493,13 +461,10 @@ mod tests {
 
   #[test]
   fn test_compute_idx4_y_idx_encoding() {
-    let l0 = 4;
-    const D: usize = 3;
-
     // β = (Finite(0), Finite(1), Finite(0), Finite(1)) → point (0, 1, 0, 1)
     // Rounds 2 and 4 filtered because u = value 1 ∉ Û_d
-    let beta = tuple_from_indices::<D>(&[1, 2, 1, 2]);
-    let contributions = compute_idx4(&beta, l0);
+    let beta = tuple_from_indices::<3>(&[1, 2, 1, 2]);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), 2); // Only rounds 1 and 3
 
@@ -531,7 +496,7 @@ mod tests {
     // β = (Finite(0), Finite(0), Finite(0), Finite(0)) → all zeros
     // All u = Finite(0) ∈ Û_d, so all rounds present
     let beta = tuple_from_indices::<D>(&[1, 1, 1, 1]);
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     assert_eq!(contributions.len(), l0);
 
@@ -561,14 +526,12 @@ mod tests {
     // Two conditions filter rounds:
     // 1. The suffix y must consist only of binary values (Finite(0) or Finite(1))
     // 2. The coordinate u must be in Û_d (i.e., u ≠ Finite(1))
-
-    let l0 = 3;
     const D: usize = 3;
 
     // β with non-binary value (Finite(2)) in suffix position
     // indices (1, 3, 2) → values (Finite(0), Finite(2), Finite(1))
     let beta = tuple_from_indices::<D>(&[1, 3, 2]);
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     // Round 1: u=Finite(0) ∈ Û_d ✓, suffix has Finite(2) → SKIP (non-binary suffix)
     // Round 2: u=Finite(2) ∈ Û_d ✓, suffix has Finite(1) binary ✓ → OK
@@ -580,7 +543,7 @@ mod tests {
     // β with ∞ in suffix position
     // indices (2, 0, 1) → values (Finite(1), ∞, Finite(0))
     let beta = tuple_from_indices::<D>(&[2, 0, 1]);
-    let contributions = compute_idx4(&beta, l0);
+    let contributions = compute_idx4(&beta);
 
     // Round 1: u=Finite(1) ∉ Û_d ✗ → SKIP (u not in Û_d)
     // Round 2: u=∞ ∈ Û_d ✓, suffix has Finite(0) binary ✓ → OK

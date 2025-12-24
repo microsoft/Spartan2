@@ -32,7 +32,7 @@ use spartan2::{
   traits::{circuit::SpartanCircuit, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait, Engine},
 };
 use std::{marker::PhantomData, time::Instant};
-use tracing::{info, info_span};
+use tracing::{info, instrument};
 use tracing_subscriber::{fmt::time::uptime, EnvFilter};
 
 // Use PallasHyraxEngine which has Barrett-optimized SmallLargeMul for Fq
@@ -107,6 +107,10 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
       .collect::<Result<Vec<_>, _>>()?;
 
     // 2. SHA-256 gadget
+    // NOTE: bellpepper's SHA-256 gadget produces constraint coefficients that can exceed
+    // 64 bits (some are ~2^237). This means SHA-256 circuits are not a good proxy for
+    // testing the small-value optimization, which requires all Az/Bz values to fit in i32.
+    // Circuits built using only u32/u64 values would be better test candidates.
     let hash_bits = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
     // 3. Sanity-check against Rust SHA-256
@@ -166,6 +170,45 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   }
 }
 
+type F = <E as Engine>::Scalar;
+
+#[instrument(skip_all)]
+fn run_setup(
+  circuit: Sha256Circuit<F>,
+) -> (
+  <SpartanSNARK<E> as R1CSSNARKTrait<E>>::ProverKey,
+  <SpartanSNARK<E> as R1CSSNARKTrait<E>>::VerifierKey,
+) {
+  let t0 = Instant::now();
+  let result = SpartanSNARK::<E>::setup(circuit).expect("setup failed");
+  info!(elapsed_ms = t0.elapsed().as_millis(), "completed");
+  result
+}
+
+#[instrument(skip_all)]
+fn run_prep_prove(
+  pk: &<SpartanSNARK<E> as R1CSSNARKTrait<E>>::ProverKey,
+  circuit: Sha256Circuit<F>,
+) -> <SpartanSNARK<E> as R1CSSNARKTrait<E>>::PrepSNARK {
+  let t0 = Instant::now();
+  let result = SpartanSNARK::<E>::prep_prove(pk, circuit, true).expect("prep_prove failed");
+  info!(elapsed_ms = t0.elapsed().as_millis(), "completed");
+  result
+}
+
+#[instrument(skip_all)]
+fn extract_sumcheck_inputs(
+  pk: &<SpartanSNARK<E> as R1CSSNARKTrait<E>>::ProverKey,
+  circuit: Sha256Circuit<F>,
+  prep_snark: &<SpartanSNARK<E> as R1CSSNARKTrait<E>>::PrepSNARK,
+) -> (Vec<F>, Vec<F>, Vec<F>, Vec<F>) {
+  let t0 = Instant::now();
+  let result = SpartanSNARK::<E>::extract_outer_sumcheck_inputs(pk, circuit, prep_snark)
+    .expect("extract_outer_sumcheck_inputs failed");
+  info!(elapsed_ms = t0.elapsed().as_millis(), "completed");
+  result
+}
+
 fn main() {
   tracing_subscriber::fmt()
     .with_target(false)
@@ -176,29 +219,13 @@ fn main() {
 
   // Use a small message for faster testing (64 bytes = 512 bits)
   let preimage_len = 64;
-  let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; preimage_len]);
+  let circuit = Sha256Circuit::<F>::new(vec![0u8; preimage_len]);
 
-  let _span = info_span!("sumcheck_equivalence", preimage_len).entered();
-  info!("Testing sumcheck method equivalence with SHA-256 circuit (preimage_len={} bytes)", preimage_len);
+  info!(preimage_len, "Testing sumcheck method equivalence with SHA-256 circuit");
 
-  // SETUP
-  info!("Running setup...");
-  let t0 = Instant::now();
-  let (pk, _vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup failed");
-  info!(elapsed_ms = t0.elapsed().as_millis(), "setup");
-
-  // PREP_PROVE
-  info!("Running prep_prove...");
-  let t0 = Instant::now();
-  let prep_snark = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
-  info!(elapsed_ms = t0.elapsed().as_millis(), "prep_prove");
-
-  // EXTRACT SUMCHECK INPUTS
-  info!("Extracting Az, Bz, Cz, tau from circuit...");
-  let t0 = Instant::now();
-  let (az, bz, cz, tau) = SpartanSNARK::<E>::extract_outer_sumcheck_inputs(&pk, circuit, &prep_snark)
-    .expect("extract_outer_sumcheck_inputs failed");
-  info!(elapsed_ms = t0.elapsed().as_millis(), "extract_outer_sumcheck_inputs");
+  let (pk, _vk) = run_setup(circuit.clone());
+  let prep_snark = run_prep_prove(&pk, circuit.clone());
+  let (az, bz, cz, tau) = extract_sumcheck_inputs(&pk, circuit, &prep_snark);
 
   let num_vars = tau.len();
   info!(num_vars = num_vars, az_len = az.len(), "Extracted polynomials");

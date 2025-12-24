@@ -120,6 +120,7 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
   }
 
   /// Number of prefix entries.
+  #[inline]
   pub fn num_prefixes(&self) -> usize {
     self.data.len()
   }
@@ -259,7 +260,7 @@ where
   let mut beta_prefix_cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
   for b in 0..num_betas {
     let beta = UdTuple::<2>::from_flat_index(b, l0);
-    let entries: Vec<_> = compute_idx4(&beta, l0)
+    let entries: Vec<_> = compute_idx4(&beta)
       .into_iter()
       .map(|entry| CachedPrefixIndex {
         round_0: entry.round_0idx(),
@@ -408,7 +409,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
   let mut beta_prefix_cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
   for b in 0..num_betas {
     let beta = UdTuple::<D>::from_flat_index(b, l0);
-    let entries: Vec<_> = compute_idx4(&beta, l0)
+    let entries: Vec<_> = compute_idx4(&beta)
       .into_iter()
       .map(|entry| CachedPrefixIndex {
         round_0: entry.round_0idx(),
@@ -729,7 +730,7 @@ mod tests {
 
     let num_betas = (D + 1).pow(l0 as u32);
     let idx4_cache: Vec<Vec<_>> = (0..num_betas)
-      .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, l0), l0))
+      .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, l0)))
       .collect();
 
     // Naive accumulators
@@ -919,7 +920,7 @@ mod tests {
     let e_y = compute_suffix_eq_pyramid(&taus[..L0], L0);
 
     let idx4_cache: Vec<Vec<_>> = (0..num_betas)
-      .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, L0), L0))
+      .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, L0)))
       .collect();
 
     let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(L0);

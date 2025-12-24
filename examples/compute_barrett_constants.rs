@@ -3,8 +3,16 @@
 
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
+  tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+
   // Pallas Fp modulus (base field)
   let p = BigUint::parse_bytes(
     b"40000000000000000000000000000000224698fc094cf91b992d30ed00000001",
@@ -22,20 +30,21 @@ fn main() {
   let mu = (&r * &r_prime) / &two_p;
   let two_pow_64_mod_p = (BigUint::one() << 64u32) % &p;
 
-  // Print as Rust constants
-  println!("// Pallas Fp (Base field) Barrett constants");
-  println!("// p = 0x{:x}", p);
-  println!();
-  print_const("PALLAS_FP", &p, 4);
-  print_const("PALLAS_FP_2P", &two_p, 5);
-  print_const("PALLAS_FP_MU", &mu, 5);
-  print_const("TWO_POW_64_MOD_FP", &two_pow_64_mod_p, 4);
+  // Log as structured data
+  info!(field = "Pallas Fp (Base field)", modulus = %format!("0x{:x}", p), "Barrett constants");
+  log_const("PALLAS_FP", &p, 4);
+  log_const("PALLAS_FP_2P", &two_p, 5);
+  log_const("PALLAS_FP_MU", &mu, 5);
+  log_const("TWO_POW_64_MOD_FP", &two_pow_64_mod_p, 4);
 
   // Also compute Fq constants
   compute_pallas_fq();
+
+  // Print final summary
+  println!("\nBarrett constants computed successfully. Run with RUST_LOG=info to see values.");
 }
 
-fn print_const(name: &str, value: &BigUint, num_limbs: usize) {
+fn log_const(name: &str, value: &BigUint, num_limbs: usize) {
   let limbs: Vec<u64> = (0..num_limbs)
     .map(|i| {
       let shifted = value >> (64 * i);
@@ -44,13 +53,7 @@ fn print_const(name: &str, value: &BigUint, num_limbs: usize) {
     })
     .collect();
 
-  let formatted: Vec<String> = limbs.iter().map(|x| format!("0x{:016x}", x)).collect();
-  println!(
-    "const {}: [u64; {}] = [{}];",
-    name,
-    num_limbs,
-    formatted.join(", ")
-  );
+  info!(name = name, num_limbs = num_limbs, limbs = ?limbs, "computed constant");
 }
 
 // Also compute for Pallas Fq (scalar field) = Vesta Fp
@@ -70,12 +73,9 @@ fn compute_pallas_fq() {
   let mu = (&r * &r_prime) / &two_q;
   let two_pow_64_mod_q = (BigUint::one() << 64u32) % &q;
 
-  println!();
-  println!("// Pallas Fq (Scalar field) Barrett constants");
-  println!("// q = 0x{:x}", q);
-  println!();
-  print_const("PALLAS_FQ", &q, 4);
-  print_const("PALLAS_FQ_2Q", &two_q, 5);
-  print_const("PALLAS_FQ_MU", &mu, 5);
-  print_const("TWO_POW_64_MOD_FQ", &two_pow_64_mod_q, 4);
+  info!(field = "Pallas Fq (Scalar field)", modulus = %format!("0x{:x}", q), "Barrett constants");
+  log_const("PALLAS_FQ", &q, 4);
+  log_const("PALLAS_FQ_2Q", &two_q, 5);
+  log_const("PALLAS_FQ_MU", &mu, 5);
+  log_const("TWO_POW_64_MOD_FQ", &two_pow_64_mod_q, 4);
 }
