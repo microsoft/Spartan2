@@ -9,7 +9,6 @@
 //! that is generic over the polynomial commitment and evaluation argument (i.e., a PCS).
 #![deny(
   warnings,
-  unused,
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,
@@ -22,13 +21,23 @@
 #![forbid(unsafe_code)]
 
 // private modules
+mod accumulator_index;
+mod accumulators;
+mod csr;
+mod spartan_accumulator_input_polynomial;
+mod thread_state_accumulators;
 mod digest;
+mod eq_linear;
+mod lagrange;
 mod math;
 mod nifs;
-mod polys;
 mod r1cs;
-mod sumcheck;
 mod zk;
+
+// modules with some public items for benchmarking
+pub mod polys;
+pub mod small_field;
+pub mod sumcheck;
 
 #[macro_use]
 mod macros;
@@ -42,7 +51,7 @@ pub mod traits;
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
-pub mod spartan_zk; // Spartan with zero-knowledge 
+pub mod spartan_zk; // Spartan with zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {
