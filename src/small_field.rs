@@ -297,6 +297,7 @@ mod barrett {
     };
     let m_times_2p = mul_5_by_1(&PALLAS_FP_2P, m);
     let mut r = sub_5_5(c, &m_times_2p);
+    // At most 2 iterations needed: after Barrett approximation, 0 ≤ r < 2p
     while gte_5_4(&r, &PALLAS_FP) {
       r = sub_5_4(&r, &PALLAS_FP);
     }
@@ -312,6 +313,7 @@ mod barrett {
     };
     let m_times_2q = mul_5_by_1(&PALLAS_FQ_2Q, m);
     let mut r = sub_5_5(c, &m_times_2q);
+    // At most 2 iterations needed: after Barrett approximation, 0 ≤ r < 2q
     while gte_5_4(&r, &PALLAS_FQ) {
       r = sub_5_4(&r, &PALLAS_FQ);
     }
@@ -465,6 +467,37 @@ mod barrett {
 // SmallValueField Implementations
 // ============================================================================
 
+/// Helper for try_field_to_small: attempts to convert a field element to i32.
+///
+/// Returns Some(v) if the field element represents a small integer in [-2^31, 2^31-1].
+fn try_field_to_small_impl<F: PrimeField>(val: &F) -> Option<i32> {
+  let repr = val.to_repr();
+  let bytes = repr.as_ref();
+
+  // Check if value fits in positive i32
+  let high_zero = bytes[4..].iter().all(|&b| b == 0);
+  if high_zero {
+    let val_u32 = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    if val_u32 <= i32::MAX as u32 {
+      return Some(val_u32 as i32);
+    }
+  }
+
+  // Check if negation fits in i32 (value is negative)
+  let neg_val = val.neg();
+  let neg_repr = neg_val.to_repr();
+  let neg_bytes = neg_repr.as_ref();
+  let neg_high_zero = neg_bytes[4..].iter().all(|&b| b == 0);
+  if neg_high_zero {
+    let neg_u32 = u32::from_le_bytes(neg_bytes[..4].try_into().unwrap());
+    if neg_u32 > 0 && neg_u32 <= (i32::MAX as u32) + 1 {
+      return Some(-(neg_u32 as i64) as i32);
+    }
+  }
+
+  None
+}
+
 impl SmallValueField for halo2curves::pasta::Fp {
   type SmallValue = i32;
   type IntermediateSmallValue = i64;
@@ -524,29 +557,7 @@ impl SmallValueField for halo2curves::pasta::Fp {
   }
 
   fn try_field_to_small(val: &Self) -> Option<i32> {
-    let repr = val.to_repr();
-    let bytes = repr.as_ref();
-
-    let high_zero = bytes[4..].iter().all(|&b| b == 0);
-    if high_zero {
-      let val_u32 = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-      if val_u32 <= i32::MAX as u32 {
-        return Some(val_u32 as i32);
-      }
-    }
-
-    let neg_val = val.neg();
-    let neg_repr = neg_val.to_repr();
-    let neg_bytes = neg_repr.as_ref();
-    let neg_high_zero = neg_bytes[4..].iter().all(|&b| b == 0);
-    if neg_high_zero {
-      let neg_u32 = u32::from_le_bytes(neg_bytes[..4].try_into().unwrap());
-      if neg_u32 > 0 && neg_u32 <= (i32::MAX as u32) + 1 {
-        return Some(-(neg_u32 as i64) as i32);
-      }
-    }
-
-    None
+    try_field_to_small_impl(val)
   }
 }
 
@@ -609,29 +620,7 @@ impl SmallValueField for halo2curves::pasta::Fq {
   }
 
   fn try_field_to_small(val: &Self) -> Option<i32> {
-    let repr = val.to_repr();
-    let bytes = repr.as_ref();
-
-    let high_zero = bytes[4..].iter().all(|&b| b == 0);
-    if high_zero {
-      let val_u32 = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-      if val_u32 <= i32::MAX as u32 {
-        return Some(val_u32 as i32);
-      }
-    }
-
-    let neg_val = val.neg();
-    let neg_repr = neg_val.to_repr();
-    let neg_bytes = neg_repr.as_ref();
-    let neg_high_zero = neg_bytes[4..].iter().all(|&b| b == 0);
-    if neg_high_zero {
-      let neg_u32 = u32::from_le_bytes(neg_bytes[..4].try_into().unwrap());
-      if neg_u32 > 0 && neg_u32 <= (i32::MAX as u32) + 1 {
-        return Some(-(neg_u32 as i64) as i32);
-      }
-    }
-
-    None
+    try_field_to_small_impl(val)
   }
 }
 

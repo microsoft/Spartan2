@@ -321,10 +321,12 @@ where
           };
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
-          for (beta_idx, sum) in state.beta_partial_sums.iter_mut().enumerate() {
-            if !beta_has_infinity[beta_idx] {
-              continue;
-            }
+          for (beta_idx, sum) in state
+            .beta_partial_sums
+            .iter_mut()
+            .enumerate()
+            .filter(|(i, _)| beta_has_infinity[*i])
+          {
             let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
             P::accumulate_eq_product(prod, &ein, sum);
           }

@@ -105,19 +105,26 @@ pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixI
   let mut result = Vec::new();
   let base = UdPoint::<D>::BASE;
 
+  // Phase 1: Compute prefix indices (forward pass)
+  // prefix_idx[i] = flat index of β[0..i] in U_d^i (mixed-radix encoding)
   let mut prefix_idx = vec![0usize; l0 + 1];
   for i in 0..l0 {
     prefix_idx[i + 1] = prefix_idx[i] * base + beta.0[i].to_index();
   }
 
+  // Phase 2: Compute suffix properties (backward pass)
+  // suffix_is_binary[i] = true iff β[i..] consists only of binary values (0 or 1)
+  // suffix_idx[i] = binary encoding of β[i..] if it's binary, undefined otherwise
   let mut suffix_is_binary = vec![true; l0 + 1];
   let mut suffix_idx = vec![0usize; l0 + 1];
   for i in (0..l0).rev() {
     let point = beta.0[i];
     if !point.is_binary() {
+      // Non-binary value breaks the suffix property for this position and all earlier
       suffix_is_binary[i] = false;
       continue;
     }
+    // Propagate binary status from suffix
     suffix_is_binary[i] = suffix_is_binary[i + 1];
     let bit = match point {
       UdPoint::Finite(0) => 0,
@@ -128,6 +135,7 @@ pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixI
     suffix_idx[i] = suffix_idx[i + 1] | (bit << shift);
   }
 
+  // Phase 3: Generate contributions for valid rounds
   for i in 1..=l0 {
     if !suffix_is_binary[i] {
       continue;

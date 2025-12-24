@@ -614,9 +614,14 @@ where
     buf_a[..input.len()].copy_from_slice(input);
 
     for j in 1..=num_vars {
+      // At step j:
+      // - prefix_count = (D+1)^{j-1} extended prefix combinations
+      // - suffix_count = 2^{num_vars-j} remaining boolean suffix combinations
       let prefix_count = Self::BASE.pow((j - 1) as u32);
       let suffix_count = 1usize << (num_vars - j);
+      // Current layout: prefix_count rows × 2 boolean values × suffix_count elements
       let current_stride = 2 * suffix_count;
+      // Next layout: prefix_count rows × (D+1) domain values × suffix_count elements
       let next_stride = Self::BASE * suffix_count;
 
       // Ping-pong between buffers
