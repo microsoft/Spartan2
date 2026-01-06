@@ -18,9 +18,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
+  ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
-  ConstraintSystem, SynthesisError,
 };
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
@@ -29,11 +29,13 @@ use spartan2::{
   provider::PallasHyraxEngine,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
-  traits::{circuit::SpartanCircuit, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait, Engine},
+  traits::{
+    Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait,
+  },
 };
 use std::{marker::PhantomData, time::Instant};
 use tracing::{info, instrument};
-use tracing_subscriber::{fmt::time::uptime, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt::time::uptime};
 
 // Use PallasHyraxEngine which has Barrett-optimized SmallLargeMul for Fq
 type E = PallasHyraxEngine;
@@ -221,14 +223,21 @@ fn main() {
   let preimage_len = 64;
   let circuit = Sha256Circuit::<F>::new(vec![0u8; preimage_len]);
 
-  info!(preimage_len, "Testing sumcheck method equivalence with SHA-256 circuit");
+  info!(
+    preimage_len,
+    "Testing sumcheck method equivalence with SHA-256 circuit"
+  );
 
   let (pk, _vk) = run_setup(circuit.clone());
   let prep_snark = run_prep_prove(&pk, circuit.clone());
   let (az, bz, cz, tau) = extract_sumcheck_inputs(&pk, circuit, &prep_snark);
 
   let num_vars = tau.len();
-  info!(num_vars = num_vars, az_len = az.len(), "Extracted polynomials");
+  info!(
+    num_vars = num_vars,
+    az_len = az.len(),
+    "Extracted polynomials"
+  );
 
   // Create field-element polynomials for the original method
   let mut az1 = MultilinearPolynomial::new(az.clone());
@@ -286,7 +295,10 @@ fn main() {
       )
       .expect("prove_cubic_with_three_inputs_small_value failed");
       let smallvalue_us = t0.elapsed().as_micros();
-      info!(elapsed_us = smallvalue_us, "prove_cubic_with_three_inputs_small_value");
+      info!(
+        elapsed_us = smallvalue_us,
+        "prove_cubic_with_three_inputs_small_value"
+      );
 
       // ===== VERIFY EQUIVALENCE =====
       info!("Verifying equivalence...");

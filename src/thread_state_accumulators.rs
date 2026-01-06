@@ -103,7 +103,13 @@ pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
 }
 
 impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
-  pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize, num_polys: usize) -> Self {
+  pub fn new(
+    l0: usize,
+    num_betas: usize,
+    prefix_size: usize,
+    ext_size: usize,
+    num_polys: usize,
+  ) -> Self {
     Self {
       acc: SmallValueAccumulators::new(l0),
       beta_partial_sums: vec![S::ZERO; num_betas],

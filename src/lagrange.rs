@@ -583,11 +583,7 @@ where
   /// # Arguments
   /// * `input` - Boolean hypercube evaluations (read-only slice, length must be power of 2)
   /// * `buf_a`, `buf_b` - Scratch buffers, will be resized if needed to (D+1)^num_vars
-  pub fn extend_in_place(
-    input: &[T],
-    buf_a: &mut Vec<T>,
-    buf_b: &mut Vec<T>,
-  ) -> (usize, usize) {
+  pub fn extend_in_place(input: &[T], buf_a: &mut Vec<T>, buf_b: &mut Vec<T>) -> (usize, usize) {
     let num_vars = input.len().trailing_zeros() as usize;
     debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
 
@@ -1602,8 +1598,14 @@ mod tests {
     let mut buf_a = Vec::new();
     let mut buf_b = Vec::new();
     let (result_buf, final_size) =
-      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::extend_in_place(&input, &mut buf_a, &mut buf_b);
-    let ext2 = if result_buf == 0 { &buf_a[..final_size] } else { &buf_b[..final_size] };
+      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::extend_in_place(
+        &input, &mut buf_a, &mut buf_b,
+      );
+    let ext2 = if result_buf == 0 {
+      &buf_a[..final_size]
+    } else {
+      &buf_b[..final_size]
+    };
 
     // Verify they match
     assert_eq!(ext1.len(), final_size);

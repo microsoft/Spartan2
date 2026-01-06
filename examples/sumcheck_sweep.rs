@@ -19,10 +19,9 @@ use spartan2::{
   polys::multilinear::MultilinearPolynomial,
   provider::PallasHyraxEngine,
   sumcheck::SumcheckProof,
-  traits::{transcript::TranscriptEngineTrait, Engine},
+  traits::{Engine, transcript::TranscriptEngineTrait},
 };
-use std::io::Write;
-use std::time::Instant;
+use std::{io::Write, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::EnvFilter;
 
@@ -129,7 +128,6 @@ fn main() {
   // 2. num_vars must be even (Algorithm 6 split expects even ℓ)
   // We start at 10 and step by 2 to satisfy both constraints.
   for num_vars in (10..=max_vars).step_by(2) {
-
     let n = 1usize << num_vars;
 
     // Run multiple iterations for small sizes to reduce variance

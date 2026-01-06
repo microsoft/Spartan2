@@ -561,5 +561,4 @@ mod tests {
     assert!(contributions.iter().any(|c| c.round == 2));
     assert!(contributions.iter().any(|c| c.round == 3));
   }
-
 }

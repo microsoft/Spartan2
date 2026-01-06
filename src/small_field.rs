@@ -33,8 +33,10 @@
 //! ```
 
 use ff::PrimeField;
-use std::fmt::Debug;
-use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
+use std::{
+  fmt::Debug,
+  ops::{Add, AddAssign, Neg, Sub, SubAssign},
+};
 
 // ============================================================================
 // SmallValueField Trait
@@ -631,8 +633,7 @@ impl SmallValueField for halo2curves::pasta::Fq {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::polys::multilinear::MultilinearPolynomial;
-  use crate::provider::pasta::pallas;
+  use crate::{polys::multilinear::MultilinearPolynomial, provider::pasta::pallas};
 
   type Scalar = pallas::Scalar;
 
@@ -695,7 +696,10 @@ mod tests {
   #[test]
   fn test_try_field_to_small_roundtrip() {
     assert_eq!(Scalar::try_field_to_small(&Scalar::from(42u64)), Some(42));
-    assert_eq!(Scalar::try_field_to_small(&-Scalar::from(100u64)), Some(-100));
+    assert_eq!(
+      Scalar::try_field_to_small(&-Scalar::from(100u64)),
+      Some(-100)
+    );
     assert_eq!(Scalar::try_field_to_small(&Scalar::from(u64::MAX)), None);
   }
 
@@ -764,7 +768,11 @@ mod tests {
     for _ in 0..100 {
       let large = Scalar::random(&mut rng);
       let small = (rng.next_u64() % (i64::MAX as u64)) as i64;
-      let small = if rng.next_u32() % 2 == 0 { small } else { -small };
+      let small = if rng.next_u32() % 2 == 0 {
+        small
+      } else {
+        -small
+      };
 
       let result = Scalar::isl_mul(small, &large);
       let expected = i64_to_field::<Scalar>(small) * large;

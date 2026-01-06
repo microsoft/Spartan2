@@ -211,8 +211,8 @@ mod tests {
   use super::*;
   use crate::{provider::pasta::pallas, zip_with};
   use ff::Field;
-  use rand_core::{CryptoRng, OsRng, RngCore};
   use pallas::Scalar;
+  use rand_core::{CryptoRng, OsRng, RngCore};
 
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.
@@ -384,7 +384,9 @@ mod tests {
     // ℓ=3, poly[i] = i^2 + 1
     let l = 3;
     let size = 1 << l;
-    let vals: Vec<Scalar> = (0..size).map(|i| Scalar::from((i * i + 1) as u64)).collect();
+    let vals: Vec<Scalar> = (0..size)
+      .map(|i| Scalar::from((i * i + 1) as u64))
+      .collect();
     let mut poly = MultilinearPolynomial::new(vals.clone());
 
     let r = Scalar::from(7u64);

@@ -341,7 +341,9 @@ where
           let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
             let ey = e_y[pref.round_0][pref.y_idx];
-            state.acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+            state
+              .acc
+              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }
         }
 
@@ -484,7 +486,9 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
             let ey = e_y[pref.round_0][pref.y_idx];
-            state.acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+            state
+              .acc
+              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
           }
         }
 

@@ -453,7 +453,15 @@ impl<E: Engine> SpartanSNARK<E> {
     pk: &SpartanProverKey<E>,
     circuit: C,
     prep_snark: &SpartanPrepSNARK<E>,
-  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+  ) -> Result<
+    (
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+      Vec<E::Scalar>,
+    ),
+    SpartanError,
+  > {
     let mut prep_snark = prep_snark.clone();
 
     let mut transcript = E::TE::new(b"SpartanSNARK");
