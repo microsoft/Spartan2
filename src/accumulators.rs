@@ -284,7 +284,7 @@ where
         state.reset_partial_sums();
 
         // Inner loop over x_in
-        for (x_in_bits, &ein) in e_in.iter().enumerate() {
+        for (x_in_bits, &e_in_eval) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           // Fill prefix buffers by index assignment (no allocation)
@@ -328,7 +328,7 @@ where
             .filter(|(i, _)| beta_has_infinity[*i])
           {
             let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
-            P::accumulate_eq_product(prod, &ein, sum);
+            P::accumulate_eq_product(prod, &e_in_eval, sum);
           }
         }
 
@@ -437,7 +437,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
         state.reset_partial_sums();
 
         // Inner loop over x_in
-        for (x_in_bits, &ein) in e_in.iter().enumerate() {
+        for (x_in_bits, &e_in_eval) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           // Fill all d prefix buffers by index assignment
@@ -473,7 +473,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
                 }
               })
               .product();
-            *sum += ein * prod;
+            *sum += e_in_eval * prod;
           }
         }
 
@@ -745,6 +745,7 @@ mod tests {
     // x_out domain size = 1 (xout_vars = 0)
     let ex = e_xout[0];
 
+    #[allow(clippy::needless_range_loop)]
     for x_in_bits in 0..(1 << half) {
       let suffix = x_in_bits; // x_out = 0
 
@@ -756,8 +757,9 @@ mod tests {
       let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
       let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
-      let ein = e_in[x_in_bits];
+      let e_in_eval = e_in[x_in_bits];
 
+      #[allow(clippy::needless_range_loop)]
       for beta_idx in 0..num_betas {
         let beta_tuple = az_ext.to_domain_tuple(beta_idx);
         let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
@@ -766,7 +768,7 @@ mod tests {
         } else {
           ab - cz_ext.get(beta_idx)
         };
-        let val = ein * prod;
+        let val = e_in_eval * prod;
 
         for pref in &idx4_cache[beta_idx] {
           let ey = e_y[pref.round_0idx()][pref.y_idx];
@@ -822,7 +824,7 @@ mod tests {
 
     // Compute e_in sum = Σ eq(τ[l0..l0+half], xin), here half=1, l0=1 -> slice τ[1]
     let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]);
-    let ein_sum: Scalar = e_in.iter().copied().sum();
+    let e_in_eval_sum: Scalar = e_in.iter().copied().sum();
 
     // Round 0, v_idx=0
     let u_infinity_idx = UdHatPoint::<2>::Infinity.to_index(); // 0
@@ -840,7 +842,7 @@ mod tests {
     // At 0: product = 1 * (-1) = -1
     assert_eq!(
       acc_zero,
-      ein_sum * (-Scalar::ONE),
+      e_in_eval_sum * (-Scalar::ONE),
       "Should equal sum * (-1)"
     );
   }
@@ -931,9 +933,11 @@ mod tests {
 
     let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(L0);
 
+    #[allow(clippy::needless_range_loop)]
     for x_out_bits in 0..(1 << xout_vars) {
       let ex = e_xout[x_out_bits];
 
+      #[allow(clippy::needless_range_loop)]
       for x_in_bits in 0..(1 << half) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
@@ -949,12 +953,13 @@ mod tests {
         let p3_ext =
           LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p3_pref);
 
-        let ein = e_in[x_in_bits];
+        let e_in_eval = e_in[x_in_bits];
 
+        #[allow(clippy::needless_range_loop)]
         for beta_idx in 0..num_betas {
           // Compute product p1(β) * p2(β) * p3(β)
           let prod = p1_ext.get(beta_idx) * p2_ext.get(beta_idx) * p3_ext.get(beta_idx);
-          let val = ein * prod;
+          let val = e_in_eval * prod;
 
           // Distribute to accumulators via idx4
           for pref in &idx4_cache[beta_idx] {
@@ -1006,7 +1011,7 @@ mod tests {
     };
 
     // Create small-value polynomials
-    let az_small_vals: Vec<i32> = (0..16).map(|b| eval(b)).collect();
+    let az_small_vals: Vec<i32> = (0..16).map(&eval).collect();
     let bz_small_vals: Vec<i32> = (0..16).map(|b| eval(b) + 7).collect();
 
     let az_small = MultilinearPolynomial::new(az_small_vals);
@@ -1060,8 +1065,8 @@ mod tests {
     let n = 1 << l;
 
     // Create polynomials with varying small values
-    let az_vals: Vec<i32> = (0..n).map(|i| (i as i32 % 1000) + 1).collect();
-    let bz_vals: Vec<i32> = (0..n).map(|i| ((i as i32 * 7) % 1000) + 1).collect();
+    let az_vals: Vec<i32> = (0..n).map(|i| (i % 1000) + 1).collect();
+    let bz_vals: Vec<i32> = (0..n).map(|i| ((i * 7) % 1000) + 1).collect();
 
     let az_small = MultilinearPolynomial::new(az_vals.clone());
     let bz_small = MultilinearPolynomial::new(bz_vals.clone());

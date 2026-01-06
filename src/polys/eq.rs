@@ -198,6 +198,7 @@ mod tests {
     let pyramid = compute_suffix_eq_pyramid(&taus, l0);
 
     assert_eq!(pyramid.len(), l0);
+    #[allow(clippy::needless_range_loop)]
     for i in 0..l0 {
       let expected_size = 1 << (l0 - i - 1);
       assert_eq!(
@@ -305,6 +306,7 @@ mod tests {
 
   /// Ensure evals_from_points uses MSB-first indexing and matches direct product formula.
   #[test]
+  #[allow(clippy::needless_range_loop)]
   fn test_eq_table_index_convention() {
     let r = vec![
       pallas::Scalar::from(2u64),

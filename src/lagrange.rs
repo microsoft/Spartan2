@@ -1179,6 +1179,7 @@ mod tests {
   // Property: R_2 equals outer product of two basis vectors.
   // Why: ensures extend() matches Kronecker definition.
   #[test]
+  #[allow(clippy::needless_range_loop)]
   fn test_lagrange_coeff_tensor_product() {
     const D: usize = 3;
     let base = D + 1;
@@ -1271,6 +1272,7 @@ mod tests {
     let ext3 = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p3);
 
     let mut prod_evals = vec![Scalar::ZERO; ext1.len()];
+    #[allow(clippy::needless_range_loop)]
     for i in 0..ext1.len() {
       prod_evals[i] = ext1.get(i) * ext2.get(i) * ext3.get(i);
     }
@@ -1351,6 +1353,7 @@ mod tests {
     let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
 
     // In U_d indexing: 0 → index 1, 1 → index 2
+    #[allow(clippy::needless_range_loop)]
     for b in 0..(1 << num_vars) {
       let mut ud_idx = 0;
       for j in 0..num_vars {
@@ -1397,7 +1400,7 @@ mod tests {
       let tuple = index_to_tuple(idx, base, num_vars);
 
       // Skip infinity points (index 0 in any coordinate)
-      if tuple.iter().any(|&t| t == 0) {
+      if tuple.contains(&0) {
         continue;
       }
 
@@ -1413,6 +1416,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(clippy::identity_op, clippy::erasing_op)]
   fn test_extend_infinity_leading_coeff() {
     use ff::Field;
 
@@ -1441,6 +1445,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(clippy::identity_op, clippy::erasing_op)]
   fn test_extend_known_polynomial() {
     // p(X, Y, Z) = X + 2Y + 4Z
     const D: usize = 3;
@@ -1540,7 +1545,7 @@ mod tests {
 
     // Create input as small values (using SmallValueField trait)
     let input_small: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i as i32 + 1))
+      .map(|i| Scalar::small_from_i32(i + 1))
       .collect();
 
     // Create same input as field elements
@@ -1588,7 +1593,7 @@ mod tests {
     let num_vars = 3;
 
     let input: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i as i32 * 2 + 1))
+      .map(|i| Scalar::small_from_i32(i * 2 + 1))
       .collect();
 
     // Extend using allocating version
@@ -1609,8 +1614,8 @@ mod tests {
 
     // Verify they match
     assert_eq!(ext1.len(), final_size);
-    for i in 0..ext1.len() {
-      assert_eq!(ext1.get(i), ext2[i], "mismatch at index {i}");
+    for (i, &ext2_val) in ext2.iter().enumerate() {
+      assert_eq!(ext1.get(i), ext2_val, "mismatch at index {i}");
     }
   }
 
@@ -1622,7 +1627,7 @@ mod tests {
     let num_vars = 2;
 
     let input: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i as i32 + 1))
+      .map(|i| Scalar::small_from_i32(i + 1))
       .collect();
 
     let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);

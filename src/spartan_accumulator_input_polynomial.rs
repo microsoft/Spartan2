@@ -43,8 +43,8 @@ pub trait SpartanAccumulatorInputPolynomial<S: PrimeField>: Sync {
   /// Multiply two witness values: a × b
   fn multiply_witnesses(a: Self::Value, b: Self::Value) -> Self::Product;
 
-  /// Accumulate eq-weighted product: sum += ein * prod
-  fn accumulate_eq_product(prod: Self::Product, ein: &S, sum: &mut S);
+  /// Accumulate eq-weighted product: sum += e_in_eval * prod
+  fn accumulate_eq_product(prod: Self::Product, e_in_eval: &S, sum: &mut S);
 }
 
 /// Implementation for field-element polynomials.
@@ -66,8 +66,8 @@ impl<S: PrimeField + Sync> SpartanAccumulatorInputPolynomial<S> for MultilinearP
     a * b
   }
 
-  fn accumulate_eq_product(prod: S, ein: &S, sum: &mut S) {
-    *sum += *ein * prod;
+  fn accumulate_eq_product(prod: S, e_in_eval: &S, sum: &mut S) {
+    *sum += *e_in_eval * prod;
   }
 }
 
@@ -95,7 +95,7 @@ where
     (a as i64) * (b as i64)
   }
 
-  fn accumulate_eq_product(prod: i64, ein: &S, sum: &mut S) {
-    *sum += S::isl_mul(prod, ein);
+  fn accumulate_eq_product(prod: i64, e_in_eval: &S, sum: &mut S) {
+    *sum += S::isl_mul(prod, e_in_eval);
   }
 }

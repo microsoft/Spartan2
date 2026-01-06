@@ -1502,6 +1502,7 @@ pub(crate) mod lagrange_sumcheck {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_smallvalue_round_matches_eq_instance_evals() {
       const NUM_VARS: usize = 6;
       const SMALL_VALUE_ROUNDS: usize = 3;
@@ -1675,7 +1676,7 @@ pub(crate) mod lagrange_sumcheck {
       let eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
       let (eval_0_std, eval_2_std, eval_3_std) =
         eq_instance.evaluation_points_cubic_with_three_inputs(0, &az1, &bz1, &cz1);
-      let evals_std = vec![eval_0_std, claim - eval_0_std, eval_2_std, eval_3_std];
+      let evals_std = [eval_0_std, claim - eval_0_std, eval_2_std, eval_3_std];
 
       // Run small-value method - get first polynomial's evaluations
       let l0 = 3usize;
