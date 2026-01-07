@@ -161,6 +161,39 @@ impl MultilinearPolynomial<i32> {
   }
 }
 
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i64>)
+// ============================================================================
+
+impl MultilinearPolynomial<i64> {
+  /// Try to create from a field-element polynomial.
+  /// Returns None if any value doesn't fit in i64.
+  pub fn try_from_field<F: SmallValueField<i64>>(poly: &MultilinearPolynomial<F>) -> Option<Self> {
+    let evals: Option<Vec<i64>> = poly
+      .Z
+      .iter()
+      .map(|f| crate::small_field::try_field_to_i64(f))
+      .collect();
+    evals.map(Self::new)
+  }
+
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<i64>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(
+      self
+        .Z
+        .iter()
+        .map(|&s| crate::small_field::i64_to_field(s))
+        .collect(),
+    )
+  }
+}
+
 impl<T> Index<usize> for MultilinearPolynomial<T> {
   type Output = T;
 

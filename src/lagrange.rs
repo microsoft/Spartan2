@@ -780,6 +780,22 @@ impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
   }
 }
 
+/// Test-only: Convert i64 evaluations to field elements.
+#[cfg(test)]
+#[allow(dead_code)]
+impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i64, D> {
+  pub fn to_field<F: SmallValueField>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+    LagrangeEvaluatedMultilinearPolynomial {
+      evals: self
+        .evals
+        .iter()
+        .map(|&v| crate::small_field::i64_to_field(v))
+        .collect(),
+      num_vars: self.num_vars,
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

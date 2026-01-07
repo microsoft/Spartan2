@@ -545,12 +545,17 @@ impl<E: Engine> SumcheckProof<E> {
   /// # Arguments
   /// * `claim` - The claimed sum
   /// * `taus` - Random challenges for the eq polynomial
-  /// * `poly_A_small` - Small-value polynomial (evaluations must fit in i32)
-  /// * `poly_B_small` - Small-value polynomial (evaluations must fit in i32)
+  /// * `poly_A_small` - Small-value polynomial (evaluations must fit in small type)
+  /// * `poly_B_small` - Small-value polynomial (evaluations must fit in small type)
   /// * `poly_A` - Field-element polynomial (same values as poly_A_small, for binding)
   /// * `poly_B` - Field-element polynomial (same values as poly_B_small, for binding)
   /// * `poly_C` - Field-element polynomial for the subtractive term
   /// * `transcript` - The transcript for Fiat-Shamir
+  ///
+  /// # Type Parameters
+  /// * `P` - The small-value polynomial type, must implement `SpartanAccumulatorInputPolynomial`
+  ///   - `MultilinearPolynomial<i32>` for i32/i64 config (simple circuits)
+  ///   - `MultilinearPolynomial<i64>` for i64/i128 config (SHA-256, large coefficients)
   ///
   /// The small-value polynomials are used for efficient ss/sl multiplications in
   /// the accumulator building phase. The field-element polynomials are used for
@@ -1739,6 +1744,182 @@ pub(crate) mod lagrange_sumcheck {
     #[test]
     fn test_small_value_equivalence_l16() {
       run_equivalence_test(16); // 2^16 = 65536 elements, l0 = 3 (must be even ℓ)
+    }
+
+    /// Test that i64 small-value polynomials produce identical results to standard.
+    /// This tests the i64/i128 path which uses isl_mul_128 Barrett reduction.
+    #[test]
+    fn test_small_value_equivalence_i64() {
+      use crate::{sumcheck::SumcheckProof, traits::transcript::TranscriptEngineTrait};
+
+      let num_vars = 10;
+      let n = 1usize << num_vars;
+
+      // Create i64 values (larger than i32 range to test the i64 path)
+      let az_i64: Vec<i64> = (0..n).map(|i| (i as i64 + 1) * 100_000).collect();
+      let bz_i64: Vec<i64> = (0..n).map(|i| (i as i64 + 3) * 100_000).collect();
+
+      // Create field-element polynomials
+      let az_vals: Vec<F> = az_i64
+        .iter()
+        .map(|&v| crate::small_field::i64_to_field(v))
+        .collect();
+      let bz_vals: Vec<F> = bz_i64
+        .iter()
+        .map(|&v| crate::small_field::i64_to_field(v))
+        .collect();
+      let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
+
+      let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
+
+      // Claim = 0 for satisfying witness (Az·Bz = Cz on {0,1}^n)
+      let claim: F = F::ZERO;
+
+      // Polynomials for standard method
+      let mut az1 = MultilinearPolynomial::new(az_vals.clone());
+      let mut bz1 = MultilinearPolynomial::new(bz_vals.clone());
+      let mut cz1 = MultilinearPolynomial::new(cz_vals.clone());
+
+      // i64 small-value polynomials
+      let az_small = MultilinearPolynomial::new(az_i64);
+      let bz_small = MultilinearPolynomial::new(bz_i64);
+
+      // Field-element polynomials for binding
+      let mut az2 = MultilinearPolynomial::new(az_vals);
+      let mut bz2 = MultilinearPolynomial::new(bz_vals);
+      let mut cz2 = MultilinearPolynomial::new(cz_vals);
+
+      // Fresh transcripts with same seed
+      let mut transcript1 = <E as Engine>::TE::new(b"test");
+      let mut transcript2 = <E as Engine>::TE::new(b"test");
+
+      // Run standard method
+      let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &claim,
+        taus.clone(),
+        &mut az1,
+        &mut bz1,
+        &mut cz1,
+        &mut transcript1,
+      )
+      .unwrap();
+
+      // Run small-value method with i64 polynomials
+      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+        &claim,
+        taus,
+        &az_small,
+        &bz_small,
+        &mut az2,
+        &mut bz2,
+        &mut cz2,
+        &mut transcript2,
+      )
+      .unwrap();
+
+      // Verify all outputs match
+      assert_eq!(r1, r2, "challenges must match for i64 test");
+      assert_eq!(
+        proof1.compressed_polys, proof2.compressed_polys,
+        "compressed_polys must match for i64 test"
+      );
+      assert_eq!(evals1, evals2, "final evals must match for i64 test");
+    }
+
+    /// Test small-value sumcheck with very large i64 values (~2^50).
+    /// This simulates the SHA-256 case where coefficients can be large.
+    #[test]
+    fn test_small_value_equivalence_i64_large() {
+      use crate::{sumcheck::SumcheckProof, traits::transcript::TranscriptEngineTrait};
+
+      let num_vars = 10;
+      let n = 1usize << num_vars;
+
+      // Create very large i64 values (similar to SHA-256 coefficients ~2^50)
+      let az_i64: Vec<i64> = (0..n)
+        .map(|i| {
+          let base = (i as i64 + 1) * (1i64 << 40); // ~2^50
+          if i % 3 == 2 { -base } else { base }
+        })
+        .collect();
+      let bz_i64: Vec<i64> = (0..n)
+        .map(|i| {
+          let base = (i as i64 + 3) * (1i64 << 35); // ~2^45
+          if i % 5 == 4 { -base } else { base }
+        })
+        .collect();
+
+      // Create field-element polynomials
+      let az_vals: Vec<F> = az_i64
+        .iter()
+        .map(|&v| crate::small_field::i64_to_field(v))
+        .collect();
+      let bz_vals: Vec<F> = bz_i64
+        .iter()
+        .map(|&v| crate::small_field::i64_to_field(v))
+        .collect();
+      let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
+
+      // Verify roundtrip
+      for i in 0..n {
+        let back = crate::small_field::try_field_to_i64(&az_vals[i]).expect("should fit");
+        assert_eq!(back, az_i64[i], "roundtrip failed at {}", i);
+      }
+
+      let taus: Vec<F> = (0..num_vars).map(|i| F::from((i + 2) as u64)).collect();
+
+      // Claim = 0 for satisfying witness (Az·Bz = Cz on {0,1}^n)
+      let claim: F = F::ZERO;
+
+      // Polynomials for standard method
+      let mut az1 = MultilinearPolynomial::new(az_vals.clone());
+      let mut bz1 = MultilinearPolynomial::new(bz_vals.clone());
+      let mut cz1 = MultilinearPolynomial::new(cz_vals.clone());
+
+      // i64 small-value polynomials
+      let az_small = MultilinearPolynomial::new(az_i64);
+      let bz_small = MultilinearPolynomial::new(bz_i64);
+
+      // Field-element polynomials for binding
+      let mut az2 = MultilinearPolynomial::new(az_vals);
+      let mut bz2 = MultilinearPolynomial::new(bz_vals);
+      let mut cz2 = MultilinearPolynomial::new(cz_vals);
+
+      // Fresh transcripts with same seed
+      let mut transcript1 = <E as Engine>::TE::new(b"test");
+      let mut transcript2 = <E as Engine>::TE::new(b"test");
+
+      // Run standard method
+      let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &claim,
+        taus.clone(),
+        &mut az1,
+        &mut bz1,
+        &mut cz1,
+        &mut transcript1,
+      )
+      .unwrap();
+
+      // Run small-value method with i64 polynomials
+      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+        &claim,
+        taus,
+        &az_small,
+        &bz_small,
+        &mut az2,
+        &mut bz2,
+        &mut cz2,
+        &mut transcript2,
+      )
+      .unwrap();
+
+      // Verify all outputs match
+      assert_eq!(r1, r2, "challenges must match for large i64 test");
+      assert_eq!(
+        proof1.compressed_polys, proof2.compressed_polys,
+        "compressed_polys must match for large i64 test"
+      );
+      assert_eq!(evals1, evals2, "final evals must match for large i64 test");
     }
   }
 }

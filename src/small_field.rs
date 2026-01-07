@@ -36,6 +36,7 @@ use crate::wide_limbs::{SignedWideLimbs, WideLimbs, sub_mag};
 use ff::PrimeField;
 use std::{
   fmt::Debug,
+  marker::PhantomData,
   ops::{Add, AddAssign, Neg, Sub, SubAssign},
 };
 
@@ -122,6 +123,10 @@ where
   /// This is the key operation for accumulator building.
   fn isl_mul(small: Self::IntermediateSmallValue, large: &Self) -> Self;
 
+  /// isl_128: i128 × large → large
+  /// Used for i64/i128 small-value configuration.
+  fn isl_mul_128(small: i128, large: &Self) -> Self;
+
   // ===== Conversions =====
 
   /// Convert SmallValue to field element.
@@ -164,6 +169,182 @@ pub fn i64_to_field<F: PrimeField>(val: i64) -> F {
     // Use wrapping_neg to handle i64::MIN correctly
     -F::from(val.wrapping_neg() as u64)
   }
+}
+
+/// Convert i128 to field element (handles negative values correctly).
+#[inline]
+pub fn i128_to_field<F: PrimeField>(val: i128) -> F {
+  if val >= 0 {
+    // Split into high and low u64 parts
+    let low = val as u64;
+    let high = (val >> 64) as u64;
+    if high == 0 {
+      F::from(low)
+    } else {
+      // result = low + high * 2^64
+      F::from(low) + F::from(high) * two_pow_64::<F>()
+    }
+  } else {
+    // Use wrapping_neg to handle i128::MIN correctly
+    let pos = val.wrapping_neg() as u128;
+    let low = pos as u64;
+    let high = (pos >> 64) as u64;
+    if high == 0 {
+      -F::from(low)
+    } else {
+      -(F::from(low) + F::from(high) * two_pow_64::<F>())
+    }
+  }
+}
+
+/// Try to convert a field element to i64.
+/// Returns None if the value doesn't fit in the i64 range.
+#[inline]
+pub fn try_field_to_i64<F: PrimeField>(val: &F) -> Option<i64> {
+  let repr = val.to_repr();
+  let bytes = repr.as_ref();
+
+  // Check if value fits in positive i64 (high bytes all zero)
+  let high_zero = bytes[8..].iter().all(|&b| b == 0);
+  if high_zero {
+    let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    if val_u64 <= i64::MAX as u64 {
+      return Some(val_u64 as i64);
+    }
+  }
+
+  // Check if negation fits in i64 (value is negative)
+  let neg_val = val.neg();
+  let neg_repr = neg_val.to_repr();
+  let neg_bytes = neg_repr.as_ref();
+  let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
+  if neg_high_zero {
+    let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
+    if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
+      return Some(-(neg_u64 as i128) as i64);
+    }
+  }
+
+  None
+}
+
+/// Returns 2^64 as a field element (cached via lazy computation).
+#[inline]
+fn two_pow_64<F: PrimeField>() -> F {
+  // 2^64 = (2^32)^2
+  let two_32 = F::from(1u64 << 32);
+  two_32 * two_32
+}
+
+// ============================================================================
+// SmallValueConfig - Type-Level Configuration for Small-Value Optimization
+// ============================================================================
+
+/// Type-level marker: batching not available for this config.
+///
+/// Used when constraint coefficients would overflow if batched.
+/// Each equality constraint is enforced directly.
+pub struct NoBatching;
+
+/// Type-level marker: batching with K constraints per flush.
+///
+/// Equality constraints are accumulated with coefficients 2^0, 2^1, ..., 2^(K-1)
+/// and flushed as a single batched constraint.
+pub struct Batching<const K: usize>;
+
+/// Trait to extract batching information at compile time.
+pub trait BatchingMode: 'static + Send + Sync {
+  /// Maximum bits for batching coefficients.
+  /// - `None` = batching not supported, use direct constraints
+  /// - `Some(k)` = batch up to k constraints before flushing
+  const MAX_COEFF_BITS: Option<usize>;
+}
+
+impl BatchingMode for NoBatching {
+  const MAX_COEFF_BITS: Option<usize> = None;
+}
+
+impl<const K: usize> BatchingMode for Batching<K> {
+  const MAX_COEFF_BITS: Option<usize> = Some(K);
+}
+
+/// Configuration trait for SmallMultiEq constraint system.
+///
+/// Bundles a scalar field type implementing `SmallValueField<SmallValue>` with
+/// a batching mode. This allows `SmallMultiEq` to use the appropriate small-value
+/// operations and batching behavior.
+///
+/// # Associated Types
+/// - `Scalar`: Field type implementing `SmallValueField<SmallValue>`
+/// - `SmallValue`: Native type for witness values (i32 or i64)
+/// - `Batching`: Batching mode (NoBatching or Batching<K>)
+pub trait SmallMultiEqConfig: 'static + Send + Sync {
+  /// The scalar field type.
+  type Scalar: SmallValueField<Self::SmallValue>;
+
+  /// Small value type for witness coefficients.
+  type SmallValue: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = Self::SmallValue>
+    + Sub<Output = Self::SmallValue>
+    + Neg<Output = Self::SmallValue>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync;
+
+  /// Batching mode for constraint accumulation.
+  type Batching: BatchingMode;
+}
+
+/// i32 configuration with no batching.
+///
+/// Use this for circuits where Az values would overflow i32 if batched.
+/// Each equality constraint is enforced directly.
+///
+/// - SmallValue: i32
+/// - Batching: None (direct constraints)
+pub struct I32NoBatch<S>(PhantomData<S>);
+
+impl<S> Default for I32NoBatch<S> {
+  fn default() -> Self {
+    I32NoBatch(PhantomData)
+  }
+}
+
+impl<S: SmallValueField<i32>> SmallMultiEqConfig for I32NoBatch<S> {
+  type Scalar = S;
+  type SmallValue = i32;
+  type Batching = NoBatching;
+}
+
+/// i64 configuration with batching (21 constraints per flush).
+///
+/// Use this for circuits with large positional coefficients (up to 2^34),
+/// like SHA-256. The larger intermediate type (i128) allows batching while
+/// keeping Az values within i64 bounds.
+///
+/// - SmallValue: i64
+/// - Batching: 21 constraints per flush
+///
+/// MAX_COEFF_BITS = 21 because:
+/// - Az ≤ 200 terms × 2^34 (positional) × 2^20 (batching) × 1 (witness) = 2^62 < 2^63
+pub struct I64Batch21<S>(PhantomData<S>);
+
+impl<S> Default for I64Batch21<S> {
+  fn default() -> Self {
+    I64Batch21(PhantomData)
+  }
+}
+
+impl<S: SmallValueField<i64>> SmallMultiEqConfig for I64Batch21<S> {
+  type Scalar = S;
+  type SmallValue = i64;
+  type Batching = Batching<21>;
 }
 
 // ============================================================================
@@ -252,7 +433,19 @@ mod barrett {
   const PALLAS_FQ_MU: u64 = 0xffffffffffffffff;
 
   // ==========================================================================
-  // Public API - Only i64 needed for SmallValueField
+  // Precomputed 2^64 constants for i128 multiplication
+  // ==========================================================================
+
+  // 2^64 as a field element (little-endian limbs: [0, 1, 0, 0])
+  // Since Pallas/Vesta primes are ~2^254, 2^64 < p and 2^64 mod p = 2^64
+  #[allow(dead_code)] // Used by mul_fp_by_i128, will be wired up for Small64
+  const TWO_POW_64_FP: Fp = Fp::from_raw([0, 1, 0, 0]);
+
+  #[allow(dead_code)] // Used by mul_fq_by_i128, will be wired up for Small64
+  const TWO_POW_64_FQ: Fq = Fq::from_raw([0, 1, 0, 0]);
+
+  // ==========================================================================
+  // Public API - i64 and i128 for SmallValueField/SmallValueConfig
   // ==========================================================================
 
   /// Multiply Pallas base field element by i64 (signed).
@@ -272,6 +465,66 @@ mod barrett {
       mul_fq_by_u64(large, small as u64)
     } else {
       mul_fq_by_u64(large, small.wrapping_neg() as u64).neg()
+    }
+  }
+
+  /// Multiply Pallas base field element by i128 (signed).
+  /// Uses i64 Barrett reduction with 2^64 constant for efficiency.
+  #[inline]
+  #[allow(dead_code)] // Will be used for Small64 sumcheck
+  pub(super) fn mul_fp_by_i128(large: &Fp, small: i128) -> Fp {
+    if small >= 0 {
+      mul_fp_by_u128(large, small as u128)
+    } else {
+      mul_fp_by_u128(large, small.wrapping_neg() as u128).neg()
+    }
+  }
+
+  /// Multiply Pallas scalar field element by i128 (signed).
+  /// Uses i64 Barrett reduction with 2^64 constant for efficiency.
+  #[inline]
+  #[allow(dead_code)] // Will be used for Small64 sumcheck
+  pub(super) fn mul_fq_by_i128(large: &Fq, small: i128) -> Fq {
+    if small >= 0 {
+      mul_fq_by_u128(large, small as u128)
+    } else {
+      mul_fq_by_u128(large, small.wrapping_neg() as u128).neg()
+    }
+  }
+
+  // ==========================================================================
+  // Internal u128 multiplication (reuses u64 Barrett)
+  // ==========================================================================
+
+  #[inline]
+  #[allow(dead_code)]
+  fn mul_fp_by_u128(large: &Fp, small: u128) -> Fp {
+    let low = small as u64;
+    let high = (small >> 64) as u64;
+
+    if high == 0 {
+      mul_fp_by_u64(large, low)
+    } else {
+      // result = large * low + large * high * 2^64
+      let low_part = mul_fp_by_u64(large, low);
+      let high_part = mul_fp_by_u64(large, high);
+      low_part + high_part * TWO_POW_64_FP
+    }
+  }
+
+  #[inline]
+  #[allow(dead_code)]
+  fn mul_fq_by_u128(large: &Fq, small: u128) -> Fq {
+    let low = small as u64;
+    let high = (small >> 64) as u64;
+
+    if high == 0 {
+      mul_fq_by_u64(large, low)
+    } else {
+      // result = large * low + large * high * 2^64
+      let low_part = mul_fq_by_u64(large, low);
+      let high_part = mul_fq_by_u64(large, high);
+      low_part + high_part * TWO_POW_64_FQ
     }
   }
 
@@ -955,6 +1208,72 @@ mod barrett {
     }
 
     #[test]
+    fn test_barrett_fp_i128() {
+      let large = Fp::random(&mut OsRng);
+
+      // Test small i128 values (fits in i64)
+      assert_eq!(mul_fp_by_i128(&large, 100), Fp::from(100u64) * large);
+      assert_eq!(mul_fp_by_i128(&large, -100), -Fp::from(100u64) * large);
+
+      // Test large i128 values (requires 2^64 decomposition)
+      let big: i128 = (1i128 << 70) + 12345;
+      let expected = crate::small_field::i128_to_field::<Fp>(big) * large;
+      assert_eq!(mul_fp_by_i128(&large, big), expected);
+
+      let neg_big: i128 = -((1i128 << 70) + 12345);
+      let expected_neg = crate::small_field::i128_to_field::<Fp>(neg_big) * large;
+      assert_eq!(mul_fp_by_i128(&large, neg_big), expected_neg);
+    }
+
+    #[test]
+    fn test_barrett_fq_i128() {
+      let large = Fq::random(&mut OsRng);
+
+      // Test small i128 values (fits in i64)
+      assert_eq!(mul_fq_by_i128(&large, 100), Fq::from(100u64) * large);
+      assert_eq!(mul_fq_by_i128(&large, -100), -Fq::from(100u64) * large);
+
+      // Test large i128 values (requires 2^64 decomposition)
+      let big: i128 = (1i128 << 70) + 12345;
+      let expected = crate::small_field::i128_to_field::<Fq>(big) * large;
+      assert_eq!(mul_fq_by_i128(&large, big), expected);
+
+      let neg_big: i128 = -((1i128 << 70) + 12345);
+      let expected_neg = crate::small_field::i128_to_field::<Fq>(neg_big) * large;
+      assert_eq!(mul_fq_by_i128(&large, neg_big), expected_neg);
+    }
+
+    #[test]
+    fn test_barrett_i128_random() {
+      let mut rng = OsRng;
+      for _ in 0..100 {
+        let large = Fq::random(&mut rng);
+        // Generate random i128 in reasonable range
+        let small: i128 = ((rng.next_u64() as i128) << 32) | (rng.next_u64() as i128);
+        let small = if rng.next_u32().is_multiple_of(2) {
+          small
+        } else {
+          -small
+        };
+
+        let result = mul_fq_by_i128(&large, small);
+        let expected = crate::small_field::i128_to_field::<Fq>(small) * large;
+        assert_eq!(result, expected);
+      }
+    }
+
+    #[test]
+    fn test_two_pow_64_constants() {
+      // Verify TWO_POW_64_FP is correct
+      let computed = Fp::from(1u64 << 32) * Fp::from(1u64 << 32);
+      assert_eq!(TWO_POW_64_FP, computed);
+
+      // Verify TWO_POW_64_FQ is correct
+      let computed = Fq::from(1u64 << 32) * Fq::from(1u64 << 32);
+      assert_eq!(TWO_POW_64_FQ, computed);
+    }
+
+    #[test]
     fn test_constants_match_halo2curves() {
       let p_minus_one = -Fp::ONE;
       let expected = Fp::from_raw([
@@ -1304,6 +1623,11 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   }
 
   #[inline]
+  fn isl_mul_128(small: i128, large: &Self) -> Self {
+    barrett::mul_fp_by_i128(large, small)
+  }
+
+  #[inline]
   fn small_to_field(val: i32) -> Self {
     if val >= 0 {
       Self::from(val as u64)
@@ -1425,6 +1749,11 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     let product = barrett::mul_4_by_2_ext(&large.0, mag);
     let result = Self(barrett::barrett_reduce_6_fp(&product));
     if is_neg { -result } else { result }
+  }
+
+  #[inline]
+  fn isl_mul_128(small: i128, large: &Self) -> Self {
+    <Self as SmallValueField<i64>>::isl_mul(small, large)
   }
 
   #[inline]
@@ -1576,6 +1905,11 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   }
 
   #[inline]
+  fn isl_mul_128(small: i128, large: &Self) -> Self {
+    barrett::mul_fq_by_i128(large, small)
+  }
+
+  #[inline]
   fn small_to_field(val: i32) -> Self {
     if val >= 0 {
       Self::from(val as u64)
@@ -1699,6 +2033,11 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
   }
 
   #[inline]
+  fn isl_mul_128(small: i128, large: &Self) -> Self {
+    barrett::mul_fq_by_i128(large, small)
+  }
+
+  #[inline]
   fn small_to_field(val: i64) -> Self {
     i64_to_field(val)
   }
@@ -1804,19 +2143,6 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
   }
 }
 
-/// Convert i128 to field element (handles negative values correctly).
-#[inline]
-pub fn i128_to_field<F: PrimeField>(val: i128) -> F {
-  if val >= 0 {
-    // Split into high and low u64 parts
-    let lo = val as u64;
-    let hi = (val >> 64) as u64;
-    F::from(lo) + F::from(hi) * F::from(1u64 << 32) * F::from(1u64 << 32)
-  } else {
-    -i128_to_field::<F>(-val)
-  }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1862,6 +2188,32 @@ mod tests {
 
     let neg: Scalar = i64_to_field(-50);
     assert_eq!(neg, -Scalar::from(50u64));
+  }
+
+  #[test]
+  fn test_try_field_to_i64_roundtrip() {
+    // Test positive values
+    for val in [0i64, 1, 100, 1_000_000, i64::MAX / 2, i64::MAX] {
+      let field: Scalar = i64_to_field(val);
+      let back = try_field_to_i64(&field).expect("should fit");
+      assert_eq!(back, val, "roundtrip failed for {}", val);
+    }
+
+    // Test negative values
+    for val in [-1i64, -100, -1_000_000, i64::MIN / 2, i64::MIN + 1] {
+      let field: Scalar = i64_to_field(val);
+      let back = try_field_to_i64(&field).expect("should fit");
+      assert_eq!(back, val, "roundtrip failed for {}", val);
+    }
+
+    // Test i64::MIN separately (edge case)
+    let field: Scalar = i64_to_field(i64::MIN);
+    let back = try_field_to_i64(&field).expect("should fit");
+    assert_eq!(back, i64::MIN, "roundtrip failed for i64::MIN");
+
+    // Test values that don't fit in i64
+    let too_large = Scalar::from(u64::MAX) + Scalar::from(1u64);
+    assert!(try_field_to_i64(&too_large).is_none());
   }
 
   #[test]
