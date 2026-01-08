@@ -46,6 +46,7 @@ use std::ops::AddAssign;
 /// - `az_buf_a/b`, `bz_buf_a/b`: Separate ping-pong buffer pairs for Az and Bz Lagrange
 ///   extensions. We need 4 buffers (not 2) because both extension results must be
 ///   available simultaneously to compute Az(β) × Bz(β) for each β.
+/// - `eyx`: JIT-computed `e_y[round] * e_xout[x_out_bits]` scratch buffer. Stays hot in L1.
 ///
 /// # Type Parameters
 ///
@@ -74,12 +75,21 @@ pub(crate) struct SpartanThreadState<
   /// Ping-pong buffers for Bz Lagrange extension. Size: (D+1)^l0 each
   pub bz_buf_a: Vec<V>,
   pub bz_buf_b: Vec<V>,
+  /// JIT-computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}
+  /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
+  pub eyx: Vec<Vec<S>>,
 }
 
 impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, const D: usize>
   SpartanThreadState<S, V, U, D>
 {
-  pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
+  pub fn new(
+    l0: usize,
+    num_betas: usize,
+    prefix_size: usize,
+    ext_size: usize,
+    e_y_sizes: &[usize],
+  ) -> Self {
     Self {
       acc: SmallValueAccumulators::new(l0),
       beta_partial_sums: vec![U::default(); num_betas],
@@ -89,6 +99,7 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
       az_buf_b: vec![V::default(); ext_size],
       bz_buf_a: vec![V::default(); ext_size],
       bz_buf_b: vec![V::default(); ext_size],
+      eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }
 
@@ -116,6 +127,9 @@ pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
   pub poly_prefs: Vec<Vec<S>>,
   /// Ping-pong buffer pairs for each polynomial's Lagrange extension. Size: d × 2 × (D+1)^l0
   pub buf_pairs: Vec<(Vec<S>, Vec<S>)>,
+  /// JIT-computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}
+  /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
+  pub eyx: Vec<Vec<S>>,
 }
 
 impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
@@ -125,6 +139,7 @@ impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
     prefix_size: usize,
     ext_size: usize,
     num_polys: usize,
+    e_y_sizes: &[usize],
   ) -> Self {
     Self {
       acc: SmallValueAccumulators::new(l0),
@@ -133,6 +148,7 @@ impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
       buf_pairs: (0..num_polys)
         .map(|_| (vec![S::ZERO; ext_size], vec![S::ZERO; ext_size]))
         .collect(),
+      eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }
 

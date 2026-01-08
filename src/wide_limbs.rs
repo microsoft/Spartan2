@@ -26,6 +26,7 @@
 //! // Then reduce once at the end
 //! ```
 
+use num_traits::Zero;
 use std::ops::{Add, AddAssign};
 
 /// Stack-allocated wide integer with N 64-bit limbs.
@@ -151,6 +152,12 @@ impl<const N: usize> SignedWideLimbs<N> {
       neg: WideLimbs::zero(),
     }
   }
+
+  /// Check if both positive and negative accumulators are zero.
+  #[inline]
+  pub fn is_zero(&self) -> bool {
+    self.pos.is_zero() && self.neg.is_zero()
+  }
 }
 
 #[allow(dead_code)]
@@ -169,6 +176,62 @@ impl<const N: usize> AddAssign<&Self> for SignedWideLimbs<N> {
   fn add_assign(&mut self, other: &Self) {
     self.pos += &other.pos;
     self.neg += &other.neg;
+  }
+}
+
+impl<const N: usize> Add for SignedWideLimbs<N> {
+  type Output = Self;
+
+  #[inline]
+  fn add(mut self, other: Self) -> Self {
+    self.pos += other.pos;
+    self.neg += other.neg;
+    self
+  }
+}
+
+impl<const N: usize> Zero for SignedWideLimbs<N> {
+  #[inline]
+  fn zero() -> Self {
+    Self {
+      pos: WideLimbs::zero(),
+      neg: WideLimbs::zero(),
+    }
+  }
+
+  #[inline]
+  fn is_zero(&self) -> bool {
+    self.pos.is_zero() && self.neg.is_zero()
+  }
+}
+
+/// Compute |a - b| and return (is_negative, magnitude).
+///
+/// Used to reduce two wide integers to one before Barrett reduction,
+/// saving one expensive reduction operation.
+#[inline(always)]
+pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> (bool, [u64; N]) {
+  let mut out = [0u64; N];
+  let mut borrow = 0u64;
+  for i in 0..N {
+    let (d1, b1) = a[i].overflowing_sub(b[i]);
+    let (d2, b2) = d1.overflowing_sub(borrow);
+    out[i] = d2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  if borrow == 0 {
+    (false, out)
+  } else {
+    // a < b, compute b - a instead
+    let mut out2 = [0u64; N];
+    borrow = 0;
+    for i in 0..N {
+      let (d1, b1) = b[i].overflowing_sub(a[i]);
+      let (d2, b2) = d1.overflowing_sub(borrow);
+      out2[i] = d2;
+      borrow = (b1 as u64) + (b2 as u64);
+    }
+    (true, out2)
   }
 }
 

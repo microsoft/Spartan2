@@ -32,7 +32,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::wide_limbs::{SignedWideLimbs, WideLimbs};
+use crate::wide_limbs::{SignedWideLimbs, WideLimbs, sub_mag};
 use ff::PrimeField;
 use std::{
   fmt::Debug,
@@ -86,7 +86,7 @@ where
   /// Unreduced accumulator for field × integer products.
   /// - For i32/i64: SignedWideLimbs<6> (384 bits)
   /// - For i64/i128: SignedWideLimbs<8> (512 bits)
-  type UnreducedMontInt: Copy + Clone + Default + Debug + AddAssign + Send + Sync;
+  type UnreducedMontInt: Copy + Clone + Default + Debug + AddAssign + Send + Sync + num_traits::Zero;
 
   /// Unreduced accumulator for field × field products (9 limbs, 576 bits).
   /// Used to delay modular reduction when summing many F × F products.
@@ -321,9 +321,20 @@ mod barrett {
   }
 
   /// Public version of mul_4_by_1 for use in trait impls.
+  #[allow(dead_code)] // Kept for debugging; main path uses fused MAC
   #[inline(always)]
   pub(super) fn mul_4_by_1_ext(a: &[u64; 4], b: u64) -> [u64; 5] {
     mul_4_by_1(a, b)
+  }
+
+  /// Multiply-accumulate: acc + a * b + carry → (low, high)
+  ///
+  /// Fused operation that computes one limb of a multiply-accumulate in a single step,
+  /// avoiding materialization of intermediate arrays.
+  #[inline(always)]
+  pub(super) fn mac(acc: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
+    let prod = (a as u128) * (b as u128) + (acc as u128) + (carry as u128);
+    (prod as u64, (prod >> 64) as u64)
   }
 
   /// Multiply two 4-limb values, producing an 8-limb result.
@@ -1313,20 +1324,24 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   #[inline]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
-    let (target, magnitude) = if small >= 0 {
+    let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u64)
     } else {
       (&mut acc.neg, (-small) as u64)
     };
-    // Compute field × |small| as 5 limbs and add to target accumulator
-    let product = barrett::mul_4_by_1_ext(&field.0, magnitude);
-    let mut carry = 0u128;
-    for (target_limb, &prod_limb) in target.0.iter_mut().take(5).zip(product.iter()) {
-      let sum = (*target_limb as u128) + (prod_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
-    target.0[5] = target.0[5].wrapping_add(carry as u64);
+    // Fused multiply-accumulate: no intermediate array
+    let a = &field.0;
+    let (r0, c) = barrett::mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
+    let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
+    let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
+    let (r4, c) = barrett::mac(target.0[4], 0, 0, c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(c);
   }
 
   #[inline]
@@ -1348,10 +1363,10 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
 
   #[inline]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
-    // Reduce both accumulators and subtract: pos - neg
-    let pos_reduced = Self(barrett::barrett_reduce_6_fp(&acc.pos.0));
-    let neg_reduced = Self(barrett::barrett_reduce_6_fp(&acc.neg.0));
-    pos_reduced - neg_reduced
+    // Subtract in limb space first, then reduce once (saves one Barrett reduction)
+    let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
+    let r = Self(barrett::barrett_reduce_6_fp(&mag));
+    if neg { -r } else { r }
   }
 
   #[inline]
@@ -1405,11 +1420,9 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     } else {
       (true, (-small) as u128)
     };
+    // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
     let product = barrett::mul_4_by_2_ext(&large.0, mag);
-    let c8 = [
-      product[0], product[1], product[2], product[3], product[4], product[5], 0, 0,
-    ];
-    let result = Self(barrett::barrett_reduce_8_fp(&c8));
+    let result = Self(barrett::barrett_reduce_6_fp(&product));
     if is_neg { -result } else { result }
   }
 
@@ -1453,23 +1466,40 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
 
   #[inline]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
-    let (target, magnitude) = if small >= 0 {
+    let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
     } else {
       (&mut acc.neg, (-small) as u128)
     };
-    let product = barrett::mul_4_by_2_ext(&field.0, magnitude);
-    let mut carry = 0u128;
-    for (target_limb, &prod_limb) in target.0.iter_mut().take(6).zip(product.iter()) {
-      let sum = (*target_limb as u128) + (prod_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
-    for target_limb in target.0[6..8].iter_mut() {
-      let sum = (*target_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
+    // Fused 4×2 multiply-accumulate: two passes at different offsets
+    let a = &field.0;
+    let b_lo = mag as u64;
+    let b_hi = (mag >> 64) as u64;
+
+    // Pass 1: multiply by b_lo at offset 0
+    let (r0, c) = barrett::mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
+    let (r4, c1) = barrett::mac(target.0[4], 0, 0, c);
+    target.0[0] = r0;
+
+    // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
+    let (r1, c) = barrett::mac(r1, a[0], b_hi, 0);
+    let (r2, c) = barrett::mac(r2, a[1], b_hi, c);
+    let (r3, c) = barrett::mac(r3, a[2], b_hi, c);
+    let (r4, c) = barrett::mac(r4, a[3], b_hi, c);
+    // Add both carries (c from pass 2, c1 from pass 1) into position 5
+    let (r5, c) = barrett::mac(target.0[5], c1, 1, c);
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = r5;
+    // Propagate final carry through remaining limbs
+    let (r6, c) = barrett::mac(target.0[6], 0, 0, c);
+    target.0[6] = r6;
+    target.0[7] = target.0[7].wrapping_add(c);
   }
 
   #[inline]
@@ -1490,9 +1520,10 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
 
   #[inline]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
-    let pos_reduced = Self(barrett::barrett_reduce_8_fp(&acc.pos.0));
-    let neg_reduced = Self(barrett::barrett_reduce_8_fp(&acc.neg.0));
-    pos_reduced - neg_reduced
+    // Subtract in limb space first, then reduce once (saves one Barrett reduction)
+    let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
+    let r = Self(barrett::barrett_reduce_8_fp(&mag));
+    if neg { -r } else { r }
   }
 
   #[inline]
@@ -1562,20 +1593,24 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   #[inline]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
-    let (target, magnitude) = if small >= 0 {
+    let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u64)
     } else {
       (&mut acc.neg, (-small) as u64)
     };
-    // Compute field × |small| as 5 limbs and add to target accumulator
-    let product = barrett::mul_4_by_1_ext(&field.0, magnitude);
-    let mut carry = 0u128;
-    for (target_limb, &prod_limb) in target.0.iter_mut().take(5).zip(product.iter()) {
-      let sum = (*target_limb as u128) + (prod_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
-    target.0[5] = target.0[5].wrapping_add(carry as u64);
+    // Fused multiply-accumulate: no intermediate array
+    let a = &field.0;
+    let (r0, c) = barrett::mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
+    let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
+    let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
+    let (r4, c) = barrett::mac(target.0[4], 0, 0, c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(c);
   }
 
   #[inline]
@@ -1596,10 +1631,10 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
 
   #[inline]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
-    // Reduce both accumulators and subtract: pos - neg
-    let pos_reduced = Self(barrett::barrett_reduce_6_fq(&acc.pos.0));
-    let neg_reduced = Self(barrett::barrett_reduce_6_fq(&acc.neg.0));
-    pos_reduced - neg_reduced
+    // Subtract in limb space first, then reduce once (saves one Barrett reduction)
+    let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
+    let r = Self(barrett::barrett_reduce_6_fq(&mag));
+    if neg { -r } else { r }
   }
 
   #[inline]
@@ -1653,11 +1688,9 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     } else {
       (true, (-small) as u128)
     };
+    // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
     let product = barrett::mul_4_by_2_ext(&large.0, mag);
-    let c8 = [
-      product[0], product[1], product[2], product[3], product[4], product[5], 0, 0,
-    ];
-    let result = Self(barrett::barrett_reduce_8_fq(&c8));
+    let result = Self(barrett::barrett_reduce_6_fq(&product));
     if is_neg { -result } else { result }
   }
 
@@ -1699,23 +1732,40 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
 
   #[inline]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
-    let (target, magnitude) = if small >= 0 {
+    let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
     } else {
       (&mut acc.neg, (-small) as u128)
     };
-    let product = barrett::mul_4_by_2_ext(&field.0, magnitude);
-    let mut carry = 0u128;
-    for (target_limb, &prod_limb) in target.0.iter_mut().take(6).zip(product.iter()) {
-      let sum = (*target_limb as u128) + (prod_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
-    for target_limb in target.0[6..8].iter_mut() {
-      let sum = (*target_limb as u128) + carry;
-      *target_limb = sum as u64;
-      carry = sum >> 64;
-    }
+    // Fused 4×2 multiply-accumulate: two passes at different offsets
+    let a = &field.0;
+    let b_lo = mag as u64;
+    let b_hi = (mag >> 64) as u64;
+
+    // Pass 1: multiply by b_lo at offset 0
+    let (r0, c) = barrett::mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
+    let (r4, c1) = barrett::mac(target.0[4], 0, 0, c);
+    target.0[0] = r0;
+
+    // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
+    let (r1, c) = barrett::mac(r1, a[0], b_hi, 0);
+    let (r2, c) = barrett::mac(r2, a[1], b_hi, c);
+    let (r3, c) = barrett::mac(r3, a[2], b_hi, c);
+    let (r4, c) = barrett::mac(r4, a[3], b_hi, c);
+    // Add both carries (c1 from pass 1, c from pass 2) into position 5
+    let (r5, c) = barrett::mac(target.0[5], c1, 1, c);
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = r5;
+    // Propagate final carry through remaining limbs
+    let (r6, c) = barrett::mac(target.0[6], 0, 0, c);
+    target.0[6] = r6;
+    target.0[7] = target.0[7].wrapping_add(c);
   }
 
   #[inline]
@@ -1736,9 +1786,10 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
 
   #[inline]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
-    let pos_reduced = Self(barrett::barrett_reduce_8_fq(&acc.pos.0));
-    let neg_reduced = Self(barrett::barrett_reduce_8_fq(&acc.neg.0));
-    pos_reduced - neg_reduced
+    // Subtract in limb space first, then reduce once (saves one Barrett reduction)
+    let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
+    let r = Self(barrett::barrett_reduce_8_fq(&mag));
+    if neg { -r } else { r }
   }
 
   #[inline]

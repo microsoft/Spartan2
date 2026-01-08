@@ -13,6 +13,7 @@
 
 use crate::{polys::multilinear::MultilinearPolynomial, small_field::SmallValueField};
 use ff::PrimeField;
+use num_traits::Zero;
 use std::ops::{Add, AddAssign, Sub};
 
 /// Trait for multilinear extensions of matrix-vector products (Az, Bz, Cz).
@@ -68,6 +69,9 @@ pub trait MatVecMLE<S: PrimeField>: Sync {
 
   /// Reduce accumulated unreduced sum to a field element.
   fn modular_reduction(acc: &Self::UnreducedSum) -> S;
+
+  /// Fast check if unreduced accumulator is zero (avoids expensive modular_reduction).
+  fn unreduced_is_zero(acc: &Self::UnreducedSum) -> bool;
 }
 
 /// Implementation for field-element polynomials.
@@ -104,6 +108,10 @@ impl<S: PrimeField + Sync> MatVecMLE<S> for MultilinearPolynomial<S> {
   fn modular_reduction(acc: &S) -> S {
     // Already reduced
     *acc
+  }
+
+  fn unreduced_is_zero(acc: &S) -> bool {
+    acc.is_zero().into()
   }
 }
 
@@ -148,6 +156,10 @@ where
   fn modular_reduction(acc: &S::UnreducedMontInt) -> S {
     S::reduce_mont_int(acc)
   }
+
+  fn unreduced_is_zero(acc: &S::UnreducedMontInt) -> bool {
+    acc.is_zero()
+  }
 }
 
 /// Implementation for i64-valued polynomials (i64 coefficients, i128 products).
@@ -188,5 +200,9 @@ where
 
   fn modular_reduction(acc: &S::UnreducedMontInt) -> S {
     S::reduce_mont_int(acc)
+  }
+
+  fn unreduced_is_zero(acc: &S::UnreducedMontInt) -> bool {
+    acc.is_zero()
   }
 }
