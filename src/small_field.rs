@@ -1321,7 +1321,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
     try_field_to_small_impl(val)
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
     let (target, mag) = if small >= 0 {
@@ -1335,16 +1335,17 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
     let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
     let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
     let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
-    let (r4, c) = barrett::mac(target.0[4], 0, 0, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
     target.0[0] = r0;
     target.0[1] = r1;
     target.0[2] = r2;
     target.0[3] = r3;
     target.0[4] = r4;
-    target.0[5] = target.0[5].wrapping_add(c);
+    target.0[5] = target.0[5].wrapping_add(of as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_mont_mul_add(
     acc: &mut Self::UnreducedMontMont,
     field_a: &Self,
@@ -1361,7 +1362,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
@@ -1369,7 +1370,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
     if neg { -r } else { r }
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
     Self(barrett::montgomery_reduce_9_fp(&acc.0))
   }
@@ -1464,7 +1465,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     None
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
@@ -1481,7 +1482,9 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
     let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
     let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
-    let (r4, c1) = barrett::mac(target.0[4], 0, 0, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of1) = target.0[4].overflowing_add(c);
+    let c1 = of1 as u64;
     target.0[0] = r0;
 
     // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
@@ -1496,13 +1499,13 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     target.0[3] = r3;
     target.0[4] = r4;
     target.0[5] = r5;
-    // Propagate final carry through remaining limbs
-    let (r6, c) = barrett::mac(target.0[6], 0, 0, c);
+    // Propagate final carry through remaining limbs (just add)
+    let (r6, of) = target.0[6].overflowing_add(c);
     target.0[6] = r6;
-    target.0[7] = target.0[7].wrapping_add(c);
+    target.0[7] = target.0[7].wrapping_add(of as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_mont_mul_add(
     acc: &mut Self::UnreducedMontMont,
     field_a: &Self,
@@ -1518,7 +1521,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
@@ -1526,7 +1529,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     if neg { -r } else { r }
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
     Self(barrett::montgomery_reduce_9_fp(&acc.0))
   }
@@ -1590,7 +1593,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
     try_field_to_small_impl(val)
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
     let (target, mag) = if small >= 0 {
@@ -1604,16 +1607,17 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
     let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
     let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
     let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
-    let (r4, c) = barrett::mac(target.0[4], 0, 0, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
     target.0[0] = r0;
     target.0[1] = r1;
     target.0[2] = r2;
     target.0[3] = r3;
     target.0[4] = r4;
-    target.0[5] = target.0[5].wrapping_add(c);
+    target.0[5] = target.0[5].wrapping_add(of as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_mont_mul_add(
     acc: &mut Self::UnreducedMontMont,
     field_a: &Self,
@@ -1629,7 +1633,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
@@ -1637,7 +1641,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
     if neg { -r } else { r }
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
     Self(barrett::montgomery_reduce_9_fq(&acc.0))
   }
@@ -1730,7 +1734,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     None
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
@@ -1747,7 +1751,9 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
     let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
     let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
-    let (r4, c1) = barrett::mac(target.0[4], 0, 0, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of1) = target.0[4].overflowing_add(c);
+    let c1 = of1 as u64;
     target.0[0] = r0;
 
     // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
@@ -1762,13 +1768,13 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     target.0[3] = r3;
     target.0[4] = r4;
     target.0[5] = r5;
-    // Propagate final carry through remaining limbs
-    let (r6, c) = barrett::mac(target.0[6], 0, 0, c);
+    // Propagate final carry through remaining limbs (just add)
+    let (r6, of) = target.0[6].overflowing_add(c);
     target.0[6] = r6;
-    target.0[7] = target.0[7].wrapping_add(c);
+    target.0[7] = target.0[7].wrapping_add(of as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn unreduced_mont_mont_mul_add(
     acc: &mut Self::UnreducedMontMont,
     field_a: &Self,
@@ -1784,7 +1790,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
@@ -1792,7 +1798,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     if neg { -r } else { r }
   }
 
-  #[inline]
+  #[inline(always)]
   fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
     Self(barrett::montgomery_reduce_9_fq(&acc.0))
   }
