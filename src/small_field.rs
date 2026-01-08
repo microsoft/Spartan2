@@ -1976,7 +1976,7 @@ mod tests {
     for _ in 0..100 {
       let large = Scalar::random(&mut rng);
       let small = (rng.next_u64() % (i64::MAX as u64)) as i64;
-      let small = if rng.next_u32() % 2 == 0 {
+      let small = if rng.next_u32().is_multiple_of(2) {
         small
       } else {
         -small

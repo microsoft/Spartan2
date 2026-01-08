@@ -16,7 +16,7 @@ use crate::{
   lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatEvaluations, UdTuple},
   mat_vec_mle::MatVecMLE,
   polys::{
-    eq::{compute_suffix_eq_pyramid, EqPolynomial},
+    eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
   },
   thread_state_accumulators::{GenericThreadState, SpartanThreadState},
@@ -261,9 +261,7 @@ where
     .collect();
 
   // Precompute indices of betas with infinity to avoid filter in hot loop
-  let betas_with_infty: Vec<usize> = (0..num_betas)
-    .filter(|&i| beta_has_infinity[i])
-    .collect();
+  let betas_with_infty: Vec<usize> = (0..num_betas).filter(|&i| beta_has_infinity[i]).collect();
 
   let mut beta_prefix_cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
   for b in 0..num_betas {
@@ -814,7 +812,12 @@ mod tests {
 
         for pref in &idx4_cache[beta_idx] {
           let ey = e_y[pref.round_0idx()][pref.y_idx];
-          acc_naive.accumulate(pref.round_0idx(), pref.v_idx, pref.u.to_index(), ey * ex * val);
+          acc_naive.accumulate(
+            pref.round_0idx(),
+            pref.v_idx,
+            pref.u.to_index(),
+            ey * ex * val,
+          );
         }
       }
     }
@@ -1001,7 +1004,12 @@ mod tests {
           // Distribute to accumulators via idx4
           for pref in &idx4_cache[beta_idx] {
             let ey = e_y[pref.round_0idx()][pref.y_idx];
-            acc_naive.accumulate(pref.round_0idx(), pref.v_idx, pref.u.to_index(), ey * ex * val);
+            acc_naive.accumulate(
+              pref.round_0idx(),
+              pref.v_idx,
+              pref.u.to_index(),
+              ey * ex * val,
+            );
           }
         }
       }
