@@ -772,9 +772,7 @@ impl<F: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<F, D>
 /// Test-only: Convert i32 evaluations to field elements.
 #[cfg(test)]
 impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
-  pub fn to_field<F: SmallValueField<SmallValue = i32>>(
-    &self,
-  ) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+  pub fn to_field<F: SmallValueField<i32>>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
     LagrangeEvaluatedMultilinearPolynomial {
       evals: self.evals.iter().map(|&v| F::small_to_field(v)).collect(),
       num_vars: self.num_vars,

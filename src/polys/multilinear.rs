@@ -145,9 +145,7 @@ impl<T: Copy> MultilinearPolynomial<T> {
 impl MultilinearPolynomial<i32> {
   /// Try to create from a field-element polynomial.
   /// Returns None if any value doesn't fit in i32.
-  pub fn try_from_field<F: SmallValueField<SmallValue = i32>>(
-    poly: &MultilinearPolynomial<F>,
-  ) -> Option<Self> {
+  pub fn try_from_field<F: SmallValueField<i32>>(poly: &MultilinearPolynomial<F>) -> Option<Self> {
     let evals: Option<Vec<i32>> = poly.Z.iter().map(|f| F::try_field_to_small(f)).collect();
     evals.map(Self::new)
   }
@@ -158,7 +156,7 @@ impl MultilinearPolynomial<i32> {
   }
 
   /// Convert to field-element polynomial.
-  pub fn to_field<F: SmallValueField<SmallValue = i32>>(&self) -> MultilinearPolynomial<F> {
+  pub fn to_field<F: SmallValueField<i32>>(&self) -> MultilinearPolynomial<F> {
     MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
   }
 }

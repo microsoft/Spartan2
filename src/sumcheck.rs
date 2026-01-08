@@ -19,6 +19,7 @@ use crate::{
   },
   eq_linear,
   errors::SpartanError,
+  mat_vec_mle::MatVecMLE,
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -554,19 +555,35 @@ impl<E: Engine> SumcheckProof<E> {
   /// The small-value polynomials are used for efficient ss/sl multiplications in
   /// the accumulator building phase. The field-element polynomials are used for
   /// binding after the small-value rounds.
+  ///
+  /// Generic over `SmallValue` to support both i32/i64 and i64/i128 configurations.
   #[allow(dead_code)]
-  pub fn prove_cubic_with_three_inputs_small_value(
+  pub fn prove_cubic_with_three_inputs_small_value<SmallValue>(
     claim: &E::Scalar,
     taus: Vec<E::Scalar>,
-    poly_A_small: &MultilinearPolynomial<i32>,
-    poly_B_small: &MultilinearPolynomial<i32>,
+    poly_A_small: &MultilinearPolynomial<SmallValue>,
+    poly_B_small: &MultilinearPolynomial<SmallValue>,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,
     poly_B: &mut MultilinearPolynomial<E::Scalar>,
     poly_C: &mut MultilinearPolynomial<E::Scalar>,
     transcript: &mut E::TE,
   ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    E::Scalar: SmallValueField<SmallValue = i32, IntermediateSmallValue = i64>,
+    SmallValue: Copy
+      + Clone
+      + Default
+      + std::fmt::Debug
+      + PartialEq
+      + Eq
+      + std::ops::Add<Output = SmallValue>
+      + std::ops::Sub<Output = SmallValue>
+      + std::ops::Neg<Output = SmallValue>
+      + std::ops::AddAssign
+      + std::ops::SubAssign
+      + Send
+      + Sync,
+    E::Scalar: SmallValueField<SmallValue>,
+    MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar>,
   {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();

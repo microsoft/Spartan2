@@ -22,16 +22,18 @@
 
 // private modules
 mod accumulator_index;
-mod accumulators;
+/// Accumulator building for sumcheck (public for benchmarking)
+pub mod accumulators;
 mod csr;
 mod digest;
 mod eq_linear;
 mod lagrange;
+mod mat_vec_mle;
 mod math;
 mod nifs;
 mod r1cs;
-mod spartan_accumulator_input_polynomial;
 mod thread_state_accumulators;
+mod wide_limbs;
 mod zk;
 
 // modules with some public items for benchmarking

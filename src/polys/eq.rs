@@ -127,22 +127,20 @@ pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Ve
     let prev_len = prev.len();
 
     // New table has 2× the entries (prepending a new variable)
-    let mut next = Vec::with_capacity(prev_len * 2);
-
     // For multilinear indexing: first variable is high bit
     // new_idx = new_bit * prev_len + old_idx
     //
     // new_bit = 0: eq factor is (1 - τ)
     // new_bit = 1: eq factor is τ
+    //
+    // Optimized: use 1 multiplication per element instead of 2
+    // hi = v * τ, lo = v - hi = v * (1 - τ)
+    let mut next = vec![S::ZERO; prev_len * 2];
+    let (lo_half, hi_half) = next.split_at_mut(prev_len);
 
-    // First half: new_bit = 0
-    for &v in prev.iter() {
-      next.push(v * (S::ONE - tau));
-    }
-
-    // Second half: new_bit = 1
-    for &v in prev.iter() {
-      next.push(v * tau);
+    for ((lo, hi), v) in lo_half.iter_mut().zip(hi_half.iter_mut()).zip(prev.iter()) {
+      *hi = *v * tau;
+      *lo = *v - *hi;
     }
 
     result[i] = next;

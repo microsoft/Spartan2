@@ -14,11 +14,8 @@ use crate::{
   accumulator_index::{CachedPrefixIndex, compute_idx4},
   csr::Csr,
   lagrange::{LagrangeCoeff, LagrangeEvaluatedMultilinearPolynomial, UdHatEvaluations, UdTuple},
-  polys::{
-    eq::{EqPolynomial, compute_suffix_eq_pyramid},
-    multilinear::MultilinearPolynomial,
-  },
-  spartan_accumulator_input_polynomial::SpartanAccumulatorInputPolynomial,
+  mat_vec_mle::MatVecMLE,
+  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   thread_state_accumulators::{GenericThreadState, SpartanThreadState},
 };
 use ff::PrimeField;
@@ -30,6 +27,43 @@ use crate::lagrange::UdHatPoint;
 /// Polynomial degree D for Spartan's small-value sumcheck.
 /// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
 pub const SPARTAN_T_DEGREE: usize = 2;
+
+fn compute_e_out_tables<S: PrimeField + Sync + Send>(
+  taus: &[S],
+  l0: usize,
+  half: usize,
+) -> Vec<Vec<S>> {
+  if l0 == 0 {
+    return Vec::new();
+  }
+
+  let mut tables = vec![Vec::new(); l0];
+  tables[l0 - 1] = EqPolynomial::evals_from_points(&taus[half + l0..]);
+
+  for round_0 in (0..l0 - 1).rev() {
+    let tau = taus[round_0 + 1];
+    let prev = &tables[round_0 + 1];
+    let prev_len = prev.len();
+
+    // Optimized: use 1 multiplication per element instead of 2
+    // hi = v * τ, lo = v - hi = v * (1 - τ)
+    let mut next = vec![S::ZERO; prev_len * 2];
+    let (lo_half, hi_half) = next.split_at_mut(prev_len);
+
+    lo_half
+      .par_iter_mut()
+      .zip(hi_half.par_iter_mut())
+      .zip(prev.par_iter())
+      .for_each(|((lo, hi), &v)| {
+        *hi = v * tau;
+        *lo = v - *hi;
+      });
+
+    tables[round_0] = next;
+  }
+
+  tables
+}
 
 /// A single round's accumulator A_i(v, u) with flat contiguous storage.
 ///
@@ -222,7 +256,7 @@ pub fn build_accumulators_spartan<S, P>(
 ) -> SmallValueAccumulators<S, 2>
 where
   S: PrimeField + Send + Sync,
-  P: SpartanAccumulatorInputPolynomial<S>,
+  P: MatVecMLE<S>,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let l = az.len().trailing_zeros() as usize;
@@ -242,8 +276,7 @@ where
 
   // Precompute eq tables
   let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // |{0,1}|^{ℓ/2}
-  let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // |{0,1}|^{ℓ/2-ℓ0}
-  let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round
+  let e_out = compute_e_out_tables(taus, l0, half);
 
   let beta_has_infinity: Vec<bool> = (0..num_betas)
     .map(|mut t| {
@@ -275,15 +308,23 @@ where
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
+  // Use P::UnreducedSum for delayed modular reduction optimization
   (0..num_x_out)
     .into_par_iter()
     .fold(
-      || SpartanThreadState::<S, P::Value, 2>::new(l0, num_betas, prefix_size, ext_size),
+      || {
+        SpartanThreadState::<S, P::Value, P::UnreducedSum, 2>::new(
+          l0,
+          num_betas,
+          prefix_size,
+          ext_size,
+        )
+      },
       |mut state, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
 
-        // Inner loop over x_in
+        // Inner loop over x_in - accumulate into UNREDUCED form
         for (x_in_bits, &e_in_eval) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
@@ -321,6 +362,7 @@ where
           };
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
+          // Use UNREDUCED accumulation - no modular reduction in this hot loop!
           for (beta_idx, sum) in state
             .beta_partial_sums
             .iter_mut()
@@ -328,22 +370,24 @@ where
             .filter(|(i, _)| beta_has_infinity[*i])
           {
             let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
-            P::accumulate_eq_product(prod, &e_in_eval, sum);
+            P::accumulate_eq_product_unreduced(sum, prod, &e_in_eval);
           }
         }
 
         // Distribute beta_partial_sums → A_i(v,u) via idx4
-        let ex = e_xout[x_out_bits];
-        for (beta_idx, &val) in state.beta_partial_sums.iter().enumerate() {
+        // NOW we reduce once per beta (not once per x_in iteration!)
+        for (beta_idx, unreduced_sum) in state.beta_partial_sums.iter().enumerate() {
+          // Reduce the accumulated unreduced sum to a field element
+          let val = P::modular_reduction(unreduced_sum);
           if val.is_zero().into() {
             continue;
           }
-          let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
-            let ey = e_y[pref.round_0][pref.y_idx];
+            let out_idx = (pref.y_idx << xout_vars) | x_out_bits;
+            let eout = e_out[pref.round_0][out_idx];
             state
               .acc
-              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, eout * val);
           }
         }
 
@@ -407,8 +451,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
 
   // Precompute eq tables
   let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // |{0,1}|^{ℓ/2}
-  let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // |{0,1}|^{ℓ/2-ℓ0}
-  let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round
+  let e_out = compute_e_out_tables(taus, l0, half);
 
   let mut beta_prefix_cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
   for b in 0..num_betas {
@@ -478,17 +521,16 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
         }
 
         // Distribute beta_partial_sums → A_i(v,u) via idx4
-        let ex = e_xout[x_out_bits];
         for (beta_idx, &val) in state.beta_partial_sums.iter().enumerate() {
           if val.is_zero().into() {
             continue;
           }
-          let ex_val = ex * val;
           for pref in &beta_prefix_cache[beta_idx] {
-            let ey = e_y[pref.round_0][pref.y_idx];
+            let out_idx = (pref.y_idx << xout_vars) | x_out_bits;
+            let eout = e_out[pref.round_0][out_idx];
             state
               .acc
-              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, ey * ex_val);
+              .accumulate(pref.round_0, pref.v_idx, pref.u_idx, eout * val);
           }
         }
 
@@ -731,8 +773,8 @@ mod tests {
 
     // Precompute eq tables for naive computation
     let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // τ[2..4]
-    let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // τ[4..] (empty -> [1])
-    let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0);
+    let e_out = compute_e_out_tables(&taus, l0, half);
+    let xout_vars = half - l0;
 
     let num_betas = (D + 1).pow(l0 as u32);
     let idx4_cache: Vec<Vec<_>> = (0..num_betas)
@@ -743,7 +785,7 @@ mod tests {
     let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(l0);
 
     // x_out domain size = 1 (xout_vars = 0)
-    let ex = e_xout[0];
+    let x_out_bits = 0usize;
 
     #[allow(clippy::needless_range_loop)]
     for x_in_bits in 0..(1 << half) {
@@ -771,13 +813,9 @@ mod tests {
         let val = e_in_eval * prod;
 
         for pref in &idx4_cache[beta_idx] {
-          let ey = e_y[pref.round_0idx()][pref.y_idx];
-          acc_naive.accumulate(
-            pref.round_0idx(),
-            pref.v_idx,
-            pref.u.to_index(),
-            ey * ex * val,
-          );
+          let out_idx = (pref.y_idx << xout_vars) | x_out_bits;
+          let eout = e_out[pref.round_0idx()][out_idx];
+          acc_naive.accumulate(pref.round_0idx(), pref.v_idx, pref.u.to_index(), eout * val);
         }
       }
     }
@@ -924,8 +962,7 @@ mod tests {
 
     // ===== Naive computation for comparison =====
     let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + half]);
-    let e_xout = EqPolynomial::evals_from_points(&taus[half + L0..]);
-    let e_y = compute_suffix_eq_pyramid(&taus[..L0], L0);
+    let e_out = compute_e_out_tables(&taus, L0, half);
 
     let idx4_cache: Vec<Vec<_>> = (0..num_betas)
       .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, L0)))
@@ -935,8 +972,6 @@ mod tests {
 
     #[allow(clippy::needless_range_loop)]
     for x_out_bits in 0..(1 << xout_vars) {
-      let ex = e_xout[x_out_bits];
-
       #[allow(clippy::needless_range_loop)]
       for x_in_bits in 0..(1 << half) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
@@ -963,13 +998,9 @@ mod tests {
 
           // Distribute to accumulators via idx4
           for pref in &idx4_cache[beta_idx] {
-            let ey = e_y[pref.round_0idx()][pref.y_idx];
-            acc_naive.accumulate(
-              pref.round_0idx(),
-              pref.v_idx,
-              pref.u.to_index(),
-              ey * ex * val,
-            );
+            let out_idx = (pref.y_idx << xout_vars) | x_out_bits;
+            let eout = e_out[pref.round_0idx()][out_idx];
+            acc_naive.accumulate(pref.round_0idx(), pref.v_idx, pref.u.to_index(), eout * val);
           }
         }
       }

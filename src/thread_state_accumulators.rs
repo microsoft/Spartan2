@@ -13,6 +13,7 @@
 
 use crate::accumulators::SmallValueAccumulators;
 use ff::PrimeField;
+use std::ops::AddAssign;
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
 ///
@@ -45,11 +46,24 @@ use ff::PrimeField;
 /// - `az_buf_a/b`, `bz_buf_a/b`: Separate ping-pong buffer pairs for Az and Bz Lagrange
 ///   extensions. We need 4 buffers (not 2) because both extension results must be
 ///   available simultaneously to compute Az(β) × Bz(β) for each β.
-pub(crate) struct SpartanThreadState<S: PrimeField, V: Copy + Default, const D: usize> {
+///
+/// # Type Parameters
+///
+/// - `S`: Field type for final accumulator values
+/// - `V`: Witness value type (i32 for small-value, S for field)
+/// - `U`: Unreduced sum type for delayed modular reduction
+/// - `D`: Polynomial degree bound
+pub(crate) struct SpartanThreadState<
+  S: PrimeField,
+  V: Copy + Default,
+  U: Copy + Default,
+  const D: usize,
+> {
   /// Accumulator being built (the actual output)
   pub acc: SmallValueAccumulators<S, D>,
-  /// Partial sums indexed by β, accumulated over the x_in loop. Reset each x_out iteration.
-  pub beta_partial_sums: Vec<S>,
+  /// Partial sums indexed by β, accumulated over the x_in loop (unreduced form).
+  /// Reset each x_out iteration.
+  pub beta_partial_sums: Vec<U>,
   /// Prefix evaluations of Az for current suffix. Size: 2^l0
   pub az_pref: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
@@ -62,11 +76,13 @@ pub(crate) struct SpartanThreadState<S: PrimeField, V: Copy + Default, const D: 
   pub bz_buf_b: Vec<V>,
 }
 
-impl<S: PrimeField, V: Copy + Default, const D: usize> SpartanThreadState<S, V, D> {
+impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, const D: usize>
+  SpartanThreadState<S, V, U, D>
+{
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
       acc: SmallValueAccumulators::new(l0),
-      beta_partial_sums: vec![S::ZERO; num_betas],
+      beta_partial_sums: vec![U::default(); num_betas],
       az_pref: vec![V::default(); prefix_size],
       bz_pref: vec![V::default(); prefix_size],
       az_buf_a: vec![V::default(); ext_size],
@@ -80,7 +96,7 @@ impl<S: PrimeField, V: Copy + Default, const D: usize> SpartanThreadState<S, V, 
   /// This is O(num_betas) but much cheaper than reallocating.
   #[inline]
   pub fn reset_partial_sums(&mut self) {
-    self.beta_partial_sums.fill(S::ZERO);
+    self.beta_partial_sums.fill(U::default());
   }
 }
 
