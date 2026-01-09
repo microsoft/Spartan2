@@ -215,6 +215,11 @@ impl<const D: usize> LagrangeIndex<D> {
     self.0.len()
   }
 
+  /// Returns true if there are no coordinates.
+  pub fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
   /// Convert from flat index (mixed-radix decoding)
   ///
   /// Uses compile-time BASE = D + 1

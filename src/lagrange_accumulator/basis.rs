@@ -35,6 +35,12 @@ pub struct LagrangeCoeff<F, const D: usize> {
   coeffs: Vec<F>,
 }
 
+impl<F: PrimeField, const D: usize> Default for LagrangeCoeff<F, D> {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
   /// Initialize R_1 = [1].
   pub fn new() -> Self {
@@ -46,6 +52,11 @@ impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
   /// Returns the number of coefficients.
   pub fn len(&self) -> usize {
     self.coeffs.len()
+  }
+
+  /// Returns true if there are no coefficients (always false by construction).
+  pub fn is_empty(&self) -> bool {
+    self.coeffs.is_empty()
   }
 
   /// Returns a slice of the coefficients.

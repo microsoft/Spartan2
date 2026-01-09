@@ -49,6 +49,11 @@ pub trait MatVecMLE<S: PrimeField>: Sync {
   /// Get polynomial length
   fn len(&self) -> usize;
 
+  /// Returns true if the polynomial is empty.
+  fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
   /// Multiply two witness values: a × b
   fn multiply_witnesses(a: Self::Value, b: Self::Value) -> Self::Product;
 
