@@ -45,8 +45,7 @@ const IV: [u32; 8] = [
 fn big_sigma_0<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
   mut cs: CS,
   x: &SmallUInt32,
-) -> Result<SmallUInt32, SynthesisError>
-{
+) -> Result<SmallUInt32, SynthesisError> {
   let r2 = x.rotr(2);
   let r13 = x.rotr(13);
   let r22 = x.rotr(22);
@@ -58,8 +57,7 @@ fn big_sigma_0<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
 fn big_sigma_1<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
   mut cs: CS,
   x: &SmallUInt32,
-) -> Result<SmallUInt32, SynthesisError>
-{
+) -> Result<SmallUInt32, SynthesisError> {
   let r6 = x.rotr(6);
   let r11 = x.rotr(11);
   let r25 = x.rotr(25);
@@ -71,8 +69,7 @@ fn big_sigma_1<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
 fn small_sigma_0<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
   mut cs: CS,
   x: &SmallUInt32,
-) -> Result<SmallUInt32, SynthesisError>
-{
+) -> Result<SmallUInt32, SynthesisError> {
   let r7 = x.rotr(7);
   let r18 = x.rotr(18);
   let s3 = x.shr(3);
@@ -84,8 +81,7 @@ fn small_sigma_0<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
 fn small_sigma_1<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
   mut cs: CS,
   x: &SmallUInt32,
-) -> Result<SmallUInt32, SynthesisError>
-{
+) -> Result<SmallUInt32, SynthesisError> {
   let r17 = x.rotr(17);
   let r19 = x.rotr(19);
   let s10 = x.shr(10);
@@ -97,11 +93,15 @@ fn small_sigma_1<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
 ///
 /// Takes the current hash state H and a 512-bit message block W,
 /// returns the updated hash state.
+///
+/// The `prefix` is prepended to all variable names to allow multiple SHA-256
+/// calls in the same constraint system (e.g., for hash chains).
 fn sha256_compression<Scalar, CS, C>(
   cs: &mut SmallMultiEq<Scalar, CS, C>,
   h: &mut [SmallUInt32; 8],
   w: &[SmallUInt32; 16],
   block_idx: usize,
+  prefix: &str,
 ) -> Result<(), SynthesisError>
 where
   Scalar: SmallValueField<C::SmallValue>,
@@ -115,16 +115,16 @@ where
   for i in 16..64 {
     // W[i] = σ1(W[i-2]) + W[i-7] + σ0(W[i-15]) + W[i-16]
     let s1 = small_sigma_1(
-      cs.namespace(|| format!("b{}_w{}_s1", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_w{}_s1", prefix, block_idx, i)),
       &w_expanded[i - 2],
     )?;
     let s0 = small_sigma_0(
-      cs.namespace(|| format!("b{}_w{}_s0", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_w{}_s0", prefix, block_idx, i)),
       &w_expanded[i - 15],
     )?;
 
     let wi = SmallUInt32::addmany(
-      cs.namespace(|| format!("b{}_w{}", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_w{}", prefix, block_idx, i)),
       &[
         s1,
         w_expanded[i - 7].clone(),
@@ -150,9 +150,12 @@ where
   // 64 rounds
   for i in 0..64 {
     // T1 = h + Σ1(e) + Ch(e,f,g) + K[i] + W[i]
-    let sigma1 = big_sigma_1(cs.namespace(|| format!("b{}_r{}_sigma1", block_idx, i)), &e)?;
+    let sigma1 = big_sigma_1(
+      cs.namespace(|| format!("{}b{}_r{}_sigma1", prefix, block_idx, i)),
+      &e,
+    )?;
     let ch = SmallUInt32::sha256_ch(
-      cs.namespace(|| format!("b{}_r{}_ch", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_r{}_ch", prefix, block_idx, i)),
       &e,
       &f,
       &g,
@@ -160,15 +163,18 @@ where
     let k = SmallUInt32::constant(ROUND_CONSTANTS[i]);
 
     let t1 = SmallUInt32::addmany(
-      cs.namespace(|| format!("b{}_r{}_t1", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_r{}_t1", prefix, block_idx, i)),
       &[h_var.clone(), sigma1, ch, k, w_expanded[i].clone()],
     )?;
 
     // T2 components: Σ0(a) and Maj(a,b,c)
     // Instead of computing T2 = sigma0 + maj separately, we fuse it into 'a' below.
-    let sigma0 = big_sigma_0(cs.namespace(|| format!("b{}_r{}_sigma0", block_idx, i)), &a)?;
+    let sigma0 = big_sigma_0(
+      cs.namespace(|| format!("{}b{}_r{}_sigma0", prefix, block_idx, i)),
+      &a,
+    )?;
     let maj = SmallUInt32::sha256_maj(
-      cs.namespace(|| format!("b{}_r{}_maj", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_r{}_maj", prefix, block_idx, i)),
       &a,
       &b,
       &c,
@@ -179,7 +185,7 @@ where
     g = f;
     f = e;
     e = SmallUInt32::addmany(
-      cs.namespace(|| format!("b{}_r{}_e", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_r{}_e", prefix, block_idx, i)),
       &[d, t1.clone()],
     )?;
     d = c;
@@ -187,42 +193,42 @@ where
     b = a;
     // Fused: a = T1 + T2 = T1 + sigma0 + maj (saves one addmany call per round)
     a = SmallUInt32::addmany(
-      cs.namespace(|| format!("b{}_r{}_a", block_idx, i)),
+      cs.namespace(|| format!("{}b{}_r{}_a", prefix, block_idx, i)),
       &[t1, sigma0, maj],
     )?;
   }
 
   // Compute final hash values
   h[0] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h0", block_idx)),
+    cs.namespace(|| format!("{}b{}_h0", prefix, block_idx)),
     &[h[0].clone(), a],
   )?;
   h[1] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h1", block_idx)),
+    cs.namespace(|| format!("{}b{}_h1", prefix, block_idx)),
     &[h[1].clone(), b],
   )?;
   h[2] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h2", block_idx)),
+    cs.namespace(|| format!("{}b{}_h2", prefix, block_idx)),
     &[h[2].clone(), c],
   )?;
   h[3] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h3", block_idx)),
+    cs.namespace(|| format!("{}b{}_h3", prefix, block_idx)),
     &[h[3].clone(), d],
   )?;
   h[4] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h4", block_idx)),
+    cs.namespace(|| format!("{}b{}_h4", prefix, block_idx)),
     &[h[4].clone(), e],
   )?;
   h[5] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h5", block_idx)),
+    cs.namespace(|| format!("{}b{}_h5", prefix, block_idx)),
     &[h[5].clone(), f],
   )?;
   h[6] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h6", block_idx)),
+    cs.namespace(|| format!("{}b{}_h6", prefix, block_idx)),
     &[h[6].clone(), g],
   )?;
   h[7] = SmallUInt32::addmany(
-    cs.namespace(|| format!("b{}_h7", block_idx)),
+    cs.namespace(|| format!("{}b{}_h7", prefix, block_idx)),
     &[h[7].clone(), h_var],
   )?;
 
@@ -246,6 +252,39 @@ where
   CS: ConstraintSystem<Scalar>,
   C: SmallMultiEqConfig,
 {
+  small_sha256_with_prefix::<Scalar, CS, C>(cs, input, "")
+}
+
+/// Compute SHA-256 hash of input bits with a prefix for variable names.
+///
+/// This variant allows multiple SHA-256 computations in the same constraint
+/// system (e.g., for hash chains) by prefixing all internal variable names.
+///
+/// # Arguments
+/// * `cs` - The constraint system
+/// * `input` - Input bits to hash
+/// * `prefix` - Prefix string for all variable names (e.g., "c0_" for chain index 0)
+///
+/// # Example
+/// ```ignore
+/// // Hash chain: H(H(H(x)))
+/// let h1 = small_sha256_with_prefix::<_, _, I32NoBatch<F>>(cs, &input, "c0_")?;
+/// let h2 = small_sha256_with_prefix::<_, _, I32NoBatch<F>>(cs, &h1, "c1_")?;
+/// let h3 = small_sha256_with_prefix::<_, _, I32NoBatch<F>>(cs, &h2, "c2_")?;
+/// ```
+pub fn small_sha256_with_prefix<Scalar, CS, C>(
+  cs: &mut CS,
+  input: &[Boolean],
+  prefix: &str,
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+  Scalar: SmallValueField<C::SmallValue>,
+  CS: ConstraintSystem<Scalar>,
+  C: SmallMultiEqConfig,
+{
+  // Push namespace to scope SmallMultiEq's batched constraints under the prefix
+  cs.push_namespace(|| format!("{}sha256", prefix));
+
   // Pad the input according to SHA-256 spec
   let padded = sha256_padding(input);
 
@@ -257,7 +296,8 @@ where
   let mut h: [SmallUInt32; 8] = IV.map(SmallUInt32::constant);
 
   // Create SmallMultiEq for batched equality constraints
-  let mut multi_eq = SmallMultiEq::<_, _, C>::new(cs);
+  // Use reborrow to allow using cs again after multi_eq is dropped
+  let mut multi_eq = SmallMultiEq::<_, _, C>::new(&mut *cs);
 
   for block_idx in 0..num_blocks {
     let block_start = block_idx * 512;
@@ -271,10 +311,14 @@ where
     }
 
     // Run compression
-    sha256_compression(&mut multi_eq, &mut h, &w, block_idx)?;
+    sha256_compression(&mut multi_eq, &mut h, &w, block_idx, prefix)?;
   }
 
   // multi_eq is dropped here, flushing any pending constraints
+  drop(multi_eq);
+
+  // Pop namespace after SmallMultiEq is flushed
+  cs.pop_namespace();
 
   // Collect output bits in big-endian order
   let mut output = Vec::with_capacity(256);

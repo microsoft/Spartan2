@@ -21,5 +21,5 @@ mod small_sha256;
 mod small_uint32;
 
 pub use small_multi_eq::SmallMultiEq;
-pub use small_sha256::small_sha256;
+pub use small_sha256::{small_sha256, small_sha256_with_prefix};
 pub use small_uint32::SmallUInt32;

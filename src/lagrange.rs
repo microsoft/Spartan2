@@ -784,7 +784,7 @@ impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
 #[cfg(test)]
 #[allow(dead_code)]
 impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i64, D> {
-  pub fn to_field<F: SmallValueField>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+  pub fn to_field<F: SmallValueField<i64>>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
     LagrangeEvaluatedMultilinearPolynomial {
       evals: self
         .evals

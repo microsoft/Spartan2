@@ -355,8 +355,7 @@ where
 fn test_sumcheck_equivalence_for_message_len<C: SmallMultiEqConfig>(
   preimage_len: usize,
   config_name: &str,
-)
-where
+) where
   F: SmallValueField<C::SmallValue> + SmallValueField<i64, IntermediateSmallValue = i128>,
 {
   let _span = info_span!("test", msg_len = preimage_len, config = config_name).entered();

@@ -148,8 +148,8 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig> Dr
   }
 }
 
-impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig> ConstraintSystem<Scalar>
-  for SmallMultiEq<Scalar, CS, C>
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
+  ConstraintSystem<Scalar> for SmallMultiEq<Scalar, CS, C>
 {
   type Root = Self;
 

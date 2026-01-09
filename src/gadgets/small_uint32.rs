@@ -384,9 +384,9 @@ impl SmallUInt32 {
 
     // Compute low limb sum (for witness generation)
     // IMPORTANT: Carry must be computed from the LOW LIMB SUM, not from the full result
-    let lo_sum: Option<u64> = operands
-      .iter()
-      .try_fold(0u64, |acc, op| op.value.map(|v| acc + ((v as u64) & 0xFFFF)));
+    let lo_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
+      op.value.map(|v| acc + ((v as u64) & 0xFFFF))
+    });
 
     // Compute carry value
     let carry_value: Option<u64> = lo_sum.map(|v| v >> 16);
@@ -396,8 +396,7 @@ impl SmallUInt32 {
     let hi_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
       op.value.map(|v| acc + (((v as u64) >> 16) & 0xFFFF))
     });
-    let hi_sum_with_carry: Option<u64> =
-      hi_sum.and_then(|h| carry_value.map(|c| h + c));
+    let hi_sum_with_carry: Option<u64> = hi_sum.and_then(|h| carry_value.map(|c| h + c));
 
     // Final result value (for returning)
     let result_value: Option<u64> = operands
@@ -614,8 +613,7 @@ mod tests {
 
     {
       let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-      let result =
-        SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b, c, d, e]).unwrap();
+      let result = SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b, c, d, e]).unwrap();
       assert_eq!(result.get_value(), Some(expected));
     }
 
