@@ -302,7 +302,9 @@ pub(crate) fn mul_by_i64<F: BarrettField>(large: &F, small: i64) -> F {
 /// Multiply field element by i128 (signed).
 #[inline]
 #[allow(dead_code)]
-pub(crate) fn mul_by_i128<F: BarrettField + std::ops::Add<Output = F> + std::ops::Mul<Output = F>>(
+pub(crate) fn mul_by_i128<
+  F: BarrettField + std::ops::Add<Output = F> + std::ops::Mul<Output = F>,
+>(
   large: &F,
   small: i128,
 ) -> F {

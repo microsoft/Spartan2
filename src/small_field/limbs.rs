@@ -43,7 +43,6 @@ impl<const N: usize> Default for WideLimbs<N> {
   }
 }
 
-
 impl<const N: usize> AddAssign for WideLimbs<N> {
   /// Wide addition with carry propagation.
   #[inline]

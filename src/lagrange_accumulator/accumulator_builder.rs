@@ -110,26 +110,23 @@ where
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
-  // Use P::UnreducedSum for delayed modular reduction optimization
-  (0..num_x_out)
+  // Use P::UnreducedSum for delayed F×int reduction, P::UnreducedFieldField for F×F scatter
+  type State<S, P> = SpartanThreadState<
+    S,
+    <P as MatVecMLE<S>>::Value,
+    <P as MatVecMLE<S>>::UnreducedSum,
+    <P as MatVecMLE<S>>::UnreducedFieldField,
+    2,
+  >;
+  let merged = (0..num_x_out)
     .into_par_iter()
     .fold(
-      || {
-        SpartanThreadState::<S, P::Value, P::UnreducedSum, 2>::new(
-          l0,
-          num_betas,
-          prefix_size,
-          ext_size,
-          &eq_tables.e_y_sizes,
-        )
-      },
-      |mut state, x_out_bits| {
+      || State::<S, P>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S, P>, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
 
-        // Compute eyx = ey * ex on-the-fly for this x_out_bits (tiny, stays hot in L1)
         let ex = eq_tables.e_xout[x_out_bits];
-        fill_eyx(ex, &eq_tables.e_y, &mut state.eyx);
 
         // Inner loop over x_in - accumulate into UNREDUCED form
         // Each beta_partial_sums[beta_idx] accumulates 2^(l/2) terms per x_out.
@@ -172,15 +169,11 @@ where
           }
         }
 
-        // Distribute beta_partial_sums → A_i(v,u) via idx4
-        // NOW we reduce once per beta (not once per x_in iteration!)
-        // Only iterate betas with infinity (others are always zero)
-        scatter_beta_contributions(
-          betas_with_infty.iter().copied(),
-          &beta_prefix_cache,
-          &state.eyx,
-          &mut state.acc,
-          |beta_idx| {
+        // Pre-compute and filter: reduce all non-zero betas upfront
+        // This eliminates closure call overhead in the scatter loop
+        let beta_values: Vec<(usize, S)> = betas_with_infty
+          .iter()
+          .filter_map(|&beta_idx| {
             let unreduced_sum = &state.beta_partial_sums[beta_idx];
             if P::unreduced_is_zero(unreduced_sum) {
               return None;
@@ -189,22 +182,45 @@ where
             if val.is_zero().into() {
               None
             } else {
-              Some(val)
+              Some((beta_idx, val))
             }
-          },
+          })
+          .collect();
+
+        // Distribute beta_partial_sums → A_i(v,u) via idx4
+        // Uses unreduced F×F accumulation to minimize Montgomery reductions:
+        // - One F×F multiply per beta (z_beta = ex * tA_red)
+        // - Unreduced ey * z_beta accumulation per contribution
+        // - Keep unreduced across all x_out iterations per thread
+        // - Final reduction once per bucket after all threads merged
+        scatter_beta_values_unreduced::<S, P, 2>(
+          &beta_values,
+          &beta_prefix_cache,
+          ex,
+          &eq_tables.e_y,
+          &mut state.acc_unred,
         );
+
+        // Don't reduce here - keep unreduced until final merge
+        // This saves ~26 * (num_threads - 1) Montgomery reductions
 
         state
       },
     )
-    .map(|state| state.acc)
     .reduce(
-      || LagrangeAccumulators::<S, 2>::new(l0),
-      |mut a, b| {
-        a.merge(&b);
+      || State::<S, P>::new(l0, num_betas, prefix_size, ext_size),
+      |mut a: State<S, P>, b: State<S, P>| {
+        // Merge unreduced accumulators (just adding WideLimbs, no reduction)
+        merge_acc_unred::<S, P, 2>(&mut a.acc_unred, &b.acc_unred);
         a
       },
-    )
+    );
+
+  // Final reduction: reduce merged unreduced accumulators once per bucket
+  // This is the only place we do Montgomery reductions for scatter contributions
+  let mut final_acc = LagrangeAccumulators::<S, 2>::new(l0);
+  reduce_and_merge_acc_unred::<S, P, 2>(&merged.acc_unred, &mut final_acc);
+  final_acc
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.
@@ -397,6 +413,9 @@ fn fill_eyx<S: PrimeField>(ex: S, e_y: &[Vec<S>], eyx: &mut [Vec<S>]) {
   }
 }
 
+/// Legacy scatter function using eyx precomputation with immediate F×F reduction.
+/// Each contribution does F×F multiply with internal Montgomery reduction.
+#[allow(dead_code)] // Kept for reference; new code uses scatter_beta_contributions_unreduced
 #[inline]
 fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
   beta_indices: I,
@@ -415,6 +434,121 @@ fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
     for pref in &beta_prefix_cache[beta_idx] {
       let eyx_val = eyx[pref.round_0][pref.y_idx];
       acc.accumulate(pref.round_0, pref.v_idx, pref.u_idx, eyx_val * val);
+    }
+  }
+}
+
+/// Optimized scatter using unreduced F×F accumulation with pre-computed beta values.
+///
+/// Takes pre-computed (beta_idx, tA_red) pairs, eliminating closure overhead.
+/// For each beta:
+/// 1. Compute z_beta = ex * tA_red (one F×F multiply per beta)
+/// 2. For each contribution, accumulate ey * z_beta into unreduced bucket
+///
+/// This saves ~(num_contributions - num_betas - num_buckets) Montgomery reductions.
+#[inline]
+fn scatter_beta_values_unreduced<S, P, const D: usize>(
+  beta_values: &[(usize, S)],
+  beta_prefix_cache: &Csr<CachedPrefixIndex>,
+  ex: S,
+  e_y: &[Vec<S>],
+  acc_unred: &mut [Vec<[P::UnreducedFieldField; D]>],
+) where
+  S: PrimeField,
+  P: MatVecMLE<S>,
+{
+  for &(beta_idx, tA_red) in beta_values {
+    // Compute z_beta = ex * tA_red once per beta (one F×F with immediate reduction)
+    let z_beta = ex * tA_red;
+
+    // Scatter to buckets using unreduced F×F accumulation
+    for pref in &beta_prefix_cache[beta_idx] {
+      let ey_val = &e_y[pref.round_0][pref.y_idx];
+      // Accumulate ey * z_beta without reduction
+      P::accumulate_field_field_unreduced(
+        &mut acc_unred[pref.round_0][pref.v_idx][pref.u_idx],
+        ey_val,
+        &z_beta,
+      );
+    }
+  }
+}
+
+/// Legacy scatter using closure for lazy evaluation (kept for reference).
+#[allow(dead_code)]
+#[inline]
+fn scatter_beta_contributions_unreduced<S, P, const D: usize, I, F>(
+  beta_indices: I,
+  beta_prefix_cache: &Csr<CachedPrefixIndex>,
+  ex: S,
+  e_y: &[Vec<S>],
+  acc_unred: &mut [Vec<[P::UnreducedFieldField; D]>],
+  mut value_for_beta: F,
+) where
+  S: PrimeField,
+  P: MatVecMLE<S>,
+  I: IntoIterator<Item = usize>,
+  F: FnMut(usize) -> Option<S>,
+{
+  for beta_idx in beta_indices {
+    let Some(tA_red) = value_for_beta(beta_idx) else {
+      continue;
+    };
+    // Compute z_beta = ex * tA_red once per beta (one F×F with immediate reduction)
+    let z_beta = ex * tA_red;
+
+    // Scatter to buckets using unreduced F×F accumulation
+    for pref in &beta_prefix_cache[beta_idx] {
+      let ey_val = &e_y[pref.round_0][pref.y_idx];
+      // Accumulate ey * z_beta without reduction
+      P::accumulate_field_field_unreduced(
+        &mut acc_unred[pref.round_0][pref.v_idx][pref.u_idx],
+        ey_val,
+        &z_beta,
+      );
+    }
+  }
+}
+
+/// Reduce unreduced F×F accumulators and merge into reduced accumulators.
+///
+/// Call once after all contributions have been accumulated.
+#[inline]
+fn reduce_and_merge_acc_unred<S, P, const D: usize>(
+  acc_unred: &[Vec<[P::UnreducedFieldField; D]>],
+  acc: &mut LagrangeAccumulators<S, D>,
+) where
+  S: PrimeField,
+  P: MatVecMLE<S>,
+{
+  for (round, round_unred) in acc_unred.iter().enumerate() {
+    for (v_idx, row) in round_unred.iter().enumerate() {
+      for (u_idx, bucket) in row.iter().enumerate() {
+        if !P::unreduced_field_field_is_zero(bucket) {
+          let reduced = P::montgomery_reduce_ff(bucket);
+          acc.accumulate(round, v_idx, u_idx, reduced);
+        }
+      }
+    }
+  }
+}
+
+/// Merge two unreduced F×F accumulator arrays (just adding WideLimbs, no reduction).
+///
+/// Used in the reduce phase to merge thread-local unreduced accumulators.
+#[inline]
+fn merge_acc_unred<S, P, const D: usize>(
+  dst: &mut [Vec<[P::UnreducedFieldField; D]>],
+  src: &[Vec<[P::UnreducedFieldField; D]>],
+) where
+  S: PrimeField,
+  P: MatVecMLE<S>,
+{
+  for (dst_round, src_round) in dst.iter_mut().zip(src.iter()) {
+    for (dst_row, src_row) in dst_round.iter_mut().zip(src_round.iter()) {
+      for (dst_bucket, src_bucket) in dst_row.iter_mut().zip(src_row.iter()) {
+        *dst_bucket += *src_bucket;
+      }
     }
   }
 }

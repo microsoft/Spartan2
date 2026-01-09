@@ -32,15 +32,15 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-mod small_value_field;
-mod delayed_reduction;
 pub(crate) mod barrett;
+mod delayed_reduction;
 mod impls;
 pub(crate) mod limbs;
+mod small_value_field;
 
 pub use delayed_reduction::DelayedReduction;
-pub use small_value_field::SmallValueField;
 pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
+pub use small_value_field::SmallValueField;
 
 use ff::PrimeField;
 
@@ -123,4 +123,3 @@ fn two_pow_64<F: PrimeField>() -> F {
   let two_32 = F::from(1u64 << 32);
   two_32 * two_32
 }
-

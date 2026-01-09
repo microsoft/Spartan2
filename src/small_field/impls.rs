@@ -6,8 +6,10 @@
 
 //! SmallValueField and DelayedReduction implementations for Fp and Fq.
 
-use super::{barrett, i128_to_field, i64_to_field, DelayedReduction, SmallValueField};
-use super::limbs::{mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag, SignedWideLimbs, SubMagResult, WideLimbs};
+use super::{
+  DelayedReduction, SmallValueField, barrett, i64_to_field, i128_to_field,
+  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
+};
 use ff::PrimeField;
 
 // ============================================================================

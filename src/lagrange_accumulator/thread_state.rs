@@ -47,22 +47,33 @@ use std::ops::AddAssign;
 ///   Lagrange extensions. After `extend_in_place`, the result is always in `*_buf_curr`.
 ///   We need 4 buffers (not 2) because both extension results must be available
 ///   simultaneously to compute Az(β) × Bz(β) for each β.
-/// - `eyx`: On-the-fly computed `e_y[round] * e_xout[x_out_bits]` scratch buffer. Stays hot in L1.
+/// - `acc_unred`: Unreduced F×F bucket accumulators for scatter phase optimization.
+///
+/// Note: `eyx` precomputation has been removed. We now use `e_y` directly in the
+/// scatter phase, computing `z_beta = ex * tA_red` once per beta instead of
+/// precomputing `eyx = ey * ex` for all y indices.
 ///
 /// # Type Parameters
 ///
 /// - `S`: Field type for final accumulator values
 /// - `V`: Witness value type (i32 for small-value, S for field)
-/// - `U`: Unreduced sum type for delayed modular reduction
+/// - `U`: Unreduced sum type for delayed modular reduction (field × int products)
+/// - `UFF`: Unreduced F×F accumulator type (9 limbs, 576 bits, 2R-scaled)
 /// - `D`: Polynomial degree bound
 pub(crate) struct SpartanThreadState<
   S: PrimeField,
   V: Copy + Default,
   U: Copy + Default,
+  UFF: Copy + Default,
   const D: usize,
 > {
-  /// Accumulator being built (the actual output)
+  /// Reduced accumulator (kept for compatibility, not used in optimized path)
+  #[allow(dead_code)]
   pub acc: LagrangeAccumulators<S, D>,
+  /// Unreduced F×F bucket accumulators for scatter phase.
+  /// Shape: [round][v_idx][u_idx] matching LagrangeAccumulators layout.
+  /// Final reduction is done once after all threads are merged.
+  pub acc_unred: Vec<Vec<[UFF; D]>>,
   /// Partial sums indexed by β, accumulated over the x_in loop (unreduced form).
   /// Reset each x_out iteration.
   pub beta_partial_sums: Vec<U>,
@@ -78,23 +89,31 @@ pub(crate) struct SpartanThreadState<
   pub bz_buf_curr: Vec<V>,
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
   pub bz_buf_scratch: Vec<V>,
-  /// On-the-fly computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}.
-  /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
-  pub eyx: Vec<Vec<S>>,
 }
 
-impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, const D: usize>
-  SpartanThreadState<S, V, U, D>
+impl<
+  S: PrimeField,
+  V: Copy + Default,
+  U: Copy + Clone + Default + AddAssign,
+  UFF: Copy + Clone + Default + AddAssign,
+  const D: usize,
+> SpartanThreadState<S, V, U, UFF, D>
 {
-  pub fn new(
-    l0: usize,
-    num_betas: usize,
-    prefix_size: usize,
-    ext_size: usize,
-    e_y_sizes: &[usize],
-  ) -> Self {
+  /// Base of the Lagrange domain U_D (compile-time constant)
+  const BASE: usize = D + 1;
+
+  pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
+    // Allocate unreduced accumulators matching LagrangeAccumulators shape
+    let acc_unred = (0..l0)
+      .map(|round| {
+        let num_prefixes = Self::BASE.pow(round as u32);
+        vec![[UFF::default(); D]; num_prefixes]
+      })
+      .collect();
+
     Self {
       acc: LagrangeAccumulators::new(l0),
+      acc_unred,
       beta_partial_sums: vec![U::default(); num_betas],
       az_pref: vec![V::default(); prefix_size],
       bz_pref: vec![V::default(); prefix_size],
@@ -102,7 +121,6 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
       az_buf_scratch: vec![V::default(); ext_size],
       bz_buf_curr: vec![V::default(); ext_size],
       bz_buf_scratch: vec![V::default(); ext_size],
-      eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }
 
@@ -111,6 +129,18 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
   #[inline]
   pub fn reset_partial_sums(&mut self) {
     self.beta_partial_sums.fill(U::default());
+  }
+
+  /// Zero out unreduced bucket accumulators.
+  /// Not used in the optimized path (we keep unreduced until final merge).
+  #[inline]
+  #[allow(dead_code)]
+  pub fn reset_acc_unred(&mut self) {
+    for round in &mut self.acc_unred {
+      for row in round.iter_mut() {
+        *row = [UFF::default(); D];
+      }
+    }
   }
 }
 

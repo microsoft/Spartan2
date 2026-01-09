@@ -29,7 +29,8 @@ use std::ops::{Add, AddAssign, Sub};
 ///
 /// - `Value`: The witness coefficient type (`S` for field polynomials, `i32` for small-value)
 /// - `Product`: The product type (`S` for field, `i64` for small-value to avoid overflow)
-/// - `UnreducedSum`: Accumulator for delayed modular reduction
+/// - `UnreducedSum`: Accumulator for delayed modular reduction (field × int products)
+/// - `UnreducedFieldField`: Accumulator for field × field products (9 limbs, 2R-scaled)
 pub trait MatVecMLE<S: PrimeField>: Sync {
   /// The witness value type (S for field, i32 for small)
   type Value: Copy + Default + Add<Output = Self::Value> + Sub<Output = Self::Value> + Send + Sync;
@@ -37,11 +38,17 @@ pub trait MatVecMLE<S: PrimeField>: Sync {
   /// The product type (S for field, i64 for small)
   type Product;
 
-  /// Unreduced accumulator for delayed modular reduction.
+  /// Unreduced accumulator for delayed modular reduction (field × int products).
   ///
   /// For small-value polynomials: pair of `WideLimbs<6>` (positive, negative).
   /// For field polynomials: just `S` (no delayed reduction in baseline).
   type UnreducedSum: Copy + Clone + Default + AddAssign + Send + Sync;
+
+  /// Unreduced accumulator for field × field products (9 limbs, 576 bits).
+  ///
+  /// Used to delay Montgomery reduction when summing many F × F products.
+  /// The value is in 2R-scaled Montgomery form, reduced via Montgomery REDC.
+  type UnreducedFieldField: Copy + Clone + Default + AddAssign + Send + Sync;
 
   /// Get witness value at index
   fn get(&self, idx: usize) -> Self::Value;
@@ -77,17 +84,37 @@ pub trait MatVecMLE<S: PrimeField>: Sync {
 
   /// Fast check if unreduced accumulator is zero (avoids expensive modular_reduction).
   fn unreduced_is_zero(acc: &Self::UnreducedSum) -> bool;
+
+  /// Accumulate field × field product in unreduced form (NO Montgomery reduction).
+  ///
+  /// Used in scatter phase to accumulate `ey * z_beta` products without reduction.
+  /// The result is in 2R-scaled Montgomery form.
+  fn accumulate_field_field_unreduced(acc: &mut Self::UnreducedFieldField, a: &S, b: &S);
+
+  /// Montgomery reduce F×F accumulator to field element (2R → 1R).
+  ///
+  /// Call once per bucket after all contributions have been accumulated.
+  fn montgomery_reduce_ff(acc: &Self::UnreducedFieldField) -> S;
+
+  /// Fast zero check for F×F accumulator (avoids expensive montgomery_reduce_ff).
+  fn unreduced_field_field_is_zero(acc: &Self::UnreducedFieldField) -> bool;
 }
 
 /// Implementation for field-element polynomials.
 ///
 /// This is the standard case where witness coefficients are field elements.
-/// No delayed reduction optimization - each accumulation reduces immediately.
-impl<S: PrimeField + Sync> MatVecMLE<S> for MultilinearPolynomial<S> {
+/// For eq-weighted accumulation: no delayed reduction - each accumulation reduces immediately.
+/// For F×F accumulation (scatter phase): uses delayed reduction via `DelayedReduction` trait.
+impl<S> MatVecMLE<S> for MultilinearPolynomial<S>
+where
+  S: PrimeField + DelayedReduction<i32, IntermediateSmallValue = i64> + Sync,
+{
   type Value = S;
   type Product = S;
-  /// No delayed reduction for field polynomials - UnreducedSum is just S.
+  /// No delayed reduction for eq-weighted field polynomials - UnreducedSum is just S.
   type UnreducedSum = S;
+  /// F×F products use 9-limb unreduced accumulator (576 bits, 2R-scaled).
+  type UnreducedFieldField = S::UnreducedFieldField;
 
   fn get(&self, idx: usize) -> S {
     self.Z[idx]
@@ -118,6 +145,18 @@ impl<S: PrimeField + Sync> MatVecMLE<S> for MultilinearPolynomial<S> {
   fn unreduced_is_zero(acc: &S) -> bool {
     acc.is_zero().into()
   }
+
+  fn accumulate_field_field_unreduced(acc: &mut Self::UnreducedFieldField, a: &S, b: &S) {
+    S::unreduced_field_field_mul_add(acc, a, b);
+  }
+
+  fn montgomery_reduce_ff(acc: &Self::UnreducedFieldField) -> S {
+    S::reduce_field_field(acc)
+  }
+
+  fn unreduced_field_field_is_zero(acc: &Self::UnreducedFieldField) -> bool {
+    acc.is_zero()
+  }
 }
 
 /// Implementation for small-value polynomials (i32 coefficients).
@@ -136,6 +175,8 @@ where
   type Product = i64;
   /// Unreduced accumulator for delayed reduction (handles sign internally).
   type UnreducedSum = S::UnreducedFieldInt;
+  /// F×F products use 9-limb unreduced accumulator (576 bits, 2R-scaled).
+  type UnreducedFieldField = S::UnreducedFieldField;
 
   fn get(&self, idx: usize) -> i32 {
     self.Z[idx]
@@ -165,6 +206,18 @@ where
   fn unreduced_is_zero(acc: &S::UnreducedFieldInt) -> bool {
     acc.is_zero()
   }
+
+  fn accumulate_field_field_unreduced(acc: &mut Self::UnreducedFieldField, a: &S, b: &S) {
+    S::unreduced_field_field_mul_add(acc, a, b);
+  }
+
+  fn montgomery_reduce_ff(acc: &Self::UnreducedFieldField) -> S {
+    S::reduce_field_field(acc)
+  }
+
+  fn unreduced_field_field_is_zero(acc: &Self::UnreducedFieldField) -> bool {
+    acc.is_zero()
+  }
 }
 
 /// Implementation for i64-valued polynomials (i64 coefficients, i128 products).
@@ -182,6 +235,8 @@ where
   type Product = i128;
   /// Unreduced accumulator for delayed reduction (8 limbs for wider products).
   type UnreducedSum = S::UnreducedFieldInt;
+  /// F×F products use 9-limb unreduced accumulator (576 bits, 2R-scaled).
+  type UnreducedFieldField = S::UnreducedFieldField;
 
   fn get(&self, idx: usize) -> i64 {
     self.Z[idx]
@@ -208,6 +263,18 @@ where
   }
 
   fn unreduced_is_zero(acc: &S::UnreducedFieldInt) -> bool {
+    acc.is_zero()
+  }
+
+  fn accumulate_field_field_unreduced(acc: &mut Self::UnreducedFieldField, a: &S, b: &S) {
+    S::unreduced_field_field_mul_add(acc, a, b);
+  }
+
+  fn montgomery_reduce_ff(acc: &Self::UnreducedFieldField) -> S {
+    S::reduce_field_field(acc)
+  }
+
+  fn unreduced_field_field_is_zero(acc: &Self::UnreducedFieldField) -> bool {
     acc.is_zero()
   }
 }

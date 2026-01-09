@@ -43,15 +43,30 @@ where
   /// Unreduced accumulator for field × integer products.
   /// - For i32/i64: SignedWideLimbs<6> (384 bits)
   /// - For i64/i128: SignedWideLimbs<8> (512 bits)
+  ///
   /// Sized to safely sum 2^(l/2) terms without overflow, assuming:
-  ///   field_bits + product_bits + (l/2) < 64*N
+  /// `field_bits + product_bits + (l/2) < 64*N`
   /// (N = limb count for this accumulator, 64 bits per limb).
-  type UnreducedFieldInt: Copy + Clone + Default + Debug + AddAssign + Send + Sync + num_traits::Zero;
+  type UnreducedFieldInt: Copy
+    + Clone
+    + Default
+    + Debug
+    + AddAssign
+    + Send
+    + Sync
+    + num_traits::Zero;
 
   /// Unreduced accumulator for field × field products (9 limbs, 576 bits).
   /// Used to delay modular reduction when summing many F × F products.
   /// The value is in 2R-scaled Montgomery form, reduced via Montgomery REDC.
-  type UnreducedFieldField: Copy + Clone + Default + Debug + AddAssign + Send + Sync;
+  type UnreducedFieldField: Copy
+    + Clone
+    + Default
+    + Debug
+    + AddAssign
+    + Send
+    + Sync
+    + num_traits::Zero;
 
   /// Multiply field element by signed integer and add to unreduced accumulator.
   /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
@@ -63,7 +78,11 @@ where
 
   /// Multiply two field elements and add to unreduced accumulator.
   /// acc += field_a × field_b (keeps result in 2R-scaled unreduced form)
-  fn unreduced_field_field_mul_add(acc: &mut Self::UnreducedFieldField, field_a: &Self, field_b: &Self);
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
+    field_a: &Self,
+    field_b: &Self,
+  );
 
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
