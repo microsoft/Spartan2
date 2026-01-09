@@ -8,9 +8,9 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial, small_field::SmallValueField, zip_with_for_each};
 use core::ops::Index;
-use ff::PrimeField;
+use ff::{Field, PrimeField};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -30,24 +30,30 @@ use serde::{Deserialize, Serialize};
 /// $$
 ///
 /// Vector $Z$ indicates $Z(e)$ where $e$ ranges from $0$ to $2^m-1$.
+///
+/// The type parameter `T` is the coefficient type. Typically this is a field element,
+/// but can also be any type with ring operations (add, sub, mul, zero).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MultilinearPolynomial<Scalar: PrimeField> {
-  pub(crate) Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
+pub struct MultilinearPolynomial<T> {
+  pub(crate) Z: Vec<T>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
 }
 
-impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
+impl<T> MultilinearPolynomial<T> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
   ///
   /// # Panics
   /// The number of evaluations must be a power of two.
-  pub fn new(Z: Vec<Scalar>) -> Self {
+  pub fn new(Z: Vec<T>) -> Self {
     MultilinearPolynomial { Z }
   }
+}
 
+impl<T: Field> MultilinearPolynomial<T> {
   /// Binds the polynomial's top variable using the given scalar.
   ///
   /// This operation modifies the polynomial in-place.
-  pub fn bind_poly_var_top(&mut self, r: &Scalar) {
+  /// Formula: new[i] = old[i] + r * (old[i + n] - old[i])
+  pub fn bind_poly_var_top(&mut self, r: &T) {
     assert!(
       self.Z.len() >= 2,
       "Vector Z must have at least two elements to bind the top variable."
@@ -58,14 +64,15 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     let (left, right) = self.Z.split_at_mut(n);
 
     zip_with_for_each!((left.par_iter_mut(), right.par_iter()), |a, b| {
+      // Field types implement Copy, so no cloning needed
       *a += *r * (*b - *a);
     });
 
     self.Z.truncate(n);
   }
 
-  /// binds the polynomial's top variables using the given scalars.
-  pub fn bind_with(poly: &[Scalar], L: &[Scalar], r_len: usize) -> Vec<Scalar> {
+  /// Binds the polynomial's top variables using the given scalars.
+  pub fn bind_with(poly: &[T], L: &[T], r_len: usize) -> Vec<T> {
     assert_eq!(
       poly.len(),
       L.len() * r_len,
@@ -79,7 +86,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     (0..r_len)
       .into_par_iter()
       .map(|i| {
-        let mut acc = Scalar::ZERO;
+        let mut acc = T::ZERO;
         for j in 0..L.len() {
           // row-major: index = j * r_len + i
           acc += L[j] * poly[j * r_len + i];
@@ -90,11 +97,108 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   }
 }
 
-impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
-  type Output = Scalar;
+impl<T: Copy> MultilinearPolynomial<T> {
+  /// Gathers prefix evaluations p(b, suffix) for all binary prefixes b ∈ {0,1}^ℓ₀.
+  ///
+  /// For a polynomial with ℓ variables, this extracts a strided slice where:
+  /// - First ℓ₀ variables form the "prefix" (high bits)
+  /// - Remaining ℓ-ℓ₀ variables form the "suffix" (low bits)
+  ///
+  /// Index layout: `index = (prefix << suffix_vars) | suffix`
+  ///
+  /// # Arguments
+  /// * `l0` - Number of prefix variables
+  /// * `suffix` - Fixed suffix value in range [0, 2^{ℓ-ℓ₀})
+  ///
+  /// # Returns
+  /// MultilinearPolynomial of size 2^ℓ₀ where result[prefix] = self[(prefix << suffix_vars) | suffix]
+  ///
+  /// # Example
+  /// For ℓ=4, ℓ₀=2, suffix=1:
+  /// - Returns polynomial with evals [self[1], self[5], self[9], self[13]]
+  /// - Indices: 0b0001, 0b0101, 0b1001, 0b1101 (prefix varies, suffix=01 fixed)
+  // Allow dead code until Chunk 7 (build_accumulators) uses this method
+  #[allow(dead_code)]
+  pub fn gather_prefix_evals(&self, l0: usize, suffix: usize) -> Self {
+    let l = self.Z.len().trailing_zeros() as usize;
+    debug_assert_eq!(self.Z.len(), 1 << l, "poly size must be power of 2");
+
+    let suffix_vars = l - l0;
+    let prefix_size = 1 << l0;
+
+    debug_assert!(suffix < (1 << suffix_vars), "suffix out of range");
+
+    let mut Z = Vec::with_capacity(prefix_size);
+    for prefix in 0..prefix_size {
+      let idx = (prefix << suffix_vars) | suffix;
+      Z.push(self.Z[idx]); // Copy, no clone needed
+    }
+
+    MultilinearPolynomial::new(Z)
+  }
+}
+
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i32>)
+// ============================================================================
+
+impl MultilinearPolynomial<i32> {
+  /// Try to create from a field-element polynomial.
+  /// Returns None if any value doesn't fit in i32.
+  pub fn try_from_field<F: SmallValueField<i32>>(poly: &MultilinearPolynomial<F>) -> Option<Self> {
+    let evals: Option<Vec<i32>> = poly.Z.iter().map(|f| F::try_field_to_small(f)).collect();
+    evals.map(Self::new)
+  }
+
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<i32>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
+  }
+}
+
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i64>)
+// ============================================================================
+
+impl MultilinearPolynomial<i64> {
+  /// Try to create from a field-element polynomial.
+  /// Returns None if any value doesn't fit in i64.
+  pub fn try_from_field<F: SmallValueField<i64>>(poly: &MultilinearPolynomial<F>) -> Option<Self> {
+    let evals: Option<Vec<i64>> = poly
+      .Z
+      .iter()
+      .map(|f| crate::small_field::try_field_to_i64(f))
+      .collect();
+    evals.map(Self::new)
+  }
+
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<i64>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(
+      self
+        .Z
+        .iter()
+        .map(|&s| crate::small_field::i64_to_field(s))
+        .collect(),
+    )
+  }
+}
+
+impl<T> Index<usize> for MultilinearPolynomial<T> {
+  type Output = T;
 
   #[inline(always)]
-  fn index(&self, _index: usize) -> &Scalar {
+  fn index(&self, _index: usize) -> &T {
     &(self.Z[_index])
   }
 }
@@ -137,6 +241,8 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 mod tests {
   use super::*;
   use crate::{provider::pasta::pallas, zip_with};
+  use ff::Field;
+  use pallas::Scalar;
   use rand_core::{CryptoRng, OsRng, RngCore};
 
   /// Evaluates the polynomial at the given point.
@@ -301,5 +407,159 @@ mod tests {
   #[test]
   fn test_bind_and_evaluate() {
     bind_and_evaluate_with::<pallas::Scalar>();
+  }
+
+  /// Explicit check that bind_poly_var_top matches manual linear interpolation on the MSB.
+  #[test]
+  fn test_bind_matches_direct_evaluation_explicit() {
+    // ℓ=3, poly[i] = i^2 + 1
+    let l = 3;
+    let size = 1 << l;
+    let vals: Vec<Scalar> = (0..size)
+      .map(|i| Scalar::from((i * i + 1) as u64))
+      .collect();
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+
+    let r = Scalar::from(7u64);
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), size / 2);
+
+    // Bound variable is the MSB: new[j] = (1-r)*vals[j] + r*vals[j+4]
+    for j in 0..(size / 2) {
+      let expected = (Scalar::ONE - r) * vals[j] + r * vals[j + size / 2];
+      assert_eq!(poly.Z[j], expected, "Mismatch at j={}", j);
+    }
+  }
+
+  /// Ensure "top" refers to the MSB (high-order variable), not the LSB.
+  #[test]
+  fn test_bind_top_is_msb_not_lsb() {
+    // ℓ=2, values encode (x0,x1) with x0 as MSB: [p(0,0), p(0,1), p(1,0), p(1,1)]
+    let vals = vec![
+      Scalar::from(1u64), // (0,0)
+      Scalar::from(2u64), // (0,1)
+      Scalar::from(3u64), // (1,0)
+      Scalar::from(4u64), // (1,1)
+    ];
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+    let r = Scalar::from(5u64);
+
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), 2);
+
+    // Expected with MSB binding:
+    // new[0] = (1-r)*p(0,0) + r*p(1,0) = (1-5)*1 + 5*3 = 11
+    // new[1] = (1-r)*p(0,1) + r*p(1,1) = (1-5)*2 + 5*4 = 12
+    assert_eq!(poly.Z[0], Scalar::from(11u64));
+    assert_eq!(poly.Z[1], Scalar::from(12u64));
+
+    // If LSB were bound, results would differ (6 and 8 respectively).
+    assert_ne!(poly.Z[0], Scalar::from(6u64));
+    assert_ne!(poly.Z[1], Scalar::from(8u64));
+  }
+
+  // === gather_prefix_evals tests ===
+
+  #[test]
+  fn test_gather_prefix_evals_all_suffixes() {
+    // ℓ=4, ℓ₀=2: 4 variables, first 2 are prefix
+    // poly[i] = i, so value equals index for easy verification
+    let l = 4;
+    let l0 = 2;
+    let size = 1 << l; // 16
+
+    let evals: Vec<pallas::Scalar> = (0..size).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let num_prefix = 1 << l0; // 4 prefix combinations
+    let suffix_vars = l - l0; // 2 suffix variables
+    let num_suffix = 1 << suffix_vars; // 4 suffix combinations
+
+    for suffix in 0..num_suffix {
+      let gathered = poly.gather_prefix_evals(l0, suffix);
+      assert_eq!(gathered.Z.len(), num_prefix);
+
+      for prefix in 0..num_prefix {
+        let expected_idx = (prefix << suffix_vars) | suffix;
+        let expected = pallas::Scalar::from(expected_idx as u64);
+        assert_eq!(
+          gathered[prefix], expected,
+          "Mismatch at suffix={}, prefix={}",
+          suffix, prefix
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn test_gather_prefix_l0_equals_l() {
+    // ℓ₀ = ℓ: no suffix variables, suffix must be 0
+    let l0 = 3;
+    let evals: Vec<pallas::Scalar> = (0..8).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let gathered = poly.gather_prefix_evals(l0, 0);
+
+    // Should return entire polynomial
+    assert_eq!(gathered.Z.len(), 8);
+    for i in 0..8 {
+      assert_eq!(gathered[i], pallas::Scalar::from(i as u64));
+    }
+  }
+
+  #[test]
+  fn test_gather_prefix_l0_equals_1() {
+    // ℓ₀ = 1: single prefix bit
+    let l0 = 1;
+    let evals: Vec<pallas::Scalar> = (0..16).map(|i| pallas::Scalar::from(i as u64)).collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    // suffix = 5 (binary 101): should get indices 5, 13
+    let gathered = poly.gather_prefix_evals(l0, 5);
+    assert_eq!(gathered.Z.len(), 2);
+    assert_eq!(gathered[0], pallas::Scalar::from(5u64)); // prefix=0: 0*8 + 5 = 5
+    assert_eq!(gathered[1], pallas::Scalar::from(13u64)); // prefix=1: 1*8 + 5 = 13
+  }
+
+  #[test]
+  fn test_gather_then_extend_preserves_binary_points() {
+    use crate::lagrange_accumulator::{LagrangeEvaluatedMultilinearPolynomial, LagrangeIndex};
+    use ff::Field;
+
+    let l = 4;
+    let l0 = 2;
+
+    // Random polynomial
+    let evals: Vec<pallas::Scalar> = (0..(1 << l))
+      .map(|_| pallas::Scalar::random(&mut OsRng))
+      .collect();
+    let poly = MultilinearPolynomial::new(evals);
+
+    let suffix_vars = l - l0;
+    let num_suffix = 1 << suffix_vars;
+
+    for suffix in 0..num_suffix {
+      let gathered = poly.gather_prefix_evals(l0, suffix);
+
+      // Extend to Lagrange domain
+      let extended = LagrangeEvaluatedMultilinearPolynomial::<_, 3>::from_multilinear(&gathered);
+
+      // Verify: at binary points, extended values match original poly values
+      for prefix_bits in 0..(1 << l0) {
+        let original_idx = (prefix_bits << suffix_vars) | suffix;
+        let original_val = poly[original_idx];
+
+        // Convert binary prefix to U_D^ℓ₀ tuple
+        let tuple = LagrangeIndex::<3>::from_binary(prefix_bits, l0);
+
+        assert_eq!(
+          extended.get_by_domain(&tuple),
+          original_val,
+          "Mismatch at suffix={}, prefix_bits={}",
+          suffix,
+          prefix_bits
+        );
+      }
+    }
   }
 }

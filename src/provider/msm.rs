@@ -481,8 +481,15 @@ mod tests {
     for bit_width in [1, 4, 8, 10, 16, 20, 32, 40, 64] {
       println!("bit_width: {bit_width}");
       assert!(bit_width <= 64); // Ensure we don't overflow F::from
+      let _bound = 1u128 << bit_width;
       let coeffs: Vec<u64> = (0..n)
-        .map(|_| rand::random::<u64>() % (1 << bit_width))
+        .map(|_| {
+          if bit_width == 64 {
+            rand::random::<u64>()
+          } else {
+            rand::random::<u64>() % (1 << bit_width)
+          }
+        })
         .collect::<Vec<_>>();
       let coeffs_scalar: Vec<F> = coeffs.iter().map(|b| F::from(*b)).collect::<Vec<_>>();
       let general = msm(&coeffs_scalar, &bases, true);

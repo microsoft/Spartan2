@@ -9,7 +9,6 @@
 //! that is generic over the polynomial commitment and evaluation argument (i.e., a PCS).
 #![deny(
   warnings,
-  unused,
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,
@@ -22,13 +21,20 @@
 #![forbid(unsafe_code)]
 
 // private modules
+mod csr;
 mod digest;
 mod math;
 mod nifs;
-mod polys;
 mod r1cs;
-mod sumcheck;
 mod zk;
+
+/// Lagrange accumulator algorithm for small-value sumcheck optimization (Algorithm 6).
+pub mod lagrange_accumulator;
+
+// modules with some public items for benchmarking
+pub mod polys;
+pub mod small_field;
+pub mod sumcheck;
 
 #[macro_use]
 mod macros;
@@ -36,13 +42,14 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
+pub mod gadgets;
 pub mod provider;
 pub mod traits;
 
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
-pub mod spartan_zk; // Spartan with zero-knowledge 
+pub mod spartan_zk; // Spartan with zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

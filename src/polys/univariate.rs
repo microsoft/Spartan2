@@ -32,7 +32,7 @@ pub struct UniPoly<Scalar: PrimeField> {
 ///
 /// The linear term coefficient is omitted to save space. For a polynomial $ax^2 + bx + c$,
 /// coefficients are stored as `vec![c, a]`. For $ax^3 + bx^2 + cx + d$, stored as `vec![d, c, a]`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompressedUniPoly<Scalar: PrimeField> {
   coeffs_except_linear_term: Vec<Scalar>,
 }
