@@ -76,17 +76,13 @@ where
   debug_assert_eq!(az.len(), 1usize << l, "poly size must be power of 2");
   debug_assert_eq!(az.len(), bz.len());
   debug_assert_eq!(taus.len(), l, "taus must have length ℓ");
-  debug_assert_eq!(l % 2, 0, "Algorithm 6 split expects even ℓ");
+  debug_assert!(l0 < l, "l0 must be < ℓ");
 
-  let half = l / 2;
-  let xout_vars = half.checked_sub(l0).expect("l0 must be <= ℓ/2");
-  debug_assert!(l0 <= half, "l0 must be <= ℓ/2");
-
-  let num_x_out = 1usize << xout_vars;
   let suffix_vars = l - l0;
   let prefix_size = 1usize << l0;
 
-  let eq_tables = precompute_eq_tables(taus, l0, half);
+  let (eq_tables, _in_vars, xout_vars) = precompute_eq_tables(taus, l0);
+  let num_x_out = 1usize << xout_vars;
   let BetaPrefixCache {
     cache: beta_prefix_cache,
     num_betas,
@@ -256,18 +252,15 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
     );
   }
   debug_assert_eq!(taus.len(), l, "taus must have length ℓ");
-  debug_assert_eq!(l % 2, 0, "Algorithm 6 split expects even ℓ");
+  debug_assert!(l0 < l, "l0 must be < ℓ");
 
-  let half = l / 2;
-  let xout_vars = half.checked_sub(l0).expect("l0 must be <= ℓ/2");
-  debug_assert!(l0 <= half, "l0 must be <= ℓ/2");
-
-  let num_x_out = 1usize << xout_vars;
   let suffix_vars = l - l0;
   let prefix_size = 1usize << l0;
   let d = polys.len();
 
-  let eq_tables = precompute_eq_tables(taus, l0, half);
+  let (eq_tables, in_vars, xout_vars) = precompute_eq_tables(taus, l0);
+  let num_x_out = 1usize << xout_vars;
+  let _num_x_in = 1usize << in_vars;
   let BetaPrefixCache {
     cache: beta_prefix_cache,
     num_betas,
@@ -366,18 +359,35 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
 // Helper functions
 // =============================================================================
 
-fn precompute_eq_tables<S: PrimeField>(taus: &[S], l0: usize, half: usize) -> EqSplitTables<S> {
-  let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // |{0,1}|^{ℓ/2}
-  let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // |{0,1}|^{ℓ/2-ℓ0}
+/// Precompute eq polynomial tables with balanced split for e_in and e_xout.
+///
+/// Returns (tables, in_vars, xout_vars) where:
+/// - in_vars = ceil((l - l0) / 2) - variables for inner loop (e_in)
+/// - xout_vars = floor((l - l0) / 2) - variables for outer loop (e_xout)
+///
+/// The balanced split reduces precomputation cost by ~33% compared to the
+/// asymmetric l/2 split, and enables odd number of rounds.
+fn precompute_eq_tables<S: PrimeField>(taus: &[S], l0: usize) -> (EqSplitTables<S>, usize, usize) {
+  let l = taus.len();
+  let suffix_vars = l - l0;
+  let in_vars = suffix_vars.div_ceil(2); // ceiling: e_in larger (inner loop, sequential access)
+  let xout_vars = suffix_vars - in_vars; // floor: e_xout smaller (outer loop, reused)
+
+  let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]); // 2^in_vars entries
+  let e_xout = EqPolynomial::evals_from_points(&taus[l0 + in_vars..]); // 2^xout_vars entries
   let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round, total 2^l0 - 1
   let e_y_sizes: Vec<usize> = e_y.iter().map(|v| v.len()).collect();
 
-  EqSplitTables {
-    e_in,
-    e_xout,
-    e_y,
-    e_y_sizes,
-  }
+  (
+    EqSplitTables {
+      e_in,
+      e_xout,
+      e_y,
+      e_y_sizes,
+    },
+    in_vars,
+    xout_vars,
+  )
 }
 
 fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
@@ -576,7 +586,11 @@ mod tests {
   fn test_build_accumulators_spartan_matches_naive() {
     let l0 = 2;
     let l = 4;
-    let half = l / 2;
+
+    // Balanced split for eq tables (matches precompute_eq_tables)
+    let suffix_vars = l - l0; // 2
+    let in_vars = (suffix_vars + 1) / 2; // 1
+    let xout_vars = suffix_vars - in_vars; // 1
 
     // Define deterministic Az, Bz, Cz over {0,1}^4
     // Use a SATISFYING witness: Cz = Az * Bz
@@ -612,9 +626,9 @@ mod tests {
     // Implementation under test
     let acc_impl = build_accumulators_spartan(&az, &bz, &taus, l0);
 
-    // Precompute eq tables for naive computation (split approach)
-    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]); // τ[2..4]
-    let e_xout = EqPolynomial::evals_from_points(&taus[half + l0..]); // τ[4..] (empty -> [1])
+    // Precompute eq tables for naive computation (balanced split)
+    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]); // τ[2..3]
+    let e_xout = EqPolynomial::evals_from_points(&taus[l0 + in_vars..]); // τ[3..4]
     let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0);
 
     let num_betas = (D + 1).pow(l0 as u32);
@@ -625,43 +639,44 @@ mod tests {
     // Naive accumulators
     let mut acc_naive: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(l0);
 
-    // x_out domain size = 1 (xout_vars = 0)
-    let x_out_bits = 0usize;
-    let ex = e_xout[x_out_bits];
-
+    // Iterate over x_out and x_in with balanced split
     #[allow(clippy::needless_range_loop)]
-    for x_in_bits in 0..(1 << half) {
-      let suffix = x_in_bits; // x_out = 0
+    for x_out_bits in 0..(1 << xout_vars) {
+      let ex = e_xout[x_out_bits];
 
-      let az_pref = az.gather_prefix_evals(l0, suffix);
-      let bz_pref = bz.gather_prefix_evals(l0, suffix);
-      let cz_pref = cz.gather_prefix_evals(l0, suffix);
+      for x_in_bits in 0..(1 << in_vars) {
+        let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-      let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
-      let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
-      let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
+        let az_pref = az.gather_prefix_evals(l0, suffix);
+        let bz_pref = bz.gather_prefix_evals(l0, suffix);
+        let cz_pref = cz.gather_prefix_evals(l0, suffix);
 
-      let e_in_eval = e_in[x_in_bits];
+        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+        let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
-      #[allow(clippy::needless_range_loop)]
-      for beta_idx in 0..num_betas {
-        let beta_tuple = az_ext.to_domain_tuple(beta_idx);
-        let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
-        let prod = if beta_tuple.has_infinity() {
-          ab
-        } else {
-          ab - cz_ext.get(beta_idx)
-        };
-        let val = e_in_eval * prod;
+        let e_in_eval = e_in[x_in_bits];
 
-        for pref in &idx4_cache[beta_idx] {
-          let ey = e_y[pref.round_0idx()][pref.y_idx];
-          acc_naive.accumulate(
-            pref.round_0idx(),
-            pref.v_idx,
-            pref.u.to_index(),
-            ey * ex * val,
-          );
+        #[allow(clippy::needless_range_loop)]
+        for beta_idx in 0..num_betas {
+          let beta_tuple = az_ext.to_domain_tuple(beta_idx);
+          let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
+          let prod = if beta_tuple.has_infinity() {
+            ab
+          } else {
+            ab - cz_ext.get(beta_idx)
+          };
+          let val = e_in_eval * prod;
+
+          for pref in &idx4_cache[beta_idx] {
+            let ey = e_y[pref.round_0idx()][pref.y_idx];
+            acc_naive.accumulate(
+              pref.round_0idx(),
+              pref.v_idx,
+              pref.u.to_index(),
+              ey * ex * val,
+            );
+          }
         }
       }
     }
@@ -695,7 +710,10 @@ mod tests {
   fn test_infinity_drops_cz() {
     let l0 = 1;
     let l = 2;
-    let half = l / 2;
+
+    // Balanced split for eq tables
+    let suffix_vars = l - l0; // 1
+    let in_vars = (suffix_vars + 1) / 2; // 1
 
     // Two constant polynomials: 1 and -1, product = -1
     let ones = MultilinearPolynomial::new(vec![Scalar::ONE; 1 << l]);
@@ -706,8 +724,8 @@ mod tests {
     // Use generic build_accumulators with D=2 for product of two polynomials
     let acc = build_accumulators::<Scalar, 2>(&[&ones, &neg_ones], &taus, l0);
 
-    // Compute e_in sum = Σ eq(τ[l0..l0+half], xin), here half=1, l0=1 -> slice τ[1]
-    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + half]);
+    // Compute e_in sum = Σ eq(τ[l0..l0+in_vars], xin), here in_vars=1, l0=1 -> slice τ[1..2]
+    let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]);
     let e_in_eval_sum: Scalar = e_in.iter().copied().sum();
 
     // Round 0, v_idx=0
@@ -784,8 +802,12 @@ mod tests {
     const D: usize = 3; // Degree bound for product of 3 linear polynomials
 
     let n = 1usize << L;
-    let half = L / 2;
-    let xout_vars = half - L0;
+
+    // Balanced split for eq tables (matches precompute_eq_tables)
+    let suffix_vars = L - L0; // 7
+    let in_vars = (suffix_vars + 1) / 2; // 4
+    let xout_vars = suffix_vars - in_vars; // 3
+
     let num_betas = (D + 1).pow(L0 as u32);
 
     let mut rng = StdRng::seed_from_u64(42);
@@ -805,9 +827,9 @@ mod tests {
     // Build accumulators using generic Procedure 9
     let acc_impl = build_accumulators::<Scalar, D>(&[&p1, &p2, &p3], &taus, L0);
 
-    // ===== Naive computation for comparison (split approach) =====
-    let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + half]);
-    let e_xout = EqPolynomial::evals_from_points(&taus[half + L0..]);
+    // ===== Naive computation for comparison (balanced split) =====
+    let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + in_vars]);
+    let e_xout = EqPolynomial::evals_from_points(&taus[L0 + in_vars..]);
     let e_y = compute_suffix_eq_pyramid(&taus[..L0], L0);
 
     let idx4_cache: Vec<Vec<_>> = (0..num_betas)
@@ -821,7 +843,7 @@ mod tests {
       let ex = e_xout[x_out_bits];
 
       #[allow(clippy::needless_range_loop)]
-      for x_in_bits in 0..(1 << half) {
+      for x_in_bits in 0..(1 << in_vars) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
         // Gather prefix evaluations and extend to Lagrange domain
@@ -977,6 +999,118 @@ mod tests {
             got, expect,
             "Mismatch at round {}, v_idx {}, u_idx {}",
             round, v_idx, u_idx
+          );
+        }
+      }
+    }
+  }
+
+  /// Test that odd number of rounds works correctly with balanced split.
+  ///
+  /// ℓ = 11 (odd), ℓ0 = 3, D = 2.
+  /// This tests the new balanced split which enables odd rounds.
+  /// With l=11, l0=3: suffix_vars=8, in_vars=4, xout_vars=4 (perfectly balanced!)
+  #[test]
+  fn test_build_accumulators_odd_rounds() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    const L: usize = 11; // Odd number of rounds
+    const L0: usize = 3;
+
+    let n = 1usize << L;
+
+    // Balanced split for eq tables
+    let suffix_vars = L - L0; // 8
+    let in_vars = (suffix_vars + 1) / 2; // 4
+    let xout_vars = suffix_vars - in_vars; // 4
+
+    let num_betas = (D + 1).pow(L0 as u32);
+
+    let mut rng = StdRng::seed_from_u64(123);
+
+    // Create satisfying witness: Cz = Az * Bz
+    let az_vals: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let bz_vals: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+    let az = MultilinearPolynomial::new(az_vals.clone());
+    let bz = MultilinearPolynomial::new(bz_vals.clone());
+    let cz = MultilinearPolynomial::new(
+      az_vals
+        .iter()
+        .zip(bz_vals.iter())
+        .map(|(a, b)| *a * *b)
+        .collect(),
+    );
+
+    // Random taus of length 11 (odd)
+    let taus: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+
+    // Build accumulators using optimized Spartan path
+    let acc_impl = build_accumulators_spartan(&az, &bz, &taus, L0);
+
+    // ===== Naive computation for comparison (balanced split) =====
+    let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + in_vars]);
+    let e_xout = EqPolynomial::evals_from_points(&taus[L0 + in_vars..]);
+    let e_y = compute_suffix_eq_pyramid(&taus[..L0], L0);
+
+    let idx4_cache: Vec<Vec<_>> = (0..num_betas)
+      .map(|b| compute_idx4(&LagrangeIndex::<D>::from_flat_index(b, L0)))
+      .collect();
+
+    let mut acc_naive: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(L0);
+
+    #[allow(clippy::needless_range_loop)]
+    for x_out_bits in 0..(1 << xout_vars) {
+      let ex = e_xout[x_out_bits];
+
+      for x_in_bits in 0..(1 << in_vars) {
+        let suffix = (x_in_bits << xout_vars) | x_out_bits;
+
+        let az_pref = az.gather_prefix_evals(L0, suffix);
+        let bz_pref = bz.gather_prefix_evals(L0, suffix);
+        let cz_pref = cz.gather_prefix_evals(L0, suffix);
+
+        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+        let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
+
+        let e_in_eval = e_in[x_in_bits];
+
+        #[allow(clippy::needless_range_loop)]
+        for beta_idx in 0..num_betas {
+          let beta_tuple = az_ext.to_domain_tuple(beta_idx);
+          let ab = az_ext.get(beta_idx) * bz_ext.get(beta_idx);
+          let prod = if beta_tuple.has_infinity() {
+            ab
+          } else {
+            ab - cz_ext.get(beta_idx)
+          };
+          let val = e_in_eval * prod;
+
+          for pref in &idx4_cache[beta_idx] {
+            let ey = e_y[pref.round_0idx()][pref.y_idx];
+            acc_naive.accumulate(
+              pref.round_0idx(),
+              pref.v_idx,
+              pref.u.to_index(),
+              ey * ex * val,
+            );
+          }
+        }
+      }
+    }
+
+    // ===== Compare all accumulator buckets =====
+    for round in 0..L0 {
+      let num_v = (D + 1).pow(round as u32);
+      for v_idx in 0..num_v {
+        for u_idx in 0..D {
+          let got = acc_impl.get(round, v_idx, u_idx);
+          let expect = acc_naive.get(round, v_idx, u_idx);
+          assert_eq!(
+            got, expect,
+            "Mismatch at round {}, v_idx {}, u_idx {} for odd ℓ={}",
+            round, v_idx, u_idx, L
           );
         }
       }
