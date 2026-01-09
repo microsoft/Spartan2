@@ -1447,47 +1447,6 @@ pub(crate) mod lagrange_sumcheck {
     }
   }
 
-  /// Build s_i(0), s_i(1), s_i(2), s_i(3) for testing against the coefficient form.
-  #[allow(dead_code)]
-  pub(crate) fn build_univariate_round_evals<F: PrimeField>(
-    li: &UdEvaluations<F, 2>,
-    t0: F,
-    t1: F,
-    t_inf: F,
-  ) -> [F; 4] {
-    // Reconstruct t_i(X) = aX^2 + bX + c from t_i(∞), t_i(1), t_i(0).
-    let a = t_inf;
-    let c = t0;
-    let b = t1 - a - c;
-
-    // Evaluate t_i(2) = a(2)^2 + b(2) + c = 4a + 2b + c and t_i(3) = 9a + 3b + c efficiently.
-    let four_a = a.double().double();
-    let two_b = b.double();
-    let t2 = four_a + two_b + c;
-
-    // t_i(3) = a(3)^2 + b(3) + c = 9a + 3b + c with 9a = 8a + a and 3b = 2b + b.
-    let eight_a = four_a.double();
-    let nine_a = eight_a + a;
-    let three_b = b.double() + b;
-    let t3 = nine_a + three_b + c;
-
-    let linf = li.at_infinity();
-    let l0 = li.at_zero();
-    let l1 = li.at_one();
-
-    // Evaluate ℓ_i(2) and ℓ_i(3) from ℓ_i(X) = ℓ_∞X + ℓ_0.
-    let l2 = linf.double() + l0;
-    let l3 = l2 + linf;
-
-    // Use s_i(u) = ℓ_i(u)·t_i(u) for u ∈ {0, 1, 2, 3}.
-    let s0 = l0 * t0;
-    let s1 = l1 * t1;
-    let s2 = l2 * t2;
-    let s3 = l3 * t3;
-
-    [s0, s1, s2, s3]
-  }
-
   #[cfg(test)]
   mod tests {
     use super::*;
@@ -1502,26 +1461,6 @@ pub(crate) mod lagrange_sumcheck {
 
     type E = PallasHyraxEngine;
     type F = <E as Engine>::Scalar;
-
-    #[test]
-    fn test_round_polynomial_matches_evals() {
-      let l0 = F::from(2u64);
-      let linf = F::from(5u64);
-      let l1 = l0 + linf;
-      let li = UdEvaluations::new(linf, [l0, l1]);
-
-      let t0 = F::from(7u64);
-      let t1 = F::from(11u64);
-      let t_inf = F::from(13u64);
-
-      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
-      let evals = build_univariate_round_evals(&li, t0, t1, t_inf);
-
-      assert_eq!(poly.evaluate(&F::ZERO), evals[0]);
-      assert_eq!(poly.evaluate(&F::ONE), evals[1]);
-      assert_eq!(poly.evaluate(&F::from(2u64)), evals[2]);
-      assert_eq!(poly.evaluate(&F::from(3u64)), evals[3]);
-    }
 
     #[test]
     #[allow(clippy::needless_range_loop)]
@@ -1571,13 +1510,11 @@ pub(crate) mod lagrange_sumcheck {
         let t1 = derive_t1(li.at_zero(), li.at_one(), claim, t0)
           .expect("l1 should be non-zero for chosen taus");
 
-        let s_evals = build_univariate_round_evals(&li, t0, t1, t_inf);
-        assert_eq!(s_evals[0], expected_eval_0);
-        assert_eq!(s_evals[2], expected_eval_2);
-        assert_eq!(s_evals[3], expected_eval_3);
-
         let r_i = F::from((round + 7) as u64);
         let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+        assert_eq!(poly.evaluate(&F::ZERO), expected_eval_0);
+        assert_eq!(poly.evaluate(&F::from(2u64)), expected_eval_2);
+        assert_eq!(poly.evaluate(&F::from(3u64)), expected_eval_3);
         claim = poly.evaluate(&r_i);
 
         poly_A.bind_poly_var_top(&r_i);
@@ -1711,29 +1648,18 @@ pub(crate) mod lagrange_sumcheck {
       let li = small_value.eq_round_values(taus[0]);
       let t1 = derive_t1(li.at_zero(), li.at_one(), claim, t0).expect("l1 non-zero");
 
-      let evals_sv = build_univariate_round_evals(&li, t0, t1, t_inf);
+      let poly_sv = build_univariate_round_polynomial(&li, t0, t1, t_inf);
 
-      // Compare evaluations
-      assert_eq!(
-        evals_sv[0], evals_std[0],
-        "s(0) must match: sv={:?}, std={:?}",
-        evals_sv[0], evals_std[0]
-      );
-      assert_eq!(
-        evals_sv[1], evals_std[1],
-        "s(1) must match: sv={:?}, std={:?}",
-        evals_sv[1], evals_std[1]
-      );
-      assert_eq!(
-        evals_sv[2], evals_std[2],
-        "s(2) must match: sv={:?}, std={:?}",
-        evals_sv[2], evals_std[2]
-      );
-      assert_eq!(
-        evals_sv[3], evals_std[3],
-        "s(3) must match: sv={:?}, std={:?}",
-        evals_sv[3], evals_std[3]
-      );
+      // Compare evaluations at 0, 1, 2, 3
+      let sv0 = poly_sv.evaluate(&F::ZERO);
+      let sv1 = poly_sv.evaluate(&F::ONE);
+      let sv2 = poly_sv.evaluate(&F::from(2u64));
+      let sv3 = poly_sv.evaluate(&F::from(3u64));
+
+      assert_eq!(sv0, evals_std[0], "s(0) must match: sv={:?}, std={:?}", sv0, evals_std[0]);
+      assert_eq!(sv1, evals_std[1], "s(1) must match: sv={:?}, std={:?}", sv1, evals_std[1]);
+      assert_eq!(sv2, evals_std[2], "s(2) must match: sv={:?}, std={:?}", sv2, evals_std[2]);
+      assert_eq!(sv3, evals_std[3], "s(3) must match: sv={:?}, std={:?}", sv3, evals_std[3]);
     }
 
     #[test]

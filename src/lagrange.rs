@@ -1557,10 +1557,8 @@ mod tests {
     const D: usize = 3;
     let num_vars = 3;
 
-    // Create input as small values (using SmallValueField trait)
-    let input_small: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i + 1))
-      .collect();
+    // Create input as small values (i32 is identity)
+    let input_small: Vec<i32> = (0..(1 << num_vars)).map(|i| (i + 1) as i32).collect();
 
     // Create same input as field elements
     let input_field: Vec<Scalar> = (0..(1 << num_vars))
@@ -1583,10 +1581,8 @@ mod tests {
 
   #[test]
   fn test_small_lagrange_single_var() {
-    use crate::small_field::SmallValueField;
-
-    let p0: i32 = Scalar::small_from_i32(7);
-    let p1: i32 = Scalar::small_from_i32(19);
+    let p0: i32 = 7;
+    let p1: i32 = 19;
 
     let input = vec![p0, p1];
     let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 3>::from_boolean_evals(&input);
@@ -1601,14 +1597,10 @@ mod tests {
 
   #[test]
   fn test_small_lagrange_extend_in_place() {
-    use crate::small_field::SmallValueField;
-
     const D: usize = 2;
     let num_vars = 3;
 
-    let input: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i * 2 + 1))
-      .collect();
+    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| (i * 2 + 1) as i32).collect();
 
     // Extend using allocating version
     let ext1 = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
@@ -1640,9 +1632,7 @@ mod tests {
     const D: usize = 2;
     let num_vars = 2;
 
-    let input: Vec<i32> = (0..(1 << num_vars))
-      .map(|i| Scalar::small_from_i32(i + 1))
-      .collect();
+    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| (i + 1) as i32).collect();
 
     let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
     let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> =
@@ -1657,11 +1647,9 @@ mod tests {
 
   #[test]
   fn test_small_lagrange_negative_values() {
-    use crate::small_field::SmallValueField;
-
     // Test with negative differences (p0 > p1)
-    let p0: i32 = Scalar::small_from_i32(100);
-    let p1: i32 = Scalar::small_from_i32(50);
+    let p0: i32 = 100;
+    let p1: i32 = 50;
 
     let input = vec![p0, p1];
     let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 2>::from_boolean_evals(&input);

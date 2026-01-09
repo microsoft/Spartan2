@@ -399,7 +399,7 @@ where
 
 fn print_csv_header() {
   println!(
-    "chain_length,num_vars,num_constraints,witness_ms,orig_sumcheck_ms,small_sumcheck_ms,total_proving_ms,speedup,witness_pct"
+    "chain_length,num_vars,log2_constraints,num_constraints,witness_ms,orig_sumcheck_ms,small_sumcheck_ms,total_proving_ms,speedup,witness_pct"
   );
 }
 
@@ -410,10 +410,14 @@ fn print_csv_row(result: &BenchmarkResult) {
   let total_ms = result.witness_ms + result.extract_ms + result.small_sumcheck_ms;
   let witness_pct = (result.witness_ms as f64 / total_ms as f64) * 100.0;
 
+  // log2(num_constraints) = number of sumcheck rounds
+  let log2_constraints = (result.num_constraints as f64).log2();
+
   println!(
-    "{},{},{},{},{},{},{},{:.2},{:.1}",
+    "{},{},{:.3},{},{},{},{},{},{:.2},{:.1}",
     result.chain_length,
     result.num_vars,
+    log2_constraints,
     result.num_constraints,
     result.witness_ms,
     result.orig_sumcheck_ms,

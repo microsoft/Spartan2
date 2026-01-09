@@ -127,6 +127,9 @@ pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
   pub poly_prefs: Vec<Vec<S>>,
   /// Ping-pong buffer pairs for each polynomial's Lagrange extension. Size: d × 2 × (D+1)^l0
   pub buf_pairs: Vec<(Vec<S>, Vec<S>)>,
+  /// Scratch buffer holding which ping-pong buffer is active per polynomial.
+  /// This avoids allocating a Vec inside the inner x_in loop.
+  pub ext_buf_idx: Vec<usize>,
   /// JIT-computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}
   /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
   pub eyx: Vec<Vec<S>>,
@@ -148,6 +151,7 @@ impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
       buf_pairs: (0..num_polys)
         .map(|_| (vec![S::ZERO; ext_size], vec![S::ZERO; ext_size]))
         .collect(),
+      ext_buf_idx: vec![0; num_polys],
       eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }

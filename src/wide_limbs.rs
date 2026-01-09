@@ -36,8 +36,8 @@ use std::ops::{Add, AddAssign};
 /// # Type Parameters
 ///
 /// - `N`: Number of 64-bit limbs. Common values:
-///   - `N=6` (384 bits): For `UnreducedMontInt` (field × integer products)
-///   - `N=9` (576 bits): For `UnreducedMontMont` (field × field products)
+///   - `N=6` (384 bits): For `UnreducedFieldInt` (field × integer products)
+///   - `N=9` (576 bits): For `UnreducedFieldField` (field × field products)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WideLimbs<const N: usize>(pub [u64; N]);
 
@@ -242,7 +242,7 @@ pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> (bool, [u64; N]) {
 /// Generic pair of accumulators for signed products.
 ///
 /// This is the type-erased version of `SignedWideLimbs` that works with
-/// any unreduced accumulator type (via `SmallValueField::UnreducedMontInt`).
+/// any unreduced accumulator type (via `SmallValueField::UnreducedFieldInt`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignedAccumulator<T> {
   /// Accumulator for positive contributions

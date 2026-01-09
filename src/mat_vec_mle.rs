@@ -11,7 +11,7 @@
 //! - Field-element witnesses (`MultilinearPolynomial<S>`)
 //! - Small-value witnesses (`MultilinearPolynomial<i32>`) for the small-value optimization
 
-use crate::{polys::multilinear::MultilinearPolynomial, small_field::SmallValueField};
+use crate::{polys::multilinear::MultilinearPolynomial, small_field::DelayedReduction};
 use ff::PrimeField;
 use num_traits::Zero;
 use std::ops::{Add, AddAssign, Sub};
@@ -125,12 +125,12 @@ impl<S: PrimeField + Sync> MatVecMLE<S> for MultilinearPolynomial<S> {
 /// then reduced once at the end.
 impl<S> MatVecMLE<S> for MultilinearPolynomial<i32>
 where
-  S: SmallValueField<i32, IntermediateSmallValue = i64> + Sync,
+  S: DelayedReduction<i32, IntermediateSmallValue = i64> + Sync,
 {
   type Value = i32;
   type Product = i64;
   /// Unreduced accumulator for delayed reduction (handles sign internally).
-  type UnreducedSum = S::UnreducedMontInt;
+  type UnreducedSum = S::UnreducedFieldInt;
 
   fn get(&self, idx: usize) -> i32 {
     self.Z[idx]
@@ -148,16 +148,16 @@ where
     *sum += S::isl_mul(prod, e_in_eval);
   }
 
-  fn accumulate_eq_product_unreduced(acc: &mut S::UnreducedMontInt, prod: i64, e_in_eval: &S) {
-    // Sign handling is done internally by unreduced_mont_int_mul_add
-    S::unreduced_mont_int_mul_add(acc, e_in_eval, prod);
+  fn accumulate_eq_product_unreduced(acc: &mut S::UnreducedFieldInt, prod: i64, e_in_eval: &S) {
+    // Sign handling is done internally by unreduced_field_int_mul_add
+    S::unreduced_field_int_mul_add(acc, e_in_eval, prod);
   }
 
-  fn modular_reduction(acc: &S::UnreducedMontInt) -> S {
-    S::reduce_mont_int(acc)
+  fn modular_reduction(acc: &S::UnreducedFieldInt) -> S {
+    S::reduce_field_int(acc)
   }
 
-  fn unreduced_is_zero(acc: &S::UnreducedMontInt) -> bool {
+  fn unreduced_is_zero(acc: &S::UnreducedFieldInt) -> bool {
     acc.is_zero()
   }
 }
@@ -171,12 +171,12 @@ where
 /// then reduced once at the end.
 impl<S> MatVecMLE<S> for MultilinearPolynomial<i64>
 where
-  S: SmallValueField<i64, IntermediateSmallValue = i128> + Sync,
+  S: DelayedReduction<i64, IntermediateSmallValue = i128> + Sync,
 {
   type Value = i64;
   type Product = i128;
   /// Unreduced accumulator for delayed reduction (8 limbs for wider products).
-  type UnreducedSum = S::UnreducedMontInt;
+  type UnreducedSum = S::UnreducedFieldInt;
 
   fn get(&self, idx: usize) -> i64 {
     self.Z[idx]
@@ -194,15 +194,15 @@ where
     *sum += S::isl_mul(prod, e_in_eval);
   }
 
-  fn accumulate_eq_product_unreduced(acc: &mut S::UnreducedMontInt, prod: i128, e_in_eval: &S) {
-    S::unreduced_mont_int_mul_add(acc, e_in_eval, prod);
+  fn accumulate_eq_product_unreduced(acc: &mut S::UnreducedFieldInt, prod: i128, e_in_eval: &S) {
+    S::unreduced_field_int_mul_add(acc, e_in_eval, prod);
   }
 
-  fn modular_reduction(acc: &S::UnreducedMontInt) -> S {
-    S::reduce_mont_int(acc)
+  fn modular_reduction(acc: &S::UnreducedFieldInt) -> S {
+    S::reduce_field_int(acc)
   }
 
-  fn unreduced_is_zero(acc: &S::UnreducedMontInt) -> bool {
+  fn unreduced_is_zero(acc: &S::UnreducedFieldInt) -> bool {
     acc.is_zero()
   }
 }

@@ -84,33 +84,6 @@ where
   /// Used when multiplying two SmallValues together.
   type IntermediateSmallValue: Copy + Clone + Default + Debug + PartialEq + Eq + Send + Sync;
 
-  /// Unreduced accumulator for field × integer products.
-  /// - For i32/i64: SignedWideLimbs<6> (384 bits)
-  /// - For i64/i128: SignedWideLimbs<8> (512 bits)
-  type UnreducedMontInt: Copy + Clone + Default + Debug + AddAssign + Send + Sync + num_traits::Zero;
-
-  /// Unreduced accumulator for field × field products (9 limbs, 576 bits).
-  /// Used to delay modular reduction when summing many F × F products.
-  /// The value is in 2R-scaled Montgomery form, reduced via Montgomery REDC.
-  type UnreducedMontMont: Copy + Clone + Default + Debug + AddAssign + Send + Sync;
-
-  // ===== Constructors =====
-
-  /// Create a SmallValue from u32.
-  fn small_from_u32(val: u32) -> SmallValue;
-
-  /// Create a SmallValue from i32.
-  fn small_from_i32(val: i32) -> SmallValue;
-
-  /// Extract the inner i32 from a SmallValue (truncates for i64).
-  fn small_inner(val: SmallValue) -> i32;
-
-  // ===== Arithmetic =====
-
-  /// Multiply SmallValue by a small constant (for Lagrange extension).
-  /// p(k) = p0 + k * diff
-  fn ss_mul_const(a: SmallValue, k: i32) -> SmallValue;
-
   // ===== Core Multiplications =====
 
   /// ss: small × small → intermediate (i32 × i32 → i64, or i64 × i64 → i128)
@@ -123,10 +96,6 @@ where
   /// This is the key operation for accumulator building.
   fn isl_mul(small: Self::IntermediateSmallValue, large: &Self) -> Self;
 
-  /// isl_128: i128 × large → large
-  /// Used for i64/i128 small-value configuration.
-  fn isl_mul_128(small: i128, large: &Self) -> Self;
-
   // ===== Conversions =====
 
   /// Convert SmallValue to field element.
@@ -138,26 +107,66 @@ where
   /// Try to convert a field element to SmallValue.
   /// Returns None if the value doesn't fit.
   fn try_field_to_small(val: &Self) -> Option<SmallValue>;
+}
 
-  // ===== Delayed Reduction Operations =====
+/// Extension trait for delayed modular reduction operations.
+///
+/// This trait extends `SmallValueField` with operations that accumulate
+/// unreduced products in wide integers, reducing only at the end.
+/// Used in hot paths like matrix-vector multiplication where many products
+/// are summed together.
+///
+/// # Performance
+///
+/// Delaying reduction saves ~1 field multiplication per accumulation:
+/// - Without delayed reduction: N additions + N reductions
+/// - With delayed reduction: N additions + 1 reduction
+pub trait DelayedReduction<SmallValue>: SmallValueField<SmallValue>
+where
+  SmallValue: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Neg<Output = SmallValue>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync,
+{
+  /// Unreduced accumulator for field × integer products.
+  /// - For i32/i64: SignedWideLimbs<6> (384 bits)
+  /// - For i64/i128: SignedWideLimbs<8> (512 bits)
+  /// Sized to safely sum 2^(l/2) terms without overflow, assuming:
+  ///   field_bits + product_bits + (l/2) < 64*N
+  /// (N = limb count for this accumulator, 64 bits per limb).
+  type UnreducedFieldInt: Copy + Clone + Default + Debug + AddAssign + Send + Sync + num_traits::Zero;
+
+  /// Unreduced accumulator for field × field products (9 limbs, 576 bits).
+  /// Used to delay modular reduction when summing many F × F products.
+  /// The value is in 2R-scaled Montgomery form, reduced via Montgomery REDC.
+  type UnreducedFieldField: Copy + Clone + Default + Debug + AddAssign + Send + Sync;
 
   /// Multiply field element by signed integer and add to unreduced accumulator.
   /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
-  fn unreduced_mont_int_mul_add(
-    acc: &mut Self::UnreducedMontInt,
+  fn unreduced_field_int_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     small: Self::IntermediateSmallValue,
   );
 
   /// Multiply two field elements and add to unreduced accumulator.
   /// acc += field_a × field_b (keeps result in 2R-scaled unreduced form)
-  fn unreduced_mont_mont_mul_add(acc: &mut Self::UnreducedMontMont, field_a: &Self, field_b: &Self);
+  fn unreduced_field_field_mul_add(acc: &mut Self::UnreducedFieldField, field_a: &Self, field_b: &Self);
 
   /// Reduce an unreduced field×integer accumulator to a field element.
-  fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self;
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 
   /// Reduce an unreduced field×field accumulator to a field element.
-  fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self;
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
 }
 
 /// Convert i64 to field element (handles negative values correctly).
@@ -380,6 +389,214 @@ mod barrett {
   use std::ops::Neg;
 
   // ==========================================================================
+  // FieldReductionConstants - Trait for field-specific reduction constants
+  // ==========================================================================
+
+  /// Trait providing precomputed constants for efficient modular reduction.
+  ///
+  /// # Overview
+  ///
+  /// When reducing a wide integer (more than 4 limbs = 256 bits) modulo a prime p,
+  /// we need to handle "overflow limbs" that represent values ≥ 2^256. Each overflow
+  /// limb at position i represents the value `limb[i] × 2^(64×i)`.
+  ///
+  /// # The R Constants
+  ///
+  /// For each bit position beyond 256 bits, we precompute `2^k mod p`:
+  ///
+  /// | Constant | Value | Used When |
+  /// |----------|-------|-----------|
+  /// | `R256_MOD` | 2^256 mod p | Reducing 5th limb (bits 256-319) |
+  /// | `R320_MOD` | 2^320 mod p | Reducing 6th limb (bits 320-383) |
+  /// | `R384_MOD` | 2^384 mod p | Reducing 7th limb (bits 384-447) |
+  /// | `R448_MOD` | 2^448 mod p | Reducing 8th limb (bits 448-511) |
+  /// | `R512_MOD` | 2^512 mod p | Reducing 9th limb (bits 512-575) |
+  ///
+  /// # Example: 6-limb Reduction
+  ///
+  /// For a 6-limb value `c = [c0, c1, c2, c3, c4, c5]` representing:
+  /// ```text
+  /// c = c0 + c1·2^64 + c2·2^128 + c3·2^192 + c4·2^256 + c5·2^320
+  /// ```
+  ///
+  /// We reduce by computing:
+  /// ```text
+  /// c mod p = (c0 + c1·2^64 + c2·2^128 + c3·2^192)
+  ///         + c4·(2^256 mod p)
+  ///         + c5·(2^320 mod p)
+  /// ```
+  ///
+  /// Since `R256_MOD` and `R320_MOD` are 4-limb values (< 2^256), multiplying
+  /// by a single limb produces at most a 5-limb result, which can then be
+  /// reduced further if needed.
+  ///
+  /// # Why This Works
+  ///
+  /// By the properties of modular arithmetic:
+  /// `a ≡ b (mod p) ⟹ c·a ≡ c·b (mod p)`
+  ///
+  /// So `c5·2^320 ≡ c5·R320_MOD (mod p)`, and the right side is much smaller.
+  ///
+  /// # Performance
+  ///
+  /// This approach is ~3× faster than naive division because:
+  /// 1. We avoid actual division entirely
+  /// 2. Multiplying by precomputed R values is just 4-5 64-bit multiplications
+  /// 3. The reduction converges quickly (usually 1-2 iterations)
+  pub trait FieldReductionConstants {
+    /// The 4-limb prime modulus p (little-endian, 256 bits)
+    const MODULUS: [u64; 4];
+
+    /// 2×p as a 5-limb value (for Barrett reduction comparisons)
+    const MODULUS_2P: [u64; 5];
+
+    /// Barrett approximation constant μ = floor(2^128 / (p >> 191))
+    /// Used to estimate the quotient in Barrett reduction
+    const MU: u64;
+
+    /// 2^256 mod p - reduces the 5th limb (index 4) of a wide integer
+    const R256_MOD: [u64; 4];
+
+    /// 2^320 mod p - reduces the 6th limb (index 5) of a wide integer
+    const R320_MOD: [u64; 4];
+
+    /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
+    const R384_MOD: [u64; 4];
+
+    /// 2^448 mod p - reduces the 8th limb (index 7) of a wide integer
+    const R448_MOD: [u64; 4];
+
+    /// 2^512 mod p - reduces the 9th limb (index 8) of a wide integer
+    const R512_MOD: [u64; 4];
+
+    /// Montgomery inverse: -p^(-1) mod 2^64
+    /// Used in Montgomery REDC to eliminate low limbs
+    const MONT_INV: u64;
+  }
+
+  // ==========================================================================
+  // FieldReductionConstants implementation for Fp (Pallas base field)
+  // ==========================================================================
+
+  impl FieldReductionConstants for Fp {
+    // p = 0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001
+    const MODULUS: [u64; 4] = [
+      0x992d30ed00000001,
+      0x224698fc094cf91b,
+      0x0000000000000000,
+      0x4000000000000000,
+    ];
+
+    const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
+
+    const MU: u64 = 0xffffffffffffffff;
+
+    // 2^256 mod p = 0x3fffffffffffffff992c350be41914ad34786d38fffffffd
+    const R256_MOD: [u64; 4] = [
+      0x34786d38fffffffd,
+      0x992c350be41914ad,
+      0xffffffffffffffff,
+      0x3fffffffffffffff,
+    ];
+
+    // 2^320 mod p = 0x3fffffffffffffff76e59c0fdacc1b91bd91d548094cf917992d30ed00000001
+    const R320_MOD: [u64; 4] = [
+      0x992d30ed00000001,
+      0xbd91d548094cf917,
+      0x76e59c0fdacc1b91,
+      0x3fffffffffffffff,
+    ];
+
+    // 2^384 mod p
+    const R384_MOD: [u64; 4] = [
+      0xcb8792c700000003,
+      0x66d3caf41be6eb52,
+      0x9b4b3c4bfffffffc,
+      0x36e59c0fdacc1b91,
+    ];
+
+    // 2^448 mod p
+    const R448_MOD: [u64; 4] = [
+      0x9b9858f294cf91ba,
+      0x8635bd2c4252b065,
+      0x496d41af7b9cb714,
+      0x1b4b3c4bfffffffc,
+    ];
+
+    // 2^512 mod p
+    const R512_MOD: [u64; 4] = [
+      0x8c78ecb30000000f,
+      0xd7d30dbd8b0de0e7,
+      0x7797a99bc3c95d18,
+      0x096d41af7b9cb714,
+    ];
+
+    // -p^(-1) mod 2^64
+    const MONT_INV: u64 = 0x992d30ecffffffff;
+  }
+
+  // ==========================================================================
+  // FieldReductionConstants implementation for Fq (Pallas scalar field)
+  // ==========================================================================
+
+  impl FieldReductionConstants for Fq {
+    // q = 0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001
+    const MODULUS: [u64; 4] = [
+      0x8c46eb2100000001,
+      0x224698fc0994a8dd,
+      0x0000000000000000,
+      0x4000000000000000,
+    ];
+
+    const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
+
+    const MU: u64 = 0xffffffffffffffff;
+
+    // 2^256 mod q
+    const R256_MOD: [u64; 4] = [
+      0x5b2b3e9cfffffffd,
+      0x992c350be3420567,
+      0xffffffffffffffff,
+      0x3fffffffffffffff,
+    ];
+
+    // 2^320 mod q
+    const R320_MOD: [u64; 4] = [
+      0x8c46eb2100000001,
+      0xf12aec780994a8d9,
+      0x76e59c0fd9ad5c89,
+      0x3fffffffffffffff,
+    ];
+
+    // 2^384 mod q
+    const R384_MOD: [u64; 4] = [
+      0xa4d4c16300000003,
+      0x66d3caf41cbdfa98,
+      0xcee4537bfffffffc,
+      0x36e59c0fd9ad5c89,
+    ];
+
+    // 2^448 mod q
+    const R448_MOD: [u64; 4] = [
+      0xcc920bb9994a8dd9,
+      0x87a7dcbe1ff6e0d7,
+      0x496d41af7ccfdaa9,
+      0x0ee4537bfffffffc,
+    ];
+
+    // 2^512 mod q
+    const R512_MOD: [u64; 4] = [
+      0xfc9678ff0000000f,
+      0x67bb433d891a16e3,
+      0x7fae231004ccf590,
+      0x096d41af7ccfdaa9,
+    ];
+
+    // -q^(-1) mod 2^64
+    const MONT_INV: u64 = 0x8c46eb20ffffffff;
+  }
+
+  // ==========================================================================
   // Const helper to double a 4-limb value to 5-limb value
   // ==========================================================================
 
@@ -403,34 +620,6 @@ mod barrett {
     let r4 = c3 as u64;
     [r0, r1, r2, r3, r4]
   }
-
-  // ==========================================================================
-  // Precomputed constants for Pallas Fp (Base field)
-  // ==========================================================================
-
-  const PALLAS_FP: [u64; 4] = [
-    0x992d30ed00000001,
-    0x224698fc094cf91b,
-    0x0000000000000000,
-    0x4000000000000000,
-  ];
-
-  const PALLAS_FP_2P: [u64; 5] = double_limbs(PALLAS_FP);
-  const PALLAS_FP_MU: u64 = 0xffffffffffffffff;
-
-  // ==========================================================================
-  // Precomputed constants for Pallas Fq (Scalar field)
-  // ==========================================================================
-
-  const PALLAS_FQ: [u64; 4] = [
-    0x8c46eb2100000001,
-    0x224698fc0994a8dd,
-    0x0000000000000000,
-    0x4000000000000000,
-  ];
-
-  const PALLAS_FQ_2Q: [u64; 5] = double_limbs(PALLAS_FQ);
-  const PALLAS_FQ_MU: u64 = 0xffffffffffffffff;
 
   // ==========================================================================
   // Precomputed 2^64 constants for i128 multiplication
@@ -573,13 +762,6 @@ mod barrett {
     result
   }
 
-  /// Public version of mul_4_by_1 for use in trait impls.
-  #[allow(dead_code)] // Kept for debugging; main path uses fused MAC
-  #[inline(always)]
-  pub(super) fn mul_4_by_1_ext(a: &[u64; 4], b: u64) -> [u64; 5] {
-    mul_4_by_1(a, b)
-  }
-
   /// Multiply-accumulate: acc + a * b + carry → (low, high)
   ///
   /// Fused operation that computes one limb of a multiply-accumulate in a single step,
@@ -635,36 +817,32 @@ mod barrett {
     result
   }
 
+  /// Generic 5-limb Barrett reduction using trait constants.
+  /// Reduces a 5-limb value (up to 320 bits) modulo p.
   #[inline(always)]
-  fn barrett_reduce_5_fp(c: &[u64; 5]) -> [u64; 4] {
+  fn barrett_reduce_5<F: FieldReductionConstants>(c: &[u64; 5]) -> [u64; 4] {
     let c_tilde = (c[3] >> 63) | (c[4] << 1);
     let m = {
-      let product = (c_tilde as u128) * (PALLAS_FP_MU as u128);
+      let product = (c_tilde as u128) * (F::MU as u128);
       (product >> 64) as u64
     };
-    let m_times_2p = mul_5_by_1(&PALLAS_FP_2P, m);
+    let m_times_2p = mul_5_by_1(&F::MODULUS_2P, m);
     let mut r = sub_5_5(c, &m_times_2p);
     // At most 2 iterations needed: after Barrett approximation, 0 ≤ r < 2p
-    while gte_5_4(&r, &PALLAS_FP) {
-      r = sub_5_4(&r, &PALLAS_FP);
+    while gte_5_4(&r, &F::MODULUS) {
+      r = sub_5_4(&r, &F::MODULUS);
     }
     [r[0], r[1], r[2], r[3]]
   }
 
   #[inline(always)]
+  fn barrett_reduce_5_fp(c: &[u64; 5]) -> [u64; 4] {
+    barrett_reduce_5::<Fp>(c)
+  }
+
+  #[inline(always)]
   fn barrett_reduce_5_fq(c: &[u64; 5]) -> [u64; 4] {
-    let c_tilde = (c[3] >> 63) | (c[4] << 1);
-    let m = {
-      let product = (c_tilde as u128) * (PALLAS_FQ_MU as u128);
-      (product >> 64) as u64
-    };
-    let m_times_2q = mul_5_by_1(&PALLAS_FQ_2Q, m);
-    let mut r = sub_5_5(c, &m_times_2q);
-    // At most 2 iterations needed: after Barrett approximation, 0 ≤ r < 2q
-    while gte_5_4(&r, &PALLAS_FQ) {
-      r = sub_5_4(&r, &PALLAS_FQ);
-    }
-    [r[0], r[1], r[2], r[3]]
+    barrett_reduce_5::<Fq>(c)
   }
 
   #[inline(always)]
@@ -724,51 +902,27 @@ mod barrett {
   }
 
   // ==========================================================================
-  // 6-limb Barrett reduction (for UnreducedMontInt accumulator)
+  // 6-limb Barrett reduction (for UnreducedFieldInt accumulator)
   // ==========================================================================
 
-  // Precomputed: 2^320 mod p (for reducing the 6th limb)
-  // This allows us to convert c[5] * 2^320 into an equivalent value mod p
-  // that fits in 4 limbs, which we then add to the lower limbs.
-  //
-  // Computed as: pow(2, 320, p) for Pallas Fp
-  // p = 0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001
-  // 2^320 mod p = 0x3fffffffffffffff76e59c0fdacc1b91bd91d548094cf917992d30ed00000001
-  #[allow(dead_code)]
-  const R320_MOD_FP: [u64; 4] = [
-    0x992d30ed00000001,
-    0xbd91d548094cf917,
-    0x76e59c0fdacc1b91,
-    0x3fffffffffffffff,
-  ];
-
-  // 2^320 mod q for Pallas Fq
-  // q = 0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001
-  // 2^320 mod q = 0x3fffffffffffffff76e59c0fd9ad5c89f12aec780994a8d98c46eb2100000001
-  #[allow(dead_code)]
-  const R320_MOD_FQ: [u64; 4] = [
-    0x8c46eb2100000001,
-    0xf12aec780994a8d9,
-    0x76e59c0fd9ad5c89,
-    0x3fffffffffffffff,
-  ];
-
-  /// Barrett reduction for 6-limb input to Fp.
+  /// Generic 6-limb Barrett reduction using trait constants.
+  ///
+  /// Reduces a 6-limb value (up to 384 bits) modulo p using precomputed
+  /// R256 = 2^256 mod p and R320 = 2^320 mod p constants.
   ///
   /// Input is already in Montgomery form (R-scaled). This function reduces
   /// the 6-limb value mod p while preserving the Montgomery scaling.
   #[inline]
-  #[allow(dead_code)] // Will be used in accumulator optimization
-  pub(crate) fn barrett_reduce_6_fp(c: &[u64; 6]) -> [u64; 4] {
+  fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
     // Reduce c[5] * 2^320 ≡ c[5] * R320 (mod p), then reduce c[4] * 2^256, etc.
     // R320 = 2^320 mod p, R256 = 2^256 mod p
     //
     // We do: result = c[0..4] + c[4] * R256 + c[5] * R320 (mod p)
 
-    // c[4] * R256_MOD_FP (4x1 -> 5 limbs)
-    let c4_contrib = mul_4_by_1(&R256_MOD_FP, c[4]);
-    // c[5] * R320_MOD_FP (4x1 -> 5 limbs)
-    let c5_contrib = mul_4_by_1(&R320_MOD_FP, c[5]);
+    // c[4] * R256_MOD (4x1 -> 5 limbs)
+    let c4_contrib = mul_4_by_1(&F::R256_MOD, c[4]);
+    // c[5] * R320_MOD (4x1 -> 5 limbs)
+    let c5_contrib = mul_4_by_1(&F::R320_MOD, c[5]);
 
     // Sum: c[0..4] + c4_contrib + c5_contrib (could be up to 6 limbs)
     let mut sum = [0u64; 6];
@@ -787,24 +941,15 @@ mod barrett {
     if sum[5] == 0 && sum[4] == 0 {
       // Result fits in 4 limbs, just do final reduction
       let mut r = [sum[0], sum[1], sum[2], sum[3]];
-      while gte_4_4(&r, &PALLAS_FP) {
-        r = sub_4_4(&r, &PALLAS_FP);
+      while gte_4_4(&r, &F::MODULUS) {
+        r = sub_4_4(&r, &F::MODULUS);
       }
       return r;
     }
 
     // Recurse (this will terminate because sum < c in most cases)
-    barrett_reduce_6_fp(&sum)
+    barrett_reduce_6::<F>(&sum)
   }
-
-  // 2^256 mod p for Pallas Fp
-  // Computed as: pow(2, 256, p)
-  const R256_MOD_FP: [u64; 4] = [
-    0x34786d38fffffffd,
-    0x992c350be41914ad,
-    0xffffffffffffffff,
-    0x3fffffffffffffff,
-  ];
 
   #[inline(always)]
   fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
@@ -819,92 +964,32 @@ mod barrett {
     result
   }
 
-  /// Barrett reduction for 6-limb input to Fq.
   #[inline]
-  #[allow(dead_code)] // Will be used in accumulator optimization
-  pub(crate) fn barrett_reduce_6_fq(c: &[u64; 6]) -> [u64; 4] {
-    let c4_contrib = mul_4_by_1(&R256_MOD_FQ, c[4]);
-    let c5_contrib = mul_4_by_1(&R320_MOD_FQ, c[5]);
-
-    let mut sum = [0u64; 6];
-    let mut carry = 0u128;
-    for i in 0..4 {
-      let s = (c[i] as u128) + (c4_contrib[i] as u128) + (c5_contrib[i] as u128) + carry;
-      sum[i] = s as u64;
-      carry = s >> 64;
-    }
-    let s = (c4_contrib[4] as u128) + (c5_contrib[4] as u128) + carry;
-    sum[4] = s as u64;
-    sum[5] = (s >> 64) as u64;
-
-    if sum[5] == 0 && sum[4] == 0 {
-      let mut r = [sum[0], sum[1], sum[2], sum[3]];
-      while gte_4_4(&r, &PALLAS_FQ) {
-        r = sub_4_4(&r, &PALLAS_FQ);
-      }
-      return r;
-    }
-
-    barrett_reduce_6_fq(&sum)
+  #[allow(dead_code)]
+  pub(crate) fn barrett_reduce_6_fp(c: &[u64; 6]) -> [u64; 4] {
+    barrett_reduce_6::<Fp>(c)
   }
 
-  // 2^256 mod q for Pallas Fq
-  // Computed as: pow(2, 256, q)
-  const R256_MOD_FQ: [u64; 4] = [
-    0x5b2b3e9cfffffffd,
-    0x992c350be3420567,
-    0xffffffffffffffff,
-    0x3fffffffffffffff,
-  ];
-
-  // ==========================================================================
-  // 8-limb Barrett reduction (for i64/i128 UnreducedMontInt accumulator)
-  // ==========================================================================
-
-  // 2^384 mod p for Pallas Fp
-  // Computed as: pow(2, 384, p)
-  const R384_MOD_FP: [u64; 4] = [
-    0xcb8792c700000003,
-    0x66d3caf41be6eb52,
-    0x9b4b3c4bfffffffc,
-    0x36e59c0fdacc1b91,
-  ];
-
-  // 2^448 mod p for Pallas Fp
-  // Computed as: pow(2, 448, p)
-  const R448_MOD_FP: [u64; 4] = [
-    0x9b9858f294cf91ba,
-    0x8635bd2c4252b065,
-    0x496d41af7b9cb714,
-    0x1b4b3c4bfffffffc,
-  ];
-
-  // 2^384 mod q for Pallas Fq
-  // Computed as: pow(2, 384, q)
-  const R384_MOD_FQ: [u64; 4] = [
-    0xa4d4c16300000003,
-    0x66d3caf41cbdfa98,
-    0xcee4537bfffffffc,
-    0x36e59c0fd9ad5c89,
-  ];
-
-  // 2^448 mod q for Pallas Fq
-  // Computed as: pow(2, 448, q)
-  const R448_MOD_FQ: [u64; 4] = [
-    0xcc920bb9994a8dd9,
-    0x87a7dcbe1ff6e0d7,
-    0x496d41af7ccfdaa9,
-    0x0ee4537bfffffffc,
-  ];
-
-  /// Barrett reduction for 8-limb input to Fp.
-  /// Used for i64/i128 small-value optimization where products are 6 limbs
-  /// and we accumulate into 8 limbs.
   #[inline]
-  pub(crate) fn barrett_reduce_8_fp(c: &[u64; 8]) -> [u64; 4] {
+  #[allow(dead_code)]
+  pub(crate) fn barrett_reduce_6_fq(c: &[u64; 6]) -> [u64; 4] {
+    barrett_reduce_6::<Fq>(c)
+  }
+
+  // ==========================================================================
+  // 8-limb Barrett reduction (for i64/i128 UnreducedFieldInt accumulator)
+  // ==========================================================================
+
+  /// Generic 8-limb Barrett reduction using trait constants.
+  ///
+  /// Reduces an 8-limb value (up to 512 bits) modulo p using precomputed
+  /// R384 = 2^384 mod p and R448 = 2^448 mod p constants, then delegates
+  /// to 6-limb reduction.
+  #[inline]
+  fn barrett_reduce_8<F: FieldReductionConstants>(c: &[u64; 8]) -> [u64; 4] {
     // Reduce high limbs: c[6] * 2^384 + c[7] * 2^448
-    let c6_contrib = mul_4_by_1(&R384_MOD_FP, c[6]);
-    let c7_contrib = mul_4_by_1(&R448_MOD_FP, c[7]);
+    let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);
+    let c7_contrib = mul_4_by_1(&F::R448_MOD, c[7]);
 
     // Sum: c[0..6] + c6_contrib + c7_contrib
     let mut sum = [0u64; 6];
@@ -922,70 +1007,37 @@ mod barrett {
     sum[5] = s as u64;
 
     // Now reduce the 6-limb result
-    barrett_reduce_6_fp(&sum)
+    barrett_reduce_6::<F>(&sum)
   }
 
-  /// Barrett reduction for 8-limb input to Fq.
+  #[inline]
+  pub(crate) fn barrett_reduce_8_fp(c: &[u64; 8]) -> [u64; 4] {
+    barrett_reduce_8::<Fp>(c)
+  }
+
   #[inline]
   pub(crate) fn barrett_reduce_8_fq(c: &[u64; 8]) -> [u64; 4] {
-    let c6_contrib = mul_4_by_1(&R384_MOD_FQ, c[6]);
-    let c7_contrib = mul_4_by_1(&R448_MOD_FQ, c[7]);
-
-    let mut sum = [0u64; 6];
-    let mut carry = 0u128;
-    for i in 0..4 {
-      let s = (c[i] as u128) + (c6_contrib[i] as u128) + (c7_contrib[i] as u128) + carry;
-      sum[i] = s as u64;
-      carry = s >> 64;
-    }
-    let s = (c[4] as u128) + (c6_contrib[4] as u128) + (c7_contrib[4] as u128) + carry;
-    sum[4] = s as u64;
-    carry = s >> 64;
-    let s = (c[5] as u128) + carry;
-    sum[5] = s as u64;
-
-    barrett_reduce_6_fq(&sum)
+    barrett_reduce_8::<Fq>(c)
   }
 
   // ==========================================================================
-  // 9-limb Montgomery REDC (for UnreducedMontMont accumulator)
+  // 9-limb Montgomery REDC (for UnreducedFieldField accumulator)
   // ==========================================================================
 
-  // Precomputed: 2^512 mod p (for reducing high limbs)
-  // Used to reduce 9-limb values to 8 limbs before REDC
-  const R512_MOD_FP: [u64; 4] = [
-    0x8c78ecb30000000f,
-    0xd7d30dbd8b0de0e7,
-    0x7797a99bc3c95d18,
-    0x096d41af7b9cb714,
-  ];
-
-  const R512_MOD_FQ: [u64; 4] = [
-    0xfc9678ff0000000f,
-    0x67bb433d891a16e3,
-    0x7fae231004ccf590,
-    0x096d41af7ccfdaa9,
-  ];
-
-  // Montgomery constant: p' = -p^(-1) mod 2^64 (low word only needed for REDC)
-  const PALLAS_FP_INV: u64 = 0x992d30ecffffffff;
-  const PALLAS_FQ_INV: u64 = 0x8c46eb20ffffffff;
-
-  /// Montgomery REDC for 9-limb input to Fp.
+  /// Generic Montgomery REDC for 9-limb input using trait constants.
   ///
   /// Reduces a 2R-scaled value (sum of field×field products) to 1R-scaled.
   /// Input: T representing x·R² (up to 9 limbs)
   /// Output: x·R mod p (4 limbs, standard Montgomery form)
   #[inline]
-  #[allow(dead_code)] // Will be used in accumulator optimization
-  pub(crate) fn montgomery_reduce_9_fp(c: &[u64; 9]) -> [u64; 4] {
+  fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
     // Step 1: Reduce 9 limbs to 8 limbs using precomputed 2^512 mod p
     let mut t = [0u64; 9];
     if c[8] == 0 {
       t[..8].copy_from_slice(&c[..8]);
     } else {
-      // t = c[0..8] + c[8] * R512_MOD_FP
-      let high_contribution = mul_4_by_1(&R512_MOD_FP, c[8]);
+      // t = c[0..8] + c[8] * R512_MOD
+      let high_contribution = mul_4_by_1(&F::R512_MOD, c[8]);
       let mut carry = 0u128;
       for i in 0..5 {
         let sum = (c[i] as u128) + (high_contribution[i] as u128) + carry;
@@ -1001,20 +1053,18 @@ mod barrett {
 
       // Recurse if still > 8 limbs
       if t[8] > 0 {
-        return montgomery_reduce_9_fp(&t);
+        return montgomery_reduce_9::<F>(&t);
       }
     }
 
     // Step 2: Montgomery REDC on 8-limb value
-    // t contains our value, need to reduce to 4 limbs
-    montgomery_reduce_8_fp(&[t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]])
+    montgomery_reduce_8::<F>(&[t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]])
   }
 
-  /// Montgomery REDC for 8-limb input.
+  /// Generic Montgomery REDC for 8-limb input.
   /// Standard Montgomery reduction: T × R⁻¹ mod p
   #[inline]
-  #[allow(dead_code)]
-  fn montgomery_reduce_8_fp(t: &[u64; 8]) -> [u64; 4] {
+  fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
     // Use 9 limbs to track overflow
     let mut r = [t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], 0u64];
 
@@ -1022,11 +1072,11 @@ mod barrett {
     // by adding appropriate multiples of p
     for i in 0..4 {
       // q = r[i] * p' mod 2^64
-      let q = r[i].wrapping_mul(PALLAS_FP_INV);
+      let q = r[i].wrapping_mul(F::MONT_INV);
 
       // r += q * p * 2^(64*i)
       // qp = q * p, which is 5 limbs (since p is 4 limbs and q is 1 limb)
-      let qp = mul_4_by_1(&PALLAS_FP, q);
+      let qp = mul_4_by_1(&F::MODULUS, q);
 
       let mut carry = 0u128;
       for j in 0..5 {
@@ -1050,87 +1100,28 @@ mod barrett {
     let mut result = [r[4], r[5], r[6], r[7], r[8]];
 
     // Reduce until result < p
-    while result[4] > 0 || gte_4_4(&[result[0], result[1], result[2], result[3]], &PALLAS_FP) {
-      let sub = sub_5_4(&result, &PALLAS_FP);
+    while result[4] > 0 || gte_4_4(&[result[0], result[1], result[2], result[3]], &F::MODULUS) {
+      let sub = sub_5_4(&result, &F::MODULUS);
       result = sub;
     }
 
     [result[0], result[1], result[2], result[3]]
-  }
-
-  /// Montgomery REDC for 9-limb input to Fq.
-  #[inline]
-  #[allow(dead_code)] // Will be used in accumulator optimization
-  pub(crate) fn montgomery_reduce_9_fq(c: &[u64; 9]) -> [u64; 4] {
-    let mut t = [0u64; 9];
-    if c[8] == 0 {
-      t[..8].copy_from_slice(&c[..8]);
-    } else {
-      let high_contribution = mul_4_by_1(&R512_MOD_FQ, c[8]);
-      let mut carry = 0u128;
-      for i in 0..5 {
-        let sum = (c[i] as u128) + (high_contribution[i] as u128) + carry;
-        t[i] = sum as u64;
-        carry = sum >> 64;
-      }
-      for i in 5..8 {
-        let sum = (c[i] as u128) + carry;
-        t[i] = sum as u64;
-        carry = sum >> 64;
-      }
-      t[8] = carry as u64;
-
-      if t[8] > 0 {
-        return montgomery_reduce_9_fq(&t);
-      }
-    }
-
-    montgomery_reduce_8_fq(&[t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]])
   }
 
   #[inline]
   #[allow(dead_code)]
-  fn montgomery_reduce_8_fq(t: &[u64; 8]) -> [u64; 4] {
-    // Use 9 limbs to track overflow
-    let mut r = [t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], 0u64];
+  pub(crate) fn montgomery_reduce_9_fp(c: &[u64; 9]) -> [u64; 4] {
+    montgomery_reduce_9::<Fp>(c)
+  }
 
-    for i in 0..4 {
-      let q = r[i].wrapping_mul(PALLAS_FQ_INV);
-      let qp = mul_4_by_1(&PALLAS_FQ, q);
-
-      let mut carry = 0u128;
-      for j in 0..5 {
-        let sum = (r[i + j] as u128) + (qp[j] as u128) + carry;
-        r[i + j] = sum as u64;
-        carry = sum >> 64;
-      }
-      // Propagate remaining carry through the rest of the array
-      for item in r[(i + 5)..9].iter_mut() {
-        let sum = (*item as u128) + carry;
-        *item = sum as u64;
-        carry = sum >> 64;
-        if carry == 0 {
-          break;
-        }
-      }
-    }
-
-    // Now r[0..4] should be zero (by construction), result is in r[4..9]
-    // We need to reduce this to [0, q)
-    let mut result = [r[4], r[5], r[6], r[7], r[8]];
-
-    // Reduce until result < q
-    while result[4] > 0 || gte_4_4(&[result[0], result[1], result[2], result[3]], &PALLAS_FQ) {
-      let sub = sub_5_4(&result, &PALLAS_FQ);
-      result = sub;
-    }
-
-    [result[0], result[1], result[2], result[3]]
+  #[inline]
+  #[allow(dead_code)]
+  pub(crate) fn montgomery_reduce_9_fq(c: &[u64; 9]) -> [u64; 4] {
+    montgomery_reduce_9::<Fq>(c)
   }
 
   // Helper functions for 4-limb operations
   #[inline(always)]
-  #[allow(dead_code)]
   fn gte_4_4(a: &[u64; 4], b: &[u64; 4]) -> bool {
     for i in (0..4).rev() {
       if a[i] > b[i] {
@@ -1277,19 +1268,19 @@ mod barrett {
     fn test_constants_match_halo2curves() {
       let p_minus_one = -Fp::ONE;
       let expected = Fp::from_raw([
-        PALLAS_FP[0].wrapping_sub(1),
-        PALLAS_FP[1],
-        PALLAS_FP[2],
-        PALLAS_FP[3],
+        Fp::MODULUS[0].wrapping_sub(1),
+        Fp::MODULUS[1],
+        Fp::MODULUS[2],
+        Fp::MODULUS[3],
       ]);
       assert_eq!(p_minus_one, expected);
 
       let q_minus_one = -Fq::ONE;
       let expected = Fq::from_raw([
-        PALLAS_FQ[0].wrapping_sub(1),
-        PALLAS_FQ[1],
-        PALLAS_FQ[2],
-        PALLAS_FQ[3],
+        Fq::MODULUS[0].wrapping_sub(1),
+        Fq::MODULUS[1],
+        Fq::MODULUS[2],
+        Fq::MODULUS[3],
       ]);
       assert_eq!(q_minus_one, expected);
     }
@@ -1584,28 +1575,6 @@ fn try_field_to_small_impl<F: PrimeField>(val: &F) -> Option<i32> {
 
 impl SmallValueField<i32> for halo2curves::pasta::Fp {
   type IntermediateSmallValue = i64;
-  type UnreducedMontInt = SignedWideLimbs<6>;
-  type UnreducedMontMont = WideLimbs<9>;
-
-  #[inline]
-  fn small_from_u32(val: u32) -> i32 {
-    val as i32
-  }
-
-  #[inline]
-  fn small_from_i32(val: i32) -> i32 {
-    val
-  }
-
-  #[inline]
-  fn small_inner(val: i32) -> i32 {
-    val
-  }
-
-  #[inline]
-  fn ss_mul_const(a: i32, k: i32) -> i32 {
-    a * k
-  }
 
   #[inline]
   fn ss_mul(a: i32, b: i32) -> i64 {
@@ -1620,11 +1589,6 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   #[inline]
   fn isl_mul(small: i64, large: &Self) -> Self {
     barrett::mul_fp_by_i64(large, small)
-  }
-
-  #[inline]
-  fn isl_mul_128(small: i128, large: &Self) -> Self {
-    barrett::mul_fp_by_i128(large, small)
   }
 
   #[inline]
@@ -1644,9 +1608,14 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   fn try_field_to_small(val: &Self) -> Option<i32> {
     try_field_to_small_impl(val)
   }
+}
+
+impl DelayedReduction<i32> for halo2curves::pasta::Fp {
+  type UnreducedFieldInt = SignedWideLimbs<6>;
+  type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
+  fn unreduced_field_int_mul_add(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u64)
@@ -1670,8 +1639,8 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn unreduced_mont_mont_mul_add(
-    acc: &mut Self::UnreducedMontMont,
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
   ) {
@@ -1687,7 +1656,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
     let r = Self(barrett::barrett_reduce_6_fp(&mag));
@@ -1695,35 +1664,13 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     Self(barrett::montgomery_reduce_9_fp(&acc.0))
   }
 }
 
 impl SmallValueField<i64> for halo2curves::pasta::Fp {
   type IntermediateSmallValue = i128;
-  type UnreducedMontInt = SignedWideLimbs<8>;
-  type UnreducedMontMont = WideLimbs<9>;
-
-  #[inline]
-  fn small_from_u32(val: u32) -> i64 {
-    val as i64
-  }
-
-  #[inline]
-  fn small_from_i32(val: i32) -> i64 {
-    val as i64
-  }
-
-  #[inline]
-  fn small_inner(val: i64) -> i32 {
-    val as i32
-  }
-
-  #[inline]
-  fn ss_mul_const(a: i64, k: i32) -> i64 {
-    a * (k as i64)
-  }
 
   #[inline]
   fn ss_mul(a: i64, b: i64) -> i128 {
@@ -1749,11 +1696,6 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
     let product = barrett::mul_4_by_2_ext(&large.0, mag);
     let result = Self(barrett::barrett_reduce_6_fp(&product));
     if is_neg { -result } else { result }
-  }
-
-  #[inline]
-  fn isl_mul_128(small: i128, large: &Self) -> Self {
-    <Self as SmallValueField<i64>>::isl_mul(small, large)
   }
 
   #[inline]
@@ -1793,9 +1735,14 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
 
     None
   }
+}
+
+impl DelayedReduction<i64> for halo2curves::pasta::Fp {
+  type UnreducedFieldInt = SignedWideLimbs<8>;
+  type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
+  fn unreduced_field_int_mul_add(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i128) {
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
     } else {
@@ -1835,8 +1782,8 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn unreduced_mont_mont_mul_add(
-    acc: &mut Self::UnreducedMontMont,
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
   ) {
@@ -1851,7 +1798,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
     let r = Self(barrett::barrett_reduce_8_fp(&mag));
@@ -1859,35 +1806,13 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
-  fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     Self(barrett::montgomery_reduce_9_fp(&acc.0))
   }
 }
 
 impl SmallValueField<i32> for halo2curves::pasta::Fq {
   type IntermediateSmallValue = i64;
-  type UnreducedMontInt = SignedWideLimbs<6>;
-  type UnreducedMontMont = WideLimbs<9>;
-
-  #[inline]
-  fn small_from_u32(val: u32) -> i32 {
-    val as i32
-  }
-
-  #[inline]
-  fn small_from_i32(val: i32) -> i32 {
-    val
-  }
-
-  #[inline]
-  fn small_inner(val: i32) -> i32 {
-    val
-  }
-
-  #[inline]
-  fn ss_mul_const(a: i32, k: i32) -> i32 {
-    a * k
-  }
 
   #[inline]
   fn ss_mul(a: i32, b: i32) -> i64 {
@@ -1902,11 +1827,6 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   #[inline]
   fn isl_mul(small: i64, large: &Self) -> Self {
     barrett::mul_fq_by_i64(large, small)
-  }
-
-  #[inline]
-  fn isl_mul_128(small: i128, large: &Self) -> Self {
-    barrett::mul_fq_by_i128(large, small)
   }
 
   #[inline]
@@ -1926,9 +1846,14 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   fn try_field_to_small(val: &Self) -> Option<i32> {
     try_field_to_small_impl(val)
   }
+}
+
+impl DelayedReduction<i32> for halo2curves::pasta::Fq {
+  type UnreducedFieldInt = SignedWideLimbs<6>;
+  type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i64) {
+  fn unreduced_field_int_mul_add(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i64) {
     // Handle sign: accumulate into pos or neg based on sign of small
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u64)
@@ -1952,8 +1877,8 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn unreduced_mont_mont_mul_add(
-    acc: &mut Self::UnreducedMontMont,
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
   ) {
@@ -1968,7 +1893,7 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<6>(&acc.pos.0, &acc.neg.0);
     let r = Self(barrett::barrett_reduce_6_fq(&mag));
@@ -1976,35 +1901,13 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     Self(barrett::montgomery_reduce_9_fq(&acc.0))
   }
 }
 
 impl SmallValueField<i64> for halo2curves::pasta::Fq {
   type IntermediateSmallValue = i128;
-  type UnreducedMontInt = SignedWideLimbs<8>;
-  type UnreducedMontMont = WideLimbs<9>;
-
-  #[inline]
-  fn small_from_u32(val: u32) -> i64 {
-    val as i64
-  }
-
-  #[inline]
-  fn small_from_i32(val: i32) -> i64 {
-    val as i64
-  }
-
-  #[inline]
-  fn small_inner(val: i64) -> i32 {
-    val as i32
-  }
-
-  #[inline]
-  fn ss_mul_const(a: i64, k: i32) -> i64 {
-    a * (k as i64)
-  }
 
   #[inline]
   fn ss_mul(a: i64, b: i64) -> i128 {
@@ -2030,11 +1933,6 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
     let product = barrett::mul_4_by_2_ext(&large.0, mag);
     let result = Self(barrett::barrett_reduce_6_fq(&product));
     if is_neg { -result } else { result }
-  }
-
-  #[inline]
-  fn isl_mul_128(small: i128, large: &Self) -> Self {
-    barrett::mul_fq_by_i128(large, small)
   }
 
   #[inline]
@@ -2072,9 +1970,14 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
 
     None
   }
+}
+
+impl DelayedReduction<i64> for halo2curves::pasta::Fq {
+  type UnreducedFieldInt = SignedWideLimbs<8>;
+  type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_mont_int_mul_add(acc: &mut Self::UnreducedMontInt, field: &Self, small: i128) {
+  fn unreduced_field_int_mul_add(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i128) {
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u128)
     } else {
@@ -2114,8 +2017,8 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn unreduced_mont_mont_mul_add(
-    acc: &mut Self::UnreducedMontMont,
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
   ) {
@@ -2130,7 +2033,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn reduce_mont_int(acc: &Self::UnreducedMontInt) -> Self {
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     let (neg, mag) = sub_mag::<8>(&acc.pos.0, &acc.neg.0);
     let r = Self(barrett::barrett_reduce_8_fq(&mag));
@@ -2138,7 +2041,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
-  fn reduce_mont_mont(acc: &Self::UnreducedMontMont) -> Self {
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     Self(barrett::montgomery_reduce_9_fq(&acc.0))
   }
 }
@@ -2158,20 +2061,20 @@ mod tests {
 
   #[test]
   fn test_small_value_field_arithmetic() {
-    let a = <Scalar as SmallValueField<i32>>::small_from_i32(10);
-    let b = <Scalar as SmallValueField<i32>>::small_from_i32(3);
+    let a: i32 = 10;
+    let b: i32 = 3;
 
     assert_eq!(a + b, 13);
     assert_eq!(a - b, 7);
     assert_eq!(-a, -10);
     assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(a, b), 30i64);
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul_const(a, 5), 50);
+    assert_eq!(a * 5, 50); // ss_mul_const is just native multiplication
   }
 
   #[test]
   fn test_small_value_field_negative() {
-    let a = <Scalar as SmallValueField<i32>>::small_from_i32(-5);
-    let b = <Scalar as SmallValueField<i32>>::small_from_i32(3);
+    let a: i32 = -5;
+    let b: i32 = 3;
 
     assert_eq!(a + b, -2);
     assert_eq!(a - b, -8);
@@ -2313,7 +2216,7 @@ mod tests {
   #[test]
   fn test_ss_zero_edge_cases() {
     let zero = 0i32;
-    let val = <Scalar as SmallValueField<i32>>::small_from_i32(12345);
+    let val = 12345i32;
 
     assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(zero, val), 0i64);
     assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(val, zero), 0i64);
@@ -2345,8 +2248,8 @@ mod tests {
   fn test_fp_small_value_field() {
     use halo2curves::pasta::Fp;
 
-    let a = <Fp as SmallValueField<i32>>::small_from_i32(42);
-    let b = <Fp as SmallValueField<i32>>::small_from_i32(-10);
+    let a: i32 = 42;
+    let b: i32 = -10;
 
     assert_eq!(a + b, 32);
     assert_eq!(<Fp as SmallValueField<i32>>::ss_mul(a, b), -420i64);
@@ -2357,7 +2260,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unreduced_mont_int_mul_add() {
+  fn test_unreduced_field_int_mul_add() {
     use crate::wide_limbs::SignedWideLimbs;
     use ff::Field;
     use rand_core::{OsRng, RngCore};
@@ -2377,16 +2280,16 @@ mod tests {
         -(small_u as i64)
       };
 
-      <Scalar as SmallValueField<i32>>::unreduced_mont_int_mul_add(&mut acc, &field, small);
+      <Scalar as DelayedReduction<i32>>::unreduced_field_int_mul_add(&mut acc, &field, small);
       expected += field * i64_to_field::<Scalar>(small);
     }
 
-    let result = <Scalar as SmallValueField<i32>>::reduce_mont_int(&acc);
+    let result = <Scalar as DelayedReduction<i32>>::reduce_field_int(&acc);
     assert_eq!(result, expected);
   }
 
   #[test]
-  fn test_unreduced_mont_mont_mul_add() {
+  fn test_unreduced_field_field_mul_add() {
     use crate::wide_limbs::WideLimbs;
     use ff::Field;
     use rand_core::OsRng;
@@ -2400,16 +2303,16 @@ mod tests {
       let a = Scalar::random(&mut rng);
       let b = Scalar::random(&mut rng);
 
-      <Scalar as SmallValueField<i32>>::unreduced_mont_mont_mul_add(&mut acc, &a, &b);
+      <Scalar as DelayedReduction<i32>>::unreduced_field_field_mul_add(&mut acc, &a, &b);
       expected += a * b;
     }
 
-    let result = <Scalar as SmallValueField<i32>>::reduce_mont_mont(&acc);
+    let result = <Scalar as DelayedReduction<i32>>::reduce_field_field(&acc);
     assert_eq!(result, expected);
   }
 
   #[test]
-  fn test_unreduced_mont_int_many_products() {
+  fn test_unreduced_field_int_many_products() {
     use crate::wide_limbs::SignedWideLimbs;
     use ff::Field;
     use rand_core::{OsRng, RngCore};
@@ -2431,16 +2334,16 @@ mod tests {
         0 // occasionally zero
       };
 
-      <Scalar as SmallValueField<i32>>::unreduced_mont_int_mul_add(&mut acc, &field, small);
+      <Scalar as DelayedReduction<i32>>::unreduced_field_int_mul_add(&mut acc, &field, small);
       expected += field * i64_to_field::<Scalar>(small);
     }
 
-    let result = <Scalar as SmallValueField<i32>>::reduce_mont_int(&acc);
+    let result = <Scalar as DelayedReduction<i32>>::reduce_field_int(&acc);
     assert_eq!(result, expected);
   }
 
   #[test]
-  fn test_unreduced_mont_mont_many_products() {
+  fn test_unreduced_field_field_many_products() {
     use crate::wide_limbs::WideLimbs;
     use ff::Field;
     use rand_core::OsRng;
@@ -2454,11 +2357,11 @@ mod tests {
       let a = Scalar::random(&mut rng);
       let b = Scalar::random(&mut rng);
 
-      <Scalar as SmallValueField<i32>>::unreduced_mont_mont_mul_add(&mut acc, &a, &b);
+      <Scalar as DelayedReduction<i32>>::unreduced_field_field_mul_add(&mut acc, &a, &b);
       expected += a * b;
     }
 
-    let result = <Scalar as SmallValueField<i32>>::reduce_mont_mont(&acc);
+    let result = <Scalar as DelayedReduction<i32>>::reduce_field_field(&acc);
     assert_eq!(result, expected);
   }
 }

@@ -307,6 +307,10 @@ where
         }
 
         // Inner loop over x_in - accumulate into UNREDUCED form
+        // Each beta_partial_sums[beta_idx] accumulates 2^(l/2) terms per x_out.
+        // Safety bound for UnreducedFieldInt (N limbs, 64 bits per limb):
+        //   field_bits + product_bits + (l/2) < 64*N
+        // i32 path: N=6, product_bits<=62; i64 path: N=8, product_bits<=126.
         for (x_in_bits, &e_in_eval) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
@@ -490,23 +494,26 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           }
 
           // Extend all d polynomials in-place (zero allocation)
-          // Collect buffer indices and sizes for each polynomial
-          let ext_results: Vec<(usize, usize)> = state
+          // Record which ping-pong buffer is active per polynomial.
+          for (k, (pref, (buf_a, buf_b))) in state
             .poly_prefs
             .iter()
             .zip(state.buf_pairs.iter_mut())
-            .map(|(pref, (buf_a, buf_b))| {
-              LagrangeEvaluatedMultilinearPolynomial::<S, D>::extend_in_place(pref, buf_a, buf_b)
-            })
-            .collect();
+            .enumerate()
+          {
+            let (buf_idx, _size) =
+              LagrangeEvaluatedMultilinearPolynomial::<S, D>::extend_in_place(pref, buf_a, buf_b);
+            state.ext_buf_idx[k] = buf_idx;
+          }
 
           // Compute ∏ p_k(β) for each beta
           for (beta_idx, sum) in state.beta_partial_sums.iter_mut().enumerate() {
-            let prod: S = ext_results
+            let prod: S = state
+              .buf_pairs
               .iter()
-              .zip(state.buf_pairs.iter())
-              .map(|((buf_idx, _size), (buf_a, buf_b))| {
-                if *buf_idx == 0 {
+              .zip(state.ext_buf_idx.iter())
+              .map(|((buf_a, buf_b), &buf_idx)| {
+                if buf_idx == 0 {
                   buf_a[beta_idx]
                 } else {
                   buf_b[beta_idx]
