@@ -12,14 +12,12 @@
 
 use crate::{
   CommitmentKey,
-  accumulators::{SPARTAN_T_DEGREE, build_accumulators_spartan},
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
-  eq_linear,
   errors::SpartanError,
-  mat_vec_mle::MatVecMLE,
+  lagrange_accumulator::{MatVecMLE, SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1},
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -630,7 +628,7 @@ impl<E: Engine> SumcheckProof<E> {
       let li = small_value.eq_round_values(taus[round]);
 
       // 3. Derive t(1) from sumcheck constraint: s(0) + s(1) = claim
-      let t1 = eq_linear::derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0)
+      let t1 = derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0)
         .ok_or(SpartanError::InvalidSumcheckProof)?;
 
       // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
@@ -1362,16 +1360,17 @@ pub(crate) mod eq_sumcheck {
 pub(crate) mod lagrange_sumcheck {
 
   use crate::{
-    accumulators::LagrangeAccumulators,
-    eq_linear::EqRoundFactor,
-    lagrange::{LagrangeBasisFactory, LagrangeCoeff, UdEvaluations, UdHatEvaluations},
+    lagrange_accumulator::{
+      EqRoundFactor, LagrangeAccumulators, LagrangeBasisFactory, LagrangeCoeff, LagrangeEvals,
+      LagrangeHatEvals,
+    },
     polys::univariate::UniPoly,
   };
   use ff::PrimeField;
 
   // Re-export for tests
   #[cfg(test)]
-  pub(crate) use crate::eq_linear::derive_t1;
+  pub(crate) use crate::lagrange_accumulator::derive_t1;
 
   /// Tracks the small-value sum-check state for the first ℓ₀ rounds.
   pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
@@ -1402,17 +1401,17 @@ pub(crate) mod lagrange_sumcheck {
     }
 
     /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
-    pub(crate) fn eval_t_all_u(&self, round: usize) -> UdHatEvaluations<Scalar, D> {
+    pub(crate) fn eval_t_all_u(&self, round: usize) -> LagrangeHatEvals<Scalar, D> {
       self.accumulators.round(round).eval_t_all_u(&self.coeff)
     }
 
     /// Compute ℓ_i values for the provided w_i.
-    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> UdEvaluations<Scalar, 2> {
+    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> LagrangeEvals<Scalar, 2> {
       self.eq_factor.values(w_i)
     }
 
     /// Advance the round state with the verifier challenge r_i.
-    pub(crate) fn advance(&mut self, li: &UdEvaluations<Scalar, 2>, r_i: Scalar) {
+    pub(crate) fn advance(&mut self, li: &LagrangeEvals<Scalar, 2>, r_i: Scalar) {
       self.eq_factor.advance(li, r_i);
       self.coeff.extend(&self.basis_factory.basis_at(r_i));
     }
@@ -1420,7 +1419,7 @@ pub(crate) mod lagrange_sumcheck {
 
   /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
   pub(crate) fn build_univariate_round_polynomial<F: PrimeField>(
-    li: &UdEvaluations<F, 2>,
+    li: &LagrangeEvals<F, 2>,
     t0: F,
     t1: F,
     t_inf: F,
@@ -1451,7 +1450,7 @@ pub(crate) mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      accumulators::{SPARTAN_T_DEGREE, build_accumulators_spartan},
+      lagrange_accumulator::{SPARTAN_T_DEGREE, build_accumulators_spartan},
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,

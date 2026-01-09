@@ -523,7 +523,7 @@ mod tests {
 
   #[test]
   fn test_gather_then_extend_preserves_binary_points() {
-    use crate::lagrange::{LagrangeEvaluatedMultilinearPolynomial, UdTuple};
+    use crate::lagrange_accumulator::{LagrangeEvaluatedMultilinearPolynomial, LagrangeIndex};
     use ff::Field;
 
     let l = 4;
@@ -550,7 +550,7 @@ mod tests {
         let original_val = poly[original_idx];
 
         // Convert binary prefix to U_D^ℓ₀ tuple
-        let tuple = UdTuple::<3>::from_binary(prefix_bits, l0);
+        let tuple = LagrangeIndex::<3>::from_binary(prefix_bits, l0);
 
         assert_eq!(
           extended.get_by_domain(&tuple),

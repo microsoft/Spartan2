@@ -21,19 +21,15 @@
 #![forbid(unsafe_code)]
 
 // private modules
-mod accumulator_index;
-/// Accumulator building for sumcheck (public for benchmarking)
-pub mod accumulators;
 mod csr;
 mod digest;
-mod eq_linear;
-mod lagrange;
-mod mat_vec_mle;
 mod math;
 mod nifs;
 mod r1cs;
-mod thread_state_accumulators;
 mod zk;
+
+/// Lagrange accumulator algorithm for small-value sumcheck optimization (Algorithm 6).
+pub mod lagrange_accumulator;
 
 // modules with some public items for benchmarking
 pub mod polys;

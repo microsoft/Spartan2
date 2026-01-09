@@ -11,7 +11,7 @@
 //! allocations to the fold identity closure (called once per Rayon thread subdivision),
 //! we reduce allocations from O(num_x_out) to O(num_threads).
 
-use crate::accumulators::LagrangeAccumulators;
+use super::accumulator::LagrangeAccumulators;
 use ff::PrimeField;
 use std::ops::AddAssign;
 
@@ -43,10 +43,11 @@ use std::ops::AddAssign;
 ///
 /// # Buffer Layout
 ///
-/// - `az_buf_a/b`, `bz_buf_a/b`: Separate ping-pong buffer pairs for Az and Bz Lagrange
-///   extensions. We need 4 buffers (not 2) because both extension results must be
-///   available simultaneously to compute Az(β) × Bz(β) for each β.
-/// - `eyx`: JIT-computed `e_y[round] * e_xout[x_out_bits]` scratch buffer. Stays hot in L1.
+/// - `az_buf_curr/scratch`, `bz_buf_curr/scratch`: Separate buffer pairs for Az and Bz
+///   Lagrange extensions. After `extend_in_place`, the result is always in `*_buf_curr`.
+///   We need 4 buffers (not 2) because both extension results must be available
+///   simultaneously to compute Az(β) × Bz(β) for each β.
+/// - `eyx`: On-the-fly computed `e_y[round] * e_xout[x_out_bits]` scratch buffer. Stays hot in L1.
 ///
 /// # Type Parameters
 ///
@@ -69,13 +70,15 @@ pub(crate) struct SpartanThreadState<
   pub az_pref: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
   pub bz_pref: Vec<V>,
-  /// Ping-pong buffers for Az Lagrange extension. Size: (D+1)^l0 each
-  pub az_buf_a: Vec<V>,
-  pub az_buf_b: Vec<V>,
-  /// Ping-pong buffers for Bz Lagrange extension. Size: (D+1)^l0 each
-  pub bz_buf_a: Vec<V>,
-  pub bz_buf_b: Vec<V>,
-  /// JIT-computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}
+  /// Result buffer for Az Lagrange extension. After `extend_in_place`, contains the extended values.
+  pub az_buf_curr: Vec<V>,
+  /// Scratch buffer for Az Lagrange extension. Used during iterative extension.
+  pub az_buf_scratch: Vec<V>,
+  /// Result buffer for Bz Lagrange extension. After `extend_in_place`, contains the extended values.
+  pub bz_buf_curr: Vec<V>,
+  /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
+  pub bz_buf_scratch: Vec<V>,
+  /// On-the-fly computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}.
   /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
   pub eyx: Vec<Vec<S>>,
 }
@@ -95,10 +98,10 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
       beta_partial_sums: vec![U::default(); num_betas],
       az_pref: vec![V::default(); prefix_size],
       bz_pref: vec![V::default(); prefix_size],
-      az_buf_a: vec![V::default(); ext_size],
-      az_buf_b: vec![V::default(); ext_size],
-      bz_buf_a: vec![V::default(); ext_size],
-      bz_buf_b: vec![V::default(); ext_size],
+      az_buf_curr: vec![V::default(); ext_size],
+      az_buf_scratch: vec![V::default(); ext_size],
+      bz_buf_curr: vec![V::default(); ext_size],
+      bz_buf_scratch: vec![V::default(); ext_size],
       eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }
@@ -125,12 +128,11 @@ pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
   pub beta_partial_sums: Vec<S>,
   /// Prefix evaluations for each of the d polynomials. Size: d × 2^l0
   pub poly_prefs: Vec<Vec<S>>,
-  /// Ping-pong buffer pairs for each polynomial's Lagrange extension. Size: d × 2 × (D+1)^l0
+  /// Buffer pairs for each polynomial's Lagrange extension: (result, scratch).
+  /// After `extend_in_place`, the result is always in the first element of each pair.
+  /// Size: d × 2 × (D+1)^l0
   pub buf_pairs: Vec<(Vec<S>, Vec<S>)>,
-  /// Scratch buffer holding which ping-pong buffer is active per polynomial.
-  /// This avoids allocating a Vec inside the inner x_in loop.
-  pub ext_buf_idx: Vec<usize>,
-  /// JIT-computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}
+  /// On-the-fly computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}.
   /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
   pub eyx: Vec<Vec<S>>,
 }
@@ -151,7 +153,6 @@ impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
       buf_pairs: (0..num_polys)
         .map(|_| (vec![S::ZERO; ext_size], vec![S::ZERO; ext_size]))
         .collect(),
-      ext_buf_idx: vec![0; num_polys],
       eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
     }
   }

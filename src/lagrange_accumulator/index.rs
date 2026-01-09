@@ -10,7 +10,7 @@
 //! - [`AccumulatorPrefixIndex`]: Describes how an evaluation prefix β contributes to accumulators
 //! - [`compute_idx4`]: Maps evaluation prefixes β ∈ U_d^ℓ₀ to accumulator contributions
 
-use crate::lagrange::{UdHatPoint, UdPoint, UdTuple};
+use super::domain::{LagrangeHatPoint, LagrangeIndex, LagrangePoint};
 
 /// A single contribution from β to an accumulator A_i(v, u).
 ///
@@ -35,7 +35,7 @@ pub struct AccumulatorPrefixIndex<const D: usize> {
   pub v_idx: usize,
 
   /// Coordinate u = βᵢ ∈ Û_d (type-safe, excludes value 1)
-  pub u: UdHatPoint<D>,
+  pub u: LagrangeHatPoint<D>,
 
   /// Binary suffix y = (β_{i+1}, ..., β_{ℓ₀}) as flat index in {0,1}^{ℓ₀-i}
   pub y_idx: usize,
@@ -99,11 +99,11 @@ impl<const D: usize> From<&AccumulatorPrefixIndex<D>> for CachedPrefixIndex {
 /// 2. The coordinate u = β[i-1] is in Û_d (i.e., u ≠ 1)
 ///
 /// Returns contributions as `AccumulatorPrefixIndex`.
-pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixIndex<D>> {
+pub fn compute_idx4<const D: usize>(beta: &LagrangeIndex<D>) -> Vec<AccumulatorPrefixIndex<D>> {
   let l0 = beta.len();
 
   let mut result = Vec::new();
-  let base = UdPoint::<D>::BASE;
+  let base = LagrangePoint::<D>::BASE;
 
   // Phase 1: Compute prefix indices (forward pass)
   // prefix_idx[i] = flat index of β[0..i] in U_d^i (mixed-radix encoding)
@@ -127,8 +127,8 @@ pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixI
     // Propagate binary status from suffix
     suffix_is_binary[i] = suffix_is_binary[i + 1];
     let bit = match point {
-      UdPoint::Finite(0) => 0,
-      UdPoint::Finite(1) => 1,
+      LagrangePoint::Finite(0) => 0,
+      LagrangePoint::Finite(1) => 1,
       _ => unreachable!("binary points must be 0 or 1"),
     };
     let shift = l0 - 1 - i;
@@ -165,10 +165,15 @@ pub fn compute_idx4<const D: usize>(beta: &UdTuple<D>) -> Vec<AccumulatorPrefixI
 mod tests {
   use super::*;
 
-  /// Helper: construct UdTuple from flat indices
+  /// Helper: construct LagrangeIndex from flat indices
   /// 0 → ∞, 1 → 0, 2 → 1, 3 → 2, ...
-  fn tuple_from_indices<const D: usize>(indices: &[usize]) -> UdTuple<D> {
-    UdTuple(indices.iter().map(|&i| UdPoint::from_index(i)).collect())
+  fn tuple_from_indices<const D: usize>(indices: &[usize]) -> LagrangeIndex<D> {
+    LagrangeIndex(
+      indices
+        .iter()
+        .map(|&i| LagrangePoint::from_index(i))
+        .collect(),
+    )
   }
 
   #[test]
@@ -177,7 +182,7 @@ mod tests {
       l0: 5,
       round: 3,
       v_idx: 10,
-      u: UdHatPoint::Finite(2),
+      u: LagrangeHatPoint::Finite(2),
       y_idx: 3,
     };
 
@@ -198,7 +203,7 @@ mod tests {
     // Round 1: v=(), u=value 0, y=(Finite(1),Finite(0)) → y_idx = 2
     let round1 = contributions.iter().find(|c| c.round == 1).unwrap();
     assert_eq!(round1.v_idx, 0);
-    assert_eq!(round1.u, UdHatPoint::Finite(0));
+    assert_eq!(round1.u, LagrangeHatPoint::Finite(0));
     assert_eq!(round1.y_idx, 2); // bits (1,0) = 2
     assert_eq!(round1.prefix_len(), 0);
     assert_eq!(round1.suffix_len(), 2);
@@ -209,7 +214,7 @@ mod tests {
     // Round 3: v=(Finite(0),Finite(1)), u=value 0, y=() → y_idx = 0
     let round3 = contributions.iter().find(|c| c.round == 3).unwrap();
     assert_eq!(round3.v_idx, 6); // 1*4 + 2 = 6
-    assert_eq!(round3.u, UdHatPoint::Finite(0));
+    assert_eq!(round3.u, LagrangeHatPoint::Finite(0));
     assert_eq!(round3.y_idx, 0);
     assert_eq!(round3.prefix_len(), 2);
     assert_eq!(round3.suffix_len(), 0);
@@ -227,13 +232,13 @@ mod tests {
     // Round 1: v=(), u=∞, y=(Finite(0),Finite(1)) → y_idx = 1
     let round1 = contributions.iter().find(|c| c.round == 1).unwrap();
     assert_eq!(round1.v_idx, 0);
-    assert_eq!(round1.u, UdHatPoint::Infinity);
+    assert_eq!(round1.u, LagrangeHatPoint::Infinity);
     assert_eq!(round1.y_idx, 1); // bits (0,1) = 1
 
     // Round 2: v=(∞,), u=value 0, y=(Finite(1),) → y_idx = 1
     let round2 = contributions.iter().find(|c| c.round == 2).unwrap();
     assert_eq!(round2.v_idx, 0);
-    assert_eq!(round2.u, UdHatPoint::Finite(0));
+    assert_eq!(round2.u, LagrangeHatPoint::Finite(0));
     assert_eq!(round2.y_idx, 1); // bits (1,) = 1
 
     // Round 3: FILTERED (u = value 1 ∉ Û_d)
@@ -255,13 +260,13 @@ mod tests {
     // Round 2: v=(∞,), u=∞, y=(Finite(0),) → y_idx = 0
     let round2 = contributions.iter().find(|c| c.round == 2).unwrap();
     assert_eq!(round2.v_idx, 0);
-    assert_eq!(round2.u, UdHatPoint::Infinity);
+    assert_eq!(round2.u, LagrangeHatPoint::Infinity);
     assert_eq!(round2.y_idx, 0);
 
     // Round 3: v=(∞,∞), u=Finite(0), y=() → y_idx = 0
     let round3 = contributions.iter().find(|c| c.round == 3).unwrap();
     assert_eq!(round3.v_idx, 0); // 0*4 + 0 = 0
-    assert_eq!(round3.u, UdHatPoint::Finite(0));
+    assert_eq!(round3.u, LagrangeHatPoint::Finite(0));
     assert_eq!(round3.y_idx, 0);
   }
 
@@ -277,7 +282,7 @@ mod tests {
     let only = &contributions[0];
     assert_eq!(only.round, 3);
     assert_eq!(only.v_idx, 15); // 3*4 + 3 = 15
-    assert_eq!(only.u, UdHatPoint::Finite(2));
+    assert_eq!(only.u, LagrangeHatPoint::Finite(2));
     assert_eq!(only.y_idx, 0);
     assert_eq!(only.suffix_len(), 0);
   }
@@ -307,7 +312,7 @@ mod tests {
     let mut zero_contribution_count = 0;
 
     for beta_idx in 0..prefix_ud_size {
-      let beta = UdTuple::<D>::from_flat_index(beta_idx, l0);
+      let beta = LagrangeIndex::<D>::from_flat_index(beta_idx, l0);
       let contributions = compute_idx4(&beta);
 
       // All contributions should have correct l0
@@ -345,7 +350,11 @@ mod tests {
       let contributions = compute_idx4(&beta);
 
       // Count how many positions have Finite(1) (value 1)
-      let num_ones = beta.0.iter().filter(|&&p| p == UdPoint::Finite(1)).count();
+      let num_ones = beta
+        .0
+        .iter()
+        .filter(|&&p| p == LagrangePoint::Finite(1))
+        .count();
 
       // Expected contributions = l0 - num_ones (each position with value 1 filters that round)
       let expected_len = l0 - num_ones;
@@ -363,7 +372,7 @@ mod tests {
         let has_round = contributions.iter().any(|c| c.round == round);
         let u = beta.0[round - 1];
 
-        if u == UdPoint::Finite(1) {
+        if u == LagrangePoint::Finite(1) {
           // u = 1 ∉ Û_d → round should be filtered
           assert!(
             !has_round,
@@ -386,7 +395,7 @@ mod tests {
     let prefix_ud_size = base.pow(l0 as u32);
 
     for beta_idx in 0..prefix_ud_size {
-      let beta = UdTuple::<D>::from_flat_index(beta_idx, l0);
+      let beta = LagrangeIndex::<D>::from_flat_index(beta_idx, l0);
       let contributions = compute_idx4(&beta);
 
       for c in contributions {
@@ -413,7 +422,7 @@ mod tests {
           beta
         );
 
-        // u should be valid UdHatPoint (this is enforced by type system)
+        // u should be valid LagrangeHatPoint (this is enforced by type system)
         let u_idx = c.u.to_index();
         assert!(u_idx < D, "u_idx {} >= {} for β={:?}", u_idx, D, beta);
 
@@ -435,7 +444,7 @@ mod tests {
   fn test_compute_idx4_v_u_decode() {
     // Test cases that have at least some contributions
     // Note: all Finite(1) has NO contributions so we exclude it
-    let test_cases: Vec<UdTuple<3>> = vec![
+    let test_cases: Vec<LagrangeIndex<3>> = vec![
       tuple_from_indices(&[1, 1, 1]), // all u=Finite(0), 3 contributions
       tuple_from_indices(&[0, 1, 1]), // u=∞,Finite(0),Finite(0), 3 contributions
       tuple_from_indices(&[3, 0, 1]), // u=Finite(2),∞,Finite(0), 3 contributions
@@ -447,7 +456,7 @@ mod tests {
 
       for c in contributions {
         // v should be β[0..round-1]
-        let expected_v = UdTuple(beta.0[0..c.prefix_len()].to_vec());
+        let expected_v = LagrangeIndex(beta.0[0..c.prefix_len()].to_vec());
         let expected_v_idx = expected_v.to_flat_index();
         assert_eq!(
           c.v_idx, expected_v_idx,
@@ -480,7 +489,7 @@ mod tests {
     let c1 = contributions.iter().find(|c| c.round == 1).unwrap();
     assert_eq!(c1.y_idx, 0b101);
     assert_eq!(c1.suffix_len(), 3);
-    assert_eq!(c1.u, UdHatPoint::Finite(0));
+    assert_eq!(c1.u, LagrangeHatPoint::Finite(0));
 
     // Round 2: FILTERED (u = Finite(1) ∉ Û_d)
     assert!(contributions.iter().all(|c| c.round != 2));
@@ -489,7 +498,7 @@ mod tests {
     let c3 = contributions.iter().find(|c| c.round == 3).unwrap();
     assert_eq!(c3.y_idx, 0b1);
     assert_eq!(c3.suffix_len(), 1);
-    assert_eq!(c3.u, UdHatPoint::Finite(0));
+    assert_eq!(c3.u, LagrangeHatPoint::Finite(0));
 
     // Round 4: FILTERED (u = Finite(1) ∉ Û_d)
     assert!(contributions.iter().all(|c| c.round != 4));
