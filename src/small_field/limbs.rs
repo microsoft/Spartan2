@@ -4,30 +4,26 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Stack-allocated wide integers for delayed modular reduction.
+//! Wide integers and limb operations for delayed modular reduction.
 //!
-//! This module provides [`WideLimbs<N>`], a fixed-size wide integer type used
-//! for accumulating unreduced field element products in hot paths.
+//! This module provides:
+//! - [`WideLimbs<N>`]: Stack-allocated wide integers for accumulating unreduced products
+//! - [`SignedWideLimbs<N>`]: Signed variant for accumulating signed products
+//! - Limb arithmetic operations (multiply, subtract, compare)
 //!
 //! # Why not `num-bigint`?
 //!
-//! We define our own type rather than using `num-bigint::BigInt` because:
+//! We define our own types rather than using `num-bigint::BigInt` because:
 //! - `BigInt` is heap-allocated (uses `Vec<u64>`)
 //! - We need stack-allocated fixed-size arrays for hot-path performance
 //! - We want the `Copy` trait for cheap pass-by-value in tight loops
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use spartan2::wide_limbs::WideLimbs;
-//!
-//! let mut acc: WideLimbs<6> = WideLimbs::zero();
-//! // ... accumulate products ...
-//! // Then reduce once at the end
-//! ```
 
 use num_traits::Zero;
 use std::ops::{Add, AddAssign};
+
+// ============================================================================
+// WideLimbs - Stack-allocated wide integer
+// ============================================================================
 
 /// Stack-allocated wide integer with N 64-bit limbs.
 ///
@@ -47,20 +43,6 @@ impl<const N: usize> Default for WideLimbs<N> {
   }
 }
 
-#[allow(dead_code)] // Will be used in accumulator optimization
-impl<const N: usize> WideLimbs<N> {
-  /// Create a zero value.
-  #[inline]
-  pub const fn zero() -> Self {
-    Self([0u64; N])
-  }
-
-  /// Check if all limbs are zero.
-  #[inline]
-  pub fn is_zero(&self) -> bool {
-    self.0.iter().all(|&x| x == 0)
-  }
-}
 
 impl<const N: usize> AddAssign for WideLimbs<N> {
   /// Wide addition with carry propagation.
@@ -75,7 +57,6 @@ impl<const N: usize> AddAssign for WideLimbs<N> {
     }
     // Note: We intentionally don't check for overflow here.
     // The caller is responsible for ensuring the sum doesn't exceed N limbs.
-    // This is guaranteed by the bit-sizing analysis in the plan.
   }
 }
 
@@ -113,6 +94,18 @@ impl<const N: usize> Add<&Self> for WideLimbs<N> {
   }
 }
 
+impl<const N: usize> Zero for WideLimbs<N> {
+  #[inline]
+  fn zero() -> Self {
+    Self([0u64; N])
+  }
+
+  #[inline]
+  fn is_zero(&self) -> bool {
+    self.0.iter().all(|&x| x == 0)
+  }
+}
+
 // ============================================================================
 // SignedWideLimbs - for accumulating signed products
 // ============================================================================
@@ -121,10 +114,6 @@ impl<const N: usize> Add<&Self> for WideLimbs<N> {
 ///
 /// Since `WideLimbs` only supports unsigned addition, we track positive and
 /// negative contributions separately, then subtract at the end.
-///
-/// Used for delayed reduction when accumulating `field × i64` products where
-/// the i64 can be negative.
-#[allow(dead_code)] // May be used in future optimizations
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignedWideLimbs<const N: usize> {
   /// Accumulator for positive contributions
@@ -142,25 +131,6 @@ impl<const N: usize> Default for SignedWideLimbs<N> {
   }
 }
 
-#[allow(dead_code)]
-impl<const N: usize> SignedWideLimbs<N> {
-  /// Create a zero value.
-  #[inline]
-  pub const fn zero() -> Self {
-    Self {
-      pos: WideLimbs::zero(),
-      neg: WideLimbs::zero(),
-    }
-  }
-
-  /// Check if both positive and negative accumulators are zero.
-  #[inline]
-  pub fn is_zero(&self) -> bool {
-    self.pos.is_zero() && self.neg.is_zero()
-  }
-}
-
-#[allow(dead_code)]
 impl<const N: usize> AddAssign for SignedWideLimbs<N> {
   /// Merge two signed accumulators by adding their respective parts.
   #[inline]
@@ -170,7 +140,6 @@ impl<const N: usize> AddAssign for SignedWideLimbs<N> {
   }
 }
 
-#[allow(dead_code)]
 impl<const N: usize> AddAssign<&Self> for SignedWideLimbs<N> {
   #[inline]
   fn add_assign(&mut self, other: &Self) {
@@ -204,6 +173,10 @@ impl<const N: usize> Zero for SignedWideLimbs<N> {
     self.pos.is_zero() && self.neg.is_zero()
   }
 }
+
+// ============================================================================
+// SubMagResult - magnitude subtraction result
+// ============================================================================
 
 /// Result of magnitude subtraction |a - b|.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,54 +218,172 @@ pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> SubMagResult<N> {
 }
 
 // ============================================================================
-// SignedAccumulator - generic wrapper for any unreduced type
+// Limb multiplication operations
 // ============================================================================
 
-/// Generic pair of accumulators for signed products.
+/// Multiply-accumulate: acc + a * b + carry → (low, high)
 ///
-/// This is the type-erased version of `SignedWideLimbs` that works with
-/// any unreduced accumulator type (via `SmallValueField::UnreducedFieldInt`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SignedAccumulator<T> {
-  /// Accumulator for positive contributions
-  pub pos: T,
-  /// Accumulator for negative contributions (stored as positive magnitude)
-  pub neg: T,
+/// Fused operation that computes one limb of a multiply-accumulate in a single step,
+/// avoiding materialization of intermediate arrays.
+#[inline(always)]
+pub fn mac(acc: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
+  let prod = (a as u128) * (b as u128) + (acc as u128) + (carry as u128);
+  (prod as u64, (prod >> 64) as u64)
 }
 
-impl<T: Default> Default for SignedAccumulator<T> {
-  fn default() -> Self {
-    Self {
-      pos: T::default(),
-      neg: T::default(),
+/// Multiply two 4-limb values, producing an 8-limb result.
+#[inline(always)]
+pub fn mul_4_by_4_ext(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
+  let mut result = [0u64; 8];
+  for i in 0..4 {
+    let mut carry = 0u128;
+    for j in 0..4 {
+      let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
+      result[i + j] = prod as u64;
+      carry = prod >> 64;
+    }
+    result[i + 4] = carry as u64;
+  }
+  result
+}
+
+/// Multiply 4-limb field by 2-limb integer (u128), producing a 6-limb result.
+/// Used for i64/i128 small-value optimization where IntermediateSmallValue is i128.
+#[inline(always)]
+pub fn mul_4_by_2_ext(a: &[u64; 4], b: u128) -> [u64; 6] {
+  let b_lo = b as u64;
+  let b_hi = (b >> 64) as u64;
+
+  // Multiply a by b_lo (4x1 -> 5 limbs)
+  let mut result = [0u64; 6];
+  let mut carry = 0u128;
+  for i in 0..4 {
+    let prod = (a[i] as u128) * (b_lo as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[4] = carry as u64;
+
+  // Multiply a by b_hi and add at offset 1 (4x1 -> 5 limbs, shifted)
+  carry = 0u128;
+  for i in 0..4 {
+    let prod = (a[i] as u128) * (b_hi as u128) + (result[i + 1] as u128) + carry;
+    result[i + 1] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[5] = carry as u64;
+
+  result
+}
+
+/// Multiply 4-limb by 1-limb, producing a 5-limb result.
+#[inline(always)]
+pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut carry = 0u128;
+  for i in 0..4 {
+    let prod = (a[i] as u128) * (b as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[4] = carry as u64;
+  result
+}
+
+/// Multiply 5-limb by 1-limb, producing a 5-limb result (overflow ignored).
+#[inline(always)]
+pub(super) fn mul_5_by_1(a: &[u64; 5], b: u64) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut carry = 0u128;
+  for i in 0..5 {
+    let prod = (a[i] as u128) * (b as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result
+}
+
+// ============================================================================
+// Limb subtraction operations
+// ============================================================================
+
+/// Subtract two 5-limb values: a - b.
+#[inline(always)]
+pub(super) fn sub_5_5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut borrow = 0u64;
+  for i in 0..5 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  result
+}
+
+/// Subtract 4-limb from 5-limb: a - b.
+#[inline(always)]
+pub(super) fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut borrow = 0u64;
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  let (diff, _) = a[4].overflowing_sub(borrow);
+  result[4] = diff;
+  result
+}
+
+/// Subtract two 4-limb values: a - b.
+#[inline(always)]
+pub(super) fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+  let mut result = [0u64; 4];
+  let mut borrow = 0u64;
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  result
+}
+
+// ============================================================================
+// Limb comparison operations
+// ============================================================================
+
+/// Check if 5-limb value >= 4-limb value.
+#[inline(always)]
+pub(super) fn gte_5_4(a: &[u64; 5], b: &[u64; 4]) -> bool {
+  if a[4] > 0 {
+    return true;
+  }
+  for i in (0..4).rev() {
+    if a[i] > b[i] {
+      return true;
+    }
+    if a[i] < b[i] {
+      return false;
     }
   }
+  true
 }
 
-#[allow(dead_code)]
-impl<T: Default> SignedAccumulator<T> {
-  /// Create a zero value.
-  #[inline]
-  pub fn zero() -> Self {
-    Self::default()
+/// Check if 4-limb value a >= 4-limb value b.
+#[inline(always)]
+pub(super) fn gte_4_4(a: &[u64; 4], b: &[u64; 4]) -> bool {
+  for i in (0..4).rev() {
+    if a[i] > b[i] {
+      return true;
+    }
+    if a[i] < b[i] {
+      return false;
+    }
   }
-}
-
-impl<T: AddAssign> AddAssign for SignedAccumulator<T> {
-  /// Merge two signed accumulators by adding their respective parts.
-  #[inline]
-  fn add_assign(&mut self, other: Self) {
-    self.pos += other.pos;
-    self.neg += other.neg;
-  }
-}
-
-impl<T: AddAssign + Copy> AddAssign<&Self> for SignedAccumulator<T> {
-  #[inline]
-  fn add_assign(&mut self, other: &Self) {
-    self.pos += other.pos;
-    self.neg += other.neg;
-  }
+  true // equal
 }
 
 // ============================================================================
@@ -377,5 +468,40 @@ mod tests {
     let y: WideLimbs<6> = WideLimbs([6, 5, 4, 3, 2, 1]);
     let z = x + y;
     assert_eq!(z.0, [7, 7, 7, 7, 7, 7]);
+  }
+
+  #[test]
+  fn test_mul_4_by_1() {
+    let a = [1u64, 2, 3, 4];
+    let b = 10u64;
+    let result = mul_4_by_1(&a, b);
+    assert_eq!(result, [10, 20, 30, 40, 0]);
+  }
+
+  #[test]
+  fn test_mul_4_by_1_with_carry() {
+    let a = [u64::MAX, 0, 0, 0];
+    let b = 2u64;
+    let result = mul_4_by_1(&a, b);
+    assert_eq!(result, [u64::MAX - 1, 1, 0, 0, 0]);
+  }
+
+  #[test]
+  fn test_sub_4_4() {
+    let a = [10u64, 20, 30, 40];
+    let b = [1u64, 2, 3, 4];
+    let result = sub_4_4(&a, &b);
+    assert_eq!(result, [9, 18, 27, 36]);
+  }
+
+  #[test]
+  fn test_gte_4_4() {
+    let a = [10u64, 20, 30, 40];
+    let b = [1u64, 2, 3, 4];
+    assert!(gte_4_4(&a, &b));
+    assert!(!gte_4_4(&b, &a));
+
+    // Equal case
+    assert!(gte_4_4(&a, &a));
   }
 }

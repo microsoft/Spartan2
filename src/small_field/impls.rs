@@ -7,7 +7,7 @@
 //! SmallValueField and DelayedReduction implementations for Fp and Fq.
 
 use super::{barrett, i128_to_field, i64_to_field, DelayedReduction, SmallValueField};
-use crate::wide_limbs::{sub_mag, SignedWideLimbs, SubMagResult, WideLimbs};
+use super::limbs::{mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag, SignedWideLimbs, SubMagResult, WideLimbs};
 use ff::PrimeField;
 
 // ============================================================================
@@ -59,12 +59,12 @@ impl SmallValueField<i32> for halo2curves::pasta::Fp {
 
   #[inline]
   fn sl_mul(small: i32, large: &Self) -> Self {
-    barrett::mul_fp_by_i64(large, small as i64)
+    barrett::mul_by_i64(large, small as i64)
   }
 
   #[inline]
   fn isl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_fp_by_i64(large, small)
+    barrett::mul_by_i64(large, small)
   }
 
   #[inline]
@@ -104,10 +104,10 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fp {
     };
     // Fused multiply-accumulate: no intermediate array
     let a = &field.0;
-    let (r0, c) = barrett::mac(target.0[0], a[0], mag, 0);
-    let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
-    let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
-    let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
+    let (r0, c) = mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = mac(target.0[1], a[1], mag, c);
+    let (r2, c) = mac(target.0[2], a[2], mag, c);
+    let (r3, c) = mac(target.0[3], a[3], mag, c);
     // Propagate carry without multiply (just add)
     let (r4, of) = target.0[4].overflowing_add(c);
     target.0[0] = r0;
@@ -125,7 +125,7 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fp {
     field_b: &Self,
   ) {
     // Compute field_a × field_b as 8 limbs and add to accumulator
-    let product = barrett::mul_4_by_4_ext(&field_a.0, &field_b.0);
+    let product = mul_4_by_4_ext(&field_a.0, &field_b.0);
     let mut carry = 0u128;
     for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
       let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
@@ -164,7 +164,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
 
   #[inline]
   fn sl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_fp_by_i64(large, small)
+    barrett::mul_by_i64(large, small)
   }
 
   #[inline]
@@ -178,7 +178,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
       (true, (-small) as u128)
     };
     // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
-    let product = barrett::mul_4_by_2_ext(&large.0, mag);
+    let product = mul_4_by_2_ext(&large.0, mag);
     let result = Self(barrett::barrett_reduce_6_fp(&product));
     if is_neg { -result } else { result }
   }
@@ -243,22 +243,22 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fp {
     let b_hi = (mag >> 64) as u64;
 
     // Pass 1: multiply by b_lo at offset 0
-    let (r0, c) = barrett::mac(target.0[0], a[0], b_lo, 0);
-    let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
-    let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
-    let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
+    let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = mac(target.0[3], a[3], b_lo, c);
     // Propagate carry without multiply (just add)
     let (r4, of1) = target.0[4].overflowing_add(c);
     let c1 = of1 as u64;
     target.0[0] = r0;
 
     // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
-    let (r1, c) = barrett::mac(r1, a[0], b_hi, 0);
-    let (r2, c) = barrett::mac(r2, a[1], b_hi, c);
-    let (r3, c) = barrett::mac(r3, a[2], b_hi, c);
-    let (r4, c) = barrett::mac(r4, a[3], b_hi, c);
+    let (r1, c) = mac(r1, a[0], b_hi, 0);
+    let (r2, c) = mac(r2, a[1], b_hi, c);
+    let (r3, c) = mac(r3, a[2], b_hi, c);
+    let (r4, c) = mac(r4, a[3], b_hi, c);
     // Add both carries (c from pass 2, c1 from pass 1) into position 5
-    let (r5, c) = barrett::mac(target.0[5], c1, 1, c);
+    let (r5, c) = mac(target.0[5], c1, 1, c);
     target.0[1] = r1;
     target.0[2] = r2;
     target.0[3] = r3;
@@ -276,7 +276,7 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fp {
     field_a: &Self,
     field_b: &Self,
   ) {
-    let product = barrett::mul_4_by_4_ext(&field_a.0, &field_b.0);
+    let product = mul_4_by_4_ext(&field_a.0, &field_b.0);
     let mut carry = 0u128;
     for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
       let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
@@ -315,12 +315,12 @@ impl SmallValueField<i32> for halo2curves::pasta::Fq {
 
   #[inline]
   fn sl_mul(small: i32, large: &Self) -> Self {
-    barrett::mul_fq_by_i64(large, small as i64)
+    barrett::mul_by_i64(large, small as i64)
   }
 
   #[inline]
   fn isl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_fq_by_i64(large, small)
+    barrett::mul_by_i64(large, small)
   }
 
   #[inline]
@@ -360,10 +360,10 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fq {
     };
     // Fused multiply-accumulate: no intermediate array
     let a = &field.0;
-    let (r0, c) = barrett::mac(target.0[0], a[0], mag, 0);
-    let (r1, c) = barrett::mac(target.0[1], a[1], mag, c);
-    let (r2, c) = barrett::mac(target.0[2], a[2], mag, c);
-    let (r3, c) = barrett::mac(target.0[3], a[3], mag, c);
+    let (r0, c) = mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = mac(target.0[1], a[1], mag, c);
+    let (r2, c) = mac(target.0[2], a[2], mag, c);
+    let (r3, c) = mac(target.0[3], a[3], mag, c);
     // Propagate carry without multiply (just add)
     let (r4, of) = target.0[4].overflowing_add(c);
     target.0[0] = r0;
@@ -380,7 +380,7 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fq {
     field_a: &Self,
     field_b: &Self,
   ) {
-    let product = barrett::mul_4_by_4_ext(&field_a.0, &field_b.0);
+    let product = mul_4_by_4_ext(&field_a.0, &field_b.0);
     let mut carry = 0u128;
     for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
       let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
@@ -419,7 +419,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
 
   #[inline]
   fn sl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_fq_by_i64(large, small)
+    barrett::mul_by_i64(large, small)
   }
 
   #[inline]
@@ -433,7 +433,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fq {
       (true, (-small) as u128)
     };
     // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
-    let product = barrett::mul_4_by_2_ext(&large.0, mag);
+    let product = mul_4_by_2_ext(&large.0, mag);
     let result = Self(barrett::barrett_reduce_6_fq(&product));
     if is_neg { -result } else { result }
   }
@@ -496,22 +496,22 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
     let b_hi = (mag >> 64) as u64;
 
     // Pass 1: multiply by b_lo at offset 0
-    let (r0, c) = barrett::mac(target.0[0], a[0], b_lo, 0);
-    let (r1, c) = barrett::mac(target.0[1], a[1], b_lo, c);
-    let (r2, c) = barrett::mac(target.0[2], a[2], b_lo, c);
-    let (r3, c) = barrett::mac(target.0[3], a[3], b_lo, c);
+    let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = mac(target.0[3], a[3], b_lo, c);
     // Propagate carry without multiply (just add)
     let (r4, of1) = target.0[4].overflowing_add(c);
     let c1 = of1 as u64;
     target.0[0] = r0;
 
     // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
-    let (r1, c) = barrett::mac(r1, a[0], b_hi, 0);
-    let (r2, c) = barrett::mac(r2, a[1], b_hi, c);
-    let (r3, c) = barrett::mac(r3, a[2], b_hi, c);
-    let (r4, c) = barrett::mac(r4, a[3], b_hi, c);
+    let (r1, c) = mac(r1, a[0], b_hi, 0);
+    let (r2, c) = mac(r2, a[1], b_hi, c);
+    let (r3, c) = mac(r3, a[2], b_hi, c);
+    let (r4, c) = mac(r4, a[3], b_hi, c);
     // Add both carries (c1 from pass 1, c from pass 2) into position 5
-    let (r5, c) = barrett::mac(target.0[5], c1, 1, c);
+    let (r5, c) = mac(target.0[5], c1, 1, c);
     target.0[1] = r1;
     target.0[2] = r2;
     target.0[3] = r3;
@@ -529,7 +529,7 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
     field_a: &Self,
     field_b: &Self,
   ) {
-    let product = barrett::mul_4_by_4_ext(&field_a.0, &field_b.0);
+    let product = mul_4_by_4_ext(&field_a.0, &field_b.0);
     let mut carry = 0u128;
     for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
       let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
@@ -769,7 +769,7 @@ mod tests {
 
   #[test]
   fn test_unreduced_field_int_mul_add() {
-    use crate::wide_limbs::SignedWideLimbs;
+    use crate::small_field::limbs::SignedWideLimbs;
     use ff::Field;
     use rand_core::{OsRng, RngCore};
 
@@ -798,7 +798,7 @@ mod tests {
 
   #[test]
   fn test_unreduced_field_field_mul_add() {
-    use crate::wide_limbs::WideLimbs;
+    use crate::small_field::limbs::WideLimbs;
     use ff::Field;
     use rand_core::OsRng;
 
@@ -821,7 +821,7 @@ mod tests {
 
   #[test]
   fn test_unreduced_field_int_many_products() {
-    use crate::wide_limbs::SignedWideLimbs;
+    use crate::small_field::limbs::SignedWideLimbs;
     use ff::Field;
     use rand_core::{OsRng, RngCore};
 
@@ -852,7 +852,7 @@ mod tests {
 
   #[test]
   fn test_unreduced_field_field_many_products() {
-    use crate::wide_limbs::WideLimbs;
+    use crate::small_field::limbs::WideLimbs;
     use ff::Field;
     use rand_core::OsRng;
 

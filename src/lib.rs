@@ -33,7 +33,6 @@ mod math;
 mod nifs;
 mod r1cs;
 mod thread_state_accumulators;
-mod wide_limbs;
 mod zk;
 
 // modules with some public items for benchmarking

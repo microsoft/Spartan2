@@ -1362,7 +1362,7 @@ pub(crate) mod eq_sumcheck {
 pub(crate) mod lagrange_sumcheck {
 
   use crate::{
-    accumulators::SmallValueAccumulators,
+    accumulators::LagrangeAccumulators,
     eq_linear::EqRoundFactor,
     lagrange::{LagrangeBasisFactory, LagrangeCoeff, UdEvaluations, UdHatEvaluations},
     polys::univariate::UniPoly,
@@ -1375,7 +1375,7 @@ pub(crate) mod lagrange_sumcheck {
 
   /// Tracks the small-value sum-check state for the first ℓ₀ rounds.
   pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
-    accumulators: SmallValueAccumulators<Scalar, D>,
+    accumulators: LagrangeAccumulators<Scalar, D>,
     coeff: LagrangeCoeff<Scalar, D>,
     eq_factor: EqRoundFactor<Scalar>,
     basis_factory: LagrangeBasisFactory<Scalar, D>,
@@ -1384,7 +1384,7 @@ pub(crate) mod lagrange_sumcheck {
   impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
     /// Create a new small-value round tracker with precomputed accumulators.
     pub(crate) fn new(
-      accumulators: SmallValueAccumulators<Scalar, D>,
+      accumulators: LagrangeAccumulators<Scalar, D>,
       basis_factory: LagrangeBasisFactory<Scalar, D>,
     ) -> Self {
       Self {
@@ -1396,7 +1396,7 @@ pub(crate) mod lagrange_sumcheck {
     }
 
     /// Create from accumulators with the standard Lagrange basis (0, 1, 2, ...).
-    pub(crate) fn from_accumulators(accumulators: SmallValueAccumulators<Scalar, D>) -> Self {
+    pub(crate) fn from_accumulators(accumulators: LagrangeAccumulators<Scalar, D>) -> Self {
       let basis_factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
       Self::new(accumulators, basis_factory)
     }
@@ -1656,10 +1656,26 @@ pub(crate) mod lagrange_sumcheck {
       let sv2 = poly_sv.evaluate(&F::from(2u64));
       let sv3 = poly_sv.evaluate(&F::from(3u64));
 
-      assert_eq!(sv0, evals_std[0], "s(0) must match: sv={:?}, std={:?}", sv0, evals_std[0]);
-      assert_eq!(sv1, evals_std[1], "s(1) must match: sv={:?}, std={:?}", sv1, evals_std[1]);
-      assert_eq!(sv2, evals_std[2], "s(2) must match: sv={:?}, std={:?}", sv2, evals_std[2]);
-      assert_eq!(sv3, evals_std[3], "s(3) must match: sv={:?}, std={:?}", sv3, evals_std[3]);
+      assert_eq!(
+        sv0, evals_std[0],
+        "s(0) must match: sv={:?}, std={:?}",
+        sv0, evals_std[0]
+      );
+      assert_eq!(
+        sv1, evals_std[1],
+        "s(1) must match: sv={:?}, std={:?}",
+        sv1, evals_std[1]
+      );
+      assert_eq!(
+        sv2, evals_std[2],
+        "s(2) must match: sv={:?}, std={:?}",
+        sv2, evals_std[2]
+      );
+      assert_eq!(
+        sv3, evals_std[3],
+        "s(3) must match: sv={:?}, std={:?}",
+        sv3, evals_std[3]
+      );
     }
 
     #[test]

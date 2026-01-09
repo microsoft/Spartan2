@@ -8,7 +8,7 @@
 //!
 //! This module defines:
 //! - [`RoundAccumulator`]: Single round accumulator A_i(v, u) with flat storage
-//! - [`SmallValueAccumulators`]: Collection of accumulators for all ℓ₀ rounds
+//! - [`LagrangeAccumulators`]: Collection of accumulators for all ℓ₀ rounds
 
 use crate::{
   accumulator_index::{CachedPrefixIndex, compute_idx4},
@@ -71,10 +71,7 @@ fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
     cache.push(&entries);
   }
 
-  BetaPrefixCache {
-    cache,
-    num_betas,
-  }
+  BetaPrefixCache { cache, num_betas }
 }
 
 #[inline]
@@ -94,10 +91,9 @@ fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
   beta_indices: I,
   beta_prefix_cache: &Csr<CachedPrefixIndex>,
   eyx: &[Vec<S>],
-  acc: &mut SmallValueAccumulators<S, D>,
+  acc: &mut LagrangeAccumulators<S, D>,
   mut value_for_beta: F,
-)
-where
+) where
   I: IntoIterator<Item = usize>,
   F: FnMut(usize) -> Option<S>,
 {
@@ -217,12 +213,12 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
 /// After processing, thread-local copies are merged via `merge()`.
 ///
 /// Type parameter D is the degree bound for t_i(X) (D=2 for Spartan).
-pub struct SmallValueAccumulators<Scalar: PrimeField, const D: usize> {
+pub struct LagrangeAccumulators<Scalar: PrimeField, const D: usize> {
   /// rounds[i] contains A_{i+1} (the accumulator for 1-indexed round i+1)
   rounds: Vec<RoundAccumulator<Scalar, D>>,
 }
 
-impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
+impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
   /// Create a fresh accumulator (used per-thread in fold).
   ///
   /// # Arguments
@@ -251,9 +247,9 @@ impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
   }
 }
 
-/// Test-only helper methods for SmallValueAccumulators.
+/// Test-only helper methods for LagrangeAccumulators.
 #[cfg(test)]
-impl<Scalar: PrimeField, const D: usize> SmallValueAccumulators<Scalar, D> {
+impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
   /// Read A_i(v, u).
   #[inline]
   pub fn get(&self, round: usize, v_idx: usize, u_idx: usize) -> Scalar {
@@ -304,7 +300,7 @@ pub fn build_accumulators_spartan<S, P>(
   bz: &P,
   taus: &[S],
   l0: usize,
-) -> SmallValueAccumulators<S, 2>
+) -> LagrangeAccumulators<S, 2>
 where
   S: PrimeField + Send + Sync,
   P: MatVecMLE<S>,
@@ -447,7 +443,7 @@ where
     )
     .map(|state| state.acc)
     .reduce(
-      || SmallValueAccumulators::<S, 2>::new(l0),
+      || LagrangeAccumulators::<S, 2>::new(l0),
       |mut a, b| {
         a.merge(&b);
         a
@@ -471,7 +467,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
   polys: &[&MultilinearPolynomial<S>],
   taus: &[S],
   l0: usize,
-) -> SmallValueAccumulators<S, D> {
+) -> LagrangeAccumulators<S, D> {
   assert!(!polys.is_empty(), "must have at least one polynomial");
   let base: usize = D + 1;
   let l = polys[0].Z.len().trailing_zeros() as usize;
@@ -512,7 +508,14 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
     .into_par_iter()
     .fold(
       || {
-        GenericThreadState::<S, D>::new(l0, num_betas, prefix_size, ext_size, d, &eq_tables.e_y_sizes)
+        GenericThreadState::<S, D>::new(
+          l0,
+          num_betas,
+          prefix_size,
+          ext_size,
+          d,
+          &eq_tables.e_y_sizes,
+        )
       },
       |mut state, x_out_bits| {
         // Reset partial sums for this x_out iteration
@@ -587,7 +590,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
     )
     .map(|state| state.acc)
     .reduce(
-      || SmallValueAccumulators::<S, D>::new(l0),
+      || LagrangeAccumulators::<S, D>::new(l0),
       |mut a, b| {
         a.merge(&b);
         a
@@ -688,15 +691,15 @@ mod tests {
     assert_eq!(acc.get(2, 0), val);
   }
 
-  // === SmallValueAccumulators tests ===
+  // === LagrangeAccumulators tests ===
 
   #[test]
-  fn test_small_value_accumulators_new() {
+  fn test_lagrange_accumulators_new() {
     // For D=2 (base=3), ℓ₀=3
     // Round 0: 3^0 = 1 prefix
     // Round 1: 3^1 = 3 prefixes
     // Round 2: 3^2 = 9 prefixes
-    let acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
+    let acc: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(3);
 
     assert_eq!(acc.num_rounds(), 3);
     assert_eq!(acc.round(0).num_prefixes(), 1);
@@ -705,8 +708,8 @@ mod tests {
   }
 
   #[test]
-  fn test_small_value_accumulators_accumulate_get() {
-    let mut acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
+  fn test_lagrange_accumulators_accumulate_get() {
+    let mut acc: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(3);
 
     let val1 = Scalar::from(19u64);
     let val2 = Scalar::from(23u64);
@@ -723,9 +726,9 @@ mod tests {
   }
 
   #[test]
-  fn test_small_value_accumulators_merge() {
-    let mut acc1: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
-    let mut acc2: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
+  fn test_lagrange_accumulators_merge() {
+    let mut acc1: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(3);
+    let mut acc2: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(3);
 
     let val1 = Scalar::from(7u64);
     let val2 = Scalar::from(11u64);
@@ -745,8 +748,8 @@ mod tests {
   }
 
   #[test]
-  fn test_small_value_accumulators_domain_methods() {
-    let mut acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(2);
+  fn test_lagrange_accumulators_domain_methods() {
+    let mut acc: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(2);
 
     // Round 1 has 3 prefixes (base^1)
     // v = (Finite(0),) -> flat index = 1 (∞=0, 0=1, 1=2)
@@ -768,7 +771,7 @@ mod tests {
     // Round 1: 3 * 2 = 6
     // Round 2: 9 * 2 = 18
     // Total: 26
-    let acc: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(3);
+    let acc: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(3);
 
     let total_elements: usize = (0..3).map(|i| acc.round(i).num_prefixes() * 2).sum();
     assert_eq!(total_elements, 26);
@@ -830,7 +833,7 @@ mod tests {
       .collect();
 
     // Naive accumulators
-    let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(l0);
+    let mut acc_naive: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(l0);
 
     // x_out domain size = 1 (xout_vars = 0)
     let x_out_bits = 0usize;
@@ -1022,7 +1025,7 @@ mod tests {
       .map(|b| compute_idx4(&UdTuple::<D>::from_flat_index(b, L0)))
       .collect();
 
-    let mut acc_naive: SmallValueAccumulators<Scalar, D> = SmallValueAccumulators::new(L0);
+    let mut acc_naive: LagrangeAccumulators<Scalar, D> = LagrangeAccumulators::new(L0);
 
     #[allow(clippy::needless_range_loop)]
     for x_out_bits in 0..(1 << xout_vars) {

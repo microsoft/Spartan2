@@ -4,31 +4,9 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Barrett reduction for optimized sl (small × large) multiplication.
-//!
-//! Provides ~3× speedup for multiplying a field element by a small integer
-//! compared to the naive approach of converting to field then multiplying.
-//!
-//! # Cost Analysis
-//!
-//! | Operation | Base Multiplications |
-//! |-----------|---------------------|
-//! | Naive (convert + multiply) | ~32 |
-//! | Barrett reduction | ~9-13 |
-//!
-//! # How It Works
-//!
-//! Field elements are stored in Montgomery form: `a_mont = a × R mod p`
-//!
-//! When multiplying by a small integer:
-//! ```text
-//! small × a_mont = small × (a × R) = (small × a) × R mod p
-//! ```
-//!
-//! The result is already in Montgomery form! We just need to:
-//! 1. Multiply the Montgomery limbs by the small integer (4 base muls)
-//! 2. Barrett-reduce the result back to 4 limbs (~5-9 base muls)
+//! Barrett reduction for small × field multiplication.
 
+use super::limbs::{gte_4_4, gte_5_4, mul_4_by_1, mul_5_by_1, sub_4_4, sub_5_4, sub_5_5};
 use halo2curves::pasta::{Fp, Fq};
 use std::ops::Neg;
 
@@ -83,10 +61,8 @@ use std::ops::Neg;
 ///
 /// # Performance
 ///
-/// This approach is ~3× faster than naive division because:
-/// 1. We avoid actual division entirely
-/// 2. Multiplying by precomputed R values is just 4-5 64-bit multiplications
-/// 3. The reduction converges quickly (usually 1-2 iterations)
+/// Much faster than naive division: avoids division entirely, uses only
+/// 4-5 64-bit multiplications with precomputed constants.
 pub trait FieldReductionConstants {
   /// The 4-limb prime modulus p (little-endian, 256 bits)
   const MODULUS: [u64; 4];
@@ -241,9 +217,53 @@ impl FieldReductionConstants for Fq {
 }
 
 // ==========================================================================
-// Const helper to double a 4-limb value to 5-limb value
+// BarrettField - Trait for generic small × field multiplication
 // ==========================================================================
 
+/// Trait for field types supporting optimized small × field multiplication.
+///
+/// Extends `FieldReductionConstants` with methods for accessing the internal
+/// limb representation and constructing field elements from limbs.
+pub(crate) trait BarrettField: FieldReductionConstants + Neg<Output = Self> + Copy {
+  /// 2^64 as a field element, used for u128 multiplication decomposition.
+  const TWO_POW_64: Self;
+
+  /// Construct a field element from 4 Montgomery-form limbs.
+  fn from_limbs(limbs: [u64; 4]) -> Self;
+
+  /// Access the internal Montgomery-form limbs.
+  fn to_limbs(&self) -> &[u64; 4];
+}
+
+impl BarrettField for Fp {
+  const TWO_POW_64: Self = Fp::from_raw([0, 1, 0, 0]);
+
+  #[inline]
+  fn from_limbs(limbs: [u64; 4]) -> Self {
+    Fp(limbs)
+  }
+
+  #[inline]
+  fn to_limbs(&self) -> &[u64; 4] {
+    &self.0
+  }
+}
+
+impl BarrettField for Fq {
+  const TWO_POW_64: Self = Fq::from_raw([0, 1, 0, 0]);
+
+  #[inline]
+  fn from_limbs(limbs: [u64; 4]) -> Self {
+    Fq(limbs)
+  }
+
+  #[inline]
+  fn to_limbs(&self) -> &[u64; 4] {
+    &self.0
+  }
+}
+
+/// Computes 2*p, returning a 5-limb result.
 const fn double_limbs(p: [u64; 4]) -> [u64; 5] {
   let (r0, c0) = p[0].overflowing_add(p[0]);
   let (r1, c1) = {
@@ -266,199 +286,64 @@ const fn double_limbs(p: [u64; 4]) -> [u64; 5] {
 }
 
 // ==========================================================================
-// Precomputed 2^64 constants for i128 multiplication
+// Generic small × field multiplication
 // ==========================================================================
 
-// 2^64 as a field element (little-endian limbs: [0, 1, 0, 0])
-// Since Pallas/Vesta primes are ~2^254, 2^64 < p and 2^64 mod p = 2^64
-#[allow(dead_code)] // Used by mul_fp_by_i128, will be wired up for Small64
-const TWO_POW_64_FP: Fp = Fp::from_raw([0, 1, 0, 0]);
-
-#[allow(dead_code)] // Used by mul_fq_by_i128, will be wired up for Small64
-const TWO_POW_64_FQ: Fq = Fq::from_raw([0, 1, 0, 0]);
-
-// ==========================================================================
-// Public API - i64 and i128 for SmallValueField/SmallValueConfig
-// ==========================================================================
-
-/// Multiply Pallas base field element by i64 (signed).
+/// Multiply field element by i64 (signed).
 #[inline]
-pub(crate) fn mul_fp_by_i64(large: &Fp, small: i64) -> Fp {
+pub(crate) fn mul_by_i64<F: BarrettField>(large: &F, small: i64) -> F {
   if small >= 0 {
-    mul_fp_by_u64(large, small as u64)
+    mul_by_u64(large, small as u64)
   } else {
-    mul_fp_by_u64(large, small.wrapping_neg() as u64).neg()
+    mul_by_u64(large, small.wrapping_neg() as u64).neg()
   }
 }
 
-/// Multiply Pallas scalar field element by i64 (signed).
-#[inline]
-pub(crate) fn mul_fq_by_i64(large: &Fq, small: i64) -> Fq {
-  if small >= 0 {
-    mul_fq_by_u64(large, small as u64)
-  } else {
-    mul_fq_by_u64(large, small.wrapping_neg() as u64).neg()
-  }
-}
-
-/// Multiply Pallas base field element by i128 (signed).
-/// Uses i64 Barrett reduction with 2^64 constant for efficiency.
-#[inline]
-#[allow(dead_code)] // Will be used for Small64 sumcheck
-pub(crate) fn mul_fp_by_i128(large: &Fp, small: i128) -> Fp {
-  if small >= 0 {
-    mul_fp_by_u128(large, small as u128)
-  } else {
-    mul_fp_by_u128(large, small.wrapping_neg() as u128).neg()
-  }
-}
-
-/// Multiply Pallas scalar field element by i128 (signed).
-/// Uses i64 Barrett reduction with 2^64 constant for efficiency.
-#[inline]
-#[allow(dead_code)] // Will be used for Small64 sumcheck
-pub(crate) fn mul_fq_by_i128(large: &Fq, small: i128) -> Fq {
-  if small >= 0 {
-    mul_fq_by_u128(large, small as u128)
-  } else {
-    mul_fq_by_u128(large, small.wrapping_neg() as u128).neg()
-  }
-}
-
-// ==========================================================================
-// Internal u128 multiplication (reuses u64 Barrett)
-// ==========================================================================
-
+/// Multiply field element by i128 (signed).
 #[inline]
 #[allow(dead_code)]
-fn mul_fp_by_u128(large: &Fp, small: u128) -> Fp {
+pub(crate) fn mul_by_i128<F: BarrettField + std::ops::Add<Output = F> + std::ops::Mul<Output = F>>(
+  large: &F,
+  small: i128,
+) -> F {
+  if small >= 0 {
+    mul_by_u128(large, small as u128)
+  } else {
+    mul_by_u128(large, small.wrapping_neg() as u128).neg()
+  }
+}
+
+/// Multiply field element by u128 (unsigned).
+#[inline]
+#[allow(dead_code)]
+fn mul_by_u128<F: BarrettField + std::ops::Add<Output = F> + std::ops::Mul<Output = F>>(
+  large: &F,
+  small: u128,
+) -> F {
   let low = small as u64;
   let high = (small >> 64) as u64;
 
   if high == 0 {
-    mul_fp_by_u64(large, low)
+    mul_by_u64(large, low)
   } else {
     // result = large * low + large * high * 2^64
-    let low_part = mul_fp_by_u64(large, low);
-    let high_part = mul_fp_by_u64(large, high);
-    low_part + high_part * TWO_POW_64_FP
+    let low_part = mul_by_u64(large, low);
+    let high_part = mul_by_u64(large, high);
+    low_part + high_part * F::TWO_POW_64
   }
 }
 
+/// Multiply field element by u64 (unsigned).
 #[inline]
-#[allow(dead_code)]
-fn mul_fq_by_u128(large: &Fq, small: u128) -> Fq {
-  let low = small as u64;
-  let high = (small >> 64) as u64;
-
-  if high == 0 {
-    mul_fq_by_u64(large, low)
-  } else {
-    // result = large * low + large * high * 2^64
-    let low_part = mul_fq_by_u64(large, low);
-    let high_part = mul_fq_by_u64(large, high);
-    low_part + high_part * TWO_POW_64_FQ
-  }
-}
-
-// ==========================================================================
-// Internal u64 multiplication
-// ==========================================================================
-
-#[inline]
-fn mul_fp_by_u64(large: &Fp, small: u64) -> Fp {
+fn mul_by_u64<F: BarrettField>(large: &F, small: u64) -> F {
   if small == 0 {
-    return Fp::zero();
+    return F::from_limbs([0, 0, 0, 0]);
   }
   if small == 1 {
     return *large;
   }
-  let c = mul_4_by_1(&large.0, small);
-  Fp(barrett_reduce_5_fp(&c))
-}
-
-#[inline]
-fn mul_fq_by_u64(large: &Fq, small: u64) -> Fq {
-  if small == 0 {
-    return Fq::zero();
-  }
-  if small == 1 {
-    return *large;
-  }
-  let c = mul_4_by_1(&large.0, small);
-  Fq(barrett_reduce_5_fq(&c))
-}
-
-// ==========================================================================
-// Core bignum operations
-// ==========================================================================
-
-#[inline(always)]
-fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut carry = 0u128;
-  for i in 0..4 {
-    let prod = (a[i] as u128) * (b as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[4] = carry as u64;
-  result
-}
-
-/// Multiply-accumulate: acc + a * b + carry → (low, high)
-///
-/// Fused operation that computes one limb of a multiply-accumulate in a single step,
-/// avoiding materialization of intermediate arrays.
-#[inline(always)]
-pub(crate) fn mac(acc: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
-  let prod = (a as u128) * (b as u128) + (acc as u128) + (carry as u128);
-  (prod as u64, (prod >> 64) as u64)
-}
-
-/// Multiply two 4-limb values, producing an 8-limb result.
-#[inline(always)]
-pub(crate) fn mul_4_by_4_ext(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
-  let mut result = [0u64; 8];
-  for i in 0..4 {
-    let mut carry = 0u128;
-    for j in 0..4 {
-      let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
-      result[i + j] = prod as u64;
-      carry = prod >> 64;
-    }
-    result[i + 4] = carry as u64;
-  }
-  result
-}
-
-/// Multiply 4-limb field by 2-limb integer (u128), producing a 6-limb result.
-/// Used for i64/i128 small-value optimization where IntermediateSmallValue is i128.
-#[inline(always)]
-pub(crate) fn mul_4_by_2_ext(a: &[u64; 4], b: u128) -> [u64; 6] {
-  let b_lo = b as u64;
-  let b_hi = (b >> 64) as u64;
-
-  // Multiply a by b_lo (4x1 -> 5 limbs)
-  let mut result = [0u64; 6];
-  let mut carry = 0u128;
-  for i in 0..4 {
-    let prod = (a[i] as u128) * (b_lo as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[4] = carry as u64;
-
-  // Multiply a by b_hi and add at offset 1 (4x1 -> 5 limbs, shifted)
-  carry = 0u128;
-  for i in 0..4 {
-    let prod = (a[i] as u128) * (b_hi as u128) + (result[i + 1] as u128) + carry;
-    result[i + 1] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[5] = carry as u64;
-
-  result
+  let c = mul_4_by_1(large.to_limbs(), small);
+  F::from_limbs(barrett_reduce_5::<F>(&c))
 }
 
 /// Generic 5-limb Barrett reduction using trait constants.
@@ -477,72 +362,6 @@ fn barrett_reduce_5<F: FieldReductionConstants>(c: &[u64; 5]) -> [u64; 4] {
     r = sub_5_4(&r, &F::MODULUS);
   }
   [r[0], r[1], r[2], r[3]]
-}
-
-#[inline(always)]
-fn barrett_reduce_5_fp(c: &[u64; 5]) -> [u64; 4] {
-  barrett_reduce_5::<Fp>(c)
-}
-
-#[inline(always)]
-fn barrett_reduce_5_fq(c: &[u64; 5]) -> [u64; 4] {
-  barrett_reduce_5::<Fq>(c)
-}
-
-#[inline(always)]
-fn mul_5_by_1(a: &[u64; 5], b: u64) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut carry = 0u128;
-  for i in 0..5 {
-    let prod = (a[i] as u128) * (b as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result
-}
-
-#[inline(always)]
-fn sub_5_5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut borrow = 0u64;
-  for i in 0..5 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-  }
-  result
-}
-
-#[inline(always)]
-fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut borrow = 0u64;
-  for i in 0..4 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-  }
-  let (diff, _) = a[4].overflowing_sub(borrow);
-  result[4] = diff;
-  result
-}
-
-#[inline(always)]
-fn gte_5_4(a: &[u64; 5], b: &[u64; 4]) -> bool {
-  if a[4] > 0 {
-    return true;
-  }
-  for i in (0..4).rev() {
-    if a[i] > b[i] {
-      return true;
-    }
-    if a[i] < b[i] {
-      return false;
-    }
-  }
-  true
 }
 
 // ==========================================================================
@@ -593,19 +412,6 @@ fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
 
   // Recurse (this will terminate because sum < c in most cases)
   barrett_reduce_6::<F>(&sum)
-}
-
-#[inline(always)]
-fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
-  let mut result = [0u64; 4];
-  let mut borrow = 0u64;
-  for i in 0..4 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-  }
-  result
 }
 
 #[inline]
@@ -764,20 +570,6 @@ pub(crate) fn montgomery_reduce_9_fq(c: &[u64; 9]) -> [u64; 4] {
   montgomery_reduce_9::<Fq>(c)
 }
 
-// Helper functions for 4-limb operations
-#[inline(always)]
-fn gte_4_4(a: &[u64; 4], b: &[u64; 4]) -> bool {
-  for i in (0..4).rev() {
-    if a[i] > b[i] {
-      return true;
-    }
-    if a[i] < b[i] {
-      return false;
-    }
-  }
-  true // equal
-}
-
 // ==========================================================================
 // Tests
 // ==========================================================================
@@ -793,7 +585,7 @@ mod tests {
     for small in [0u64, 1, 2, 42, 1000, u32::MAX as u64, u64::MAX] {
       let large = Fp::random(&mut OsRng);
       let naive = Fp::from(small) * large;
-      let barrett = mul_fp_by_u64(&large, small);
+      let barrett = mul_by_u64(&large, small);
       assert_eq!(naive, barrett, "Fp mismatch for small = {}", small);
     }
   }
@@ -804,15 +596,15 @@ mod tests {
     for _ in 0..1000 {
       let large = Fp::random(&mut rng);
       let small: u64 = rng.next_u64();
-      assert_eq!(Fp::from(small) * large, mul_fp_by_u64(&large, small));
+      assert_eq!(Fp::from(small) * large, mul_by_u64(&large, small));
     }
   }
 
   #[test]
   fn test_barrett_fp_i64() {
     let large = Fp::from(42u64);
-    assert_eq!(mul_fp_by_i64(&large, 100), Fp::from(100u64) * large);
-    assert_eq!(mul_fp_by_i64(&large, -100), -Fp::from(100u64) * large);
+    assert_eq!(mul_by_i64(&large, 100i64), Fp::from(100u64) * large);
+    assert_eq!(mul_by_i64(&large, -100i64), -Fp::from(100u64) * large);
   }
 
   #[test]
@@ -820,7 +612,7 @@ mod tests {
     for small in [0u64, 1, 2, 42, 1000, u32::MAX as u64, u64::MAX] {
       let large = Fq::random(&mut OsRng);
       let naive = Fq::from(small) * large;
-      let barrett = mul_fq_by_u64(&large, small);
+      let barrett = mul_by_u64(&large, small);
       assert_eq!(naive, barrett, "Fq mismatch for small = {}", small);
     }
   }
@@ -831,15 +623,15 @@ mod tests {
     for _ in 0..1000 {
       let large = Fq::random(&mut rng);
       let small: u64 = rng.next_u64();
-      assert_eq!(Fq::from(small) * large, mul_fq_by_u64(&large, small));
+      assert_eq!(Fq::from(small) * large, mul_by_u64(&large, small));
     }
   }
 
   #[test]
   fn test_barrett_fq_i64() {
     let large = Fq::from(42u64);
-    assert_eq!(mul_fq_by_i64(&large, 100), Fq::from(100u64) * large);
-    assert_eq!(mul_fq_by_i64(&large, -100), -Fq::from(100u64) * large);
+    assert_eq!(mul_by_i64(&large, 100i64), Fq::from(100u64) * large);
+    assert_eq!(mul_by_i64(&large, -100i64), -Fq::from(100u64) * large);
   }
 
   #[test]
@@ -847,17 +639,17 @@ mod tests {
     let large = Fp::random(&mut OsRng);
 
     // Test small i128 values (fits in i64)
-    assert_eq!(mul_fp_by_i128(&large, 100), Fp::from(100u64) * large);
-    assert_eq!(mul_fp_by_i128(&large, -100), -Fp::from(100u64) * large);
+    assert_eq!(mul_by_i128(&large, 100), Fp::from(100u64) * large);
+    assert_eq!(mul_by_i128(&large, -100), -Fp::from(100u64) * large);
 
     // Test large i128 values (requires 2^64 decomposition)
     let big: i128 = (1i128 << 70) + 12345;
     let expected = crate::small_field::i128_to_field::<Fp>(big) * large;
-    assert_eq!(mul_fp_by_i128(&large, big), expected);
+    assert_eq!(mul_by_i128(&large, big), expected);
 
     let neg_big: i128 = -((1i128 << 70) + 12345);
     let expected_neg = crate::small_field::i128_to_field::<Fp>(neg_big) * large;
-    assert_eq!(mul_fp_by_i128(&large, neg_big), expected_neg);
+    assert_eq!(mul_by_i128(&large, neg_big), expected_neg);
   }
 
   #[test]
@@ -865,17 +657,17 @@ mod tests {
     let large = Fq::random(&mut OsRng);
 
     // Test small i128 values (fits in i64)
-    assert_eq!(mul_fq_by_i128(&large, 100), Fq::from(100u64) * large);
-    assert_eq!(mul_fq_by_i128(&large, -100), -Fq::from(100u64) * large);
+    assert_eq!(mul_by_i128(&large, 100), Fq::from(100u64) * large);
+    assert_eq!(mul_by_i128(&large, -100), -Fq::from(100u64) * large);
 
     // Test large i128 values (requires 2^64 decomposition)
     let big: i128 = (1i128 << 70) + 12345;
     let expected = crate::small_field::i128_to_field::<Fq>(big) * large;
-    assert_eq!(mul_fq_by_i128(&large, big), expected);
+    assert_eq!(mul_by_i128(&large, big), expected);
 
     let neg_big: i128 = -((1i128 << 70) + 12345);
     let expected_neg = crate::small_field::i128_to_field::<Fq>(neg_big) * large;
-    assert_eq!(mul_fq_by_i128(&large, neg_big), expected_neg);
+    assert_eq!(mul_by_i128(&large, neg_big), expected_neg);
   }
 
   #[test]
@@ -891,7 +683,7 @@ mod tests {
         -small
       };
 
-      let result = mul_fq_by_i128(&large, small);
+      let result = mul_by_i128(&large, small);
       let expected = crate::small_field::i128_to_field::<Fq>(small) * large;
       assert_eq!(result, expected);
     }
@@ -899,13 +691,13 @@ mod tests {
 
   #[test]
   fn test_two_pow_64_constants() {
-    // Verify TWO_POW_64_FP is correct
+    // Verify Fp::TWO_POW_64 is correct
     let computed = Fp::from(1u64 << 32) * Fp::from(1u64 << 32);
-    assert_eq!(TWO_POW_64_FP, computed);
+    assert_eq!(Fp::TWO_POW_64, computed);
 
-    // Verify TWO_POW_64_FQ is correct
+    // Verify Fq::TWO_POW_64 is correct
     let computed = Fq::from(1u64 << 32) * Fq::from(1u64 << 32);
-    assert_eq!(TWO_POW_64_FQ, computed);
+    assert_eq!(Fq::TWO_POW_64, computed);
   }
 
   #[test]

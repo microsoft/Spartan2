@@ -11,7 +11,7 @@
 //! allocations to the fold identity closure (called once per Rayon thread subdivision),
 //! we reduce allocations from O(num_x_out) to O(num_threads).
 
-use crate::accumulators::SmallValueAccumulators;
+use crate::accumulators::LagrangeAccumulators;
 use ff::PrimeField;
 use std::ops::AddAssign;
 
@@ -61,7 +61,7 @@ pub(crate) struct SpartanThreadState<
   const D: usize,
 > {
   /// Accumulator being built (the actual output)
-  pub acc: SmallValueAccumulators<S, D>,
+  pub acc: LagrangeAccumulators<S, D>,
   /// Partial sums indexed by β, accumulated over the x_in loop (unreduced form).
   /// Reset each x_out iteration.
   pub beta_partial_sums: Vec<U>,
@@ -91,7 +91,7 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
     e_y_sizes: &[usize],
   ) -> Self {
     Self {
-      acc: SmallValueAccumulators::new(l0),
+      acc: LagrangeAccumulators::new(l0),
       beta_partial_sums: vec![U::default(); num_betas],
       az_pref: vec![V::default(); prefix_size],
       bz_pref: vec![V::default(); prefix_size],
@@ -120,7 +120,7 @@ impl<S: PrimeField, V: Copy + Default, U: Copy + Clone + Default + AddAssign, co
 /// See `SpartanThreadState` documentation for the full motivation.
 pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
   /// Accumulator being built (the actual output)
-  pub acc: SmallValueAccumulators<S, D>,
+  pub acc: LagrangeAccumulators<S, D>,
   /// Partial sums indexed by β. Reset each x_out iteration.
   pub beta_partial_sums: Vec<S>,
   /// Prefix evaluations for each of the d polynomials. Size: d × 2^l0
@@ -145,7 +145,7 @@ impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
     e_y_sizes: &[usize],
   ) -> Self {
     Self {
-      acc: SmallValueAccumulators::new(l0),
+      acc: LagrangeAccumulators::new(l0),
       beta_partial_sums: vec![S::ZERO; num_betas],
       poly_prefs: (0..num_polys).map(|_| vec![S::ZERO; prefix_size]).collect(),
       buf_pairs: (0..num_polys)

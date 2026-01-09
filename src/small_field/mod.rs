@@ -28,7 +28,7 @@
 //!                              ▼
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │              Barrett Reduction (internal)                    │
-//! │  mul_fp_by_i64, mul_fq_by_i64 - ~9 base muls vs ~32 naive   │
+//! │  mul_by_i64<F> - ~9 base muls vs ~32 naive                  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -36,9 +36,11 @@ mod small_value_field;
 mod delayed_reduction;
 pub(crate) mod barrett;
 mod impls;
+pub(crate) mod limbs;
 
 pub use delayed_reduction::DelayedReduction;
 pub use small_value_field::SmallValueField;
+pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
 
 use ff::PrimeField;
 
