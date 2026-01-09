@@ -205,12 +205,21 @@ impl<const N: usize> Zero for SignedWideLimbs<N> {
   }
 }
 
-/// Compute |a - b| and return (is_negative, magnitude).
+/// Result of magnitude subtraction |a - b|.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubMagResult<const N: usize> {
+  /// a >= b, contains a - b
+  Positive([u64; N]),
+  /// a < b, contains b - a
+  Negative([u64; N]),
+}
+
+/// Compute |a - b| and return the magnitude with sign information.
 ///
 /// Used to reduce two wide integers to one before Barrett reduction,
 /// saving one expensive reduction operation.
 #[inline(always)]
-pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> (bool, [u64; N]) {
+pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> SubMagResult<N> {
   let mut out = [0u64; N];
   let mut borrow = 0u64;
   for i in 0..N {
@@ -220,7 +229,7 @@ pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> (bool, [u64; N]) {
     borrow = (b1 as u64) + (b2 as u64);
   }
   if borrow == 0 {
-    (false, out)
+    SubMagResult::Positive(out)
   } else {
     // a < b, compute b - a instead
     let mut out2 = [0u64; N];
@@ -231,7 +240,7 @@ pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> (bool, [u64; N]) {
       out2[i] = d2;
       borrow = (b1 as u64) + (b2 as u64);
     }
-    (true, out2)
+    SubMagResult::Negative(out2)
   }
 }
 
