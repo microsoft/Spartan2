@@ -28,10 +28,10 @@ use bellpepper_core::{
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
-  gadgets::small_sha256,
+  gadgets::{small_sha256, I32NoBatch, I64Batch21, SmallMultiEqConfig},
   polys::multilinear::MultilinearPolynomial,
   provider::PallasHyraxEngine,
-  small_field::{I32NoBatch, I64Batch21, SmallMultiEqConfig, SmallValueField},
+  small_field::SmallValueField,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
   traits::{

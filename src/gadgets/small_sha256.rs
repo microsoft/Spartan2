@@ -19,8 +19,8 @@
 //! let hash_bits = small_sha256(cs, &input_bits)?;
 //! ```
 
-use super::{SmallMultiEq, SmallUInt32};
-use crate::small_field::{SmallMultiEqConfig, SmallValueField};
+use super::{small_multi_eq::SmallMultiEqConfig, SmallMultiEq, SmallUInt32};
+use crate::small_field::SmallValueField;
 use bellpepper_core::{ConstraintSystem, SynthesisError, boolean::Boolean};
 use ff::PrimeField;
 
@@ -369,7 +369,7 @@ fn sha256_padding(input: &[Boolean]) -> Vec<Boolean> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::small_field::{I32NoBatch, I64Batch21};
+  use crate::gadgets::{I32NoBatch, I64Batch21};
   use bellpepper_core::test_cs::TestConstraintSystem;
   use halo2curves::pasta::Fq;
   use rand::{Rng, SeedableRng, rngs::StdRng};

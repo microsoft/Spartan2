@@ -33,10 +33,161 @@
 //! way to make the batched sum zero is for all individual differences to be zero.
 //! This is because 2^k > 2^(k-1) + ... + 2^0 = 2^k - 1.
 
-use crate::small_field::{BatchingMode, SmallMultiEqConfig};
+use crate::small_field::SmallValueField;
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 use ff::PrimeField;
-use std::marker::PhantomData;
+use std::{
+  fmt::Debug,
+  marker::PhantomData,
+  ops::{Add, AddAssign, Neg, Sub, SubAssign},
+};
+
+// ============================================================================
+// SmallValueConfig - Type-Level Configuration for Small-Value Optimization
+// ============================================================================
+
+/// Type-level marker: batching not available for this config.
+///
+/// Used when constraint coefficients would overflow if batched.
+/// Each equality constraint is enforced directly.
+pub struct NoBatching;
+
+/// Type-level marker: batching with K constraints per flush.
+///
+/// Equality constraints are accumulated with coefficients 2^0, 2^1, ..., 2^(K-1)
+/// and flushed as a single batched constraint.
+pub struct Batching<const K: usize>;
+
+/// Trait to extract batching information at compile time.
+pub trait BatchingMode: 'static + Send + Sync {
+  /// Maximum bits for batching coefficients.
+  /// - `None` = batching not supported, use direct constraints
+  /// - `Some(k)` = batch up to k constraints before flushing
+  const MAX_COEFF_BITS: Option<usize>;
+}
+
+impl BatchingMode for NoBatching {
+  const MAX_COEFF_BITS: Option<usize> = None;
+}
+
+impl<const K: usize> BatchingMode for Batching<K> {
+  const MAX_COEFF_BITS: Option<usize> = Some(K);
+}
+
+/// Configuration trait for SmallMultiEq constraint system.
+///
+/// Bundles a scalar field type implementing `SmallValueField<SmallValue>` with
+/// a batching mode. This allows `SmallMultiEq` to use the appropriate small-value
+/// operations and batching behavior.
+///
+/// # Associated Types
+/// - `Scalar`: Field type implementing `SmallValueField<SmallValue>`
+/// - `SmallValue`: Native type for witness values (i32 or i64)
+/// - `Batching`: Batching mode (NoBatching or Batching<K>)
+pub trait SmallMultiEqConfig: 'static + Send + Sync {
+  /// The scalar field type.
+  type Scalar: SmallValueField<Self::SmallValue>;
+
+  /// Small value type for witness coefficients.
+  type SmallValue: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = Self::SmallValue>
+    + Sub<Output = Self::SmallValue>
+    + Neg<Output = Self::SmallValue>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync;
+
+  /// Batching mode for constraint accumulation.
+  type Batching: BatchingMode;
+}
+
+/// i32 configuration with no batching.
+///
+/// Use this for circuits where Az values would overflow i32 if batched.
+/// Each equality constraint is enforced directly.
+///
+/// - SmallValue: i32
+/// - Batching: None (direct constraints)
+pub struct I32NoBatch<S>(PhantomData<S>);
+
+impl<S> Default for I32NoBatch<S> {
+  fn default() -> Self {
+    I32NoBatch(PhantomData)
+  }
+}
+
+impl<S: SmallValueField<i32>> SmallMultiEqConfig for I32NoBatch<S> {
+  type Scalar = S;
+  type SmallValue = i32;
+  type Batching = NoBatching;
+}
+
+/// i64 configuration with batching (21 constraints per flush).
+///
+/// Use this for circuits with large positional coefficients (up to 2^34),
+/// like SHA-256. The larger intermediate type (i128) allows batching while
+/// keeping Az values within i64 bounds.
+///
+/// - SmallValue: i64
+/// - Batching: 21 constraints per flush
+///
+/// # Why K=21 Specifically?
+///
+/// Batching packs multiple equality constraints into fewer constraints by forming:
+/// ```text
+/// B(z) = Σⱼ 2ʲ · Lⱼ(z)  for j = 0..K-1
+/// ```
+/// and enforcing B(z) = 0. This is safe because:
+/// - If all Lⱼ(z) = 0, then B(z) = 0
+/// - If some Lⱼ(z) ≠ 0, the weighted sum won't cancel (powers of 2 give unique representation)
+///
+/// The limit K=21 comes from not overflowing i64 before converting to field:
+///
+/// ```text
+/// MAX_COEFF_BITS = 21 because:
+/// Az ≤ 200 terms × 2^34 (positional) × 2^20 (batching) × 1 (witness)
+///    = 2^8 × 2^34 × 2^20 × 2^0
+///    = 2^62 < 2^63 (i64 signed max)
+/// ```
+///
+/// Where:
+/// - **200 terms**: Worst-case number of terms summed in a constraint row
+/// - **2^34**: Positional coefficients in SHA-256-like circuits (limb shifts, bit packing)
+/// - **2^20**: Batching weights (we batch K=21 constraints, weights up to 2^20)
+/// - **1**: Witness values (bits are 0 or 1)
+///
+/// # Why not K=32?
+///
+/// Batching is limited by not overflowing the "small" representation before
+/// mapping into the field. If we batch too many, the integer sum can exceed i64
+/// and silently wrap. K=21 is the safe maximum for our coefficient envelope.
+///
+/// # Performance Impact
+///
+/// Without batching: ~100-1000 eq constraints, each produces its own row contribution.
+/// With batching K=21: ~21 eq's compressed into 1 row → ~21× fewer rows from this gadget.
+///
+/// This makes the "small value" assumption more valuable by reducing the total count
+/// of expensive `isl_mul` and delayed reduction operations associated with constraints.
+pub struct I64Batch21<S>(PhantomData<S>);
+
+impl<S> Default for I64Batch21<S> {
+  fn default() -> Self {
+    I64Batch21(PhantomData)
+  }
+}
+
+impl<S: SmallValueField<i64>> SmallMultiEqConfig for I64Batch21<S> {
+  type Scalar = S;
+  type SmallValue = i64;
+  type Batching = Batching<21>;
+}
 
 /// SmallMultiEq: Batches equality constraints while keeping coefficients
 /// within SmallMultiEqConfig bounds.
@@ -233,7 +384,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::small_field::{Batching, I32NoBatch, I64Batch21, SmallValueField};
+  use super::{Batching, I32NoBatch, I64Batch21, SmallValueField};
   use bellpepper_core::test_cs::TestConstraintSystem;
   use halo2curves::pasta::Fq;
   use std::marker::PhantomData;

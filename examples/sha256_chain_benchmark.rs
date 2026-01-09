@@ -30,10 +30,10 @@ use clap::{Parser, Subcommand};
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
-  gadgets::small_sha256_with_prefix,
+  gadgets::{small_sha256_with_prefix, I64Batch21, SmallMultiEqConfig},
   polys::multilinear::MultilinearPolynomial,
   provider::PallasHyraxEngine,
-  small_field::{I64Batch21, SmallMultiEqConfig, SmallValueField},
+  small_field::SmallValueField,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
   traits::{

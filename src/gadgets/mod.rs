@@ -20,6 +20,8 @@ mod small_multi_eq;
 mod small_sha256;
 mod small_uint32;
 
-pub use small_multi_eq::SmallMultiEq;
+pub use small_multi_eq::{
+  Batching, BatchingMode, I32NoBatch, I64Batch21, NoBatching, SmallMultiEq, SmallMultiEqConfig,
+};
 pub use small_sha256::{small_sha256, small_sha256_with_prefix};
 pub use small_uint32::SmallUInt32;

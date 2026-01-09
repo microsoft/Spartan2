@@ -29,8 +29,8 @@
 //! | `shr()` | No - inserts zero bits |
 //! | `sha256_ch/maj()` | No - uses AND/XOR |
 
-use super::small_multi_eq::SmallMultiEq;
-use crate::small_field::{SmallMultiEqConfig, SmallValueField};
+use super::small_multi_eq::{SmallMultiEq, SmallMultiEqConfig};
+use crate::small_field::SmallValueField;
 use bellpepper_core::{
   ConstraintSystem, LinearCombination, SynthesisError,
   boolean::{AllocatedBit, Boolean},
@@ -504,7 +504,7 @@ impl SmallUInt32 {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::small_field::I32NoBatch;
+  use crate::gadgets::I32NoBatch;
   use bellpepper_core::test_cs::TestConstraintSystem;
   use halo2curves::pasta::Fq;
 
@@ -576,7 +576,7 @@ mod tests {
 
   #[test]
   fn test_small_uint32_addmany_small64() {
-    use crate::small_field::I64Batch21;
+    use crate::gadgets::I64Batch21;
 
     let mut cs = TestConstraintSystem::<Fq>::new();
 
