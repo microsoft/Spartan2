@@ -4,35 +4,22 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SmallUInt32: 32-bit unsigned integer gadget using SmallMultiEq.
+//! SmallUInt32: 32-bit unsigned integer gadget for small-value sumcheck.
 //!
-//! This is a port of bellpepper's `UInt32` with one key change:
-//! `addmany` uses `SmallMultiEq` instead of `MultiEq` for batched carry constraints.
-//!
-//! # Why SmallUInt32?
-//!
-//! Bellpepper's `UInt32::addmany` has:
-//! ```ignore
-//! where M: ConstraintSystem<Scalar, Root = MultiEq<Scalar, CS>>
-//! ```
-//!
-//! It's hardcoded to bellpepper's `MultiEq`. We need our own copy that uses
-//! `SmallMultiEq` to keep constraint coefficients within `SmallValueField` bounds.
+//! This is a port of bellpepper's `UInt32` with bit operations for SHA-256.
+//! Addition is handled externally via the `SmallMultiEq` trait's `addmany` method.
 //!
 //! # SHA256 Operations
 //!
-//! | Operation | Uses SmallMultiEq? |
-//! |-----------|-------------------|
-//! | `addmany()` | **Yes** - carry constraints |
-//! | `xor()` | No - delegates to Boolean |
-//! | `rotr()` | No - just reorders bits |
-//! | `shr()` | No - inserts zero bits |
-//! | `sha256_ch/maj()` | No - uses AND/XOR |
+//! | Operation | Constraints |
+//! |-----------|-------------|
+//! | `xor()` | Delegates to Boolean |
+//! | `rotr()` | No constraints - just reorders bits |
+//! | `shr()` | No constraints - inserts zero bits |
+//! | `sha256_ch/maj()` | Uses AND/XOR |
 
-use super::small_multi_eq::{SmallMultiEq, SmallMultiEqConfig};
-use crate::small_field::SmallValueField;
 use bellpepper_core::{
-  ConstraintSystem, LinearCombination, SynthesisError,
+  ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
 };
 use ff::PrimeField;
@@ -41,17 +28,15 @@ use ff::PrimeField;
 #[derive(Clone, Debug)]
 pub struct SmallUInt32 {
   /// Little-endian bit representation
-  bits: Vec<Boolean>,
+  bits: [Boolean; 32],
   /// Cached value (if known)
   value: Option<u32>,
 }
 
 impl SmallUInt32 {
-  /// Construct a `SmallUInt32` from a `Boolean` vector.
+  /// Construct a `SmallUInt32` from a `Boolean` array.
   /// Bits are in little-endian order.
-  pub fn from_bits_le(bits: &[Boolean]) -> Self {
-    assert_eq!(bits.len(), 32);
-
+  pub fn from_bits_le(bits: &[Boolean; 32]) -> Self {
     let value = bits.iter().rev().try_fold(0u32, |acc, bit| {
       bit
         .get_value()
@@ -59,26 +44,25 @@ impl SmallUInt32 {
     });
 
     SmallUInt32 {
-      bits: bits.to_vec(),
+      bits: bits.clone(),
       value,
     }
   }
 
-  /// Construct a `SmallUInt32` from a `Boolean` vector in big-endian order.
-  pub fn from_bits_be(bits: &[Boolean]) -> Self {
-    assert_eq!(bits.len(), 32);
-    let mut bits = bits.to_vec();
-    bits.reverse();
-    Self::from_bits_le(&bits)
+  /// Construct a `SmallUInt32` from a `Boolean` array in big-endian order.
+  pub fn from_bits_be(bits: &[Boolean; 32]) -> Self {
+    let mut bits_le = bits.clone();
+    bits_le.reverse();
+    Self::from_bits_le(&bits_le)
   }
 
   /// Get the bits in little-endian order.
-  pub fn bits_le(&self) -> &[Boolean] {
+  pub fn bits_le(&self) -> &[Boolean; 32] {
     &self.bits
   }
 
   /// Get the bits in big-endian order.
-  pub fn into_bits_be(self) -> Vec<Boolean> {
+  pub fn into_bits_be(self) -> [Boolean; 32] {
     let mut bits = self.bits;
     bits.reverse();
     bits
@@ -91,9 +75,7 @@ impl SmallUInt32 {
 
   /// Create a constant `SmallUInt32`.
   pub fn constant(value: u32) -> Self {
-    let bits: Vec<Boolean> = (0..32)
-      .map(|i| Boolean::constant((value >> i) & 1 == 1))
-      .collect();
+    let bits: [Boolean; 32] = std::array::from_fn(|i| Boolean::constant((value >> i) & 1 == 1));
 
     SmallUInt32 {
       bits,
@@ -107,30 +89,20 @@ impl SmallUInt32 {
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
   {
-    let bits: Vec<Boolean> = (0..32)
-      .map(|i| {
-        AllocatedBit::alloc(
-          cs.namespace(|| format!("bit {}", i)),
-          value.map(|v| (v >> i) & 1 == 1),
-        )
-        .map(Boolean::from)
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
+    let mut bits = [const { Boolean::Constant(false) }; 32];
+    for (i, slot) in bits.iter_mut().enumerate() {
+      *slot = Boolean::from(AllocatedBit::alloc(
+        cs.namespace(|| format!("b{i}")),
+        value.map(|v| (v >> i) & 1 == 1),
+      )?);
+    }
     Ok(SmallUInt32 { bits, value })
   }
 
   /// Right rotation.
   pub fn rotr(&self, by: usize) -> Self {
     let by = by % 32;
-    let bits: Vec<Boolean> = self
-      .bits
-      .iter()
-      .cycle()
-      .skip(by)
-      .take(32)
-      .cloned()
-      .collect();
+    let bits: [Boolean; 32] = std::array::from_fn(|i| self.bits[(i + by) % 32].clone());
 
     SmallUInt32 {
       bits,
@@ -140,15 +112,13 @@ impl SmallUInt32 {
 
   /// Right shift.
   pub fn shr(&self, by: usize) -> Self {
-    let bits: Vec<Boolean> = (0..32)
-      .map(|i| {
-        if i + by < 32 {
-          self.bits[i + by].clone()
-        } else {
-          Boolean::constant(false)
-        }
-      })
-      .collect();
+    let bits: [Boolean; 32] = std::array::from_fn(|i| {
+      if i + by < 32 {
+        self.bits[i + by].clone()
+      } else {
+        Boolean::constant(false)
+      }
+    });
 
     SmallUInt32 {
       bits,
@@ -162,13 +132,14 @@ impl SmallUInt32 {
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
   {
-    let bits: Vec<Boolean> = self
-      .bits
-      .iter()
-      .zip(other.bits.iter())
+    let mut bits = [const { Boolean::Constant(false) }; 32];
+    for (i, (slot, (a, b))) in bits
+      .iter_mut()
+      .zip(self.bits.iter().zip(other.bits.iter()))
       .enumerate()
-      .map(|(i, (a, b))| Boolean::xor(cs.namespace(|| format!("xor bit {}", i)), a, b))
-      .collect::<Result<Vec<_>, _>>()?;
+    {
+      *slot = Boolean::xor(cs.namespace(|| format!("b{i}")), a, b)?;
+    }
 
     Ok(SmallUInt32 {
       bits,
@@ -187,14 +158,14 @@ impl SmallUInt32 {
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
   {
-    let bits: Vec<Boolean> = a
-      .bits
-      .iter()
-      .zip(b.bits.iter())
-      .zip(c.bits.iter())
+    let mut bits = [const { Boolean::Constant(false) }; 32];
+    for (i, (slot, ((a_bit, b_bit), c_bit))) in bits
+      .iter_mut()
+      .zip(a.bits.iter().zip(b.bits.iter()).zip(c.bits.iter()))
       .enumerate()
-      .map(|(i, ((a, b), c))| Boolean::sha256_ch(cs.namespace(|| format!("ch bit {}", i)), a, b, c))
-      .collect::<Result<Vec<_>, _>>()?;
+    {
+      *slot = Boolean::sha256_ch(cs.namespace(|| format!("b{i}")), a_bit, b_bit, c_bit)?;
+    }
 
     Ok(SmallUInt32 {
       bits,
@@ -218,32 +189,19 @@ impl SmallUInt32 {
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
   {
-    let bits: Vec<Boolean> = a
-      .bits
-      .iter()
-      .zip(b.bits.iter())
-      .zip(c.bits.iter())
+    let mut bits = [const { Boolean::Constant(false) }; 32];
+    for (i, (slot, ((a_bit, b_bit), c_bit))) in bits
+      .iter_mut()
+      .zip(a.bits.iter().zip(b.bits.iter()).zip(c.bits.iter()))
       .enumerate()
-      .map(|(i, ((a_bit, b_bit), c_bit))| {
-        // Optimized: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
-        // t = a ^ b
-        let t = Boolean::xor(
-          cs.namespace(|| format!("maj_axorb bit {}", i)),
-          a_bit,
-          b_bit,
-        )?;
-        // u = c & t
-        let u = Boolean::and(cs.namespace(|| format!("maj_candt bit {}", i)), c_bit, &t)?;
-        // v = a & b
-        let v = Boolean::and(
-          cs.namespace(|| format!("maj_aandb bit {}", i)),
-          a_bit,
-          b_bit,
-        )?;
-        // maj = v ^ u
-        Boolean::xor(cs.namespace(|| format!("maj_result bit {}", i)), &v, &u)
-      })
-      .collect::<Result<Vec<_>, _>>()?;
+    {
+      let mut bit_cs = cs.namespace(|| format!("b{i}"));
+      // Optimized: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
+      let t = Boolean::xor(bit_cs.namespace(|| "xor_ab"), a_bit, b_bit)?;
+      let u = Boolean::and(bit_cs.namespace(|| "and_c_t"), c_bit, &t)?;
+      let v = Boolean::and(bit_cs.namespace(|| "and_ab"), a_bit, b_bit)?;
+      *slot = Boolean::xor(bit_cs.namespace(|| "xor_vu"), &v, &u)?;
+    }
 
     Ok(SmallUInt32 {
       bits,
@@ -253,258 +211,12 @@ impl SmallUInt32 {
       }),
     })
   }
-
-  /// Add multiple `SmallUInt32`s together using `SmallMultiEq` for batched carry constraints.
-  ///
-  /// This is the key function that differs from bellpepper's `UInt32::addmany`:
-  /// it uses `SmallMultiEq` instead of `MultiEq` to keep constraint coefficients bounded.
-  ///
-  /// For i32 (I32NoBatch<Fq>): Uses 16-bit limbed addition to keep max coefficient at 2^18.
-  /// For i64 (I64Batch21<Fq>): Uses full 35-bit addition (max coefficient 2^34 fits in i64).
-  pub fn addmany<Scalar, CS, C, M>(cs: M, operands: &[Self]) -> Result<Self, SynthesisError>
-  where
-    Scalar: SmallValueField<C::SmallValue>,
-    CS: ConstraintSystem<Scalar>,
-    C: SmallMultiEqConfig,
-    M: ConstraintSystem<Scalar, Root = SmallMultiEq<Scalar, CS, C>>,
-  {
-    // Make some constraints about the number of operands
-    assert!(Scalar::NUM_BITS >= 64);
-    assert!(operands.len() >= 2);
-    assert!(operands.len() <= 10); // Reasonable limit
-
-    // If all operands are constant, return constant result
-    if operands.iter().all(|op| op.value.is_some()) {
-      let all_constant = operands
-        .iter()
-        .all(|op| op.bits.iter().all(|b| matches!(b, Boolean::Constant(_))));
-      if all_constant {
-        let sum: u32 = operands
-          .iter()
-          .map(|op| op.value.unwrap())
-          .fold(0u32, |a, b| a.wrapping_add(b));
-        return Ok(Self::constant(sum));
-      }
-    }
-
-    // Dispatch based on small value type size:
-    // - i32 (4 bytes): Use limbed addition (max coeff 2^18)
-    // - i64 (8 bytes): Use full addition (max coeff 2^34)
-    if std::mem::size_of::<C::SmallValue>() <= 4 {
-      Self::addmany_limbed::<Scalar, CS, C, M>(cs, operands)
-    } else {
-      Self::addmany_full::<Scalar, CS, C, M>(cs, operands)
-    }
-  }
-
-  /// Full 35-bit addition for i64 path.
-  /// Max coefficient: 2^34 (for 5 operands producing 35-bit result).
-  fn addmany_full<Scalar, CS, C, M>(mut cs: M, operands: &[Self]) -> Result<Self, SynthesisError>
-  where
-    Scalar: SmallValueField<C::SmallValue>,
-    CS: ConstraintSystem<Scalar>,
-    C: SmallMultiEqConfig,
-    M: ConstraintSystem<Scalar, Root = SmallMultiEq<Scalar, CS, C>>,
-  {
-    // Compute the maximum value of the sum
-    let max_value = (operands.len() as u64) * (u32::MAX as u64);
-
-    // How many bits do we need to represent the result?
-    let result_bits = 64 - max_value.leading_zeros() as usize;
-
-    // Compute the value of the result
-    let result_value = operands
-      .iter()
-      .try_fold(0u64, |acc, op| op.value.map(|v| acc + (v as u64)));
-
-    // Allocate each bit of the result
-    let mut result_bits_vec: Vec<Boolean> = Vec::with_capacity(result_bits);
-    let mut coeff = Scalar::ONE;
-    let mut lc = LinearCombination::zero();
-    let mut all_operands_lc = LinearCombination::zero();
-
-    for i in 0..result_bits {
-      // Allocate the bit
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("result bit {}", i)),
-        result_value.map(|v| (v >> i) & 1 == 1),
-      )?;
-
-      // Add to linear combination
-      lc = lc + (coeff, bit.get_variable());
-
-      result_bits_vec.push(Boolean::from(bit));
-      coeff = coeff.double();
-    }
-
-    // Compute linear combination of all operand bits
-    for op in operands.iter() {
-      let mut coeff = Scalar::ONE;
-      for bit in &op.bits {
-        all_operands_lc = all_operands_lc + &bit.lc(CS::one(), coeff);
-        coeff = coeff.double();
-      }
-    }
-
-    // Enforce that the result equals the sum of operands
-    cs.get_root().enforce_equal(&lc, &all_operands_lc);
-
-    // Truncate to 32 bits
-    let bits: Vec<Boolean> = result_bits_vec.into_iter().take(32).collect();
-    assert_eq!(bits.len(), 32);
-
-    Ok(SmallUInt32 {
-      bits,
-      value: result_value.map(|v| v as u32),
-    })
-  }
-
-  /// 16-bit limbed addition for i32 path.
-  /// Splits each 32-bit value into two 16-bit limbs and adds them separately.
-  /// Max coefficient: 2^18 (fits in i32).
-  ///
-  /// Constraint 1 (low limb):
-  ///   Σ(operand_lo) = result_lo + carry × 2^16
-  ///
-  /// Constraint 2 (high limb):
-  ///   Σ(operand_hi) + carry = result_hi + overflow × 2^16
-  fn addmany_limbed<Scalar, CS, C, M>(mut cs: M, operands: &[Self]) -> Result<Self, SynthesisError>
-  where
-    Scalar: SmallValueField<C::SmallValue>,
-    CS: ConstraintSystem<Scalar>,
-    C: SmallMultiEqConfig,
-    M: ConstraintSystem<Scalar, Root = SmallMultiEq<Scalar, CS, C>>,
-  {
-    // For N operands, each 16-bit limb sum can be up to N * (2^16 - 1)
-    // For 10 operands: 10 * 65535 = 655350, needs 20 bits
-    // We allocate 16 result bits + up to 4 carry/overflow bits
-    let num_carry_bits =
-      64 - ((operands.len() as u64) * (u16::MAX as u64)).leading_zeros() as usize - 16;
-    let num_carry_bits = num_carry_bits.max(1); // At least 1 carry bit
-
-    // Compute low limb sum (for witness generation)
-    // IMPORTANT: Carry must be computed from the LOW LIMB SUM, not from the full result
-    let lo_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-      op.value.map(|v| acc + ((v as u64) & 0xFFFF))
-    });
-
-    // Compute carry value
-    let carry_value: Option<u64> = lo_sum.map(|v| v >> 16);
-
-    // Compute high limb sum (for witness generation)
-    // hi_sum = Σ(operand_hi) + carry
-    let hi_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-      op.value.map(|v| acc + (((v as u64) >> 16) & 0xFFFF))
-    });
-    let hi_sum_with_carry: Option<u64> = hi_sum.and_then(|h| carry_value.map(|c| h + c));
-
-    // Final result value (for returning)
-    let result_value: Option<u64> = operands
-      .iter()
-      .try_fold(0u64, |acc, op| op.value.map(|v| acc + (v as u64)));
-
-    // === LOW LIMB CONSTRAINT ===
-    // Sum of low 16 bits of each operand = low 16 bits of result + carry × 2^16
-
-    // Build LHS: sum of all operand low limbs
-    let mut lo_operands_lc = LinearCombination::zero();
-    for op in operands.iter() {
-      let mut coeff = Scalar::ONE;
-      for bit in &op.bits[0..16] {
-        lo_operands_lc = lo_operands_lc + &bit.lc(CS::one(), coeff);
-        coeff = coeff.double();
-      }
-    }
-
-    // Allocate result low bits (0..15) from lo_sum
-    let mut lo_result_lc = LinearCombination::zero();
-    let mut result_bits: Vec<Boolean> = Vec::with_capacity(32);
-    let mut carry_bits: Vec<AllocatedBit> = Vec::with_capacity(num_carry_bits);
-
-    let mut coeff = Scalar::ONE;
-    for i in 0..16 {
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("lo_result_bit_{}", i)),
-        lo_sum.map(|v| (v >> i) & 1 == 1),
-      )?;
-      lo_result_lc = lo_result_lc + (coeff, bit.get_variable());
-      result_bits.push(Boolean::from(bit));
-      coeff = coeff.double();
-    }
-
-    // Allocate carry bits from lo_sum (bits 16+)
-    for i in 0..num_carry_bits {
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("carry_bit_{}", i)),
-        lo_sum.map(|v| (v >> (16 + i)) & 1 == 1),
-      )?;
-      lo_result_lc = lo_result_lc + (coeff, bit.get_variable());
-      carry_bits.push(bit);
-      coeff = coeff.double();
-    }
-
-    // Enforce: lo_operands_lc = lo_result_lc
-    cs.get_root().enforce_equal(&lo_operands_lc, &lo_result_lc);
-
-    // === HIGH LIMB CONSTRAINT ===
-    // Sum of high 16 bits of each operand + carry = high 16 bits of result + overflow × 2^16
-
-    // Build LHS: sum of all operand high limbs + carry
-    let mut hi_operands_lc = LinearCombination::zero();
-    for op in operands.iter() {
-      let mut coeff = Scalar::ONE;
-      for bit in &op.bits[16..32] {
-        hi_operands_lc = hi_operands_lc + &bit.lc(CS::one(), coeff);
-        coeff = coeff.double();
-      }
-    }
-
-    // Add carry from low limb
-    let mut coeff = Scalar::ONE;
-    for carry_bit in &carry_bits {
-      hi_operands_lc = hi_operands_lc + (coeff, carry_bit.get_variable());
-      coeff = coeff.double();
-    }
-
-    // Allocate result high bits (16..31) from hi_sum_with_carry
-    let mut hi_result_lc = LinearCombination::zero();
-    let mut coeff = Scalar::ONE;
-    for i in 0..16 {
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("hi_result_bit_{}", i)),
-        hi_sum_with_carry.map(|v| (v >> i) & 1 == 1),
-      )?;
-      hi_result_lc = hi_result_lc + (coeff, bit.get_variable());
-      result_bits.push(Boolean::from(bit));
-      coeff = coeff.double();
-    }
-
-    // Allocate overflow bits from hi_sum_with_carry (bits 16+, discarded)
-    for i in 0..num_carry_bits {
-      let bit = AllocatedBit::alloc(
-        cs.namespace(|| format!("overflow_bit_{}", i)),
-        hi_sum_with_carry.map(|v| (v >> (16 + i)) & 1 == 1),
-      )?;
-      hi_result_lc = hi_result_lc + (coeff, bit.get_variable());
-      coeff = coeff.double();
-    }
-
-    // Enforce: hi_operands_lc = hi_result_lc
-    cs.get_root().enforce_equal(&hi_operands_lc, &hi_result_lc);
-
-    assert_eq!(result_bits.len(), 32);
-
-    Ok(SmallUInt32 {
-      bits: result_bits,
-      value: result_value.map(|v| v as u32),
-    })
-  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::gadgets::I32NoBatch;
+  use crate::gadgets::{BatchingEq, NoBatchEq, SmallMultiEq};
   use bellpepper_core::test_cs::TestConstraintSystem;
   use halo2curves::pasta::Fq;
 
@@ -541,7 +253,7 @@ mod tests {
   }
 
   #[test]
-  fn test_small_uint32_addmany() {
+  fn test_small_uint32_addmany_via_trait() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
     let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(100)).unwrap();
@@ -549,8 +261,8 @@ mod tests {
     let c = SmallUInt32::alloc(cs.namespace(|| "c"), Some(300)).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-      let result = SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b, c]).unwrap();
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c]).unwrap();
       assert_eq!(result.get_value(), Some(600));
     }
 
@@ -565,8 +277,8 @@ mod tests {
     let b = SmallUInt32::alloc(cs.namespace(|| "b"), Some(1)).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-      let result = SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b]).unwrap();
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b]).unwrap();
       // Should wrap to 0
       assert_eq!(result.get_value(), Some(0));
     }
@@ -575,9 +287,7 @@ mod tests {
   }
 
   #[test]
-  fn test_small_uint32_addmany_small64() {
-    use crate::gadgets::I64Batch21;
-
+  fn test_small_uint32_addmany_batching() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
     let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(100)).unwrap();
@@ -585,9 +295,9 @@ mod tests {
     let c = SmallUInt32::alloc(cs.namespace(|| "c"), Some(300)).unwrap();
 
     {
-      // Use I64Batch21<Fq> config (full 35-bit addition path)
-      let mut multi_eq = SmallMultiEq::<_, _, I64Batch21<Fq>>::new(&mut cs);
-      let result = SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b, c]).unwrap();
+      // Use BatchingEq<21> (full 35-bit addition path)
+      let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c]).unwrap();
       assert_eq!(result.get_value(), Some(600));
     }
 
@@ -612,8 +322,8 @@ mod tests {
       .wrapping_add(0x01020304);
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-      let result = SmallUInt32::addmany(multi_eq.namespace(|| "add"), &[a, b, c, d, e]).unwrap();
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c, d, e]).unwrap();
       assert_eq!(result.get_value(), Some(expected));
     }
 

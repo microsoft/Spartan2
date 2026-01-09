@@ -6,9 +6,9 @@
 
 //! SmallMultiEq: Batched equality constraints with bounded coefficients.
 //!
-//! This module provides `SmallMultiEq`, a constraint system wrapper that batches
-//! multiple equality constraints together while keeping coefficients within
-//! `SmallMultiEqConfig` bounds. This enables the small-value sumcheck optimization.
+//! This module provides the `SmallMultiEq` trait and two implementations:
+//! - [`NoBatchEq`]: Each equality constraint is enforced directly (for i32 path)
+//! - [`BatchingEq`]: Batches up to K constraints before flushing (for i64 path)
 //!
 //! # Why SmallMultiEq?
 //!
@@ -22,285 +22,125 @@
 //!
 //! Even if z(y) is small (bits), if A(x,y) = 2^237, then Az(x) is huge.
 //!
-//! SmallMultiEq solves this by either:
-//! - For `NoBatching` (I32NoBatch<Fq>): Enforce each constraint directly
-//! - For `Batching<K>` (I64Batch21<Fq>): Batch up to K constraints before flushing
+//! # Design
 //!
-//! # Soundness
+//! The `SmallMultiEq` trait extends `ConstraintSystem` with:
+//! - `enforce_equal`: Batch-aware equality constraints
+//! - `flush`: Force pending constraints to be emitted
+//! - `addmany`: Add multiple SmallUInt32 values (algorithm determined by impl)
 //!
-//! SmallMultiEq is equally sound as MultiEq for bit constraints. The batching
-//! uses powers of 2, so for constrained values that are bits (0 or 1), the only
-//! way to make the batched sum zero is for all individual differences to be zero.
-//! This is because 2^k > 2^(k-1) + ... + 2^0 = 2^k - 1.
+//! Each implementation pairs a batching strategy with its compatible addmany algorithm:
+//! - `NoBatchEq`: No batching + limbed addition (max coeff 2^18, fits i32)
+//! - `BatchingEq<K>`: Batch K constraints + full addition (max coeff 2^34, fits i64)
 
-use crate::small_field::SmallValueField;
+use super::{addmany, small_uint32::SmallUInt32};
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 use ff::PrimeField;
-use std::{
-  fmt::Debug,
-  marker::PhantomData,
-  ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
 
 // ============================================================================
-// SmallValueConfig - Type-Level Configuration for Small-Value Optimization
+// SmallMultiEq Trait
 // ============================================================================
 
-/// Type-level marker: batching not available for this config.
+/// Constraint system extension for batched equality constraints with bounded coefficients.
 ///
-/// Used when constraint coefficients would overflow if batched.
-/// Each equality constraint is enforced directly.
-pub struct NoBatching;
-
-/// Type-level marker: batching with K constraints per flush.
-///
-/// Equality constraints are accumulated with coefficients 2^0, 2^1, ..., 2^(K-1)
-/// and flushed as a single batched constraint.
-pub struct Batching<const K: usize>;
-
-/// Trait to extract batching information at compile time.
-pub trait BatchingMode: 'static + Send + Sync {
-  /// Maximum bits for batching coefficients.
-  /// - `None` = batching not supported, use direct constraints
-  /// - `Some(k)` = batch up to k constraints before flushing
-  const MAX_COEFF_BITS: Option<usize>;
-}
-
-impl BatchingMode for NoBatching {
-  const MAX_COEFF_BITS: Option<usize> = None;
-}
-
-impl<const K: usize> BatchingMode for Batching<K> {
-  const MAX_COEFF_BITS: Option<usize> = Some(K);
-}
-
-/// Configuration trait for SmallMultiEq constraint system.
-///
-/// Bundles a scalar field type implementing `SmallValueField<SmallValue>` with
-/// a batching mode. This allows `SmallMultiEq` to use the appropriate small-value
-/// operations and batching behavior.
-///
-/// # Associated Types
-/// - `Scalar`: Field type implementing `SmallValueField<SmallValue>`
-/// - `SmallValue`: Native type for witness values (i32 or i64)
-/// - `Batching`: Batching mode (NoBatching or Batching<K>)
-pub trait SmallMultiEqConfig: 'static + Send + Sync {
-  /// The scalar field type.
-  type Scalar: SmallValueField<Self::SmallValue>;
-
-  /// Small value type for witness coefficients.
-  type SmallValue: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = Self::SmallValue>
-    + Sub<Output = Self::SmallValue>
-    + Neg<Output = Self::SmallValue>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync;
-
-  /// Batching mode for constraint accumulation.
-  type Batching: BatchingMode;
-}
-
-/// i32 configuration with no batching.
-///
-/// Use this for circuits where Az values would overflow i32 if batched.
-/// Each equality constraint is enforced directly.
-///
-/// - SmallValue: i32
-/// - Batching: None (direct constraints)
-pub struct I32NoBatch<S>(PhantomData<S>);
-
-impl<S> Default for I32NoBatch<S> {
-  fn default() -> Self {
-    I32NoBatch(PhantomData)
-  }
-}
-
-impl<S: SmallValueField<i32>> SmallMultiEqConfig for I32NoBatch<S> {
-  type Scalar = S;
-  type SmallValue = i32;
-  type Batching = NoBatching;
-}
-
-/// i64 configuration with batching (21 constraints per flush).
-///
-/// Use this for circuits with large positional coefficients (up to 2^34),
-/// like SHA-256. The larger intermediate type (i128) allows batching while
-/// keeping Az values within i64 bounds.
-///
-/// - SmallValue: i64
-/// - Batching: 21 constraints per flush
-///
-/// # Why K=21 Specifically?
-///
-/// Batching packs multiple equality constraints into fewer constraints by forming:
-/// ```text
-/// B(z) = Σⱼ 2ʲ · Lⱼ(z)  for j = 0..K-1
-/// ```
-/// and enforcing B(z) = 0. This is safe because:
-/// - If all Lⱼ(z) = 0, then B(z) = 0
-/// - If some Lⱼ(z) ≠ 0, the weighted sum won't cancel (powers of 2 give unique representation)
-///
-/// The limit K=21 comes from not overflowing i64 before converting to field:
-///
-/// ```text
-/// MAX_COEFF_BITS = 21 because:
-/// Az ≤ 200 terms × 2^34 (positional) × 2^20 (batching) × 1 (witness)
-///    = 2^8 × 2^34 × 2^20 × 2^0
-///    = 2^62 < 2^63 (i64 signed max)
-/// ```
-///
-/// Where:
-/// - **200 terms**: Worst-case number of terms summed in a constraint row
-/// - **2^34**: Positional coefficients in SHA-256-like circuits (limb shifts, bit packing)
-/// - **2^20**: Batching weights (we batch K=21 constraints, weights up to 2^20)
-/// - **1**: Witness values (bits are 0 or 1)
-///
-/// # Why not K=32?
-///
-/// Batching is limited by not overflowing the "small" representation before
-/// mapping into the field. If we batch too many, the integer sum can exceed i64
-/// and silently wrap. K=21 is the safe maximum for our coefficient envelope.
-///
-/// # Performance Impact
-///
-/// Without batching: ~100-1000 eq constraints, each produces its own row contribution.
-/// With batching K=21: ~21 eq's compressed into 1 row → ~21× fewer rows from this gadget.
-///
-/// This makes the "small value" assumption more valuable by reducing the total count
-/// of expensive `isl_mul` and delayed reduction operations associated with constraints.
-pub struct I64Batch21<S>(PhantomData<S>);
-
-impl<S> Default for I64Batch21<S> {
-  fn default() -> Self {
-    I64Batch21(PhantomData)
-  }
-}
-
-impl<S: SmallValueField<i64>> SmallMultiEqConfig for I64Batch21<S> {
-  type Scalar = S;
-  type SmallValue = i64;
-  type Batching = Batching<21>;
-}
-
-/// SmallMultiEq: Batches equality constraints while keeping coefficients
-/// within SmallMultiEqConfig bounds.
-///
-/// Unlike bellpepper's `MultiEq` which can accumulate 2^237 coefficients,
-/// `SmallMultiEq` either:
-/// - Enforces directly if `C::Batching = NoBatching`
-/// - Flushes when approaching `MAX_COEFF_BITS` if `C::Batching = Batching<K>`
-pub struct SmallMultiEq<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig> {
-  cs: CS,
-  /// Number of equality constraints enforced so far (for naming)
-  ops: usize,
-  /// Number of bits used in current batch (only relevant for Batching<K>)
-  bits_used: usize,
-  /// Accumulated left-hand side of batched equality
-  lhs: LinearCombination<Scalar>,
-  /// Accumulated right-hand side of batched equality
-  rhs: LinearCombination<Scalar>,
-  _config: PhantomData<C>,
-}
-
-impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
-  SmallMultiEq<Scalar, CS, C>
-{
-  /// Create a new SmallMultiEq wrapper around a constraint system.
-  pub fn new(cs: CS) -> Self {
-    SmallMultiEq {
-      cs,
-      ops: 0,
-      bits_used: 0,
-      lhs: LinearCombination::zero(),
-      rhs: LinearCombination::zero(),
-      _config: PhantomData,
-    }
-  }
-
-  /// Flush the pending batched constraint to the underlying constraint system.
-  /// Only used when batching is enabled.
-  fn flush(&mut self) {
-    let ops = self.ops;
-    let lhs = std::mem::replace(&mut self.lhs, LinearCombination::zero());
-    let rhs = std::mem::replace(&mut self.rhs, LinearCombination::zero());
-
-    // Only enforce if we have accumulated something
-    if self.bits_used > 0 {
-      self.cs.enforce(
-        || format!("multieq {ops}"),
-        |_| lhs,
-        |lc| lc + CS::one(),
-        |_| rhs,
-      );
-      self.ops += 1;
-    }
-
-    self.bits_used = 0;
-  }
-
+/// This trait extends `ConstraintSystem` with methods for enforcing equality
+/// constraints in a way that keeps coefficients within small-value bounds.
+pub trait SmallMultiEq<Scalar: PrimeField>: ConstraintSystem<Scalar> {
   /// Enforce that `lhs` equals `rhs`.
   ///
-  /// Behavior depends on `C::Batching`:
-  /// - `NoBatching`: Enforces directly as a single constraint
-  /// - `Batching<K>`: Batches with coefficient 2^bits_used, flushes at K
-  pub fn enforce_equal(
-    &mut self,
-    lhs: &LinearCombination<Scalar>,
-    rhs: &LinearCombination<Scalar>,
-  ) {
-    // Const dispatch based on batching mode
-    match <C::Batching as BatchingMode>::MAX_COEFF_BITS {
-      None => {
-        // NoBatching: enforce directly
-        let ops = self.ops;
-        self.cs.enforce(
-          || format!("eq {ops}"),
-          |_| lhs.clone(),
-          |lc| lc + CS::one(),
-          |_| rhs.clone(),
-        );
-        self.ops += 1;
-      }
-      Some(max_bits) => {
-        // Batching<K>: accumulate with coefficients 2^bits_used
-        if self.bits_used >= max_bits {
-          self.flush();
-        }
+  /// The implementation determines whether this is enforced directly or batched.
+  fn enforce_equal(&mut self, lhs: &LinearCombination<Scalar>, rhs: &LinearCombination<Scalar>);
 
-        // Compute the coefficient: 2^bits_used
-        let coeff = Scalar::from(1u64 << self.bits_used);
+  /// Flush any pending batched constraints to the underlying constraint system.
+  fn flush(&mut self);
 
-        // Scale and accumulate
-        self.lhs = self.lhs.clone() + (coeff, lhs);
-        self.rhs = self.rhs.clone() + (coeff, rhs);
+  /// Add multiple SmallUInt32 values together.
+  ///
+  /// The implementation determines which addition algorithm is used:
+  /// - `NoBatchEq`: Uses limbed addition (max coeff 2^18)
+  /// - `BatchingEq<K>`: Uses full addition (max coeff 2^34)
+  fn addmany(&mut self, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError>;
+}
 
-        self.bits_used += 1;
-      }
+// ============================================================================
+// NoBatchEq - Direct enforcement, limbed addition
+// ============================================================================
+
+/// Constraint system wrapper that enforces equality constraints directly.
+///
+/// Each call to `enforce_equal` immediately creates a constraint. This is used
+/// with the limbed addition algorithm which keeps coefficients within i32 bounds.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+/// eq.enforce_equal(&lhs, &rhs);  // Immediately enforced
+/// let sum = eq.addmany(&[a, b, c])?;  // Uses limbed addition
+/// ```
+pub struct NoBatchEq<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> {
+  cs: &'a mut CS,
+  ops: usize,
+  addmany_count: usize,
+  _marker: std::marker::PhantomData<Scalar>,
+}
+
+impl<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> NoBatchEq<'a, Scalar, CS> {
+  /// Create a new NoBatchEq wrapper around a constraint system.
+  pub fn new(cs: &'a mut CS) -> Self {
+    NoBatchEq {
+      cs,
+      ops: 0,
+      addmany_count: 0,
+      _marker: std::marker::PhantomData,
     }
   }
 }
 
-impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig> Drop
-  for SmallMultiEq<Scalar, CS, C>
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallMultiEq<Scalar>
+  for NoBatchEq<'_, Scalar, CS>
 {
-  fn drop(&mut self) {
-    // Flush any pending constraints when going out of scope
-    // (only relevant for Batching<K> mode)
-    if <C::Batching as BatchingMode>::MAX_COEFF_BITS.is_some() {
-      self.flush();
+  fn enforce_equal(&mut self, lhs: &LinearCombination<Scalar>, rhs: &LinearCombination<Scalar>) {
+    let ops = self.ops;
+    self.cs.enforce(
+      || format!("eq {ops}"),
+      |_| lhs.clone(),
+      |lc| lc + CS::one(),
+      |_| rhs.clone(),
+    );
+    self.ops += 1;
+  }
+
+  fn flush(&mut self) {
+    // No-op: NoBatchEq enforces constraints directly
+  }
+
+  fn addmany(&mut self, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError> {
+    assert!(Scalar::NUM_BITS >= 64);
+    assert!(operands.len() >= 2);
+    assert!(operands.len() <= 10);
+
+    // Check for all-constant case
+    if let Some(sum) = try_constant_sum(operands) {
+      return Ok(SmallUInt32::constant(sum));
     }
+
+    // Create a unique namespace for this addmany call
+    let count = self.addmany_count;
+    self.addmany_count += 1;
+    self.cs.push_namespace(|| format!("add{count}"));
+
+    // Use limbed addition (max coeff 2^18, fits i32)
+    let result = addmany::limbed(self, operands);
+
+    self.cs.pop_namespace();
+    result
   }
 }
 
-impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
-  ConstraintSystem<Scalar> for SmallMultiEq<Scalar, CS, C>
+// Delegate ConstraintSystem to inner cs
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> ConstraintSystem<Scalar>
+  for NoBatchEq<'_, Scalar, CS>
 {
   type Root = Self;
 
@@ -334,9 +174,6 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
     LB: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
     LC: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
   {
-    // DO NOT flush here - R1CS constraints are unordered, so there's no
-    // soundness reason to flush. Only flush on capacity limit or Drop.
-    // This allows batching to actually work across enforce() calls.
     self.cs.enforce(annotation, a, b, c);
   }
 
@@ -381,133 +218,355 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, C: SmallMultiEqConfig>
   }
 }
 
+// ============================================================================
+// BatchingEq - Batched enforcement, full addition
+// ============================================================================
+
+/// Constraint system wrapper that batches equality constraints.
+///
+/// Accumulates up to K equality constraints with coefficients 2^0, 2^1, ..., 2^(K-1)
+/// before flushing as a single batched constraint. This is used with the full
+/// addition algorithm which keeps coefficients within i64 bounds.
+///
+/// # Type Parameter
+///
+/// - `K`: Maximum number of constraints to batch before flushing
+///
+/// # Why K=21?
+///
+/// Batching packs multiple equality constraints into fewer constraints by forming:
+/// ```text
+/// B(z) = Σⱼ 2ʲ · Lⱼ(z)  for j = 0..K-1
+/// ```
+/// and enforcing B(z) = 0. This is safe because powers of 2 give unique representation.
+///
+/// The limit K=21 comes from not overflowing i64 before converting to field:
+/// ```text
+/// Az ≤ 200 terms × 2^34 (positional) × 2^20 (batching) × 1 (witness)
+///    = 2^8 × 2^34 × 2^20 × 2^0
+///    = 2^62 < 2^63 (i64 signed max)
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
+/// eq.enforce_equal(&lhs1, &rhs1);  // Batched with coeff 2^0
+/// eq.enforce_equal(&lhs2, &rhs2);  // Batched with coeff 2^1
+/// // ... up to 21 constraints batched together
+/// let sum = eq.addmany(&[a, b, c])?;  // Uses full addition
+/// drop(eq);  // Flushes remaining batched constraints
+/// ```
+pub struct BatchingEq<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> {
+  cs: &'a mut CS,
+  ops: usize,
+  addmany_count: usize,
+  bits_used: usize,
+  lhs: LinearCombination<Scalar>,
+  rhs: LinearCombination<Scalar>,
+}
+
+impl<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize>
+  BatchingEq<'a, Scalar, CS, K>
+{
+  /// Create a new BatchingEq wrapper around a constraint system.
+  pub fn new(cs: &'a mut CS) -> Self {
+    BatchingEq {
+      cs,
+      ops: 0,
+      addmany_count: 0,
+      bits_used: 0,
+      lhs: LinearCombination::zero(),
+      rhs: LinearCombination::zero(),
+    }
+  }
+
+  /// Flush the pending batched constraint to the underlying constraint system.
+  fn do_flush(&mut self) {
+    let ops = self.ops;
+    let lhs = std::mem::replace(&mut self.lhs, LinearCombination::zero());
+    let rhs = std::mem::replace(&mut self.rhs, LinearCombination::zero());
+
+    // Only enforce if we have accumulated something
+    if self.bits_used > 0 {
+      self.cs.enforce(
+        || format!("multieq {ops}"),
+        |_| lhs,
+        |lc| lc + CS::one(),
+        |_| rhs,
+      );
+      self.ops += 1;
+    }
+
+    self.bits_used = 0;
+  }
+}
+
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> SmallMultiEq<Scalar>
+  for BatchingEq<'_, Scalar, CS, K>
+{
+  fn enforce_equal(&mut self, lhs: &LinearCombination<Scalar>, rhs: &LinearCombination<Scalar>) {
+    if self.bits_used >= K {
+      self.do_flush();
+    }
+
+    // Compute the coefficient: 2^bits_used
+    let coeff = Scalar::from(1u64 << self.bits_used);
+
+    // Scale and accumulate
+    self.lhs = self.lhs.clone() + (coeff, lhs);
+    self.rhs = self.rhs.clone() + (coeff, rhs);
+
+    self.bits_used += 1;
+  }
+
+  fn flush(&mut self) {
+    self.do_flush();
+  }
+
+  fn addmany(&mut self, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError> {
+    assert!(Scalar::NUM_BITS >= 64);
+    assert!(operands.len() >= 2);
+    assert!(operands.len() <= 10);
+
+    // Check for all-constant case
+    if let Some(sum) = try_constant_sum(operands) {
+      return Ok(SmallUInt32::constant(sum));
+    }
+
+    // Create a unique namespace for this addmany call
+    let count = self.addmany_count;
+    self.addmany_count += 1;
+    self.cs.push_namespace(|| format!("add{count}"));
+
+    // Use full addition (max coeff 2^34, fits i64)
+    let result = addmany::full(self, operands);
+
+    self.cs.pop_namespace();
+    result
+  }
+}
+
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> Drop
+  for BatchingEq<'_, Scalar, CS, K>
+{
+  fn drop(&mut self) {
+    self.do_flush();
+  }
+}
+
+// Delegate ConstraintSystem to inner cs
+impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> ConstraintSystem<Scalar>
+  for BatchingEq<'_, Scalar, CS, K>
+{
+  type Root = Self;
+
+  fn one() -> Variable {
+    CS::one()
+  }
+
+  fn alloc<F, A, AR>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>
+  where
+    F: FnOnce() -> Result<Scalar, SynthesisError>,
+    A: FnOnce() -> AR,
+    AR: Into<String>,
+  {
+    self.cs.alloc(annotation, f)
+  }
+
+  fn alloc_input<F, A, AR>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>
+  where
+    F: FnOnce() -> Result<Scalar, SynthesisError>,
+    A: FnOnce() -> AR,
+    AR: Into<String>,
+  {
+    self.cs.alloc_input(annotation, f)
+  }
+
+  fn enforce<A, AR, LA, LB, LC>(&mut self, annotation: A, a: LA, b: LB, c: LC)
+  where
+    A: FnOnce() -> AR,
+    AR: Into<String>,
+    LA: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
+    LB: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
+    LC: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
+  {
+    self.cs.enforce(annotation, a, b, c);
+  }
+
+  fn push_namespace<NR, N>(&mut self, name_fn: N)
+  where
+    NR: Into<String>,
+    N: FnOnce() -> NR,
+  {
+    self.cs.push_namespace(name_fn);
+  }
+
+  fn pop_namespace(&mut self) {
+    self.cs.pop_namespace();
+  }
+
+  fn get_root(&mut self) -> &mut Self::Root {
+    self
+  }
+
+  fn is_witness_generator(&self) -> bool {
+    self.cs.is_witness_generator()
+  }
+
+  fn extend_inputs(&mut self, inputs: &[Scalar]) {
+    self.cs.extend_inputs(inputs);
+  }
+
+  fn extend_aux(&mut self, aux: &[Scalar]) {
+    self.cs.extend_aux(aux);
+  }
+
+  fn allocate_empty(&mut self, aux_n: usize, inputs_n: usize) -> (&mut [Scalar], &mut [Scalar]) {
+    self.cs.allocate_empty(aux_n, inputs_n)
+  }
+
+  fn inputs_slice(&self) -> &[Scalar] {
+    self.cs.inputs_slice()
+  }
+
+  fn aux_slice(&self) -> &[Scalar] {
+    self.cs.aux_slice()
+  }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Try to compute sum as a constant if all operands are constant.
+fn try_constant_sum(operands: &[SmallUInt32]) -> Option<u32> {
+  // Check if all operands have known values
+  if !operands.iter().all(|op| op.get_value().is_some()) {
+    return None;
+  }
+
+  // Check if all bits are constant
+  let all_constant = operands.iter().all(|op| {
+    op.bits_le()
+      .iter()
+      .all(|b| matches!(b, bellpepper_core::boolean::Boolean::Constant(_)))
+  });
+
+  if all_constant {
+    let sum: u32 = operands
+      .iter()
+      .map(|op| op.get_value().unwrap())
+      .fold(0u32, |a, b| a.wrapping_add(b));
+    Some(sum)
+  } else {
+    None
+  }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use super::{Batching, I32NoBatch, I64Batch21, SmallValueField};
   use bellpepper_core::test_cs::TestConstraintSystem;
   use halo2curves::pasta::Fq;
-  use std::marker::PhantomData;
-
-  // Test config with custom batching limit for testing flush behavior
-  struct TestBatching5<S>(PhantomData<S>);
-  impl<S: SmallValueField<i32>> SmallMultiEqConfig for TestBatching5<S> {
-    type Scalar = S;
-    type SmallValue = i32;
-    type Batching = Batching<5>;
-  }
 
   #[test]
-  fn test_small_multi_eq_basic_small32() {
+  fn test_no_batch_eq_basic() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // Create some variables
     let a = cs.alloc(|| "a", || Ok(Fq::from(5u64))).unwrap();
     let b = cs.alloc(|| "b", || Ok(Fq::from(5u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-
-      // Enforce a == b
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
       let lhs = LinearCombination::zero() + a;
       let rhs = LinearCombination::zero() + b;
-      multi_eq.enforce_equal(&lhs, &rhs);
-    } // Drop
+      eq.enforce_equal(&lhs, &rhs);
+    }
 
     assert!(cs.is_satisfied());
-    // I32NoBatch<Fq> uses NoBatching, so there should be 1 direct constraint
     assert_eq!(cs.num_constraints(), 1);
   }
 
   #[test]
-  fn test_small_multi_eq_basic_small64() {
+  fn test_batching_eq_basic() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // Create some variables
     let a = cs.alloc(|| "a", || Ok(Fq::from(5u64))).unwrap();
     let b = cs.alloc(|| "b", || Ok(Fq::from(5u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I64Batch21<Fq>>::new(&mut cs);
-
-      // Enforce a == b
+      let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
       let lhs = LinearCombination::zero() + a;
       let rhs = LinearCombination::zero() + b;
-      multi_eq.enforce_equal(&lhs, &rhs);
+      eq.enforce_equal(&lhs, &rhs);
     } // Drop flushes
 
     assert!(cs.is_satisfied());
-    // I64Batch21<Fq> uses Batching<21>, so there should be 1 batched constraint after flush
     assert_eq!(cs.num_constraints(), 1);
   }
 
   #[test]
-  fn test_small_multi_eq_multiple_small32() {
+  fn test_no_batch_eq_multiple() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // Create variables
     let a = cs.alloc(|| "a", || Ok(Fq::from(10u64))).unwrap();
     let b = cs.alloc(|| "b", || Ok(Fq::from(10u64))).unwrap();
     let c = cs.alloc(|| "c", || Ok(Fq::from(20u64))).unwrap();
     let d = cs.alloc(|| "d", || Ok(Fq::from(20u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-
-      // Enforce a == b
-      multi_eq.enforce_equal(
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      eq.enforce_equal(
         &(LinearCombination::zero() + a),
         &(LinearCombination::zero() + b),
       );
-
-      // Enforce c == d
-      multi_eq.enforce_equal(
+      eq.enforce_equal(
         &(LinearCombination::zero() + c),
         &(LinearCombination::zero() + d),
       );
     }
 
     assert!(cs.is_satisfied());
-    // I32NoBatch<Fq> (NoBatching): 2 direct constraints
+    // NoBatchEq: 2 direct constraints
     assert_eq!(cs.num_constraints(), 2);
   }
 
   #[test]
-  fn test_small_multi_eq_multiple_small64() {
+  fn test_batching_eq_multiple() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // Create variables
     let a = cs.alloc(|| "a", || Ok(Fq::from(10u64))).unwrap();
     let b = cs.alloc(|| "b", || Ok(Fq::from(10u64))).unwrap();
     let c = cs.alloc(|| "c", || Ok(Fq::from(20u64))).unwrap();
     let d = cs.alloc(|| "d", || Ok(Fq::from(20u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I64Batch21<Fq>>::new(&mut cs);
-
-      // Enforce a == b
-      multi_eq.enforce_equal(
+      let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
+      eq.enforce_equal(
         &(LinearCombination::zero() + a),
         &(LinearCombination::zero() + b),
       );
-
-      // Enforce c == d
-      multi_eq.enforce_equal(
+      eq.enforce_equal(
         &(LinearCombination::zero() + c),
         &(LinearCombination::zero() + d),
       );
     }
 
     assert!(cs.is_satisfied());
-    // I64Batch21<Fq> (Batching<21>): 2 constraints batched into 1
+    // BatchingEq<21>: 2 constraints batched into 1
     assert_eq!(cs.num_constraints(), 1);
   }
 
   #[test]
-  fn test_small_multi_eq_flush_at_capacity() {
+  fn test_batching_eq_flush_at_capacity() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // TestBatching5 flushes at 5 constraints
+    // Batch size 5 for testing
     let n = 12; // 12 constraints = 2 full batches (5+5) + 2 remaining
 
     let vars: Vec<_> = (0..n)
@@ -517,18 +576,15 @@ mod tests {
       })
       .collect();
 
-    // Allocate expected before creating SmallMultiEq
     let expected = cs.alloc(|| "expected", || Ok(Fq::from(42u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, TestBatching5<Fq>>::new(&mut cs);
-
-      // Enforce v[i] == expected for all i
+      let mut eq = BatchingEq::<Fq, _, 5>::new(&mut cs);
       let expected_lc = LinearCombination::zero() + expected;
 
       for v in &vars {
         let lhs = LinearCombination::zero() + *v;
-        multi_eq.enforce_equal(&lhs, &expected_lc);
+        eq.enforce_equal(&lhs, &expected_lc);
       }
     }
 
@@ -538,7 +594,7 @@ mod tests {
   }
 
   #[test]
-  fn test_small_multi_eq_no_batching_many() {
+  fn test_no_batch_eq_many() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
     let n = 10;
@@ -553,39 +609,112 @@ mod tests {
     let expected = cs.alloc(|| "expected", || Ok(Fq::from(42u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I32NoBatch<Fq>>::new(&mut cs);
-
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
       let expected_lc = LinearCombination::zero() + expected;
 
       for v in &vars {
         let lhs = LinearCombination::zero() + *v;
-        multi_eq.enforce_equal(&lhs, &expected_lc);
+        eq.enforce_equal(&lhs, &expected_lc);
       }
     }
 
     assert!(cs.is_satisfied());
-    // I32NoBatch<Fq> (NoBatching): 10 direct constraints
+    // NoBatchEq: 10 direct constraints
     assert_eq!(cs.num_constraints(), 10);
   }
 
   #[test]
-  fn test_small_multi_eq_unsatisfied() {
+  fn test_batching_eq_unsatisfied() {
     let mut cs = TestConstraintSystem::<Fq>::new();
 
-    // Create variables with different values
     let a = cs.alloc(|| "a", || Ok(Fq::from(5u64))).unwrap();
     let b = cs.alloc(|| "b", || Ok(Fq::from(10u64))).unwrap();
 
     {
-      let mut multi_eq = SmallMultiEq::<_, _, I64Batch21<Fq>>::new(&mut cs);
-
-      // Enforce a == b (should fail because 5 != 10)
-      multi_eq.enforce_equal(
+      let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
+      eq.enforce_equal(
         &(LinearCombination::zero() + a),
         &(LinearCombination::zero() + b),
       );
     }
 
     assert!(!cs.is_satisfied());
+  }
+
+  #[test]
+  fn test_no_batch_eq_addmany() {
+    let mut cs = TestConstraintSystem::<Fq>::new();
+
+    let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(100)).unwrap();
+    let b = SmallUInt32::alloc(cs.namespace(|| "b"), Some(200)).unwrap();
+    let c = SmallUInt32::alloc(cs.namespace(|| "c"), Some(300)).unwrap();
+
+    {
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c]).unwrap();
+      assert_eq!(result.get_value(), Some(600));
+    }
+
+    assert!(cs.is_satisfied());
+  }
+
+  #[test]
+  fn test_batching_eq_addmany() {
+    let mut cs = TestConstraintSystem::<Fq>::new();
+
+    let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(100)).unwrap();
+    let b = SmallUInt32::alloc(cs.namespace(|| "b"), Some(200)).unwrap();
+    let c = SmallUInt32::alloc(cs.namespace(|| "c"), Some(300)).unwrap();
+
+    {
+      let mut eq = BatchingEq::<Fq, _, 21>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c]).unwrap();
+      assert_eq!(result.get_value(), Some(600));
+    }
+
+    assert!(cs.is_satisfied());
+  }
+
+  #[test]
+  fn test_addmany_overflow() {
+    let mut cs = TestConstraintSystem::<Fq>::new();
+
+    let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(0xFFFFFFFF)).unwrap();
+    let b = SmallUInt32::alloc(cs.namespace(|| "b"), Some(1)).unwrap();
+
+    {
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b]).unwrap();
+      // Should wrap to 0
+      assert_eq!(result.get_value(), Some(0));
+    }
+
+    assert!(cs.is_satisfied());
+  }
+
+  #[test]
+  fn test_addmany_5_operands() {
+    // SHA-256 uses 5-operand addition
+    let mut cs = TestConstraintSystem::<Fq>::new();
+
+    let a = SmallUInt32::alloc(cs.namespace(|| "a"), Some(0x12345678)).unwrap();
+    let b = SmallUInt32::alloc(cs.namespace(|| "b"), Some(0x87654321)).unwrap();
+    let c = SmallUInt32::alloc(cs.namespace(|| "c"), Some(0xDEADBEEF)).unwrap();
+    let d = SmallUInt32::alloc(cs.namespace(|| "d"), Some(0xCAFEBABE)).unwrap();
+    let e = SmallUInt32::alloc(cs.namespace(|| "e"), Some(0x01020304)).unwrap();
+
+    let expected = 0x12345678u32
+      .wrapping_add(0x87654321)
+      .wrapping_add(0xDEADBEEF)
+      .wrapping_add(0xCAFEBABE)
+      .wrapping_add(0x01020304);
+
+    {
+      let mut eq = NoBatchEq::<Fq, _>::new(&mut cs);
+      let result = eq.addmany(&[a, b, c, d, e]).unwrap();
+      assert_eq!(result.get_value(), Some(expected));
+    }
+
+    assert!(cs.is_satisfied());
   }
 }

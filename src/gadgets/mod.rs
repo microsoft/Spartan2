@@ -8,20 +8,21 @@
 //!
 //! This module provides circuit gadgets that are designed to work with the
 //! small-value sumcheck optimization. The key difference from bellpepper's
-//! gadgets is that constraint coefficients are bounded to fit in `SmallValueField`.
+//! gadgets is that constraint coefficients are bounded to fit in native integers.
 //!
 //! # Available Gadgets
 //!
-//! - [`SmallMultiEq`]: Batched equality constraints with bounded coefficients
-//! - [`SmallUInt32`]: 32-bit unsigned integer with SmallMultiEq integration
+//! - [`SmallMultiEq`]: Trait for batched equality constraints with bounded coefficients
+//! - [`NoBatchEq`]: Direct enforcement (for i32 path)
+//! - [`BatchingEq`]: Batched enforcement (for i64 path)
+//! - [`SmallUInt32`]: 32-bit unsigned integer with bit operations
 //! - [`small_sha256`]: SHA-256 function using small-value compatible gadgets
 
+mod addmany;
 mod small_multi_eq;
 mod small_sha256;
 mod small_uint32;
 
-pub use small_multi_eq::{
-  Batching, BatchingMode, I32NoBatch, I64Batch21, NoBatching, SmallMultiEq, SmallMultiEqConfig,
-};
-pub use small_sha256::{small_sha256, small_sha256_with_prefix};
+pub use small_multi_eq::{BatchingEq, NoBatchEq, SmallMultiEq};
+pub use small_sha256::{small_sha256, small_sha256_with_prefix, small_sha256_with_small_multi_eq};
 pub use small_uint32::SmallUInt32;
