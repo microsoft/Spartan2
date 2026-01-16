@@ -8,20 +8,40 @@
 //! Example circuit demonstrating split-commitments with a lookup table
 //! using the logup randomized check.
 //!
-//! The circuit has:
-//! - Shared section: A table T containing all values from 0 to 255 (256 entries)
-//! - Precommitted section: 
+//! ## Circuit Structure
+//!
+//! The circuit implements a lookup argument using the logup technique:
+//! 
+//! - **Shared section**: A table T containing all values from 0 to 255 (256 entries)
+//! - **Precommitted section**: 
 //!   - L: lookup values (1024 entries) claimed to be in the table
 //!   - counts: for each table entry, how many times it appears in L (256 entries)
-//! - Synthesize: Verifies sum_i {1/(L[i] + c)} = sum_j {counts[j]/(T[j] + c)}
-//!   where c is a challenge value (currently hardcoded as 42 for simplicity)
+//! - **Synthesize section**: Verifies the logup identity:
+//!   ```
+//!   sum_i {1/(L[i] + c)} = sum_j {counts[j]/(T[j] + c)}
+//!   ```
+//!   where c is a challenge value
 //!
-//! NOTE: This example uses a fixed challenge value instead of deriving it from
-//! the Fiat-Shamir transcript. A production implementation should use the
-//! proper challenge mechanism with num_challenges() and derive the challenge
-//! from the commitments to shared and precommitted sections.
+//! ## Implementation Notes
 //!
-//! Run with: `RUST_LOG=info cargo run --release --example logup_lookup`
+//! - Uses a **fixed challenge value** (c=42) instead of deriving it from the Fiat-Shamir transcript
+//! - To avoid using the challenge as a scalar coefficient in R1CS constraints, allocates
+//!   intermediate variables `val_plus_c = val + c` for each value
+//! - Provides inverse hints as untrusted witness values and verifies them with R1CS constraints
+//!
+//! ## Known Issues
+//!
+//! The circuit currently fails PCS verification. This indicates either:
+//! 1. A bug in the constraint formulation or witness computation
+//! 2. An issue with how the circuit interacts with Spartan's commitment scheme
+//!
+//! Further debugging needed to resolve the PCS failure.
+//!
+//! ## Running
+//!
+//! ```sh
+//! RUST_LOG=info cargo run --release --example logup_lookup
+//! ```
 
 #[cfg(feature = "jem")]
 #[global_allocator]
