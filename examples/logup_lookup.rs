@@ -16,26 +16,19 @@
 //! - **Precommitted section**: 
 //!   - L: lookup values (1024 entries) claimed to be in the table
 //!   - counts: for each table entry, how many times it appears in L (256 entries)
+//! - **Challenge**: c derived from Fiat-Shamir transcript (depends on commitments)
 //! - **Synthesize section**: Verifies the logup identity:
 //!   ```
 //!   sum_i {1/(L[i] + c)} = sum_j {counts[j]/(T[j] + c)}
 //!   ```
-//!   where c is a challenge value
 //!
 //! ## Implementation Notes
 //!
-//! - Uses a **fixed challenge value** (c=42) instead of deriving it from the Fiat-Shamir transcript
-//! - To avoid using the challenge as a scalar coefficient in R1CS constraints, allocates
-//!   intermediate variables `val_plus_c = val + c` for each value
+//! - Uses Spartan's `num_challenges()` mechanism to get a Fiat-Shamir challenge
+//! - Challenge is allocated as a public input variable in `synthesize`
+//! - Allocates intermediate `val_plus_c = val + c` variables for each value
 //! - Provides inverse hints as untrusted witness values and verifies them with R1CS constraints
-//!
-//! ## Known Issues
-//!
-//! The circuit currently fails PCS verification. This indicates either:
-//! 1. A bug in the constraint formulation or witness computation
-//! 2. An issue with how the circuit interacts with Spartan's commitment scheme
-//!
-//! Further debugging needed to resolve the PCS failure.
+//! - Directly compares sums using linear combinations without intermediate sum variables
 //!
 //! ## Running
 //!
@@ -95,8 +88,8 @@ impl<Scalar: PrimeField> LookupCircuit<Scalar> {
 
 impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
   fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
-    // Return a dummy public value to satisfy the requirement that num_inputs > num_challenges
-    Ok(vec![E::Scalar::ZERO])
+    // Return table size as a public value to satisfy num_inputs > num_challenges
+    Ok(vec![E::Scalar::from(TABLE_SIZE as u64)])
   }
 
   fn shared<CS: ConstraintSystem<E::Scalar>>(
@@ -109,6 +102,15 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
     for i in 0..TABLE_SIZE {
       let val = E::Scalar::from(i as u64);
       let allocated = AllocatedNum::alloc(cs.namespace(|| format!("table[{}]", i)), || Ok(val))?;
+      
+      // Enforce that the variable holds the expected constant value
+      cs.enforce(
+        || format!("table[{}] constant check", i),
+        |lc| lc + allocated.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + (val, CS::one()),
+      );
+      
       table.push(allocated);
     }
     Ok(table)
@@ -121,17 +123,17 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     let mut result = Vec::new();
 
-    // Add a dummy public input to satisfy num_inputs > num_challenges requirement
-    let dummy_public = AllocatedNum::alloc_input(
-      cs.namespace(|| "dummy_public"),
-      || Ok(E::Scalar::ZERO),
+    // Add a public input for the table size
+    let table_size_public = AllocatedNum::alloc_input(
+      cs.namespace(|| "table_size_public"),
+      || Ok(E::Scalar::from(TABLE_SIZE as u64)),
     )?;
-    // Add a constraint to ensure it's zero
+    // Enforce that it holds the expected constant value
     cs.enforce(
-      || "dummy_check",
-      |lc| lc + dummy_public.get_variable(),
+      || "table_size constant check",
+      |lc| lc + table_size_public.get_variable(),
       |lc| lc + CS::one(),
-      |lc| lc,
+      |lc| lc + (E::Scalar::from(TABLE_SIZE as u64), CS::one()),
     );
 
     // Allocate the lookup values L
@@ -155,8 +157,8 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
   }
 
   fn num_challenges(&self) -> usize {
-    // Don't use the built-in challenge mechanism
-    0
+    // We use one challenge for the logup check
+    1
   }
 
   fn synthesize<CS: ConstraintSystem<E::Scalar>>(
@@ -164,7 +166,7 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
     cs: &mut CS,
     shared: &[AllocatedNum<E::Scalar>],
     precommitted: &[AllocatedNum<E::Scalar>],
-    _challenges: Option<&[E::Scalar]>,
+    challenges: Option<&[E::Scalar]>,
   ) -> Result<(), SynthesisError> {
     // shared contains the table T
     let table = shared;
@@ -176,11 +178,13 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
     assert_eq!(lookup_values.len(), LOOKUP_SIZE);
     assert_eq!(counts.len(), TABLE_SIZE);
 
-    // Allocate the challenge as a witness variable
-    // In a real implementation, this would be derived from a hash of the commitments
-    // For this example, we'll use a fixed non-zero value
-    let challenge_value = E::Scalar::from(42u64);
-    let challenge = AllocatedNum::alloc(
+    // Allocate the challenge as a public input variable
+    // The challenge comes from the verifier via the Fiat-Shamir transform
+    // During setup, this will be ZERO; during proving, it will be the actual challenge
+    let challenge_value = challenges
+      .and_then(|c| c.first().copied())
+      .unwrap_or(E::Scalar::ZERO);
+    let challenge = AllocatedNum::alloc_input(
       cs.namespace(|| "challenge"),
       || Ok(challenge_value),
     )?;
@@ -277,56 +281,20 @@ impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
 
     // Now check that sum of LHS inverses equals sum of RHS numerators
     // sum_i h_i = sum_j g_j
-    // Allocate a variable for the LHS sum
-    let lhs_sum_value = lhs_inverses
-      .iter()
-      .try_fold(E::Scalar::ZERO, |acc, inv| {
-        inv.get_value().map(|v| acc + v)
-      });
-    let lhs_sum = AllocatedNum::alloc(cs.namespace(|| "lhs_sum"), || {
-      lhs_sum_value.ok_or(SynthesisError::AssignmentMissing)
-    })?;
-
-    // Constrain lhs_sum = sum of lhs_inverses
+    // We can directly compare the sums using linear combinations without allocating intermediate variables
     cs.enforce(
-      || "lhs_sum_constraint",
+      || "equality_check",
       |lc| {
         lhs_inverses
           .iter()
           .fold(lc, |lc, inv| lc + inv.get_variable())
       },
       |lc| lc + CS::one(),
-      |lc| lc + lhs_sum.get_variable(),
-    );
-
-    // Allocate a variable for the RHS sum
-    let rhs_sum_value = rhs_numerators
-      .iter()
-      .try_fold(E::Scalar::ZERO, |acc, num| {
-        num.get_value().map(|v| acc + v)
-      });
-    let rhs_sum = AllocatedNum::alloc(cs.namespace(|| "rhs_sum"), || {
-      rhs_sum_value.ok_or(SynthesisError::AssignmentMissing)
-    })?;
-
-    // Constrain rhs_sum = sum of rhs_numerators
-    cs.enforce(
-      || "rhs_sum_constraint",
       |lc| {
         rhs_numerators
           .iter()
           .fold(lc, |lc, num| lc + num.get_variable())
       },
-      |lc| lc + CS::one(),
-      |lc| lc + rhs_sum.get_variable(),
-    );
-
-    // Final constraint: lhs_sum = rhs_sum
-    cs.enforce(
-      || "equality_check",
-      |lc| lc + lhs_sum.get_variable(),
-      |lc| lc + CS::one(),
-      |lc| lc + rhs_sum.get_variable(),
     );
 
     Ok(())
