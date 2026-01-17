@@ -151,35 +151,38 @@ where
     "Extracted sumcheck polynomials"
   );
 
-  // Create field-element polynomials for the original method
-  let mut az1 = MultilinearPolynomial::new(az.clone());
-  let mut bz1 = MultilinearPolynomial::new(bz.clone());
-  let mut cz1 = MultilinearPolynomial::new(cz.clone());
+  // Claim is zero for satisfying R1CS (Az * Bz = Cz)
+  let claim = F::ZERO;
+
+  // ===== ORIGINAL METHOD =====
+  // Run in scope so memory is freed before next benchmark
+  let (proof1, r1, evals1, original_us) = {
+    let mut az1 = MultilinearPolynomial::new(az.clone());
+    let mut bz1 = MultilinearPolynomial::new(bz.clone());
+    let mut cz1 = MultilinearPolynomial::new(cz.clone());
+
+    info!("Running prove_cubic_with_three_inputs (original method)...");
+    let mut transcript1 = <E as Engine>::TE::new(b"test_equivalence");
+    let t0 = Instant::now();
+    let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+      &claim,
+      tau.clone(),
+      &mut az1,
+      &mut bz1,
+      &mut cz1,
+      &mut transcript1,
+    )
+    .expect("prove_cubic_with_three_inputs failed");
+    let elapsed = t0.elapsed().as_micros();
+    info!(elapsed_us = elapsed, "prove_cubic_with_three_inputs");
+    (proof1, r1, evals1, elapsed)
+  }; // az1, bz1, cz1 dropped here
 
   // Try to create small-value polynomials for the optimized method
   let az_poly = MultilinearPolynomial::new(az.clone());
   let bz_poly = MultilinearPolynomial::new(bz.clone());
   let az_small_opt = MultilinearPolynomial::<i64>::try_from_field(&az_poly);
   let bz_small_opt = MultilinearPolynomial::<i64>::try_from_field(&bz_poly);
-
-  // Claim is zero for satisfying R1CS (Az * Bz = Cz)
-  let claim = F::ZERO;
-
-  // ===== ORIGINAL METHOD =====
-  info!("Running prove_cubic_with_three_inputs (original method)...");
-  let mut transcript1 = <E as Engine>::TE::new(b"test_equivalence");
-  let t0 = Instant::now();
-  let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
-    &claim,
-    tau.clone(),
-    &mut az1,
-    &mut bz1,
-    &mut cz1,
-    &mut transcript1,
-  )
-  .expect("prove_cubic_with_three_inputs failed");
-  let original_us = t0.elapsed().as_micros();
-  info!(elapsed_us = original_us, "prove_cubic_with_three_inputs");
 
   // ===== SMALL-VALUE METHOD (Algorithm 6) =====
   match (az_small_opt, bz_small_opt) {
@@ -218,29 +221,33 @@ where
       }
       info!("Verified: i64 polynomials match field polynomials");
 
-      let mut az2 = MultilinearPolynomial::new(az);
-      let mut bz2 = MultilinearPolynomial::new(bz);
-      let mut cz2 = MultilinearPolynomial::new(cz);
-      let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
+      // Run in scope so memory is freed after benchmark
+      let (proof2, r2, evals2, smallvalue_us) = {
+        let mut az2 = MultilinearPolynomial::new(az);
+        let mut bz2 = MultilinearPolynomial::new(bz);
+        let mut cz2 = MultilinearPolynomial::new(cz);
+        let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
 
-      info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
-      let t0 = Instant::now();
-      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-        &claim,
-        tau,
-        &az_small,
-        &bz_small,
-        &mut az2,
-        &mut bz2,
-        &mut cz2,
-        &mut transcript2,
-      )
-      .expect("prove_cubic_with_three_inputs_small_value failed");
-      let smallvalue_us = t0.elapsed().as_micros();
-      info!(
-        elapsed_us = smallvalue_us,
-        "prove_cubic_with_three_inputs_small_value"
-      );
+        info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
+        let t0 = Instant::now();
+        let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+          &claim,
+          tau,
+          &az_small,
+          &bz_small,
+          &mut az2,
+          &mut bz2,
+          &mut cz2,
+          &mut transcript2,
+        )
+        .expect("prove_cubic_with_three_inputs_small_value failed");
+        let elapsed = t0.elapsed().as_micros();
+        info!(
+          elapsed_us = elapsed,
+          "prove_cubic_with_three_inputs_small_value"
+        );
+        (proof2, r2, evals2, elapsed)
+      };
 
       // ===== VERIFY EQUIVALENCE =====
       info!("Verifying equivalence...");
@@ -290,9 +297,8 @@ fn main() {
 
   info!("Testing sumcheck method equivalence with SmallSha256Circuit");
   info!("SmallSha256Circuit uses SmallMultiEq to keep coefficients bounded");
-  info!("Note: Small-value sumcheck (Algorithm 6) requires even num_vars");
 
-  // Message lengths: 1024 bytes produces num_vars=20 (even)
+  // Message lengths: 1024 bytes produces num_vars=20
   let preimage_len = 1024;
 
   // Test with NoBatchEq (i32 path) - direct constraints

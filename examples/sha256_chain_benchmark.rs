@@ -123,56 +123,63 @@ where
     expected_num_vars, num_vars
   );
 
-  // Create field-element polynomials for the original method
-  let mut az1 = MultilinearPolynomial::new(az.clone());
-  let mut bz1 = MultilinearPolynomial::new(bz.clone());
-  let mut cz1 = MultilinearPolynomial::new(cz.clone());
-
-  // Create small-value polynomials for the optimized method (using i64)
-  let az_poly = MultilinearPolynomial::new(az.clone());
-  let bz_poly = MultilinearPolynomial::new(bz.clone());
-  let az_small =
-    MultilinearPolynomial::<i64>::try_from_field(&az_poly).expect("Az values too large for i64");
-  let bz_small =
-    MultilinearPolynomial::<i64>::try_from_field(&bz_poly).expect("Bz values too large for i64");
-
   let claim = F::ZERO;
 
   // ===== ORIGINAL SUMCHECK =====
-  let mut transcript1 = <E as Engine>::TE::new(b"sha256_chain_bench");
-  let t0 = Instant::now();
-  let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
-    &claim,
-    tau.clone(),
-    &mut az1,
-    &mut bz1,
-    &mut cz1,
-    &mut transcript1,
-  )
-  .expect("prove_cubic_with_three_inputs failed");
-  let orig_sumcheck_ms = t0.elapsed().as_millis();
-  info!(orig_sumcheck_ms, "original sumcheck");
+  // Run in scope so memory is freed before next benchmark
+  let (proof1, r1, evals1, orig_sumcheck_ms) = {
+    let mut az1 = MultilinearPolynomial::new(az.clone());
+    let mut bz1 = MultilinearPolynomial::new(bz.clone());
+    let mut cz1 = MultilinearPolynomial::new(cz.clone());
+    let mut transcript1 = <E as Engine>::TE::new(b"sha256_chain_bench");
+
+    let t0 = Instant::now();
+    let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+      &claim,
+      tau.clone(),
+      &mut az1,
+      &mut bz1,
+      &mut cz1,
+      &mut transcript1,
+    )
+    .expect("prove_cubic_with_three_inputs failed");
+    let elapsed = t0.elapsed().as_millis();
+    info!(orig_sumcheck_ms = elapsed, "original sumcheck");
+    (proof1, r1, evals1, elapsed)
+  }; // az1, bz1, cz1 dropped here
 
   // ===== SMALL-VALUE SUMCHECK =====
-  let mut az2 = MultilinearPolynomial::new(az);
-  let mut bz2 = MultilinearPolynomial::new(bz);
-  let mut cz2 = MultilinearPolynomial::new(cz);
-  let mut transcript2 = <E as Engine>::TE::new(b"sha256_chain_bench");
+  // Run in scope so memory is freed after benchmark
+  let (proof2, r2, evals2, small_sumcheck_ms) = {
+    // Create small-value polynomials for the optimized method (using i64)
+    let az_poly = MultilinearPolynomial::new(az.clone());
+    let bz_poly = MultilinearPolynomial::new(bz.clone());
+    let az_small =
+      MultilinearPolynomial::<i64>::try_from_field(&az_poly).expect("Az values too large for i64");
+    let bz_small =
+      MultilinearPolynomial::<i64>::try_from_field(&bz_poly).expect("Bz values too large for i64");
 
-  let t0 = Instant::now();
-  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-    &claim,
-    tau,
-    &az_small,
-    &bz_small,
-    &mut az2,
-    &mut bz2,
-    &mut cz2,
-    &mut transcript2,
-  )
-  .expect("prove_cubic_with_three_inputs_small_value failed");
-  let small_sumcheck_ms = t0.elapsed().as_millis();
-  info!(small_sumcheck_ms, "small-value sumcheck");
+    let mut az2 = MultilinearPolynomial::new(az);
+    let mut bz2 = MultilinearPolynomial::new(bz);
+    let mut cz2 = MultilinearPolynomial::new(cz);
+    let mut transcript2 = <E as Engine>::TE::new(b"sha256_chain_bench");
+
+    let t0 = Instant::now();
+    let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+      &claim,
+      tau,
+      &az_small,
+      &bz_small,
+      &mut az2,
+      &mut bz2,
+      &mut cz2,
+      &mut transcript2,
+    )
+    .expect("prove_cubic_with_three_inputs_small_value failed");
+    let elapsed = t0.elapsed().as_millis();
+    info!(small_sumcheck_ms = elapsed, "small-value sumcheck");
+    (proof2, r2, evals2, elapsed)
+  };
 
   // Verify equivalence
   assert_eq!(r1, r2, "Challenges must match!");
@@ -233,17 +240,11 @@ fn main() {
 
   let args = Args::parse();
 
-  // Determine which num_vars values to run (must be even for Algorithm 6)
+  // Determine which num_vars values to run
   let num_vars_list: Vec<usize> = match args.command {
-    Some(Command::Single { num_vars }) => {
-      assert!(
-        num_vars % 2 == 0,
-        "num_vars must be even (Algorithm 6 requirement)"
-      );
-      vec![num_vars]
-    }
-    Some(Command::RangeSweep { min, max }) => (min..=max).step_by(2).collect(),
-    None => vec![16, 18, 20, 22, 24, 26],
+    Some(Command::Single { num_vars }) => vec![num_vars],
+    Some(Command::RangeSweep { min, max }) => (min..=max).collect(),
+    None => vec![16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
   };
 
   // Use a deterministic input
