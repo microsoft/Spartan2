@@ -89,6 +89,9 @@ pub(crate) struct SpartanThreadState<
   pub bz_buf_curr: Vec<V>,
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
   pub bz_buf_scratch: Vec<V>,
+  /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
+  /// Eliminates per-x_out allocation overhead.
+  pub beta_values: Vec<(usize, S)>,
 }
 
 impl<
@@ -121,6 +124,7 @@ impl<
       az_buf_scratch: vec![V::default(); ext_size],
       bz_buf_curr: vec![V::default(); ext_size],
       bz_buf_scratch: vec![V::default(); ext_size],
+      beta_values: Vec::with_capacity(num_betas),
     }
   }
 
@@ -129,6 +133,7 @@ impl<
   #[inline]
   pub fn reset_partial_sums(&mut self) {
     self.beta_partial_sums.fill(U::default());
+    self.beta_values.clear();
   }
 
   /// Zero out unreduced bucket accumulators.

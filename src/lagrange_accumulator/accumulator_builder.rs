@@ -167,21 +167,18 @@ where
 
         // Pre-compute and filter: reduce all non-zero betas upfront
         // This eliminates closure call overhead in the scatter loop
-        let beta_values: Vec<(usize, S)> = betas_with_infty
-          .iter()
-          .filter_map(|&beta_idx| {
-            let unreduced_sum = &state.beta_partial_sums[beta_idx];
-            if P::unreduced_is_zero(unreduced_sum) {
-              return None;
-            }
-            let val = P::modular_reduction(unreduced_sum);
-            if val.is_zero().into() {
-              None
-            } else {
-              Some((beta_idx, val))
-            }
-          })
-          .collect();
+        // Reuse pre-allocated buffer to avoid per-iteration allocations
+        for &beta_idx in &betas_with_infty {
+          let unreduced_sum = &state.beta_partial_sums[beta_idx];
+          if P::unreduced_is_zero(unreduced_sum) {
+            continue;
+          }
+          let val = P::modular_reduction(unreduced_sum);
+          if val.is_zero().into() {
+            continue;
+          }
+          state.beta_values.push((beta_idx, val));
+        }
 
         // Distribute beta_partial_sums → A_i(v,u) via idx4
         // Uses unreduced F×F accumulation to minimize Montgomery reductions:
@@ -190,7 +187,7 @@ where
         // - Keep unreduced across all x_out iterations per thread
         // - Final reduction once per bucket after all threads merged
         scatter_beta_values_unreduced::<S, P, 2>(
-          &beta_values,
+          &state.beta_values,
           &beta_prefix_cache,
           ex,
           &eq_tables.e_y,
@@ -651,9 +648,12 @@ mod tests {
         let bz_pref = bz.gather_prefix_evals(l0, suffix);
         let cz_pref = cz.gather_prefix_evals(l0, suffix);
 
-        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
-        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
-        let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
+        let az_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+        let bz_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+        let cz_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
         let e_in_eval = e_in[x_in_bits];
 
@@ -1070,9 +1070,12 @@ mod tests {
         let bz_pref = bz.gather_prefix_evals(L0, suffix);
         let cz_pref = cz.gather_prefix_evals(L0, suffix);
 
-        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
-        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
-        let cz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
+        let az_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+        let bz_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+        let cz_ext =
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
         let e_in_eval = e_in[x_in_bits];
 

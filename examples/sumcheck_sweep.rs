@@ -153,7 +153,9 @@ where
   // Create small i32 values - these are small and kept for all benchmarks
   let az_i32: Vec<i32> = (0..n).map(|i| (i + 1) as i32).collect();
   let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
-  let taus: Vec<F<E>> = (0..num_vars).map(|i| F::<E>::from((i + 2) as u64)).collect();
+  let taus: Vec<F<E>> = (0..num_vars)
+    .map(|i| F::<E>::from((i + 2) as u64))
+    .collect();
 
   // Claim = 0 for satisfying witness
   let claim: F<E> = F::<E>::from(0u64);
@@ -181,7 +183,11 @@ where
     .unwrap();
     let prove_us = t_prove.elapsed().as_micros();
     info!(setup_us, prove_us, "prove_cubic_with_three_inputs");
-    (Some(BenchResult { setup_us, prove_us }), Some(r1), Some(evals1))
+    (
+      Some(BenchResult { setup_us, prove_us }),
+      Some(r1),
+      Some(evals1),
+    )
   } else {
     (None, None, None)
   }; // az1, bz1, cz1, az_vals, bz_vals, cz_vals dropped here
@@ -220,10 +226,13 @@ where
     let prove_us = t_prove.elapsed().as_micros();
     info!(
       setup_us,
-      prove_us,
-      "prove_cubic_with_three_inputs_small_value (i64/i128)"
+      prove_us, "prove_cubic_with_three_inputs_small_value (i64/i128)"
     );
-    (Some(BenchResult { setup_us, prove_us }), Some(r3), Some(evals3))
+    (
+      Some(BenchResult { setup_us, prove_us }),
+      Some(r3),
+      Some(evals3),
+    )
   } else {
     (None, None, None)
   };
@@ -240,18 +249,16 @@ where
 }
 
 /// Run i32 benchmark separately (only for fields that support SmallValueField<i32>)
-fn run_i32_benchmark<E>(
-  num_vars: usize,
-  az_i32: &[i32],
-  bz_i32: &[i32],
-) -> Option<BenchResult>
+fn run_i32_benchmark<E>(num_vars: usize, az_i32: &[i32], bz_i32: &[i32]) -> Option<BenchResult>
 where
   E: Engine,
   E::Scalar: SmallValueField<i32, IntermediateSmallValue = i64> + DelayedReduction<i32>,
 {
   type F<E> = <E as Engine>::Scalar;
 
-  let taus: Vec<F<E>> = (0..num_vars).map(|i| F::<E>::from((i + 2) as u64)).collect();
+  let taus: Vec<F<E>> = (0..num_vars)
+    .map(|i| F::<E>::from((i + 2) as u64))
+    .collect();
   let claim: F<E> = F::<E>::from(0u64);
 
   let t_setup = Instant::now();
@@ -280,8 +287,7 @@ where
   let prove_us = t_prove.elapsed().as_micros();
   info!(
     setup_us,
-    prove_us,
-    "prove_cubic_with_three_inputs_small_value (i32/i64)"
+    prove_us, "prove_cubic_with_three_inputs_small_value (i32/i64)"
   );
   Some(BenchResult { setup_us, prove_us })
 }
