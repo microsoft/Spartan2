@@ -7,7 +7,10 @@
 //! Barrett reduction for small × field multiplication.
 
 use super::limbs::{gte_4_4, gte_5_4, mul_4_by_1, mul_5_by_1, sub_4_4, sub_5_4, sub_5_5};
-use halo2curves::pasta::{Fp, Fq};
+use halo2curves::{
+  bn256::Fr as Bn254Fr,
+  pasta::{Fp, Fq},
+};
 use std::ops::Neg;
 
 // ==========================================================================
@@ -217,6 +220,67 @@ impl FieldReductionConstants for Fq {
 }
 
 // ==========================================================================
+// FieldReductionConstants implementation for Bn254Fr (BN254 scalar field)
+// ==========================================================================
+
+impl FieldReductionConstants for Bn254Fr {
+  // r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+  const MODULUS: [u64; 4] = [
+    0x43e1f593f0000001,
+    0x2833e84879b97091,
+    0xb85045b68181585d,
+    0x30644e72e131a029,
+  ];
+
+  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
+
+  const MU: u64 = 0xffffffffffffffff;
+
+  // 2^256 mod r
+  const R256_MOD: [u64; 4] = [
+    0xac96341c4ffffffb,
+    0x36fc76959f60cd29,
+    0x666ea36f7879462e,
+    0x0e0a77c19a07df2f,
+  ];
+
+  // 2^320 mod r
+  const R320_MOD: [u64; 4] = [
+    0xb4c6edf97c5fb586,
+    0x708c8d50bfeb93be,
+    0x9ffd1de404f7e0ef,
+    0x215b02ac9a392866,
+  ];
+
+  // 2^384 mod r
+  const R384_MOD: [u64; 4] = [
+    0xb075da81ef8cfeb9,
+    0xa7f12acca5b6cd8c,
+    0x32c475047957bf7b,
+    0x03d581d748ffa25e,
+  ];
+
+  // 2^448 mod r
+  const R448_MOD: [u64; 4] = [
+    0x5665c3b5c177f51a,
+    0x00e7f02ade75c713,
+    0xb09192e52f747168,
+    0x0621c0bbcccdc65d,
+  ];
+
+  // 2^512 mod r
+  const R512_MOD: [u64; 4] = [
+    0x1bb8e645ae216da7,
+    0x53fe3ab1e35c59e3,
+    0x8c49833d53bb8085,
+    0x0216d0b17f4e44a5,
+  ];
+
+  // -r^(-1) mod 2^64
+  const MONT_INV: u64 = 0xc2e1f593efffffff;
+}
+
+// ==========================================================================
 // BarrettField - Trait for generic small × field multiplication
 // ==========================================================================
 
@@ -255,6 +319,20 @@ impl BarrettField for Fq {
   #[inline]
   fn from_limbs(limbs: [u64; 4]) -> Self {
     Fq(limbs)
+  }
+
+  #[inline]
+  fn to_limbs(&self) -> &[u64; 4] {
+    &self.0
+  }
+}
+
+impl BarrettField for Bn254Fr {
+  const TWO_POW_64: Self = Bn254Fr::from_raw([0, 1, 0, 0]);
+
+  #[inline]
+  fn from_limbs(limbs: [u64; 4]) -> Self {
+    Bn254Fr(limbs)
   }
 
   #[inline]
@@ -570,6 +648,28 @@ pub(crate) fn montgomery_reduce_9_fp(c: &[u64; 9]) -> [u64; 4] {
 #[allow(dead_code)]
 pub(crate) fn montgomery_reduce_9_fq(c: &[u64; 9]) -> [u64; 4] {
   montgomery_reduce_9::<Fq>(c)
+}
+
+// ==========================================================================
+// BN254 Fr reduction functions
+// ==========================================================================
+
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn barrett_reduce_6_bn254_fr(c: &[u64; 6]) -> [u64; 4] {
+  barrett_reduce_6::<Bn254Fr>(c)
+}
+
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn barrett_reduce_8_bn254_fr(c: &[u64; 8]) -> [u64; 4] {
+  barrett_reduce_8::<Bn254Fr>(c)
+}
+
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn montgomery_reduce_9_bn254_fr(c: &[u64; 9]) -> [u64; 4] {
+  montgomery_reduce_9::<Bn254Fr>(c)
 }
 
 // ==========================================================================

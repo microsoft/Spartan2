@@ -7,6 +7,7 @@
 //! This module implements Spartan's traits using the following several different combinations
 
 // public modules to be used as an commitment engine with Spartan
+pub mod bn254;
 pub mod keccak;
 pub mod pasta;
 pub mod pcs;
@@ -17,6 +18,7 @@ mod msm;
 
 use crate::{
   provider::{
+    bn254::bn254 as bn254_types,
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
     pcs::hyrax_pc::HyraxPCS,
@@ -42,6 +44,10 @@ pub struct P256HyraxEngine;
 /// An implementation of the Spartan Engine trait with T256 curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct T256HyraxEngine;
+
+/// An implementation of the Spartan Engine trait with BN254 curve and Hyrax commitment scheme
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Bn254Engine;
 
 impl Engine for PallasHyraxEngine {
   type Base = pallas::Base;
@@ -71,6 +77,14 @@ impl Engine for T256HyraxEngine {
   type Base = t256::Base;
   type Scalar = t256::Scalar;
   type GE = t256::Point;
+  type TE = Keccak256Transcript<Self>;
+  type PCS = HyraxPCS<Self>;
+}
+
+impl Engine for Bn254Engine {
+  type Base = bn254_types::Base;
+  type Scalar = bn254_types::Scalar;
+  type GE = bn254_types::Point;
   type TE = Keccak256Transcript<Self>;
   type PCS = HyraxPCS<Self>;
 }

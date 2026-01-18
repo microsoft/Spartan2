@@ -84,6 +84,36 @@ where
     field_b: &Self,
   );
 
+  /// Batch 4 independent field×int multiply-accumulates for ILP optimization.
+  /// Default implementation calls single version 4 times.
+  #[inline(always)]
+  fn unreduced_field_int_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldInt; 4],
+    field: &Self,
+    smalls: [Self::IntermediateSmallValue; 4],
+  ) {
+    let [acc0, acc1, acc2, acc3] = accs;
+    Self::unreduced_field_int_mul_add(acc0, field, smalls[0]);
+    Self::unreduced_field_int_mul_add(acc1, field, smalls[1]);
+    Self::unreduced_field_int_mul_add(acc2, field, smalls[2]);
+    Self::unreduced_field_int_mul_add(acc3, field, smalls[3]);
+  }
+
+  /// Batch 4 independent field×field multiply-accumulates for ILP optimization.
+  /// Default implementation calls single version 4 times.
+  #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    let [acc0, acc1, acc2, acc3] = accs;
+    Self::unreduced_field_field_mul_add(acc0, a[0], b[0]);
+    Self::unreduced_field_field_mul_add(acc1, a[1], b[1]);
+    Self::unreduced_field_field_mul_add(acc2, a[2], b[2]);
+    Self::unreduced_field_field_mul_add(acc3, a[3], b[3]);
+  }
+
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 

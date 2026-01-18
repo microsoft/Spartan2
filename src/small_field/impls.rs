@@ -4,13 +4,14 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SmallValueField and DelayedReduction implementations for Fp and Fq.
+//! SmallValueField and DelayedReduction implementations for Fp, Fq, and BN254 Fr.
 
 use super::{
   DelayedReduction, SmallValueField, barrett, i64_to_field, i128_to_field,
   limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
 };
 use ff::PrimeField;
+use halo2curves::bn256::Fr as Bn254Fr;
 
 // ============================================================================
 // Helper function for try_field_to_small
@@ -135,6 +136,29 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fp {
       carry = sum >> 64;
     }
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_int_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldInt; 4],
+    field: &Self,
+    smalls: [i64; 4],
+  ) {
+    // Batched ILP version: interleave 4 independent carry chains
+    batch_unreduced_field_int_mul_add_x4_fp(accs, field, smalls);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    batch_unreduced_field_field_mul_add_x4(
+      accs,
+      [&a[0].0, &a[1].0, &a[2].0, &a[3].0],
+      [&b[0].0, &b[1].0, &b[2].0, &b[3].0],
+    );
   }
 
   #[inline(always)]
@@ -289,6 +313,19 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fp {
   }
 
   #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    batch_unreduced_field_field_mul_add_x4(
+      accs,
+      [&a[0].0, &a[1].0, &a[2].0, &a[3].0],
+      [&b[0].0, &b[1].0, &b[2].0, &b[3].0],
+    );
+  }
+
+  #[inline(always)]
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
@@ -390,6 +427,29 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fq {
       carry = sum >> 64;
     }
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_int_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldInt; 4],
+    field: &Self,
+    smalls: [i64; 4],
+  ) {
+    // Batched ILP version: interleave 4 independent carry chains
+    batch_unreduced_field_int_mul_add_x4_fq(accs, field, smalls);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    batch_unreduced_field_field_mul_add_x4(
+      accs,
+      [&a[0].0, &a[1].0, &a[2].0, &a[3].0],
+      [&b[0].0, &b[1].0, &b[2].0, &b[3].0],
+    );
   }
 
   #[inline(always)]
@@ -542,6 +602,19 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
   }
 
   #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    batch_unreduced_field_field_mul_add_x4(
+      accs,
+      [&a[0].0, &a[1].0, &a[2].0, &a[3].0],
+      [&b[0].0, &b[1].0, &b[2].0, &b[3].0],
+    );
+  }
+
+  #[inline(always)]
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
@@ -554,6 +627,492 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     Self(barrett::montgomery_reduce_9_fq(&acc.0))
   }
+}
+
+// ============================================================================
+// SmallValueField<i64> for BN254 Fr
+// ============================================================================
+
+impl SmallValueField<i64> for Bn254Fr {
+  type IntermediateSmallValue = i128;
+
+  #[inline]
+  fn ss_mul(a: i64, b: i64) -> i128 {
+    (a as i128) * (b as i128)
+  }
+
+  #[inline]
+  fn sl_mul(small: i64, large: &Self) -> Self {
+    barrett::mul_by_i64(large, small)
+  }
+
+  #[inline]
+  fn isl_mul(small: i128, large: &Self) -> Self {
+    if small == 0 {
+      return Self::zero();
+    }
+    let (is_neg, mag) = if small >= 0 {
+      (false, small as u128)
+    } else {
+      (true, (-small) as u128)
+    };
+    let product = mul_4_by_2_ext(&large.0, mag);
+    let result = Self(barrett::barrett_reduce_6_bn254_fr(&product));
+    if is_neg { -result } else { result }
+  }
+
+  #[inline]
+  fn small_to_field(val: i64) -> Self {
+    i64_to_field(val)
+  }
+
+  #[inline]
+  fn intermediate_to_field(val: i128) -> Self {
+    i128_to_field(val)
+  }
+
+  fn try_field_to_small(val: &Self) -> Option<i64> {
+    let repr = val.to_repr();
+    let bytes = repr.as_ref();
+
+    let high_zero = bytes[8..].iter().all(|&b| b == 0);
+    if high_zero {
+      let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+      if val_u64 <= i64::MAX as u64 {
+        return Some(val_u64 as i64);
+      }
+    }
+
+    let neg_val = val.neg();
+    let neg_repr = neg_val.to_repr();
+    let neg_bytes = neg_repr.as_ref();
+    let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
+    if neg_high_zero {
+      let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
+      if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
+        return Some(-(neg_u64 as i128) as i64);
+      }
+    }
+
+    None
+  }
+}
+
+// ============================================================================
+// DelayedReduction<i64> for BN254 Fr
+// ============================================================================
+
+impl DelayedReduction<i64> for Bn254Fr {
+  type UnreducedFieldInt = SignedWideLimbs<8>;
+  type UnreducedFieldField = WideLimbs<9>;
+
+  #[inline(always)]
+  fn unreduced_field_int_mul_add(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i128) {
+    let (target, mag) = if small >= 0 {
+      (&mut acc.pos, small as u128)
+    } else {
+      (&mut acc.neg, (-small) as u128)
+    };
+    let a = &field.0;
+    let b_lo = mag as u64;
+    let b_hi = (mag >> 64) as u64;
+
+    // Pass 1: multiply by b_lo at offset 0
+    let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = mac(target.0[3], a[3], b_lo, c);
+    let (r4, of1) = target.0[4].overflowing_add(c);
+    let c1 = of1 as u64;
+    target.0[0] = r0;
+
+    // Pass 2: multiply by b_hi at offset 1
+    let (r1, c) = mac(r1, a[0], b_hi, 0);
+    let (r2, c) = mac(r2, a[1], b_hi, c);
+    let (r3, c) = mac(r3, a[2], b_hi, c);
+    let (r4, c) = mac(r4, a[3], b_hi, c);
+    let (r5, c) = mac(target.0[5], c1, 1, c);
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = r5;
+    let (r6, of) = target.0[6].overflowing_add(c);
+    target.0[6] = r6;
+    target.0[7] = target.0[7].wrapping_add(of as u64);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_field_mul_add(
+    acc: &mut Self::UnreducedFieldField,
+    field_a: &Self,
+    field_b: &Self,
+  ) {
+    let product = mul_4_by_4_ext(&field_a.0, &field_b.0);
+    let mut carry = 0u128;
+    for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
+      let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
+      *acc_limb = sum as u64;
+      carry = sum >> 64;
+    }
+    acc.0[8] = acc.0[8].wrapping_add(carry as u64);
+  }
+
+  #[inline(always)]
+  fn unreduced_field_field_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldField; 4],
+    a: [&Self; 4],
+    b: [&Self; 4],
+  ) {
+    batch_unreduced_field_field_mul_add_x4(
+      accs,
+      [&a[0].0, &a[1].0, &a[2].0, &a[3].0],
+      [&b[0].0, &b[1].0, &b[2].0, &b[3].0],
+    );
+  }
+
+  #[inline(always)]
+  fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
+    match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8_bn254_fr(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8_bn254_fr(&mag)),
+    }
+  }
+
+  #[inline(always)]
+  fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
+    Self(barrett::montgomery_reduce_9_bn254_fr(&acc.0))
+  }
+}
+
+// ============================================================================
+// Batched ILP Operations
+// ============================================================================
+
+/// Internal helper for batched MAC operations (works for any 4-limb field).
+///
+/// Interleaves 4 independent carry chains for better ILP on AArch64.
+#[inline(always)]
+fn batch_mac_4limb_x4(targets: [&mut WideLimbs<6>; 4], a: &[u64; 4], mags: [u64; 4]) {
+  // Limb 0: 4 independent macs (ILP - CPU can overlap these)
+  let (r0_0, c0) = mac(targets[0].0[0], a[0], mags[0], 0);
+  let (r1_0, c1) = mac(targets[1].0[0], a[0], mags[1], 0);
+  let (r2_0, c2) = mac(targets[2].0[0], a[0], mags[2], 0);
+  let (r3_0, c3) = mac(targets[3].0[0], a[0], mags[3], 0);
+
+  // Limb 1: 4 independent macs (each uses its own carry)
+  let (r0_1, c0) = mac(targets[0].0[1], a[1], mags[0], c0);
+  let (r1_1, c1) = mac(targets[1].0[1], a[1], mags[1], c1);
+  let (r2_1, c2) = mac(targets[2].0[1], a[1], mags[2], c2);
+  let (r3_1, c3) = mac(targets[3].0[1], a[1], mags[3], c3);
+
+  // Limb 2: 4 independent macs
+  let (r0_2, c0) = mac(targets[0].0[2], a[2], mags[0], c0);
+  let (r1_2, c1) = mac(targets[1].0[2], a[2], mags[1], c1);
+  let (r2_2, c2) = mac(targets[2].0[2], a[2], mags[2], c2);
+  let (r3_2, c3) = mac(targets[3].0[2], a[2], mags[3], c3);
+
+  // Limb 3: 4 independent macs
+  let (r0_3, c0) = mac(targets[0].0[3], a[3], mags[0], c0);
+  let (r1_3, c1) = mac(targets[1].0[3], a[3], mags[1], c1);
+  let (r2_3, c2) = mac(targets[2].0[3], a[3], mags[2], c2);
+  let (r3_3, c3) = mac(targets[3].0[3], a[3], mags[3], c3);
+
+  // Final carry propagation for all 4 (still independent)
+  let (r0_4, of0) = targets[0].0[4].overflowing_add(c0);
+  let (r1_4, of1) = targets[1].0[4].overflowing_add(c1);
+  let (r2_4, of2) = targets[2].0[4].overflowing_add(c2);
+  let (r3_4, of3) = targets[3].0[4].overflowing_add(c3);
+
+  // Store results for accumulator 0
+  targets[0].0[0] = r0_0;
+  targets[0].0[1] = r0_1;
+  targets[0].0[2] = r0_2;
+  targets[0].0[3] = r0_3;
+  targets[0].0[4] = r0_4;
+  targets[0].0[5] = targets[0].0[5].wrapping_add(of0 as u64);
+
+  // Store results for accumulator 1
+  targets[1].0[0] = r1_0;
+  targets[1].0[1] = r1_1;
+  targets[1].0[2] = r1_2;
+  targets[1].0[3] = r1_3;
+  targets[1].0[4] = r1_4;
+  targets[1].0[5] = targets[1].0[5].wrapping_add(of1 as u64);
+
+  // Store results for accumulator 2
+  targets[2].0[0] = r2_0;
+  targets[2].0[1] = r2_1;
+  targets[2].0[2] = r2_2;
+  targets[2].0[3] = r2_3;
+  targets[2].0[4] = r2_4;
+  targets[2].0[5] = targets[2].0[5].wrapping_add(of2 as u64);
+
+  // Store results for accumulator 3
+  targets[3].0[0] = r3_0;
+  targets[3].0[1] = r3_1;
+  targets[3].0[2] = r3_2;
+  targets[3].0[3] = r3_3;
+  targets[3].0[4] = r3_4;
+  targets[3].0[5] = targets[3].0[5].wrapping_add(of3 as u64);
+}
+
+/// Batch 4 independent field×int multiply-accumulates for instruction-level parallelism.
+///
+/// On AArch64 (M1/M2), this allows the CPU to overlap mul/umulh latencies across
+/// 4 independent carry chains, significantly improving throughput compared to
+/// processing one accumulation at a time.
+///
+/// # Safety
+/// - All 4 accumulators must be valid and non-overlapping
+/// - This is for Fq (4 limbs, 256-bit field)
+#[inline(always)]
+pub fn batch_unreduced_field_int_mul_add_x4_fq(
+  accs: [&mut SignedWideLimbs<6>; 4],
+  field: &halo2curves::pasta::Fq,
+  smalls: [i64; 4],
+) {
+  // Destructure to get 4 independent mutable references (satisfies borrow checker)
+  let [acc0, acc1, acc2, acc3] = accs;
+
+  // Prepare targets and magnitudes for each of the 4 operations
+  let (target0, mag0) = if smalls[0] >= 0 {
+    (&mut acc0.pos, smalls[0] as u64)
+  } else {
+    (&mut acc0.neg, (-smalls[0]) as u64)
+  };
+  let (target1, mag1) = if smalls[1] >= 0 {
+    (&mut acc1.pos, smalls[1] as u64)
+  } else {
+    (&mut acc1.neg, (-smalls[1]) as u64)
+  };
+  let (target2, mag2) = if smalls[2] >= 0 {
+    (&mut acc2.pos, smalls[2] as u64)
+  } else {
+    (&mut acc2.neg, (-smalls[2]) as u64)
+  };
+  let (target3, mag3) = if smalls[3] >= 0 {
+    (&mut acc3.pos, smalls[3] as u64)
+  } else {
+    (&mut acc3.neg, (-smalls[3]) as u64)
+  };
+
+  let a = &field.0;
+
+  // Limb 0: 4 independent macs (ILP - CPU can overlap these)
+  let (r0_0, c0) = mac(target0.0[0], a[0], mag0, 0);
+  let (r1_0, c1) = mac(target1.0[0], a[0], mag1, 0);
+  let (r2_0, c2) = mac(target2.0[0], a[0], mag2, 0);
+  let (r3_0, c3) = mac(target3.0[0], a[0], mag3, 0);
+
+  // Limb 1: 4 independent macs (each uses its own carry)
+  let (r0_1, c0) = mac(target0.0[1], a[1], mag0, c0);
+  let (r1_1, c1) = mac(target1.0[1], a[1], mag1, c1);
+  let (r2_1, c2) = mac(target2.0[1], a[1], mag2, c2);
+  let (r3_1, c3) = mac(target3.0[1], a[1], mag3, c3);
+
+  // Limb 2: 4 independent macs
+  let (r0_2, c0) = mac(target0.0[2], a[2], mag0, c0);
+  let (r1_2, c1) = mac(target1.0[2], a[2], mag1, c1);
+  let (r2_2, c2) = mac(target2.0[2], a[2], mag2, c2);
+  let (r3_2, c3) = mac(target3.0[2], a[2], mag3, c3);
+
+  // Limb 3: 4 independent macs
+  let (r0_3, c0) = mac(target0.0[3], a[3], mag0, c0);
+  let (r1_3, c1) = mac(target1.0[3], a[3], mag1, c1);
+  let (r2_3, c2) = mac(target2.0[3], a[3], mag2, c2);
+  let (r3_3, c3) = mac(target3.0[3], a[3], mag3, c3);
+
+  // Final carry propagation for all 4 (still independent)
+  let (r0_4, of0) = target0.0[4].overflowing_add(c0);
+  let (r1_4, of1) = target1.0[4].overflowing_add(c1);
+  let (r2_4, of2) = target2.0[4].overflowing_add(c2);
+  let (r3_4, of3) = target3.0[4].overflowing_add(c3);
+
+  // Store results for accumulator 0
+  target0.0[0] = r0_0;
+  target0.0[1] = r0_1;
+  target0.0[2] = r0_2;
+  target0.0[3] = r0_3;
+  target0.0[4] = r0_4;
+  target0.0[5] = target0.0[5].wrapping_add(of0 as u64);
+
+  // Store results for accumulator 1
+  target1.0[0] = r1_0;
+  target1.0[1] = r1_1;
+  target1.0[2] = r1_2;
+  target1.0[3] = r1_3;
+  target1.0[4] = r1_4;
+  target1.0[5] = target1.0[5].wrapping_add(of1 as u64);
+
+  // Store results for accumulator 2
+  target2.0[0] = r2_0;
+  target2.0[1] = r2_1;
+  target2.0[2] = r2_2;
+  target2.0[3] = r2_3;
+  target2.0[4] = r2_4;
+  target2.0[5] = target2.0[5].wrapping_add(of2 as u64);
+
+  // Store results for accumulator 3
+  target3.0[0] = r3_0;
+  target3.0[1] = r3_1;
+  target3.0[2] = r3_2;
+  target3.0[3] = r3_3;
+  target3.0[4] = r3_4;
+  target3.0[5] = target3.0[5].wrapping_add(of3 as u64);
+}
+
+/// Batch 4 independent field×int multiply-accumulates for Fp.
+#[inline(always)]
+pub fn batch_unreduced_field_int_mul_add_x4_fp(
+  accs: [&mut SignedWideLimbs<6>; 4],
+  field: &halo2curves::pasta::Fp,
+  smalls: [i64; 4],
+) {
+  // Destructure to get 4 independent mutable references (satisfies borrow checker)
+  let [acc0, acc1, acc2, acc3] = accs;
+
+  // Prepare targets and magnitudes for each of the 4 operations
+  let (target0, mag0) = if smalls[0] >= 0 {
+    (&mut acc0.pos, smalls[0] as u64)
+  } else {
+    (&mut acc0.neg, (-smalls[0]) as u64)
+  };
+  let (target1, mag1) = if smalls[1] >= 0 {
+    (&mut acc1.pos, smalls[1] as u64)
+  } else {
+    (&mut acc1.neg, (-smalls[1]) as u64)
+  };
+  let (target2, mag2) = if smalls[2] >= 0 {
+    (&mut acc2.pos, smalls[2] as u64)
+  } else {
+    (&mut acc2.neg, (-smalls[2]) as u64)
+  };
+  let (target3, mag3) = if smalls[3] >= 0 {
+    (&mut acc3.pos, smalls[3] as u64)
+  } else {
+    (&mut acc3.neg, (-smalls[3]) as u64)
+  };
+
+  batch_mac_4limb_x4(
+    [target0, target1, target2, target3],
+    &field.0,
+    [mag0, mag1, mag2, mag3],
+  );
+}
+
+/// Batch 4 independent field×field multiply-accumulates for ILP optimization.
+///
+/// Computes 4 products in parallel (mul_4_by_4_ext) and adds them to 4 separate
+/// 9-limb accumulators with interleaved carry propagation for better ILP on AArch64.
+#[inline(always)]
+pub fn batch_unreduced_field_field_mul_add_x4(
+  accs: [&mut WideLimbs<9>; 4],
+  a: [&[u64; 4]; 4],
+  b: [&[u64; 4]; 4],
+) {
+  let [acc0, acc1, acc2, acc3] = accs;
+
+  // Compute 4 products (ILP: these can be computed independently)
+  let prod0 = mul_4_by_4_ext(a[0], b[0]);
+  let prod1 = mul_4_by_4_ext(a[1], b[1]);
+  let prod2 = mul_4_by_4_ext(a[2], b[2]);
+  let prod3 = mul_4_by_4_ext(a[3], b[3]);
+
+  // Add products to accumulators with interleaved carry propagation
+  // Limb 0
+  let sum0 = (acc0.0[0] as u128) + (prod0[0] as u128);
+  let sum1 = (acc1.0[0] as u128) + (prod1[0] as u128);
+  let sum2 = (acc2.0[0] as u128) + (prod2[0] as u128);
+  let sum3 = (acc3.0[0] as u128) + (prod3[0] as u128);
+  acc0.0[0] = sum0 as u64;
+  acc1.0[0] = sum1 as u64;
+  acc2.0[0] = sum2 as u64;
+  acc3.0[0] = sum3 as u64;
+  let (mut c0, mut c1, mut c2, mut c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 1
+  let sum0 = (acc0.0[1] as u128) + (prod0[1] as u128) + c0;
+  let sum1 = (acc1.0[1] as u128) + (prod1[1] as u128) + c1;
+  let sum2 = (acc2.0[1] as u128) + (prod2[1] as u128) + c2;
+  let sum3 = (acc3.0[1] as u128) + (prod3[1] as u128) + c3;
+  acc0.0[1] = sum0 as u64;
+  acc1.0[1] = sum1 as u64;
+  acc2.0[1] = sum2 as u64;
+  acc3.0[1] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 2
+  let sum0 = (acc0.0[2] as u128) + (prod0[2] as u128) + c0;
+  let sum1 = (acc1.0[2] as u128) + (prod1[2] as u128) + c1;
+  let sum2 = (acc2.0[2] as u128) + (prod2[2] as u128) + c2;
+  let sum3 = (acc3.0[2] as u128) + (prod3[2] as u128) + c3;
+  acc0.0[2] = sum0 as u64;
+  acc1.0[2] = sum1 as u64;
+  acc2.0[2] = sum2 as u64;
+  acc3.0[2] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 3
+  let sum0 = (acc0.0[3] as u128) + (prod0[3] as u128) + c0;
+  let sum1 = (acc1.0[3] as u128) + (prod1[3] as u128) + c1;
+  let sum2 = (acc2.0[3] as u128) + (prod2[3] as u128) + c2;
+  let sum3 = (acc3.0[3] as u128) + (prod3[3] as u128) + c3;
+  acc0.0[3] = sum0 as u64;
+  acc1.0[3] = sum1 as u64;
+  acc2.0[3] = sum2 as u64;
+  acc3.0[3] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 4
+  let sum0 = (acc0.0[4] as u128) + (prod0[4] as u128) + c0;
+  let sum1 = (acc1.0[4] as u128) + (prod1[4] as u128) + c1;
+  let sum2 = (acc2.0[4] as u128) + (prod2[4] as u128) + c2;
+  let sum3 = (acc3.0[4] as u128) + (prod3[4] as u128) + c3;
+  acc0.0[4] = sum0 as u64;
+  acc1.0[4] = sum1 as u64;
+  acc2.0[4] = sum2 as u64;
+  acc3.0[4] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 5
+  let sum0 = (acc0.0[5] as u128) + (prod0[5] as u128) + c0;
+  let sum1 = (acc1.0[5] as u128) + (prod1[5] as u128) + c1;
+  let sum2 = (acc2.0[5] as u128) + (prod2[5] as u128) + c2;
+  let sum3 = (acc3.0[5] as u128) + (prod3[5] as u128) + c3;
+  acc0.0[5] = sum0 as u64;
+  acc1.0[5] = sum1 as u64;
+  acc2.0[5] = sum2 as u64;
+  acc3.0[5] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 6
+  let sum0 = (acc0.0[6] as u128) + (prod0[6] as u128) + c0;
+  let sum1 = (acc1.0[6] as u128) + (prod1[6] as u128) + c1;
+  let sum2 = (acc2.0[6] as u128) + (prod2[6] as u128) + c2;
+  let sum3 = (acc3.0[6] as u128) + (prod3[6] as u128) + c3;
+  acc0.0[6] = sum0 as u64;
+  acc1.0[6] = sum1 as u64;
+  acc2.0[6] = sum2 as u64;
+  acc3.0[6] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 7
+  let sum0 = (acc0.0[7] as u128) + (prod0[7] as u128) + c0;
+  let sum1 = (acc1.0[7] as u128) + (prod1[7] as u128) + c1;
+  let sum2 = (acc2.0[7] as u128) + (prod2[7] as u128) + c2;
+  let sum3 = (acc3.0[7] as u128) + (prod3[7] as u128) + c3;
+  acc0.0[7] = sum0 as u64;
+  acc1.0[7] = sum1 as u64;
+  acc2.0[7] = sum2 as u64;
+  acc3.0[7] = sum3 as u64;
+  (c0, c1, c2, c3) = (sum0 >> 64, sum1 >> 64, sum2 >> 64, sum3 >> 64);
+
+  // Limb 8 (final carry)
+  acc0.0[8] = acc0.0[8].wrapping_add(c0 as u64);
+  acc1.0[8] = acc1.0[8].wrapping_add(c1 as u64);
+  acc2.0[8] = acc2.0[8].wrapping_add(c2 as u64);
+  acc3.0[8] = acc3.0[8].wrapping_add(c3 as u64);
 }
 
 // ============================================================================
