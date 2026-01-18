@@ -11,6 +11,112 @@
 use super::domain::LagrangeIndex;
 use std::ops::{Add, Sub};
 
+// ============================================================================
+// Helper functions for Lagrange extension
+// ============================================================================
+
+/// Extend a single suffix element from boolean to Lagrange domain.
+/// Original implementation, kept for clarity and remainder handling.
+#[inline(always)]
+fn extend_single<T, const D: usize>(
+  src: &[T],
+  dst: &mut [T],
+  base_src: usize,
+  base_dst: usize,
+  suffix_count: usize,
+  suffix_idx: usize,
+) where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
+  let p0 = src[base_src + suffix_idx];
+  let p1 = src[base_src + suffix_count + suffix_idx];
+  let diff = p1 - p0;
+
+  // γ = ∞ (index 0)
+  dst[base_dst + suffix_idx] = diff;
+  // γ = 0 (index 1)
+  dst[base_dst + suffix_count + suffix_idx] = p0;
+
+  if D >= 2 {
+    // γ = 1 (index 2)
+    dst[base_dst + 2 * suffix_count + suffix_idx] = p1;
+    // γ = 2..D-1: extrapolate
+    let mut val = p1;
+    for k in 2..D {
+      val = val + diff;
+      dst[base_dst + (k + 1) * suffix_count + suffix_idx] = val;
+    }
+  }
+}
+
+/// Extend 4 consecutive suffix elements with ILP optimization.
+/// Interleaves operations across 4 independent elements for better
+/// instruction-level parallelism on modern CPUs (especially AArch64).
+#[inline(always)]
+fn extend_batch4<T, const D: usize>(
+  src: &[T],
+  dst: &mut [T],
+  base_src: usize,
+  base_dst: usize,
+  suffix_count: usize,
+  s: usize,
+) where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
+  // Load 4 pairs (contiguous reads)
+  let p0_0 = src[base_src + s];
+  let p0_1 = src[base_src + s + 1];
+  let p0_2 = src[base_src + s + 2];
+  let p0_3 = src[base_src + s + 3];
+
+  let p1_0 = src[base_src + suffix_count + s];
+  let p1_1 = src[base_src + suffix_count + s + 1];
+  let p1_2 = src[base_src + suffix_count + s + 2];
+  let p1_3 = src[base_src + suffix_count + s + 3];
+
+  // 4 independent diffs (ILP)
+  let d0 = p1_0 - p0_0;
+  let d1 = p1_1 - p0_1;
+  let d2 = p1_2 - p0_2;
+  let d3 = p1_3 - p0_3;
+
+  // γ = ∞ (4 contiguous writes)
+  dst[base_dst + s] = d0;
+  dst[base_dst + s + 1] = d1;
+  dst[base_dst + s + 2] = d2;
+  dst[base_dst + s + 3] = d3;
+
+  // γ = 0 (4 contiguous writes)
+  dst[base_dst + suffix_count + s] = p0_0;
+  dst[base_dst + suffix_count + s + 1] = p0_1;
+  dst[base_dst + suffix_count + s + 2] = p0_2;
+  dst[base_dst + suffix_count + s + 3] = p0_3;
+
+  if D >= 2 {
+    // γ = 1 (4 contiguous writes)
+    dst[base_dst + 2 * suffix_count + s] = p1_0;
+    dst[base_dst + 2 * suffix_count + s + 1] = p1_1;
+    dst[base_dst + 2 * suffix_count + s + 2] = p1_2;
+    dst[base_dst + 2 * suffix_count + s + 3] = p1_3;
+
+    // γ = 2..D-1: extrapolate (4 at a time)
+    if D > 2 {
+      let (mut v0, mut v1, mut v2, mut v3) = (p1_0, p1_1, p1_2, p1_3);
+      for k in 2..D {
+        v0 = v0 + d0;
+        v1 = v1 + d1;
+        v2 = v2 + d2;
+        v3 = v3 + d3;
+        let offset = (k + 1) * suffix_count + s;
+        dst[base_dst + offset] = v0;
+        dst[base_dst + offset + 1] = v1;
+        dst[base_dst + offset + 2] = v2;
+        dst[base_dst + offset + 3] = v3;
+      }
+    }
+  }
+}
+
 #[cfg(test)]
 use crate::polys::multilinear::MultilinearPolynomial;
 #[cfg(test)]
@@ -97,31 +203,20 @@ where
       };
 
       for prefix_idx in 0..prefix_count {
-        for suffix_idx in 0..suffix_count {
-          let base_current = prefix_idx * current_stride;
-          let p0 = src[base_current + suffix_idx];
-          let p1 = src[base_current + suffix_count + suffix_idx];
+        let base_src = prefix_idx * current_stride;
+        let base_dst = prefix_idx * next_stride;
+        let mut s = 0;
 
-          let diff = p1 - p0;
-          let base_next = prefix_idx * next_stride;
+        // Process 4 suffix elements at a time for ILP
+        while s + 4 <= suffix_count {
+          extend_batch4::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
+          s += 4;
+        }
 
-          // γ = ∞ (index 0): leading coefficient
-          dst[base_next + suffix_idx] = diff;
-
-          // γ = 0 (index 1): p(prefix, 0, suffix)
-          dst[base_next + suffix_count + suffix_idx] = p0;
-
-          if D >= 2 {
-            // γ = 1 (index 2): p(prefix, 1, suffix)
-            dst[base_next + 2 * suffix_count + suffix_idx] = p1;
-
-            // γ = 2, 3, ..., D-1: extrapolate
-            let mut val = p1;
-            for k in 2..D {
-              val = val + diff;
-              dst[base_next + (k + 1) * suffix_count + suffix_idx] = val;
-            }
-          }
+        // Handle remainder (0-3 elements)
+        while s < suffix_count {
+          extend_single::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
+          s += 1;
         }
       }
     }
