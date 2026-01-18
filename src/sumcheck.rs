@@ -588,11 +588,10 @@ impl<E: Engine> SumcheckProof<E> {
     E::Scalar: SmallValueField<SmallValue>,
     MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar>,
   {
-    let mut r: Vec<E::Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
-    let mut claim_per_round = *claim;
-
     let num_rounds = taus.len();
+    let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::with_capacity(num_rounds);
+    let mut claim_per_round = *claim;
 
     // Determine ℓ₀: must satisfy l0 <= num_rounds / 2
     let l0 = std::cmp::min(Self::DEFAULT_SMALL_VALUE_ROUNDS, num_rounds / 2);
@@ -690,7 +689,7 @@ impl<E: Engine> SumcheckProof<E> {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
 
-        let evals = vec![
+        let evals = [
           eval_point_0,
           claim_per_round - eval_point_0,
           eval_point_2,
