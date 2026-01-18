@@ -23,7 +23,7 @@ use crate::{
     univariate::{CompressedUniPoly, UniPoly},
   },
   r1cs::SplitMultiRoundR1CSShape,
-  small_field::SmallValueField,
+  small_field::{DelayedReduction, SmallValueField},
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
@@ -630,7 +630,7 @@ impl<E: Engine> SumcheckProof<E> {
       + std::ops::SubAssign
       + Send
       + Sync,
-    E::Scalar: SmallValueField<SmallValue>,
+    E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
     MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar>,
   {
     let num_rounds = taus.len();
@@ -723,7 +723,7 @@ impl<E: Engine> SumcheckProof<E> {
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
+          eq_instance.evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(round, poly_A, poly_B, poly_C);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -1101,7 +1101,7 @@ impl<E: Engine> SumcheckProof<E> {
 pub(crate) mod eq_sumcheck {
   //! This module implements the sumcheck optimization for equality polynomials.
   //! The optimization is described in Section 5 of <https://eprint.iacr.org/2025/1117> algorithm 5.
-  use crate::{polys::multilinear::MultilinearPolynomial, traits::Engine};
+  use crate::{polys::multilinear::MultilinearPolynomial, small_field::DelayedReduction, traits::Engine};
   use ff::{Field, PrimeField};
   use rayon::{iter::ZipEq, prelude::*, slice::Iter};
 
@@ -1253,6 +1253,172 @@ pub(crate) mod eq_sumcheck {
             || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
             |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
           )
+      };
+
+      self.update_evals(&mut eval_0, &mut eval_2, &mut eval_3);
+
+      (eval_0, eval_2, eval_3)
+    }
+
+    /// Evaluate poly_A * poly_B - poly_C using delayed reduction.
+    ///
+    /// Same as `evaluation_points_cubic_with_three_inputs` but uses delayed modular reduction
+    /// to reduce Montgomery reductions from O(2^k) to O(2^{k/2}) per round.
+    ///
+    /// # Algorithm
+    ///
+    /// Uses two-phase accumulation with the split-eq factorization:
+    /// - E[id] = E_out[x_out] * E_in[x_in] where id = (x_out, x_in)
+    ///
+    /// Phase 1 (inner): For each x_out, accumulate ∑_{x_in} E_in[x_in] ⊗ q_k(g) in wide limbs
+    /// Phase 2 (outer): Reduce once, then accumulate E_out[x_out] ⊗ inner_reduced
+    /// Final: Reduce once at the end
+    #[inline]
+    pub fn evaluation_points_cubic_with_three_inputs_delayed<SmallValue>(
+      &self,
+      round_idx: usize,
+      poly_A: &MultilinearPolynomial<E::Scalar>,
+      poly_B: &MultilinearPolynomial<E::Scalar>,
+      poly_C: &MultilinearPolynomial<E::Scalar>,
+    ) -> (E::Scalar, E::Scalar, E::Scalar)
+    where
+      SmallValue: Copy
+        + Clone
+        + Default
+        + std::fmt::Debug
+        + PartialEq
+        + Eq
+        + std::ops::Add<Output = SmallValue>
+        + std::ops::Sub<Output = SmallValue>
+        + std::ops::Neg<Output = SmallValue>
+        + std::ops::AddAssign
+        + std::ops::SubAssign
+        + Send
+        + Sync,
+      E::Scalar: DelayedReduction<SmallValue>,
+    {
+      debug_assert_eq!(poly_A.Z.len() % 2, 0);
+
+      type UF<S, SV> = <S as DelayedReduction<SV>>::UnreducedFieldField;
+
+      let in_first_half = self.round < self.first_half;
+      let half_p = poly_A.Z.len() / 2;
+
+      let (mut eval_0, mut eval_2, mut eval_3) = if in_first_half {
+        // Two-phase accumulation: E[id] = E_out[x_out] * E_in[x_in]
+        let (poly_eq_left, poly_eq_right, second_half, _low_mask) = self.poly_eqs_first_half();
+        let eq_out_len = poly_eq_left.len();
+
+        // Outer loop: iterate over E_out indices
+        // Dynamic chunk size: enough chunks for work-stealing, but not too many to cause overhead
+        let min_chunk = (eq_out_len / (rayon::current_num_threads() * 4)).max(1);
+        let (acc_0, acc_2, acc_3) = (0..eq_out_len)
+          .into_par_iter()
+          .with_min_len(min_chunk)
+          .fold(
+            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            |mut outer_acc, x_out| {
+              let e_out = &poly_eq_left[x_out];
+
+              // Phase 1: Inner loop - accumulate E_in[x_in] ⊗ q_k(g) in wide limbs
+              let mut inner_0 = UF::<E::Scalar, SmallValue>::default();
+              let mut inner_2 = UF::<E::Scalar, SmallValue>::default();
+              let mut inner_3 = UF::<E::Scalar, SmallValue>::default();
+
+              for (x_in, e_in) in poly_eq_right.iter().enumerate() {
+                let id = (x_out << second_half) | x_in;
+
+                // Get polynomial values at index id
+                let (zero_a, one_a) = (&poly_A.Z[id], &poly_A.Z[id + half_p]);
+                let (zero_b, one_b) = (&poly_B.Z[id], &poly_B.Z[id + half_p]);
+                let (zero_c, one_c) = (&poly_C.Z[id], &poly_C.Z[id + half_p]);
+
+                let (q0, q2, q3) = eval_one_case_cubic_three_inputs(
+                  round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+                );
+
+                // Accumulate E_in * q_k in wide limbs (NO REDUCTION)
+                E::Scalar::unreduced_field_field_mul_add(&mut inner_0, e_in, &q0);
+                E::Scalar::unreduced_field_field_mul_add(&mut inner_2, e_in, &q2);
+                E::Scalar::unreduced_field_field_mul_add(&mut inner_3, e_in, &q3);
+              }
+
+              // Phase 2: Reduce inner sums ONCE, then multiply by E_out
+              let inner_0_red = E::Scalar::reduce_field_field(&inner_0);
+              let inner_2_red = E::Scalar::reduce_field_field(&inner_2);
+              let inner_3_red = E::Scalar::reduce_field_field(&inner_3);
+
+              // Accumulate E_out * inner_reduced in wide limbs (NO REDUCTION)
+              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.0, e_out, &inner_0_red);
+              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.1, e_out, &inner_2_red);
+              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.2, e_out, &inner_3_red);
+
+              outer_acc
+            },
+          )
+          .reduce(
+            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            |mut a, b| {
+              a.0 += b.0;
+              a.1 += b.1;
+              a.2 += b.2;
+              a
+            },
+          );
+
+        // Final reduction
+        (
+          E::Scalar::reduce_field_field(&acc_0),
+          E::Scalar::reduce_field_field(&acc_2),
+          E::Scalar::reduce_field_field(&acc_3),
+        )
+      } else {
+        // Second half: only E_in (poly_eq_right), no E_out
+        // Still use delayed reduction but simpler (single phase)
+        let poly_eq_right = self.poly_eq_right_last_half();
+
+        // Dynamic chunk size for work-stealing balance
+        let min_chunk = (half_p / (rayon::current_num_threads() * 4)).max(1);
+        let (acc_0, acc_2, acc_3) = (0..half_p)
+          .into_par_iter()
+          .with_min_len(min_chunk)
+          .fold(
+            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            |mut acc, id| {
+              let e = &poly_eq_right[id];
+
+              let (zero_a, one_a) = (&poly_A.Z[id], &poly_A.Z[id + half_p]);
+              let (zero_b, one_b) = (&poly_B.Z[id], &poly_B.Z[id + half_p]);
+              let (zero_c, one_c) = (&poly_C.Z[id], &poly_C.Z[id + half_p]);
+
+              let (q0, q2, q3) = eval_one_case_cubic_three_inputs(
+                round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
+              );
+
+              // Accumulate E * q_k in wide limbs (NO REDUCTION)
+              E::Scalar::unreduced_field_field_mul_add(&mut acc.0, e, &q0);
+              E::Scalar::unreduced_field_field_mul_add(&mut acc.1, e, &q2);
+              E::Scalar::unreduced_field_field_mul_add(&mut acc.2, e, &q3);
+
+              acc
+            },
+          )
+          .reduce(
+            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            |mut a, b| {
+              a.0 += b.0;
+              a.1 += b.1;
+              a.2 += b.2;
+              a
+            },
+          );
+
+        // Final reduction
+        (
+          E::Scalar::reduce_field_field(&acc_0),
+          E::Scalar::reduce_field_field(&acc_2),
+          E::Scalar::reduce_field_field(&acc_3),
+        )
       };
 
       self.update_evals(&mut eval_0, &mut eval_2, &mut eval_3);
