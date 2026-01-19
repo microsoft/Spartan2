@@ -8,10 +8,11 @@
 //!
 //! This module defines:
 //! - [`RoundAccumulator`]: Single round accumulator A_i(v, u) with flat storage
-//! - [`LagrangeAccumulators`]: Collection of accumulators for all ℓ₀ rounds
+//! - [`LagrangeAccumulator`]: Collection of accumulators for all ℓ₀ rounds
 
 use super::{basis::LagrangeCoeff, evals::LagrangeHatEvals};
 use ff::PrimeField;
+use std::ops::AddAssign;
 
 #[cfg(test)]
 use super::domain::{LagrangeHatPoint, LagrangeIndex};
@@ -22,38 +23,71 @@ use super::domain::{LagrangeHatPoint, LagrangeIndex};
 /// - (D+1)^i prefixes (one per v ∈ U_D^i)
 /// - Each prefix has D values (one per u ∈ Û_D = {∞, 0, 2, ..., D-1})
 ///
-/// Storage: `Vec<[Scalar; D]>` — one allocation, contiguous
+/// Storage: `Vec<[T; D]>` — one allocation, contiguous
 /// Access: data[v_idx][u_idx]
 ///
 /// This flat storage design provides:
 /// - Cache-friendly memory access patterns
 /// - Vectorizable merge operations
 /// - No runtime bounds checks on inner dimension (compile-time D)
-pub struct RoundAccumulator<Scalar: PrimeField, const D: usize> {
+pub struct RoundAccumulator<T, const D: usize> {
   /// Flat storage: data[v_idx] = [A_i(v, ∞), A_i(v, 0), A_i(v, 2), ...]
-  data: Vec<[Scalar; D]>,
+  data: Vec<[T; D]>,
 }
 
-impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
+impl<T: Copy + Default, const D: usize> RoundAccumulator<T, D> {
   /// Base of the Lagrange domain U_D (compile-time constant)
   const BASE: usize = D + 1;
 
   /// Create a new accumulator for the given round (0-indexed).
   ///
   /// Allocates (D+1)^round prefix entries, each with D values.
+  /// Uses `Default::default()` which is zero for field elements.
   pub fn new(round: usize) -> Self {
     let num_prefixes = Self::BASE.pow(round as u32);
     Self {
-      data: vec![[Scalar::ZERO; D]; num_prefixes],
+      data: vec![[T::default(); D]; num_prefixes],
     }
   }
 
   /// O(1) indexed accumulation into bucket (v_idx, u_idx).
   #[inline]
-  pub fn accumulate(&mut self, v_idx: usize, u_idx: usize, value: Scalar) {
+  pub fn accumulate(&mut self, v_idx: usize, u_idx: usize, value: T)
+  where
+    T: AddAssign,
+  {
     self.data[v_idx][u_idx] += value;
   }
 
+  /// Element-wise merge (tight loop, compiler can vectorize).
+  ///
+  /// Used in the reduce phase of parallel fold-reduce.
+  pub fn merge(&mut self, other: &Self)
+  where
+    T: AddAssign,
+  {
+    for (a, b) in self.data.iter_mut().zip(&other.data) {
+      for i in 0..D {
+        a[i] += b[i];
+      }
+    }
+  }
+
+  /// Get direct access to data slice.
+  #[inline]
+  pub fn data(&self) -> &[[T; D]] {
+    &self.data
+  }
+
+  /// Get mutable direct access to data slice.
+  #[inline]
+  pub fn data_mut(&mut self) -> &mut [[T; D]] {
+    &mut self.data
+  }
+}
+
+/// Sumcheck-specific methods for RoundAccumulator with field elements.
+impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
   /// Evaluate t_i(u) for all u ∈ Û_D in a single pass.
   pub fn eval_t_all_u(&self, coeff: &LagrangeCoeff<Scalar, D>) -> LagrangeHatEvals<Scalar, D> {
     debug_assert_eq!(self.data.len(), coeff.len());
@@ -65,17 +99,6 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
       }
     }
     LagrangeHatEvals::from_array(acc)
-  }
-
-  /// Element-wise merge (tight loop, compiler can vectorize).
-  ///
-  /// Used in the reduce phase of parallel fold-reduce.
-  pub fn merge(&mut self, other: &Self) {
-    for (a, b) in self.data.iter_mut().zip(&other.data) {
-      for i in 0..D {
-        a[i] += b[i];
-      }
-    }
   }
 }
 
@@ -116,18 +139,19 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
   }
 }
 
-/// Collection of accumulators for all ℓ₀ rounds.
+/// Generic collection of accumulators for all ℓ₀ rounds.
 ///
-/// Each thread gets its own copy during parallel execution.
-/// After processing, thread-local copies are merged via `merge()`.
+/// This struct can hold any element type T, enabling both:
+/// - Reduced field elements (for final sumcheck usage)
+/// - Unreduced wide-limb elements (during DMR-enabled accumulation)
 ///
 /// Type parameter D is the degree bound for t_i(X) (D=2 for Spartan).
-pub struct LagrangeAccumulators<Scalar: PrimeField, const D: usize> {
+pub struct LagrangeAccumulators<T, const D: usize> {
   /// rounds[i] contains A_{i+1} (the accumulator for 1-indexed round i+1)
-  rounds: Vec<RoundAccumulator<Scalar, D>>,
+  pub rounds: Vec<RoundAccumulator<T, D>>,
 }
 
-impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
+impl<T: Copy + Default, const D: usize> LagrangeAccumulators<T, D> {
   /// Create a fresh accumulator (used per-thread in fold).
   ///
   /// # Arguments
@@ -139,24 +163,53 @@ impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
 
   /// O(1) accumulation into bucket (round, v_idx, u_idx).
   #[inline]
-  pub fn accumulate(&mut self, round: usize, v_idx: usize, u_idx: usize, value: Scalar) {
+  pub fn accumulate(&mut self, round: usize, v_idx: usize, u_idx: usize, value: T)
+  where
+    T: AddAssign,
+  {
     self.rounds[round].accumulate(v_idx, u_idx, value);
   }
 
   /// Merge another accumulator into this one (for reduce phase).
-  pub fn merge(&mut self, other: &Self) {
+  pub fn merge(&mut self, other: &Self)
+  where
+    T: AddAssign,
+  {
     for (self_round, other_round) in self.rounds.iter_mut().zip(&other.rounds) {
       self_round.merge(other_round);
     }
   }
 
+  /// Number of rounds.
+  pub fn num_rounds(&self) -> usize {
+    self.rounds.len()
+  }
+
+  /// Check if all elements are zero (equal to default).
+  #[allow(dead_code)]
+  pub fn is_all_zero(&self) -> bool
+  where
+    T: PartialEq,
+  {
+    let zero = T::default();
+    self.rounds.iter().all(|round| {
+      round
+        .data()
+        .iter()
+        .all(|row| row.iter().all(|elem| *elem == zero))
+    })
+  }
+}
+
+/// Sumcheck-specific methods for LagrangeAccumulator with field elements.
+impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
   /// Get read-only access to a specific round's accumulator.
   pub fn round(&self, i: usize) -> &RoundAccumulator<Scalar, D> {
     &self.rounds[i]
   }
 }
 
-/// Test-only helper methods for LagrangeAccumulators.
+/// Test-only helper methods for LagrangeAccumulator.
 #[cfg(test)]
 impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
   /// Read A_i(v, u).
@@ -186,11 +239,6 @@ impl<Scalar: PrimeField, const D: usize> LagrangeAccumulators<Scalar, D> {
     u: LagrangeHatPoint<D>,
   ) -> Scalar {
     self.rounds[round].get_by_domain(v, u)
-  }
-
-  /// Number of rounds.
-  pub fn num_rounds(&self) -> usize {
-    self.rounds.len()
   }
 }
 
@@ -287,7 +335,7 @@ mod tests {
     assert_eq!(acc.get(2, 0), val);
   }
 
-  // === LagrangeAccumulators tests ===
+  // === LagrangeAccumulator tests ===
 
   #[test]
   fn test_lagrange_accumulators_new() {

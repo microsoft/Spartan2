@@ -17,7 +17,10 @@ use crate::{
     solver::SatisfyingAssignment,
   },
   errors::SpartanError,
-  lagrange_accumulator::{MatVecMLE, SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1},
+  lagrange_accumulator::{
+    AccumulateProduct, DelayedModularReductionEnabled, MatVecMLE, SPARTAN_T_DEGREE,
+    build_accumulators_spartan, derive_t1,
+  },
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -722,6 +725,8 @@ impl<E: Engine> SumcheckProof<E> {
       + Sync,
     E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
     MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar>,
+    <MultilinearPolynomial<SmallValue> as MatVecMLE<E::Scalar>>::Product:
+      AccumulateProduct<E::Scalar>,
   {
     let num_rounds = taus.len();
     let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
@@ -740,7 +745,12 @@ impl<E: Engine> SumcheckProof<E> {
     // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic
     // ss: i32 × i32 → i64 for polynomial products
     // isl: i64 × field for eq weighting
-    let accumulators = build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
+    let accumulators = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<SmallValue>>(
+      poly_A_small,
+      poly_B_small,
+      &taus,
+      l0,
+    );
     let mut small_value =
       lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(
         accumulators,
@@ -812,8 +822,10 @@ impl<E: Engine> SumcheckProof<E> {
 
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
-        let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(round, poly_A, poly_B, poly_C);
+        let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
+          .evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(
+            round, poly_A, poly_B, poly_C,
+          );
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -1191,7 +1203,9 @@ impl<E: Engine> SumcheckProof<E> {
 pub(crate) mod eq_sumcheck {
   //! This module implements the sumcheck optimization for equality polynomials.
   //! The optimization is described in Section 5 of <https://eprint.iacr.org/2025/1117> algorithm 5.
-  use crate::{polys::multilinear::MultilinearPolynomial, small_field::DelayedReduction, traits::Engine};
+  use crate::{
+    polys::multilinear::MultilinearPolynomial, small_field::DelayedReduction, traits::Engine,
+  };
   use ff::{Field, PrimeField};
   use rayon::{iter::ZipEq, prelude::*, slice::Iter};
 
@@ -1364,7 +1378,7 @@ pub(crate) mod eq_sumcheck {
     /// Phase 2 (outer): Reduce once, then accumulate E_out[x_out] ⊗ inner_reduced
     /// Final: Reduce once at the end
     #[inline]
-    pub fn evaluation_points_cubic_with_three_inputs_delayed<SmallValue>(
+    pub fn evaluation_points_cubic_with_three_inputs_delayed<Value>(
       &self,
       round_idx: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
@@ -1372,20 +1386,20 @@ pub(crate) mod eq_sumcheck {
       poly_C: &MultilinearPolynomial<E::Scalar>,
     ) -> (E::Scalar, E::Scalar, E::Scalar)
     where
-      SmallValue: Copy
+      Value: Copy
         + Clone
         + Default
         + std::fmt::Debug
         + PartialEq
         + Eq
-        + std::ops::Add<Output = SmallValue>
-        + std::ops::Sub<Output = SmallValue>
-        + std::ops::Neg<Output = SmallValue>
+        + std::ops::Add<Output = Value>
+        + std::ops::Sub<Output = Value>
+        + std::ops::Neg<Output = Value>
         + std::ops::AddAssign
         + std::ops::SubAssign
         + Send
         + Sync,
-      E::Scalar: DelayedReduction<SmallValue>,
+      E::Scalar: DelayedReduction<Value>,
     {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
 
@@ -1406,14 +1420,20 @@ pub(crate) mod eq_sumcheck {
           .into_par_iter()
           .with_min_len(min_chunk)
           .fold(
-            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            || {
+              (
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+              )
+            },
             |mut outer_acc, x_out| {
               let e_out = &poly_eq_left[x_out];
 
               // Phase 1: Inner loop - accumulate E_in[x_in] ⊗ q_k(g) in wide limbs
-              let mut inner_0 = UF::<E::Scalar, SmallValue>::default();
-              let mut inner_2 = UF::<E::Scalar, SmallValue>::default();
-              let mut inner_3 = UF::<E::Scalar, SmallValue>::default();
+              let mut inner_0 = UF::<E::Scalar, Value>::default();
+              let mut inner_2 = UF::<E::Scalar, Value>::default();
+              let mut inner_3 = UF::<E::Scalar, Value>::default();
 
               for (x_in, e_in) in poly_eq_right.iter().enumerate() {
                 let id = (x_out << second_half) | x_in;
@@ -1447,7 +1467,13 @@ pub(crate) mod eq_sumcheck {
             },
           )
           .reduce(
-            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            || {
+              (
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+              )
+            },
             |mut a, b| {
               a.0 += b.0;
               a.1 += b.1;
@@ -1473,7 +1499,13 @@ pub(crate) mod eq_sumcheck {
           .into_par_iter()
           .with_min_len(min_chunk)
           .fold(
-            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            || {
+              (
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+              )
+            },
             |mut acc, id| {
               let e = &poly_eq_right[id];
 
@@ -1494,7 +1526,13 @@ pub(crate) mod eq_sumcheck {
             },
           )
           .reduce(
-            || (UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default(), UF::<E::Scalar, SmallValue>::default()),
+            || {
+              (
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+                UF::<E::Scalar, Value>::default(),
+              )
+            },
             |mut a, b| {
               a.0 += b.0;
               a.1 += b.1;
@@ -1645,7 +1683,8 @@ pub(crate) mod eq_sumcheck {
   }
 }
 
-pub(crate) mod lagrange_sumcheck {
+/// Lagrange sumcheck implementation for small-value rounds.
+pub mod lagrange_sumcheck {
 
   use crate::{
     lagrange_accumulator::{
@@ -1661,7 +1700,7 @@ pub(crate) mod lagrange_sumcheck {
   pub(crate) use crate::lagrange_accumulator::derive_t1;
 
   /// Tracks the small-value sum-check state for the first ℓ₀ rounds.
-  pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
+  pub struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
     accumulators: LagrangeAccumulators<Scalar, D>,
     coeff: LagrangeCoeff<Scalar, D>,
     eq_factor: EqRoundFactor<Scalar>,
@@ -1670,7 +1709,7 @@ pub(crate) mod lagrange_sumcheck {
 
   impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
     /// Create a new small-value round tracker with precomputed accumulators.
-    pub(crate) fn new(
+    pub fn new(
       accumulators: LagrangeAccumulators<Scalar, D>,
       basis_factory: LagrangeBasisFactory<Scalar, D>,
     ) -> Self {
@@ -1683,23 +1722,23 @@ pub(crate) mod lagrange_sumcheck {
     }
 
     /// Create from accumulators with the standard Lagrange basis (0, 1, 2, ...).
-    pub(crate) fn from_accumulators(accumulators: LagrangeAccumulators<Scalar, D>) -> Self {
+    pub fn from_accumulators(accumulators: LagrangeAccumulators<Scalar, D>) -> Self {
       let basis_factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
       Self::new(accumulators, basis_factory)
     }
 
     /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
-    pub(crate) fn eval_t_all_u(&self, round: usize) -> LagrangeHatEvals<Scalar, D> {
+    pub fn eval_t_all_u(&self, round: usize) -> LagrangeHatEvals<Scalar, D> {
       self.accumulators.round(round).eval_t_all_u(&self.coeff)
     }
 
     /// Compute ℓ_i values for the provided w_i.
-    pub(crate) fn eq_round_values(&self, w_i: Scalar) -> LagrangeEvals<Scalar, 2> {
+    pub fn eq_round_values(&self, w_i: Scalar) -> LagrangeEvals<Scalar, 2> {
       self.eq_factor.values(w_i)
     }
 
     /// Advance the round state with the verifier challenge r_i.
-    pub(crate) fn advance(&mut self, li: &LagrangeEvals<Scalar, 2>, r_i: Scalar) {
+    pub fn advance(&mut self, li: &LagrangeEvals<Scalar, 2>, r_i: Scalar) {
       self.eq_factor.advance(li, r_i);
       self.coeff.extend(&self.basis_factory.basis_at(r_i));
     }
@@ -1738,7 +1777,9 @@ pub(crate) mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      lagrange_accumulator::{SPARTAN_T_DEGREE, build_accumulators_spartan},
+      lagrange_accumulator::{
+        DelayedModularReductionDisabled, SPARTAN_T_DEGREE, build_accumulators_spartan,
+      },
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,
@@ -1778,7 +1819,12 @@ pub(crate) mod lagrange_sumcheck {
         claim += eq_evals[i] * (az.Z[i] * bz.Z[i] - cz.Z[i]);
       }
 
-      let accs = build_accumulators_spartan(&az, &bz, &taus, SMALL_VALUE_ROUNDS);
+      let accs = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
+        &az,
+        &bz,
+        &taus,
+        SMALL_VALUE_ROUNDS,
+      );
       let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
       let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -1926,7 +1972,8 @@ pub(crate) mod lagrange_sumcheck {
 
       // Run small-value method - get first polynomial's evaluations
       let l0 = 3usize;
-      let accumulators = build_accumulators_spartan(&az2, &bz2, &taus, l0);
+      let accumulators =
+        build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az2, &bz2, &taus, l0);
       let small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
 
       let t_all = small_value.eval_t_all_u(0);

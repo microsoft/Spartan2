@@ -25,6 +25,7 @@
 mod accumulator;
 mod accumulator_builder;
 mod basis;
+mod delay_modular_reduction_mode;
 mod domain;
 mod eq_round;
 mod evals;
@@ -51,9 +52,15 @@ pub use accumulator::{LagrangeAccumulators, RoundAccumulator};
 // Builder functions
 pub use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators, build_accumulators_spartan};
 
+// Delayed modular reduction mode selection
+pub use delay_modular_reduction_mode::{
+  AccumulateProduct, DelayedModularReductionDisabled, DelayedModularReductionEnabled,
+  DelayedModularReductionMode,
+};
+
 // Index computation
 pub use index::{AccumulatorPrefixIndex, CachedPrefixIndex, compute_idx4};
 
-// Internal re-exports for crate-level access
-pub(crate) use eq_round::{EqRoundFactor, derive_t1};
+// Eq round factor and derivation
+pub use eq_round::{EqRoundFactor, derive_t1};
 pub use mat_vec_mle::MatVecMLE;

@@ -12,20 +12,26 @@ use ff::PrimeField;
 /// Derives t_i(1) using the sumcheck relation: claim = ℓ_i(0)·t(0) + ℓ_i(1)·t(1).
 ///
 /// Returns `None` if `l1` is zero (non-invertible).
-pub(crate) fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
+pub fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
   let s0 = l0 * t0;
   let s1 = claim_prev - s0;
   l1.invert().into_option().map(|inv| s1 * inv)
 }
 
 /// Tracks α_i = eqe(w_{<i}, r_{<i}) to build ℓ_i values each round.
-pub(crate) struct EqRoundFactor<F: PrimeField> {
+pub struct EqRoundFactor<F: PrimeField> {
   alpha: F,
+}
+
+impl<F: PrimeField> Default for EqRoundFactor<F> {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl<F: PrimeField> EqRoundFactor<F> {
   /// Creates a new tracker with α_0 = 1.
-  pub(crate) fn new() -> Self {
+  pub fn new() -> Self {
     Self { alpha: F::ONE }
   }
 
@@ -34,7 +40,7 @@ impl<F: PrimeField> EqRoundFactor<F> {
   /// - `infinity` = ℓ_i(∞) = α_i · (2w_i − 1)
   /// - `finite[0]` = ℓ_i(0) = α_i · (1 − w_i)
   /// - `finite[1]` = ℓ_i(1) = α_i · w_i
-  pub(crate) fn values(&self, w_i: F) -> LagrangeEvals<F, 2> {
+  pub fn values(&self, w_i: F) -> LagrangeEvals<F, 2> {
     let l0 = self.alpha * (F::ONE - w_i);
     let l1 = self.alpha * w_i;
     let linf = self.alpha * (w_i.double() - F::ONE);
@@ -42,7 +48,7 @@ impl<F: PrimeField> EqRoundFactor<F> {
   }
 
   /// Advances α using ℓ_i(r_i) = linf * r_i + l0.
-  pub(crate) fn advance(&mut self, li: &LagrangeEvals<F, 2>, r_i: F) {
+  pub fn advance(&mut self, li: &LagrangeEvals<F, 2>, r_i: F) {
     self.alpha = li.eval_linear_at(r_i);
   }
 }

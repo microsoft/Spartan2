@@ -11,9 +11,11 @@
 //! allocations to the fold identity closure (called once per Rayon thread subdivision),
 //! we reduce allocations from O(num_x_out) to O(num_threads).
 
-use super::accumulator::LagrangeAccumulators;
+use super::{
+  accumulator::LagrangeAccumulators, delay_modular_reduction_mode::DelayedModularReductionMode,
+  mat_vec_mle::MatVecMLE,
+};
 use ff::PrimeField;
-use std::ops::AddAssign;
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
 ///
@@ -47,7 +49,7 @@ use std::ops::AddAssign;
 ///   Lagrange extensions. After `extend_in_place`, the result is always in `*_buf_curr`.
 ///   We need 4 buffers (not 2) because both extension results must be available
 ///   simultaneously to compute Az(β) × Bz(β) for each β.
-/// - `acc_unred`: Unreduced F×F bucket accumulators for scatter phase optimization.
+/// - `scatter_acc`: Bucket accumulators for scatter phase (type determined by Mode).
 ///
 /// Note: `eyx` precomputation has been removed. We now use `e_y` directly in the
 /// scatter phase, computing `z_beta = ex * tA_red` once per beta instead of
@@ -57,26 +59,23 @@ use std::ops::AddAssign;
 ///
 /// - `S`: Field type for final accumulator values
 /// - `V`: Witness value type (i32 for small-value, S for field)
-/// - `U`: Unreduced sum type for delayed modular reduction (field × int products)
-/// - `UFF`: Unreduced F×F accumulator type (9 limbs, 576 bits, 2R-scaled)
+/// - `P`: Polynomial type implementing [`MatVecMLE`]
+/// - `Mode`: Delayed modular reduction mode selection ([`super::DelayedModularReductionEnabled`] or [`super::DelayedModularReductionDisabled`])
 /// - `D`: Polynomial degree bound
-pub(crate) struct SpartanThreadState<
-  S: PrimeField,
+pub(crate) struct SpartanThreadState<S, V, P, Mode, const D: usize>
+where
+  S: PrimeField + Send + Sync,
   V: Copy + Default,
-  U: Copy + Default,
-  UFF: Copy + Default,
-  const D: usize,
-> {
-  /// Reduced accumulator (kept for compatibility, not used in optimized path)
-  #[allow(dead_code)]
-  pub acc: LagrangeAccumulators<S, D>,
-  /// Unreduced F×F bucket accumulators for scatter phase.
-  /// Shape: [round][v_idx][u_idx] matching LagrangeAccumulators layout.
-  /// Final reduction is done once after all threads are merged.
-  pub acc_unred: Vec<Vec<[UFF; D]>>,
-  /// Partial sums indexed by β, accumulated over the x_in loop (unreduced form).
+  P: MatVecMLE<S>,
+  Mode: DelayedModularReductionMode<S, P, D>,
+{
+  /// Partial sums indexed by β, accumulated over the x_in loop.
+  /// Type determined by Mode: unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled.
   /// Reset each x_out iteration.
-  pub beta_partial_sums: Vec<U>,
+  pub partial_sums: Vec<Mode::PartialSum>,
+  /// Bucket accumulators for scatter phase.
+  /// Type determined by Mode: unreduced F×F for DelayedModularReductionEnabled, LagrangeAccumulator for DelayedModularReductionDisabled.
+  pub scatter_acc: LagrangeAccumulators<Mode::ScatterElement, D>,
   /// Prefix evaluations of Az for current suffix. Size: 2^l0
   pub az_pref: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
@@ -94,30 +93,17 @@ pub(crate) struct SpartanThreadState<
   pub beta_values: Vec<(usize, S)>,
 }
 
-impl<
-  S: PrimeField,
+impl<S, V, P, Mode, const D: usize> SpartanThreadState<S, V, P, Mode, D>
+where
+  S: PrimeField + Send + Sync,
   V: Copy + Default,
-  U: Copy + Clone + Default + AddAssign,
-  UFF: Copy + Clone + Default + AddAssign,
-  const D: usize,
-> SpartanThreadState<S, V, U, UFF, D>
+  P: MatVecMLE<S>,
+  Mode: DelayedModularReductionMode<S, P, D>,
 {
-  /// Base of the Lagrange domain U_D (compile-time constant)
-  const BASE: usize = D + 1;
-
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
-    // Allocate unreduced accumulators matching LagrangeAccumulators shape
-    let acc_unred = (0..l0)
-      .map(|round| {
-        let num_prefixes = Self::BASE.pow(round as u32);
-        vec![[UFF::default(); D]; num_prefixes]
-      })
-      .collect();
-
     Self {
-      acc: LagrangeAccumulators::new(l0),
-      acc_unred,
-      beta_partial_sums: vec![U::default(); num_betas],
+      partial_sums: vec![Mode::PartialSum::default(); num_betas],
+      scatter_acc: LagrangeAccumulators::new(l0),
       az_pref: vec![V::default(); prefix_size],
       bz_pref: vec![V::default(); prefix_size],
       az_buf_curr: vec![V::default(); ext_size],
@@ -132,20 +118,10 @@ impl<
   /// This is O(num_betas) but much cheaper than reallocating.
   #[inline]
   pub fn reset_partial_sums(&mut self) {
-    self.beta_partial_sums.fill(U::default());
-    self.beta_values.clear();
-  }
-
-  /// Zero out unreduced bucket accumulators.
-  /// Not used in the optimized path (we keep unreduced until final merge).
-  #[inline]
-  #[allow(dead_code)]
-  pub fn reset_acc_unred(&mut self) {
-    for round in &mut self.acc_unred {
-      for row in round.iter_mut() {
-        *row = [UFF::default(); D];
-      }
+    for sum in &mut self.partial_sums {
+      *sum = Mode::PartialSum::default();
     }
+    self.beta_values.clear();
   }
 }
 

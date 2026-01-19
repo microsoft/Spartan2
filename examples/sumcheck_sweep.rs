@@ -44,6 +44,19 @@ enum FieldChoice {
   Bn254Fr,
 }
 
+/// Sumcheck method to benchmark
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+enum SumcheckMethod {
+  /// Baseline cubic sumcheck
+  Base,
+  /// Split-eq with delayed modular reduction
+  SplitEqDmr,
+  /// Small-value i32 optimization
+  I32,
+  /// Small-value i64 optimization
+  I64,
+}
+
 #[derive(Parser)]
 #[command(about = "Sumcheck benchmark sweep")]
 struct Args {
@@ -51,9 +64,14 @@ struct Args {
   #[arg(long, value_enum, default_value = "pallas-fq")]
   field: FieldChoice,
 
-  /// Methods to benchmark (comma-separated: base,i32,i64). Default: all
-  #[arg(long, default_value = "base,i32,i64", value_delimiter = ',')]
-  methods: Vec<String>,
+  /// Methods to benchmark (comma-separated). Default: all
+  #[arg(
+    long,
+    value_enum,
+    default_value = "base,i32,i64",
+    value_delimiter = ','
+  )]
+  methods: Vec<SumcheckMethod>,
 
   /// Number of trials per num_vars (each recorded separately)
   #[arg(long, default_value = "1")]
@@ -66,18 +84,18 @@ struct Args {
 /// Tracks which benchmark methods to run
 struct BenchMethods {
   base: bool,
-  split_eq_dmr: bool,
+  split_eq_delayed_modular_reduction: bool,
   i32_small: bool,
   i64_small: bool,
 }
 
 impl BenchMethods {
-  fn from_args(methods: &[String]) -> Self {
+  fn from_args(methods: &[SumcheckMethod]) -> Self {
     Self {
-      base: methods.iter().any(|m| m == "base"),
-      split_eq_dmr: methods.iter().any(|m| m == "split-eq-dmr"),
-      i32_small: methods.iter().any(|m| m == "i32"),
-      i64_small: methods.iter().any(|m| m == "i64"),
+      base: methods.contains(&SumcheckMethod::Base),
+      split_eq_delayed_modular_reduction: methods.contains(&SumcheckMethod::SplitEqDmr),
+      i32_small: methods.contains(&SumcheckMethod::I32),
+      i64_small: methods.contains(&SumcheckMethod::I64),
     }
   }
 
@@ -85,7 +103,7 @@ impl BenchMethods {
   fn without_i32(&self) -> Self {
     Self {
       base: self.base,
-      split_eq_dmr: self.split_eq_dmr,
+      split_eq_delayed_modular_reduction: self.split_eq_delayed_modular_reduction,
       i32_small: false,
       i64_small: self.i64_small,
     }
@@ -105,7 +123,7 @@ struct TrialResult {
   n: usize,
   trial: usize,
   base: Option<BenchResult>,
-  split_eq_dmr: Option<BenchResult>,
+  split_eq_delayed_modular_reduction: Option<BenchResult>,
   i32_small: Option<BenchResult>,
   i64_small: Option<BenchResult>,
 }
@@ -132,7 +150,7 @@ fn make_field_polys<F: ff::PrimeField>(az_i32: &[i32], bz_i32: &[i32]) -> (Vec<F
   (az_vals, bz_vals, cz_vals)
 }
 
-/// Returns (base_result, split_eq_dmr_result, i64_result) as Options based on selected methods.
+/// Returns (base_result, split_eq_delayed_modular_reduction_result, i64_result) as Options based on selected methods.
 /// Each BenchResult contains separate setup_us and prove_us timings.
 ///
 /// Memory-optimized: each benchmark runs in its own scope so memory is freed
@@ -141,7 +159,11 @@ fn make_field_polys<F: ff::PrimeField>(az_i32: &[i32], bz_i32: &[i32]) -> (Vec<F
 fn run_single_benchmark<E>(
   num_vars: usize,
   methods: &BenchMethods,
-) -> (Option<BenchResult>, Option<BenchResult>, Option<BenchResult>)
+) -> (
+  Option<BenchResult>,
+  Option<BenchResult>,
+  Option<BenchResult>,
+)
 where
   E: Engine,
   E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64>,
@@ -197,39 +219,40 @@ where
   }; // az1, bz1, cz1, az_vals, bz_vals, cz_vals dropped here
 
   // ===== SPLIT-EQ DELAYED MODULAR REDUCTION METHOD =====
-  let (result_split_eq_dmr, r2, evals2) = if methods.split_eq_dmr {
-    let t_setup = Instant::now();
-    let (az_vals, bz_vals, cz_vals) = make_field_polys::<F<E>>(&az_i32, &bz_i32);
-    let mut az2 = MultilinearPolynomial::new(az_vals);
-    let mut bz2 = MultilinearPolynomial::new(bz_vals);
-    let mut cz2 = MultilinearPolynomial::new(cz_vals);
-    let mut transcript2 = E::TE::new(b"bench");
-    let setup_us = t_setup.elapsed().as_micros();
+  let (result_split_eq_delayed_modular_reduction, r2, evals2) =
+    if methods.split_eq_delayed_modular_reduction {
+      let t_setup = Instant::now();
+      let (az_vals, bz_vals, cz_vals) = make_field_polys::<F<E>>(&az_i32, &bz_i32);
+      let mut az2 = MultilinearPolynomial::new(az_vals);
+      let mut bz2 = MultilinearPolynomial::new(bz_vals);
+      let mut cz2 = MultilinearPolynomial::new(cz_vals);
+      let mut transcript2 = E::TE::new(b"bench");
+      let setup_us = t_setup.elapsed().as_micros();
 
-    let t_prove = Instant::now();
-    let (_proof2, r2, evals2) =
-      SumcheckProof::<E>::prove_cubic_with_three_inputs_split_eq_delayed::<i64>(
-        &claim,
-        taus.clone(),
-        &mut az2,
-        &mut bz2,
-        &mut cz2,
-        &mut transcript2,
+      let t_prove = Instant::now();
+      let (_proof2, r2, evals2) =
+        SumcheckProof::<E>::prove_cubic_with_three_inputs_split_eq_delayed::<i64>(
+          &claim,
+          taus.clone(),
+          &mut az2,
+          &mut bz2,
+          &mut cz2,
+          &mut transcript2,
+        )
+        .unwrap();
+      let prove_us = t_prove.elapsed().as_micros();
+      info!(
+        setup_us,
+        prove_us, "prove_cubic_with_three_inputs_split_eq_delayed"
+      );
+      (
+        Some(BenchResult { setup_us, prove_us }),
+        Some(r2),
+        Some(evals2),
       )
-      .unwrap();
-    let prove_us = t_prove.elapsed().as_micros();
-    info!(
-      setup_us,
-      prove_us, "prove_cubic_with_three_inputs_split_eq_delayed"
-    );
-    (
-      Some(BenchResult { setup_us, prove_us }),
-      Some(r2),
-      Some(evals2),
-    )
-  } else {
-    (None, None, None)
-  };
+    } else {
+      (None, None, None)
+    };
 
   // Note: i32 benchmark is handled separately in run_i32_benchmark() for fields that support it
 
@@ -276,12 +299,18 @@ where
     (None, None, None)
   };
 
-  // Verify split_eq_dmr matches base (only when both methods were run)
+  // Verify split_eq_delayed_modular_reduction matches base (only when both methods were run)
   if let (Some(r1), Some(r2)) = (&r1, &r2) {
-    assert_eq!(r1, r2, "split_eq_dmr challenges must match base");
+    assert_eq!(
+      r1, r2,
+      "split_eq_delayed_modular_reduction challenges must match base"
+    );
   }
   if let (Some(e1), Some(e2)) = (&evals1, &evals2) {
-    assert_eq!(e1, e2, "split_eq_dmr final evaluations must match base");
+    assert_eq!(
+      e1, e2,
+      "split_eq_delayed_modular_reduction final evaluations must match base"
+    );
   }
 
   // Verify i64 matches base (only when both methods were run)
@@ -292,7 +321,11 @@ where
     assert_eq!(e1, e3, "i64 final evaluations must match");
   }
 
-  (result_base, result_split_eq_dmr, result_i64)
+  (
+    result_base,
+    result_split_eq_delayed_modular_reduction,
+    result_i64,
+  )
 }
 
 /// Run i32 benchmark separately (only for fields that support SmallValueField<i32>)
@@ -346,9 +379,9 @@ fn build_csv_header(methods: &BenchMethods) -> String {
     cols.push("base_setup_us");
     cols.push("base_prove_us");
   }
-  if methods.split_eq_dmr {
-    cols.push("split_eq_dmr_setup_us");
-    cols.push("split_eq_dmr_prove_us");
+  if methods.split_eq_delayed_modular_reduction {
+    cols.push("split_eq_delayed_modular_reduction_setup_us");
+    cols.push("split_eq_delayed_modular_reduction_prove_us");
   }
   if methods.i32_small {
     cols.push("i32_setup_us");
@@ -359,8 +392,8 @@ fn build_csv_header(methods: &BenchMethods) -> String {
     cols.push("i64_prove_us");
   }
   // Add speedup columns only when comparing base with others (based on prove time)
-  if methods.base && methods.split_eq_dmr {
-    cols.push("prove_speedup_split_eq_dmr");
+  if methods.base && methods.split_eq_delayed_modular_reduction {
+    cols.push("prove_speedup_split_eq_delayed_modular_reduction");
   }
   if methods.base && methods.i32_small {
     cols.push("prove_speedup_i32");
@@ -384,8 +417,8 @@ fn format_csv_row(result: &TrialResult, methods: &BenchMethods) -> String {
     vals.push(r.setup_us.to_string());
     vals.push(r.prove_us.to_string());
   }
-  if methods.split_eq_dmr {
-    let r = result.split_eq_dmr.unwrap();
+  if methods.split_eq_delayed_modular_reduction {
+    let r = result.split_eq_delayed_modular_reduction.unwrap();
     vals.push(r.setup_us.to_string());
     vals.push(r.prove_us.to_string());
   }
@@ -401,11 +434,12 @@ fn format_csv_row(result: &TrialResult, methods: &BenchMethods) -> String {
   }
 
   // Add speedup columns only when comparing base with others (based on prove time)
-  if methods.base && methods.split_eq_dmr {
+  if methods.base && methods.split_eq_delayed_modular_reduction {
     let base_prove = result.base.unwrap().prove_us as f64;
-    let dmr_prove = result.split_eq_dmr.unwrap().prove_us as f64;
-    let speedup = if dmr_prove > 0.0 {
-      base_prove / dmr_prove
+    let delayed_modular_reduction_prove =
+      result.split_eq_delayed_modular_reduction.unwrap().prove_us as f64;
+    let speedup = if delayed_modular_reduction_prove > 0.0 {
+      base_prove / delayed_modular_reduction_prove
     } else {
       f64::INFINITY
     };
@@ -460,7 +494,8 @@ fn run_sumcheck_sweep_with_i32<E>(
     let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
 
     for trial in 1..=num_trials {
-      let (base_r, split_eq_dmr_r, i64_r) = run_single_benchmark::<E>(num_vars, methods);
+      let (base_r, split_eq_delayed_modular_reduction_r, i64_r) =
+        run_single_benchmark::<E>(num_vars, methods);
       let i32_r = if methods.i32_small {
         run_i32_benchmark::<E>(num_vars, &az_i32, &bz_i32)
       } else {
@@ -472,7 +507,7 @@ fn run_sumcheck_sweep_with_i32<E>(
         n,
         trial,
         base: base_r,
-        split_eq_dmr: split_eq_dmr_r,
+        split_eq_delayed_modular_reduction: split_eq_delayed_modular_reduction_r,
         i32_small: i32_r,
         i64_small: i64_r,
       };
@@ -503,14 +538,15 @@ fn run_sumcheck_sweep_i64_only<E>(
     let n = 1usize << num_vars;
 
     for trial in 1..=num_trials {
-      let (base_r, split_eq_dmr_r, i64_r) = run_single_benchmark::<E>(num_vars, &methods);
+      let (base_r, split_eq_delayed_modular_reduction_r, i64_r) =
+        run_single_benchmark::<E>(num_vars, &methods);
 
       let result = TrialResult {
         num_vars,
         n,
         trial,
         base: base_r,
-        split_eq_dmr: split_eq_dmr_r,
+        split_eq_delayed_modular_reduction: split_eq_delayed_modular_reduction_r,
         i32_small: None,
         i64_small: i64_r,
       };

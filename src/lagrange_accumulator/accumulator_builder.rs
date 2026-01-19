@@ -12,6 +12,7 @@
 
 use super::{
   accumulator::LagrangeAccumulators,
+  delay_modular_reduction_mode::DelayedModularReductionMode,
   domain::LagrangeIndex,
   extension::LagrangeEvaluatedMultilinearPolynomial,
   index::CachedPrefixIndex,
@@ -52,16 +53,24 @@ struct BetaPrefixCache {
 ///
 /// D is the degree bound of t_i(X) (not s_i); for Spartan, D = 2.
 ///
-/// Parallelism strategy:
+/// # Type Parameters
+///
+/// - `S`: Field type
+/// - `P`: Polynomial type implementing [`MatVecMLE`]
+/// - `Mode`: Delayed modular reduction mode selection ([`super::DelayedModularReductionEnabled`] or [`super::DelayedModularReductionDisabled`])
+///
+/// # Parallelism strategy
+///
 /// - Outer parallel loop over x_out values (using Rayon fold-reduce)
 /// - Each thread maintains thread-local accumulators
 /// - Final reduction merges all thread-local results via element-wise addition
 ///
-/// Spartan-specific optimizations (D=2):
+/// # Spartan-specific optimizations (D=2)
+///
 /// - Skip cz_ext entirely: for binary betas, use cz_pref directly
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so they contribute 0
 /// - Only process betas with ∞ (where Cz doesn't contribute anyway)
-pub fn build_accumulators_spartan<S, P>(
+pub fn build_accumulators_spartan<S, P, Mode>(
   az: &P,
   bz: &P,
   taus: &[S],
@@ -70,6 +79,7 @@ pub fn build_accumulators_spartan<S, P>(
 where
   S: PrimeField + Send + Sync,
   P: MatVecMLE<S>,
+  Mode: DelayedModularReductionMode<S, P, 2>,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let l = az.len().trailing_zeros() as usize;
@@ -106,19 +116,14 @@ where
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
-  // Use P::UnreducedSum for delayed F×int reduction, P::UnreducedFieldField for F×F scatter
-  type State<S, P> = SpartanThreadState<
-    S,
-    <P as MatVecMLE<S>>::Value,
-    <P as MatVecMLE<S>>::UnreducedSum,
-    <P as MatVecMLE<S>>::UnreducedFieldField,
-    2,
-  >;
-  let merged = (0..num_x_out)
+  // State type determined by Mode: DelayedModularReductionEnabled uses unreduced accumulators, DelayedModularReductionDisabled uses reduced
+  type State<S, P, Mode> = SpartanThreadState<S, <P as MatVecMLE<S>>::Value, P, Mode, 2>;
+
+  let fold_results: Vec<State<S, P, Mode>> = (0..num_x_out)
     .into_par_iter()
     .fold(
-      || State::<S, P>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S, P>, x_out_bits| {
+      || State::<S, P, Mode>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S, P, Mode>, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
 
@@ -156,12 +161,11 @@ where
           let bz_ext = &state.bz_buf_curr[..bz_size];
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
-          // Use UNREDUCED accumulation - no modular reduction in this hot loop!
+          // Accumulation strategy determined by Mode (unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled)
           // Use precomputed indices to avoid filter overhead in inner loop
           for &beta_idx in &betas_with_infty {
-            let sum = &mut state.beta_partial_sums[beta_idx];
             let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
-            P::accumulate_eq_product_unreduced(sum, prod, &e_in_eval);
+            Mode::accumulate_eq_product(&mut state.partial_sums[beta_idx], prod, &e_in_eval);
           }
         }
 
@@ -169,51 +173,62 @@ where
         // This eliminates closure call overhead in the scatter loop
         // Reuse pre-allocated buffer to avoid per-iteration allocations
         for &beta_idx in &betas_with_infty {
-          let unreduced_sum = &state.beta_partial_sums[beta_idx];
-          if P::unreduced_is_zero(unreduced_sum) {
+          if Mode::partial_sum_is_zero(&state.partial_sums[beta_idx]) {
             continue;
           }
-          let val = P::modular_reduction(unreduced_sum);
-          if val.is_zero().into() {
+          let val = Mode::modular_reduction_partial_sum(&state.partial_sums[beta_idx]);
+          if ff::Field::is_zero(&val).into() {
             continue;
           }
           state.beta_values.push((beta_idx, val));
         }
 
-        // Distribute beta_partial_sums → A_i(v,u) via idx4
-        // Uses unreduced F×F accumulation to minimize Montgomery reductions:
-        // - One F×F multiply per beta (z_beta = ex * tA_red)
-        // - Unreduced ey * z_beta accumulation per contribution
-        // - Keep unreduced across all x_out iterations per thread
-        // - Final reduction once per bucket after all threads merged
-        scatter_beta_values_unreduced::<S, P, 2>(
-          &state.beta_values,
-          &beta_prefix_cache,
-          ex,
-          &eq_tables.e_y,
-          &mut state.acc_unred,
-        );
-
-        // Don't reduce here - keep unreduced until final merge
-        // This saves ~26 * (num_threads - 1) Montgomery reductions
+        // Distribute beta values → A_i(v,u) via idx4
+        // Accumulation strategy determined by Mode:
+        // - DelayedModularReductionEnabled: Unreduced F×F accumulation, final reduction once after merge
+        // - DelayedModularReductionDisabled: Immediate F×F reduction on each accumulation
+        for &(beta_idx, val) in &state.beta_values {
+          let z_beta = ex * val;
+          for pref in &beta_prefix_cache[beta_idx] {
+            let ey = &eq_tables.e_y[pref.round_0][pref.y_idx];
+            Mode::accumulate_scatter(
+              &mut state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
+              ey,
+              &z_beta,
+            );
+          }
+        }
 
         state
       },
     )
-    .reduce(
-      || State::<S, P>::new(l0, num_betas, prefix_size, ext_size),
-      |mut a: State<S, P>, b: State<S, P>| {
-        // Merge unreduced accumulators (just adding WideLimbs, no reduction)
-        merge_acc_unred::<S, P, 2>(&mut a.acc_unred, &b.acc_unred);
-        a
-      },
-    );
+    .collect();
 
-  // Final reduction: reduce merged unreduced accumulators once per bucket
-  // This is the only place we do Montgomery reductions for scatter contributions
-  let mut final_acc = LagrangeAccumulators::<S, 2>::new(l0);
-  reduce_and_merge_acc_unred::<S, P, 2>(&merged.acc_unred, &mut final_acc);
-  final_acc
+  // Sequential merge: avoids parallel reduce tree overhead and identity allocations.
+  // Each fold task's State is merged one by one, spreading deallocation cost.
+  // Using std::iter::Iterator::reduce (not rayon's) - no extra state allocations.
+  let merged = fold_results
+    .into_iter()
+    .reduce(|mut a, b| {
+      a.scatter_acc.merge(&b.scatter_acc);
+      a
+    })
+    .expect("num_x_out > 0 guarantees non-empty fold results");
+
+  // Finalize: convert scatter accumulator to LagrangeAccumulator
+  // For DelayedModularReductionEnabled: performs final Montgomery reductions on each element
+  // For DelayedModularReductionDisabled: elements are already reduced (identity operation)
+  let mut result: LagrangeAccumulators<S, 2> = LagrangeAccumulators::new(l0);
+  for (round_idx, round) in merged.scatter_acc.rounds.iter().enumerate() {
+    for (v_idx, row) in round.data().iter().enumerate() {
+      for (u_idx, elem) in row.iter().enumerate() {
+        if !Mode::scatter_element_is_zero(elem) {
+          result.rounds[round_idx].data_mut()[v_idx][u_idx] = Mode::modular_reduction_scatter(elem);
+        }
+      }
+    }
+  }
+  result
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.
@@ -331,7 +346,7 @@ pub fn build_accumulators<S: PrimeField + Send + Sync, const D: usize>(
           &mut state.acc,
           |beta_idx| {
             let val = state.beta_partial_sums[beta_idx];
-            if val.is_zero().into() {
+            if ff::Field::is_zero(&val).into() {
               None
             } else {
               Some(val)
@@ -445,126 +460,14 @@ fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
   }
 }
 
-/// Optimized scatter using unreduced F×F accumulation with pre-computed beta values.
-///
-/// Takes pre-computed (beta_idx, tA_red) pairs, eliminating closure overhead.
-/// For each beta:
-/// 1. Compute z_beta = ex * tA_red (one F×F multiply per beta)
-/// 2. For each contribution, accumulate ey * z_beta into unreduced bucket
-///
-/// This saves ~(num_contributions - num_betas - num_buckets) Montgomery reductions.
-#[inline]
-fn scatter_beta_values_unreduced<S, P, const D: usize>(
-  beta_values: &[(usize, S)],
-  beta_prefix_cache: &Csr<CachedPrefixIndex>,
-  ex: S,
-  e_y: &[Vec<S>],
-  acc_unred: &mut [Vec<[P::UnreducedFieldField; D]>],
-) where
-  S: PrimeField,
-  P: MatVecMLE<S>,
-{
-  for &(beta_idx, tA_red) in beta_values {
-    // Compute z_beta = ex * tA_red once per beta (one F×F with immediate reduction)
-    let z_beta = ex * tA_red;
-
-    // Scatter to buckets using unreduced F×F accumulation
-    for pref in &beta_prefix_cache[beta_idx] {
-      let ey_val = &e_y[pref.round_0][pref.y_idx];
-      // Accumulate ey * z_beta without reduction
-      P::accumulate_field_field_unreduced(
-        &mut acc_unred[pref.round_0][pref.v_idx][pref.u_idx],
-        ey_val,
-        &z_beta,
-      );
-    }
-  }
-}
-
-/// Legacy scatter using closure for lazy evaluation (kept for reference).
-#[allow(dead_code)]
-#[inline]
-fn scatter_beta_contributions_unreduced<S, P, const D: usize, I, F>(
-  beta_indices: I,
-  beta_prefix_cache: &Csr<CachedPrefixIndex>,
-  ex: S,
-  e_y: &[Vec<S>],
-  acc_unred: &mut [Vec<[P::UnreducedFieldField; D]>],
-  mut value_for_beta: F,
-) where
-  S: PrimeField,
-  P: MatVecMLE<S>,
-  I: IntoIterator<Item = usize>,
-  F: FnMut(usize) -> Option<S>,
-{
-  for beta_idx in beta_indices {
-    let Some(tA_red) = value_for_beta(beta_idx) else {
-      continue;
-    };
-    // Compute z_beta = ex * tA_red once per beta (one F×F with immediate reduction)
-    let z_beta = ex * tA_red;
-
-    // Scatter to buckets using unreduced F×F accumulation
-    for pref in &beta_prefix_cache[beta_idx] {
-      let ey_val = &e_y[pref.round_0][pref.y_idx];
-      // Accumulate ey * z_beta without reduction
-      P::accumulate_field_field_unreduced(
-        &mut acc_unred[pref.round_0][pref.v_idx][pref.u_idx],
-        ey_val,
-        &z_beta,
-      );
-    }
-  }
-}
-
-/// Reduce unreduced F×F accumulators and merge into reduced accumulators.
-///
-/// Call once after all contributions have been accumulated.
-#[inline]
-fn reduce_and_merge_acc_unred<S, P, const D: usize>(
-  acc_unred: &[Vec<[P::UnreducedFieldField; D]>],
-  acc: &mut LagrangeAccumulators<S, D>,
-) where
-  S: PrimeField,
-  P: MatVecMLE<S>,
-{
-  for (round, round_unred) in acc_unred.iter().enumerate() {
-    for (v_idx, row) in round_unred.iter().enumerate() {
-      for (u_idx, bucket) in row.iter().enumerate() {
-        if !P::unreduced_field_field_is_zero(bucket) {
-          let reduced = P::montgomery_reduce_ff(bucket);
-          acc.accumulate(round, v_idx, u_idx, reduced);
-        }
-      }
-    }
-  }
-}
-
-/// Merge two unreduced F×F accumulator arrays (just adding WideLimbs, no reduction).
-///
-/// Used in the reduce phase to merge thread-local unreduced accumulators.
-#[inline]
-fn merge_acc_unred<S, P, const D: usize>(
-  dst: &mut [Vec<[P::UnreducedFieldField; D]>],
-  src: &[Vec<[P::UnreducedFieldField; D]>],
-) where
-  S: PrimeField,
-  P: MatVecMLE<S>,
-{
-  for (dst_round, src_round) in dst.iter_mut().zip(src.iter()) {
-    for (dst_row, src_row) in dst_round.iter_mut().zip(src_round.iter()) {
-      for (dst_bucket, src_bucket) in dst_row.iter_mut().zip(src_row.iter()) {
-        *dst_bucket += *src_bucket;
-      }
-    }
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::{
-    lagrange_accumulator::domain::LagrangeHatPoint, polys::eq::EqPolynomial,
+    lagrange_accumulator::{
+      DelayedModularReductionDisabled, DelayedModularReductionEnabled, domain::LagrangeHatPoint,
+    },
+    polys::eq::EqPolynomial,
     provider::pasta::pallas,
   };
   use ff::Field;
@@ -621,7 +524,8 @@ mod tests {
     ];
 
     // Implementation under test
-    let acc_impl = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let acc_impl =
+      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, l0);
 
     // Precompute eq tables for naive computation (balanced split)
     let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]); // τ[2..3]
@@ -772,7 +676,8 @@ mod tests {
 
     let taus: Vec<Scalar> = vec![Scalar::from(3u64), Scalar::from(5u64)];
 
-    let acc = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let acc =
+      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, l0);
 
     // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞}.
     // Buckets for u = 0 should be zero (binary β), bucket for u = ∞ should be non-zero.
@@ -940,8 +845,12 @@ mod tests {
     ];
 
     // Build accumulators using both versions (unified function, different input types)
-    let acc_small = build_accumulators_spartan(&az_small, &bz_small, &taus, l0);
-    let acc_field = build_accumulators_spartan(&az_field, &bz_field, &taus, l0);
+    let acc_small = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<i32>>(
+      &az_small, &bz_small, &taus, l0,
+    );
+    let acc_field = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
+      &az_field, &bz_field, &taus, l0,
+    );
 
     // Compare all buckets
     for round in 0..l0 {
@@ -986,8 +895,12 @@ mod tests {
     let taus: Vec<Scalar> = (0..l).map(|i| Scalar::from((i * 7 + 3) as u64)).collect();
 
     // Build and compare (unified function, different input types)
-    let acc_small = build_accumulators_spartan(&az_small, &bz_small, &taus, l0);
-    let acc_field = build_accumulators_spartan(&az_field, &bz_field, &taus, l0);
+    let acc_small = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<i32>>(
+      &az_small, &bz_small, &taus, l0,
+    );
+    let acc_field = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
+      &az_field, &bz_field, &taus, l0,
+    );
 
     for round in 0..l0 {
       let num_v = (D + 1).pow(round as u32);
@@ -1046,7 +959,8 @@ mod tests {
     let taus: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
 
     // Build accumulators using optimized Spartan path
-    let acc_impl = build_accumulators_spartan(&az, &bz, &taus, L0);
+    let acc_impl =
+      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, L0);
 
     // ===== Naive computation for comparison (balanced split) =====
     let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + in_vars]);
