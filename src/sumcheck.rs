@@ -576,6 +576,96 @@ impl<E: Engine> SumcheckProof<E> {
     ))
   }
 
+  /// Prove poly_A * poly_B - poly_C using split-eq with delayed modular reduction.
+  ///
+  /// Same as `prove_cubic_with_three_inputs` but uses delayed modular reduction
+  /// in the eq polynomial evaluation to reduce Montgomery reductions from O(2^k)
+  /// to O(2^{k/2}) per round. This isolates the delayed reduction optimization
+  /// without small-value accumulator precomputation.
+  #[allow(dead_code)]
+  pub fn prove_cubic_with_three_inputs_split_eq_delayed<SmallValue>(
+    claim: &E::Scalar,
+    taus: Vec<E::Scalar>,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C: &mut MultilinearPolynomial<E::Scalar>,
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    SmallValue: Copy
+      + Clone
+      + Default
+      + std::fmt::Debug
+      + PartialEq
+      + Eq
+      + std::ops::Add<Output = SmallValue>
+      + std::ops::Sub<Output = SmallValue>
+      + std::ops::Neg<Output = SmallValue>
+      + std::ops::AddAssign
+      + std::ops::SubAssign
+      + Send
+      + Sync,
+    E::Scalar: DelayedReduction<SmallValue>,
+  {
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
+    let mut claim_per_round = *claim;
+
+    let num_rounds = taus.len();
+
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus);
+
+    for round in 0..num_rounds {
+      let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+      let poly = {
+        let (_eval_span, eval_t) = start_span!("compute_eval_points");
+        // Use delayed modular reduction version
+        let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
+          .evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(
+            round, poly_A, poly_B, poly_C,
+          );
+        if eval_t.elapsed().as_millis() > 0 {
+          info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+        }
+
+        let evals = vec![
+          eval_point_0,
+          claim_per_round - eval_point_0,
+          eval_point_2,
+          eval_point_3,
+        ];
+        UniPoly::from_evals(&evals)?
+      };
+
+      // append the prover's message to the transcript
+      transcript.absorb(b"p", &poly);
+
+      //derive the verifier's challenge for the next round
+      let r_i = transcript.squeeze(b"c")?;
+      r.push(r_i);
+      polys.push(poly.compress());
+
+      // Set up next round
+      claim_per_round = poly.evaluate(&r_i);
+
+      // bound all tables to the verifier's challenge
+      let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+      bind_three_polys_top(poly_A, poly_B, poly_C, &r_i);
+      eq_instance.bound(&r_i);
+      info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+      info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+    }
+
+    Ok((
+      SumcheckProof {
+        compressed_polys: polys,
+      },
+      r,
+      vec![poly_A[0], poly_B[0], poly_C[0]],
+    ))
+  }
+
   /// Default number of small-value rounds (ℓ₀) for Algorithm 6.
   /// Optimal value from paper analysis for Spartan with D=2.
   const DEFAULT_SMALL_VALUE_ROUNDS: usize = 3;
