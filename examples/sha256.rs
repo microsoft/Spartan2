@@ -86,7 +86,7 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
       .preimage
       .clone()
       .into_iter()
-      .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
+      .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
       .map(Some)
       .collect();
     assert_eq!(bit_values.len(), self.preimage.len() * 8);
