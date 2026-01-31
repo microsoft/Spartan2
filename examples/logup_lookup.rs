@@ -1,0 +1,361 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+// This file is part of the Spartan2 project.
+// See the LICENSE file in the project root for full license information.
+// Source repository: https://github.com/Microsoft/Spartan2
+
+//! examples/logup_lookup.rs
+//! Example circuit demonstrating split-commitments with a lookup table
+//! using the logup randomized check.
+//!
+//! ## Circuit Structure
+//!
+//! The circuit implements a lookup argument using the logup technique:
+//! 
+//! - **Shared section**: A table T containing all values from 0 to 255 (256 entries)
+//! - **Precommitted section**: 
+//!   - L: lookup values (1024 entries) claimed to be in the table
+//!   - counts: for each table entry, how many times it appears in L (256 entries)
+//! - **Challenge**: c derived from Fiat-Shamir transcript (depends on commitments)
+//! - **Synthesize section**: Verifies the logup identity:
+//!   ```
+//!   sum_i {1/(L[i] + c)} = sum_j {counts[j]/(T[j] + c)}
+//!   ```
+//!
+//! ## Implementation Notes
+//!
+//! - Uses Spartan's `num_challenges()` mechanism to get a Fiat-Shamir challenge
+//! - Challenge is allocated as a public input variable in `synthesize`
+//! - Allocates intermediate `val_plus_c = val + c` variables for each value
+//! - Provides inverse hints as untrusted witness values and verifies them with R1CS constraints
+//! - Directly compares sums using linear combinations without intermediate sum variables
+//!
+//! ## Running
+//!
+//! ```sh
+//! RUST_LOG=info cargo run --release --example logup_lookup
+//! ```
+
+#[cfg(feature = "jem")]
+#[global_allocator]
+static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
+
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
+use ff::{Field, PrimeField};
+use spartan2::{
+  provider::T256HyraxEngine,
+  spartan::SpartanSNARK,
+  traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
+};
+use std::{marker::PhantomData, time::Instant};
+use tracing::{info, info_span};
+use tracing_subscriber::EnvFilter;
+
+type E = T256HyraxEngine;
+
+const TABLE_SIZE: usize = 256;
+const LOOKUP_SIZE: usize = 1024;
+
+#[derive(Clone, Debug)]
+struct LookupCircuit<Scalar: PrimeField> {
+  // The lookup values (each should be in range 0..256)
+  lookup_values: Vec<u64>,
+  _p: PhantomData<Scalar>,
+}
+
+impl<Scalar: PrimeField> LookupCircuit<Scalar> {
+  fn new(lookup_values: Vec<u64>) -> Self {
+    assert_eq!(lookup_values.len(), LOOKUP_SIZE);
+    // Ensure all lookup values are in the table range
+    for &val in &lookup_values {
+      assert!(val < TABLE_SIZE as u64, "Lookup value must be < {}", TABLE_SIZE);
+    }
+    Self {
+      lookup_values,
+      _p: PhantomData,
+    }
+  }
+
+  // Compute the counts array: how many times each table entry appears in lookup_values
+  fn compute_counts(&self) -> Vec<u64> {
+    let mut counts = vec![0u64; TABLE_SIZE];
+    for &val in &self.lookup_values {
+      counts[val as usize] += 1;
+    }
+    counts
+  }
+}
+
+impl<E: Engine> SpartanCircuit<E> for LookupCircuit<E::Scalar> {
+  fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+    // Return table size as a public value to satisfy num_inputs > num_challenges
+    Ok(vec![E::Scalar::from(TABLE_SIZE as u64)])
+  }
+
+  fn shared<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    // Allocate the table T in the shared section
+    // T contains all values from 0 to 255
+    let mut table = Vec::with_capacity(TABLE_SIZE);
+    for i in 0..TABLE_SIZE {
+      let val = E::Scalar::from(i as u64);
+      let allocated = AllocatedNum::alloc(cs.namespace(|| format!("table[{}]", i)), || Ok(val))?;
+      
+      // Enforce that the variable holds the expected constant value
+      cs.enforce(
+        || format!("table[{}] constant check", i),
+        |lc| lc + allocated.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + (val, CS::one()),
+      );
+      
+      table.push(allocated);
+    }
+    Ok(table)
+  }
+
+  fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+    _shared: &[AllocatedNum<E::Scalar>],
+  ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+    let mut result = Vec::new();
+
+    // Add a public input for the table size
+    let table_size_public = AllocatedNum::alloc_input(
+      cs.namespace(|| "table_size_public"),
+      || Ok(E::Scalar::from(TABLE_SIZE as u64)),
+    )?;
+    // Enforce that it holds the expected constant value
+    cs.enforce(
+      || "table_size constant check",
+      |lc| lc + table_size_public.get_variable(),
+      |lc| lc + CS::one(),
+      |lc| lc + (E::Scalar::from(TABLE_SIZE as u64), CS::one()),
+    );
+
+    // Allocate the lookup values L
+    for (i, &val) in self.lookup_values.iter().enumerate() {
+      let scalar_val = E::Scalar::from(val);
+      let allocated =
+        AllocatedNum::alloc(cs.namespace(|| format!("lookup[{}]", i)), || Ok(scalar_val))?;
+      result.push(allocated);
+    }
+
+    // Allocate the counts array
+    let counts = self.compute_counts();
+    for (i, &count) in counts.iter().enumerate() {
+      let scalar_count = E::Scalar::from(count);
+      let allocated =
+        AllocatedNum::alloc(cs.namespace(|| format!("count[{}]", i)), || Ok(scalar_count))?;
+      result.push(allocated);
+    }
+
+    Ok(result)
+  }
+
+  fn num_challenges(&self) -> usize {
+    // We use one challenge for the logup check
+    1
+  }
+
+  fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+    &self,
+    cs: &mut CS,
+    shared: &[AllocatedNum<E::Scalar>],
+    precommitted: &[AllocatedNum<E::Scalar>],
+    challenges: Option<&[E::Scalar]>,
+  ) -> Result<(), SynthesisError> {
+    // shared contains the table T
+    let table = shared;
+    assert_eq!(table.len(), TABLE_SIZE);
+
+    // precommitted contains L (lookup values) followed by counts
+    let lookup_values = &precommitted[0..LOOKUP_SIZE];
+    let counts = &precommitted[LOOKUP_SIZE..LOOKUP_SIZE + TABLE_SIZE];
+    assert_eq!(lookup_values.len(), LOOKUP_SIZE);
+    assert_eq!(counts.len(), TABLE_SIZE);
+
+    // Allocate the challenge as a public input variable
+    // The challenge comes from the verifier via the Fiat-Shamir transform
+    // During setup, this will be ZERO; during proving, it will be the actual challenge
+    let challenge_value = challenges
+      .and_then(|c| c.first().copied())
+      .unwrap_or(E::Scalar::ZERO);
+    let challenge = AllocatedNum::alloc_input(
+      cs.namespace(|| "challenge"),
+      || Ok(challenge_value),
+    )?;
+
+    // Allocate val_plus_c variables for LHS
+    let mut val_plus_c_lhs = Vec::with_capacity(LOOKUP_SIZE);
+    for (i, lookup_val) in lookup_values.iter().enumerate() {
+      let val_plus_c_value = lookup_val.get_value().map(|v| v + challenge_value);
+      let val_plus_c = AllocatedNum::alloc(
+        cs.namespace(|| format!("val_plus_c_lhs[{}]", i)),
+        || val_plus_c_value.ok_or(SynthesisError::AssignmentMissing),
+      )?;
+      
+      // Constrain val_plus_c = lookup_val + challenge
+      cs.enforce(
+        || format!("val_plus_c_lhs_check[{}]", i),
+        |lc| lc + lookup_val.get_variable() + challenge.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + val_plus_c.get_variable(),
+      );
+      
+      val_plus_c_lhs.push(val_plus_c);
+    }
+
+    // Allocate inverse hints for LHS: h_i = 1/(L[i] + c)
+    let mut lhs_inverses = Vec::with_capacity(LOOKUP_SIZE);
+    for (i, val_plus_c) in val_plus_c_lhs.iter().enumerate() {
+      let hint_value = val_plus_c
+        .get_value()
+        .and_then(|v| Some(v.invert().unwrap_or(E::Scalar::ZERO)));
+
+      let hint =
+        AllocatedNum::alloc(cs.namespace(|| format!("lhs_inv[{}]", i)), || {
+          hint_value.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+      // Add constraint: hint * val_plus_c = 1
+      cs.enforce(
+        || format!("lhs_inv_check[{}]", i),
+        |lc| lc + hint.get_variable(),
+        |lc| lc + val_plus_c.get_variable(),
+        |lc| lc + CS::one(),
+      );
+
+      lhs_inverses.push(hint);
+    }
+
+    // Allocate val_plus_c variables for RHS
+    let mut val_plus_c_rhs = Vec::with_capacity(TABLE_SIZE);
+    for (j, table_val) in table.iter().enumerate() {
+      let val_plus_c_value = table_val.get_value().map(|v| v + challenge_value);
+      let val_plus_c = AllocatedNum::alloc(
+        cs.namespace(|| format!("val_plus_c_rhs[{}]", j)),
+        || val_plus_c_value.ok_or(SynthesisError::AssignmentMissing),
+      )?;
+      
+      // Constrain val_plus_c = table_val + challenge
+      cs.enforce(
+        || format!("val_plus_c_rhs_check[{}]", j),
+        |lc| lc + table_val.get_variable() + challenge.get_variable(),
+        |lc| lc + CS::one(),
+        |lc| lc + val_plus_c.get_variable(),
+      );
+      
+      val_plus_c_rhs.push(val_plus_c);
+    }
+
+    // Allocate inverse hints for RHS: g_j = counts[j]/(T[j] + c)
+    let mut rhs_numerators = Vec::with_capacity(TABLE_SIZE);
+    for (j, (val_plus_c, count)) in val_plus_c_rhs.iter().zip(counts.iter()).enumerate() {
+      let hint_value = val_plus_c
+        .get_value()
+        .and_then(|v| count.get_value().map(|c_val| (v, c_val)))
+        .and_then(|(v, c_val)| {
+          let inv = v.invert().unwrap_or(E::Scalar::ZERO);
+          Some(c_val * inv)
+        });
+
+      let hint =
+        AllocatedNum::alloc(cs.namespace(|| format!("rhs_num[{}]", j)), || {
+          hint_value.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+      // Add constraint: hint * val_plus_c = count
+      cs.enforce(
+        || format!("rhs_num_check[{}]", j),
+        |lc| lc + hint.get_variable(),
+        |lc| lc + val_plus_c.get_variable(),
+        |lc| lc + count.get_variable(),
+      );
+
+      rhs_numerators.push(hint);
+    }
+
+    // Now check that sum of LHS inverses equals sum of RHS numerators
+    // sum_i h_i = sum_j g_j
+    // We can directly compare the sums using linear combinations without allocating intermediate variables
+    cs.enforce(
+      || "equality_check",
+      |lc| {
+        lhs_inverses
+          .iter()
+          .fold(lc, |lc, inv| lc + inv.get_variable())
+      },
+      |lc| lc + CS::one(),
+      |lc| {
+        rhs_numerators
+          .iter()
+          .fold(lc, |lc, num| lc + num.get_variable())
+      },
+    );
+
+    Ok(())
+  }
+}
+
+fn main() {
+  tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
+
+  // Create a lookup circuit with random lookup values
+  // For simplicity, we'll use a deterministic pattern
+  let mut lookup_values = Vec::with_capacity(LOOKUP_SIZE);
+  for i in 0..LOOKUP_SIZE {
+    // Use a pattern that ensures all table entries are used at least once
+    // and some multiple times
+    lookup_values.push((i % TABLE_SIZE) as u64);
+  }
+
+  let circuit = LookupCircuit::<<E as Engine>::Scalar>::new(lookup_values);
+
+  let root_span = info_span!("logup_lookup").entered();
+  info!("======= Logup Lookup Circuit =======");
+  info!("Table size: {}", TABLE_SIZE);
+  info!("Lookup size: {}", LOOKUP_SIZE);
+
+  // SETUP
+  let t0 = Instant::now();
+  let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup failed");
+  let setup_ms = t0.elapsed().as_millis();
+  info!(elapsed_ms = setup_ms, "setup");
+
+  // PREPARE
+  let t0 = Instant::now();
+  let prep_snark =
+    SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
+  let prep_ms = t0.elapsed().as_millis();
+  info!(elapsed_ms = prep_ms, "prep_prove");
+
+  // PROVE
+  let t0 = Instant::now();
+  let proof =
+    SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true).expect("prove failed");
+  let prove_ms = t0.elapsed().as_millis();
+  info!(elapsed_ms = prove_ms, "prove");
+
+  // VERIFY
+  let t0 = Instant::now();
+  proof.verify(&vk).expect("verify errored");
+  let verify_ms = t0.elapsed().as_millis();
+  info!(elapsed_ms = verify_ms, "verify");
+
+  // Summary
+  info!(
+    "SUMMARY table_size={}, lookup_size={}, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
+    TABLE_SIZE, LOOKUP_SIZE, setup_ms, prep_ms, prove_ms, verify_ms
+  );
+  drop(root_span);
+
+  info!("Logup lookup circuit verification PASSED!");
+}
