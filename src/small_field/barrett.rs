@@ -456,7 +456,7 @@ fn barrett_reduce_5<F: FieldReductionConstants>(c: &[u64; 5]) -> [u64; 4] {
 /// Input is already in Montgomery form (R-scaled). This function reduces
 /// the 6-limb value mod p while preserving the Montgomery scaling.
 #[inline]
-fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
+pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
   // Reduce c[5] * 2^320 ≡ c[5] * R320 (mod p), then reduce c[4] * 2^256, etc.
   // R320 = 2^320 mod p, R256 = 2^256 mod p
   //
@@ -516,7 +516,7 @@ pub(crate) fn barrett_reduce_6_fq(c: &[u64; 6]) -> [u64; 4] {
 /// R384 = 2^384 mod p and R448 = 2^448 mod p constants, then delegates
 /// to 6-limb reduction.
 #[inline]
-fn barrett_reduce_8<F: FieldReductionConstants>(c: &[u64; 8]) -> [u64; 4] {
+pub(crate) fn barrett_reduce_8<F: FieldReductionConstants>(c: &[u64; 8]) -> [u64; 4] {
   // Reduce high limbs: c[6] * 2^384 + c[7] * 2^448
   let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);
   let c7_contrib = mul_4_by_1(&F::R448_MOD, c[7]);
@@ -560,7 +560,7 @@ pub(crate) fn barrett_reduce_8_fq(c: &[u64; 8]) -> [u64; 4] {
 /// Input: T representing x·R² (up to 9 limbs)
 /// Output: x·R mod p (4 limbs, standard Montgomery form)
 #[inline]
-fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
+pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
   // Step 1: Reduce 9 limbs to 8 limbs using precomputed 2^512 mod p
   let mut t = [0u64; 9];
   if c[8] == 0 {

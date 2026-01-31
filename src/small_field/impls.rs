@@ -7,7 +7,8 @@
 //! SmallValueField and DelayedReduction implementations for Fp, Fq, and BN254 Fr.
 
 use super::{
-  DelayedReduction, SmallValueField, barrett, i64_to_field, i128_to_field,
+  DelayedReduction, SmallValueField, SupportsSmallI32, SupportsSmallI64, barrett,
+  i64_to_field, i128_to_field, try_field_to_i64,
   limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
 };
 use ff::PrimeField;
@@ -49,10 +50,20 @@ fn try_field_to_small_impl<F: PrimeField>(val: &F) -> Option<i32> {
 }
 
 // ============================================================================
-// SmallValueField<i32> for Fp
+// Marker trait implementations
 // ============================================================================
 
-impl SmallValueField<i32> for halo2curves::pasta::Fp {
+impl SupportsSmallI32 for halo2curves::pasta::Fp {}
+impl SupportsSmallI32 for halo2curves::pasta::Fq {}
+impl SupportsSmallI64 for halo2curves::pasta::Fp {}
+impl SupportsSmallI64 for halo2curves::pasta::Fq {}
+impl SupportsSmallI64 for Bn254Fr {}
+
+// ============================================================================
+// Blanket SmallValueField<i32> for all SupportsSmallI32 fields
+// ============================================================================
+
+impl<F: SupportsSmallI32 + PrimeField> SmallValueField<i32> for F {
   type IntermediateSmallValue = i64;
 
   #[inline]
@@ -177,10 +188,10 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fp {
 }
 
 // ============================================================================
-// SmallValueField<i64> for Fp
+// Blanket SmallValueField<i64> for all SupportsSmallI64 fields
 // ============================================================================
 
-impl SmallValueField<i64> for halo2curves::pasta::Fp {
+impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
   type IntermediateSmallValue = i128;
 
   #[inline]
@@ -196,7 +207,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
   #[inline]
   fn isl_mul(small: i128, large: &Self) -> Self {
     if small == 0 {
-      return Self::zero();
+      return F::ZERO;
     }
     let (is_neg, mag) = if small >= 0 {
       (false, small as u128)
@@ -204,8 +215,8 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
       (true, (-small) as u128)
     };
     // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
-    let product = mul_4_by_2_ext(&large.0, mag);
-    let result = Self(barrett::barrett_reduce_6_fp(&product));
+    let product = mul_4_by_2_ext(large.to_limbs(), mag);
+    let result = Self::from_limbs(barrett::barrett_reduce_6::<F>(&product));
     if is_neg { -result } else { result }
   }
 
@@ -220,31 +231,7 @@ impl SmallValueField<i64> for halo2curves::pasta::Fp {
   }
 
   fn try_field_to_small(val: &Self) -> Option<i64> {
-    let repr = val.to_repr();
-    let bytes = repr.as_ref();
-
-    // Check if value fits in positive i64
-    let high_zero = bytes[8..].iter().all(|&b| b == 0);
-    if high_zero {
-      let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-      if val_u64 <= i64::MAX as u64 {
-        return Some(val_u64 as i64);
-      }
-    }
-
-    // Check if negation fits in i64
-    let neg_val = val.neg();
-    let neg_repr = neg_val.to_repr();
-    let neg_bytes = neg_repr.as_ref();
-    let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
-    if neg_high_zero {
-      let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
-      if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
-        return Some(-(neg_u64 as i128) as i64);
-      }
-    }
-
-    None
+    try_field_to_i64(val)
   }
 }
 
@@ -340,46 +327,6 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fp {
   }
 }
 
-// ============================================================================
-// SmallValueField<i32> for Fq
-// ============================================================================
-
-impl SmallValueField<i32> for halo2curves::pasta::Fq {
-  type IntermediateSmallValue = i64;
-
-  #[inline]
-  fn ss_mul(a: i32, b: i32) -> i64 {
-    (a as i64) * (b as i64)
-  }
-
-  #[inline]
-  fn sl_mul(small: i32, large: &Self) -> Self {
-    barrett::mul_by_i64(large, small as i64)
-  }
-
-  #[inline]
-  fn isl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_by_i64(large, small)
-  }
-
-  #[inline]
-  fn small_to_field(val: i32) -> Self {
-    if val >= 0 {
-      Self::from(val as u64)
-    } else {
-      -Self::from((-val) as u64)
-    }
-  }
-
-  #[inline]
-  fn intermediate_to_field(val: i64) -> Self {
-    i64_to_field(val)
-  }
-
-  fn try_field_to_small(val: &Self) -> Option<i32> {
-    try_field_to_small_impl(val)
-  }
-}
 
 // ============================================================================
 // DelayedReduction<i32> for Fq
@@ -467,75 +414,6 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fq {
   }
 }
 
-// ============================================================================
-// SmallValueField<i64> for Fq
-// ============================================================================
-
-impl SmallValueField<i64> for halo2curves::pasta::Fq {
-  type IntermediateSmallValue = i128;
-
-  #[inline]
-  fn ss_mul(a: i64, b: i64) -> i128 {
-    (a as i128) * (b as i128)
-  }
-
-  #[inline]
-  fn sl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_by_i64(large, small)
-  }
-
-  #[inline]
-  fn isl_mul(small: i128, large: &Self) -> Self {
-    if small == 0 {
-      return Self::zero();
-    }
-    let (is_neg, mag) = if small >= 0 {
-      (false, small as u128)
-    } else {
-      (true, (-small) as u128)
-    };
-    // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
-    let product = mul_4_by_2_ext(&large.0, mag);
-    let result = Self(barrett::barrett_reduce_6_fq(&product));
-    if is_neg { -result } else { result }
-  }
-
-  #[inline]
-  fn small_to_field(val: i64) -> Self {
-    i64_to_field(val)
-  }
-
-  #[inline]
-  fn intermediate_to_field(val: i128) -> Self {
-    i128_to_field(val)
-  }
-
-  fn try_field_to_small(val: &Self) -> Option<i64> {
-    let repr = val.to_repr();
-    let bytes = repr.as_ref();
-
-    let high_zero = bytes[8..].iter().all(|&b| b == 0);
-    if high_zero {
-      let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-      if val_u64 <= i64::MAX as u64 {
-        return Some(val_u64 as i64);
-      }
-    }
-
-    let neg_val = val.neg();
-    let neg_repr = neg_val.to_repr();
-    let neg_bytes = neg_repr.as_ref();
-    let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
-    if neg_high_zero {
-      let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
-      if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
-        return Some(-(neg_u64 as i128) as i64);
-      }
-    }
-
-    None
-  }
-}
 
 // ============================================================================
 // DelayedReduction<i64> for Fq
@@ -629,74 +507,6 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
   }
 }
 
-// ============================================================================
-// SmallValueField<i64> for BN254 Fr
-// ============================================================================
-
-impl SmallValueField<i64> for Bn254Fr {
-  type IntermediateSmallValue = i128;
-
-  #[inline]
-  fn ss_mul(a: i64, b: i64) -> i128 {
-    (a as i128) * (b as i128)
-  }
-
-  #[inline]
-  fn sl_mul(small: i64, large: &Self) -> Self {
-    barrett::mul_by_i64(large, small)
-  }
-
-  #[inline]
-  fn isl_mul(small: i128, large: &Self) -> Self {
-    if small == 0 {
-      return Self::zero();
-    }
-    let (is_neg, mag) = if small >= 0 {
-      (false, small as u128)
-    } else {
-      (true, (-small) as u128)
-    };
-    let product = mul_4_by_2_ext(&large.0, mag);
-    let result = Self(barrett::barrett_reduce_6_bn254_fr(&product));
-    if is_neg { -result } else { result }
-  }
-
-  #[inline]
-  fn small_to_field(val: i64) -> Self {
-    i64_to_field(val)
-  }
-
-  #[inline]
-  fn intermediate_to_field(val: i128) -> Self {
-    i128_to_field(val)
-  }
-
-  fn try_field_to_small(val: &Self) -> Option<i64> {
-    let repr = val.to_repr();
-    let bytes = repr.as_ref();
-
-    let high_zero = bytes[8..].iter().all(|&b| b == 0);
-    if high_zero {
-      let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-      if val_u64 <= i64::MAX as u64 {
-        return Some(val_u64 as i64);
-      }
-    }
-
-    let neg_val = val.neg();
-    let neg_repr = neg_val.to_repr();
-    let neg_bytes = neg_repr.as_ref();
-    let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
-    if neg_high_zero {
-      let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
-      if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
-        return Some(-(neg_u64 as i128) as i64);
-      }
-    }
-
-    None
-  }
-}
 
 // ============================================================================
 // DelayedReduction<i64> for BN254 Fr

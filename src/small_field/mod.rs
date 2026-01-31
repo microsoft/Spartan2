@@ -42,6 +42,14 @@ pub use delayed_reduction::DelayedReduction;
 pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
 pub use small_value_field::SmallValueField;
 
+use barrett::BarrettField;
+
+/// Marker trait: field supports `SmallValueField<i32>` via blanket impl.
+pub(crate) trait SupportsSmallI32: BarrettField {}
+
+/// Marker trait: field supports `SmallValueField<i64>` via blanket impl.
+pub(crate) trait SupportsSmallI64: BarrettField {}
+
 use ff::PrimeField;
 
 // ============================================================================
