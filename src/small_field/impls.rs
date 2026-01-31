@@ -176,14 +176,14 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fp {
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_6_fp(&mag)),
-      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_6_fp(&mag)),
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_6::<Self>(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_6::<Self>(&mag)),
     }
   }
 
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self(barrett::montgomery_reduce_9_fp(&acc.0))
+    Self(barrett::montgomery_reduce_9::<Self>(&acc.0))
   }
 }
 
@@ -316,14 +316,14 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fp {
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8_fp(&mag)),
-      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8_fp(&mag)),
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8::<Self>(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8::<Self>(&mag)),
     }
   }
 
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self(barrett::montgomery_reduce_9_fp(&acc.0))
+    Self(barrett::montgomery_reduce_9::<Self>(&acc.0))
   }
 }
 
@@ -403,14 +403,14 @@ impl DelayedReduction<i32> for halo2curves::pasta::Fq {
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_6_fq(&mag)),
-      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_6_fq(&mag)),
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_6::<Self>(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_6::<Self>(&mag)),
     }
   }
 
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self(barrett::montgomery_reduce_9_fq(&acc.0))
+    Self(barrett::montgomery_reduce_9::<Self>(&acc.0))
   }
 }
 
@@ -496,14 +496,14 @@ impl DelayedReduction<i64> for halo2curves::pasta::Fq {
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8_fq(&mag)),
-      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8_fq(&mag)),
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8::<Self>(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8::<Self>(&mag)),
     }
   }
 
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self(barrett::montgomery_reduce_9_fq(&acc.0))
+    Self(barrett::montgomery_reduce_9::<Self>(&acc.0))
   }
 }
 
@@ -584,14 +584,14 @@ impl DelayedReduction<i64> for Bn254Fr {
   #[inline(always)]
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8_bn254_fr(&mag)),
-      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8_bn254_fr(&mag)),
+      SubMagResult::Positive(mag) => Self(barrett::barrett_reduce_8::<Self>(&mag)),
+      SubMagResult::Negative(mag) => -Self(barrett::barrett_reduce_8::<Self>(&mag)),
     }
   }
 
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self(barrett::montgomery_reduce_9_bn254_fr(&acc.0))
+    Self(barrett::montgomery_reduce_9::<Self>(&acc.0))
   }
 }
 

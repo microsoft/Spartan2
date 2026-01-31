@@ -494,18 +494,6 @@ pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64
   barrett_reduce_6::<F>(&sum)
 }
 
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn barrett_reduce_6_fp(c: &[u64; 6]) -> [u64; 4] {
-  barrett_reduce_6::<Fp>(c)
-}
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn barrett_reduce_6_fq(c: &[u64; 6]) -> [u64; 4] {
-  barrett_reduce_6::<Fq>(c)
-}
-
 // ==========================================================================
 // 8-limb Barrett reduction (for i64/i128 UnreducedFieldInt accumulator)
 // ==========================================================================
@@ -538,16 +526,6 @@ pub(crate) fn barrett_reduce_8<F: FieldReductionConstants>(c: &[u64; 8]) -> [u64
 
   // Now reduce the 6-limb result
   barrett_reduce_6::<F>(&sum)
-}
-
-#[inline]
-pub(crate) fn barrett_reduce_8_fp(c: &[u64; 8]) -> [u64; 4] {
-  barrett_reduce_8::<Fp>(c)
-}
-
-#[inline]
-pub(crate) fn barrett_reduce_8_fq(c: &[u64; 8]) -> [u64; 4] {
-  barrett_reduce_8::<Fq>(c)
 }
 
 // ==========================================================================
@@ -636,40 +614,6 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
   }
 
   [result[0], result[1], result[2], result[3]]
-}
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn montgomery_reduce_9_fp(c: &[u64; 9]) -> [u64; 4] {
-  montgomery_reduce_9::<Fp>(c)
-}
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn montgomery_reduce_9_fq(c: &[u64; 9]) -> [u64; 4] {
-  montgomery_reduce_9::<Fq>(c)
-}
-
-// ==========================================================================
-// BN254 Fr reduction functions
-// ==========================================================================
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn barrett_reduce_6_bn254_fr(c: &[u64; 6]) -> [u64; 4] {
-  barrett_reduce_6::<Bn254Fr>(c)
-}
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn barrett_reduce_8_bn254_fr(c: &[u64; 8]) -> [u64; 4] {
-  barrett_reduce_8::<Bn254Fr>(c)
-}
-
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn montgomery_reduce_9_bn254_fr(c: &[u64; 9]) -> [u64; 4] {
-  montgomery_reduce_9::<Bn254Fr>(c)
 }
 
 // ==========================================================================
@@ -830,7 +774,7 @@ mod tests {
   #[test]
   fn test_barrett_6_fp_zero() {
     let c = [0u64; 6];
-    let result = Fp(barrett_reduce_6_fp(&c));
+    let result = Fp(barrett_reduce_6::<Fp>(&c));
     assert_eq!(result, Fp::ZERO);
   }
 
@@ -849,7 +793,7 @@ mod tests {
     ];
 
     // Reduce
-    let result = Fp(barrett_reduce_6_fp(&c));
+    let result = Fp(barrett_reduce_6::<Fp>(&c));
 
     // Expected: field_elem * small
     let expected = field_elem * Fp::from(small);
@@ -885,7 +829,7 @@ mod tests {
     }
 
     // Reduce and compare
-    let result = Fp(barrett_reduce_6_fp(&acc));
+    let result = Fp(barrett_reduce_6::<Fp>(&acc));
     assert_eq!(result, expected_sum);
   }
 
@@ -915,7 +859,7 @@ mod tests {
       acc[5] = acc[5].wrapping_add(carry as u64);
     }
 
-    let result = Fp(barrett_reduce_6_fp(&acc));
+    let result = Fp(barrett_reduce_6::<Fp>(&acc));
     assert_eq!(result, expected_sum);
   }
 
@@ -941,7 +885,7 @@ mod tests {
       acc[5] = acc[5].wrapping_add(carry as u64);
     }
 
-    let result = Fq(barrett_reduce_6_fq(&acc));
+    let result = Fq(barrett_reduce_6::<Fq>(&acc));
     assert_eq!(result, expected_sum);
   }
 
@@ -980,7 +924,7 @@ mod tests {
     ];
 
     // Montgomery reduce: should give (a*b)*R mod p = (a*b) in Montgomery form
-    let result = Fp(montgomery_reduce_9_fp(&c));
+    let result = Fp(montgomery_reduce_9::<Fp>(&c));
 
     // Expected: a * b in field
     let expected = a * b;
@@ -1016,7 +960,7 @@ mod tests {
     }
 
     // Montgomery reduce and compare
-    let result = Fp(montgomery_reduce_9_fp(&acc));
+    let result = Fp(montgomery_reduce_9::<Fp>(&acc));
     assert_eq!(result, expected_sum);
   }
 
@@ -1044,7 +988,7 @@ mod tests {
       acc[8] = acc[8].wrapping_add(carry as u64);
     }
 
-    let result = Fp(montgomery_reduce_9_fp(&acc));
+    let result = Fp(montgomery_reduce_9::<Fp>(&acc));
     assert_eq!(result, expected_sum);
   }
 
@@ -1070,7 +1014,7 @@ mod tests {
       acc[8] = acc[8].wrapping_add(carry as u64);
     }
 
-    let result = Fq(montgomery_reduce_9_fq(&acc));
+    let result = Fq(montgomery_reduce_9::<Fq>(&acc));
     assert_eq!(result, expected_sum);
   }
 }
