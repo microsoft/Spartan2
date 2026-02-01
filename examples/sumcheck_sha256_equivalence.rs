@@ -25,7 +25,7 @@ use bellpepper_core::{Circuit, test_cs::TestConstraintSystem};
 use circuits::{Sha256Circuit, SmallSha256Circuit};
 use ff::Field;
 use spartan2::{
-  polys::multilinear::MultilinearPolynomial,
+  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::PallasHyraxEngine,
   small_field::SmallValueField,
   spartan::SpartanSNARK,
@@ -153,6 +153,7 @@ where
 
   // Claim is zero for satisfying R1CS (Az * Bz = Cz)
   let claim = F::ZERO;
+  let tau_for_verify = tau.clone();
 
   // ===== ORIGINAL METHOD =====
   // Run in scope so memory is freed before next benchmark
@@ -260,6 +261,19 @@ where
 
       assert_eq!(evals1, evals2, "Final evaluations must match!");
       info!("Final evaluations match");
+
+      // Verify sumcheck proof
+      {
+        let mut transcript_v = <E as Engine>::TE::new(b"test_equivalence");
+        let (final_claim, r_v) = proof1
+          .verify(claim, num_vars, 3, &mut transcript_v)
+          .expect("sumcheck verify failed");
+        assert_eq!(r_v, r1, "Verify challenges must match prover");
+        let tau_eval = EqPolynomial::new(tau_for_verify.clone()).evaluate(&r_v);
+        let expected = tau_eval * (evals1[0] * evals1[1] - evals1[2]);
+        assert_eq!(final_claim, expected, "Sumcheck final claim mismatch");
+        info!("Sumcheck verification passed");
+      }
 
       let speedup = if smallvalue_us > 0 {
         original_us as f64 / smallvalue_us as f64

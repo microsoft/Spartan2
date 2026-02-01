@@ -10,6 +10,7 @@ use super::limbs::{gte_4_4, gte_5_4, mul_4_by_1, mul_5_by_1, sub_4_4, sub_5_4, s
 use halo2curves::{
   bn256::Fr as Bn254Fr,
   pasta::{Fp, Fq},
+  t256::Fq as T256Fq,
 };
 use std::ops::Neg;
 
@@ -281,6 +282,67 @@ impl FieldReductionConstants for Bn254Fr {
 }
 
 // ==========================================================================
+// FieldReductionConstants implementation for T256Fq (T256 scalar field = secp256r1 base field)
+// ==========================================================================
+
+impl FieldReductionConstants for T256Fq {
+  // p = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+  const MODULUS: [u64; 4] = [
+    0xffffffffffffffff,
+    0x00000000ffffffff,
+    0x0000000000000000,
+    0xffffffff00000001,
+  ];
+
+  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
+
+  const MU: u64 = 0x800000007fffffff;
+
+  // 2^256 mod p
+  const R256_MOD: [u64; 4] = [
+    0x0000000000000001,
+    0xffffffff00000000,
+    0xffffffffffffffff,
+    0x00000000fffffffe,
+  ];
+
+  // 2^320 mod p
+  const R320_MOD: [u64; 4] = [
+    0x00000000ffffffff,
+    0x0000000100000001,
+    0xfffffffeffffffff,
+    0xfffffffe00000000,
+  ];
+
+  // 2^384 mod p
+  const R384_MOD: [u64; 4] = [
+    0xfffffffefffffffe,
+    0x00000002ffffffff,
+    0x0000000000000002,
+    0xfffffffe00000001,
+  ];
+
+  // 2^448 mod p
+  const R448_MOD: [u64; 4] = [
+    0xfffffffeffffffff,
+    0xfffffffffffffffe,
+    0x0000000200000000,
+    0x0000000000000003,
+  ];
+
+  // 2^512 mod p
+  const R512_MOD: [u64; 4] = [
+    0x0000000000000003,
+    0xfffffffbffffffff,
+    0xfffffffffffffffe,
+    0x00000004fffffffd,
+  ];
+
+  // -p^(-1) mod 2^64
+  const MONT_INV: u64 = 0x0000000000000001;
+}
+
+// ==========================================================================
 // BarrettField - Trait for generic small × field multiplication
 // ==========================================================================
 
@@ -333,6 +395,20 @@ impl BarrettField for Bn254Fr {
   #[inline]
   fn from_limbs(limbs: [u64; 4]) -> Self {
     Bn254Fr(limbs)
+  }
+
+  #[inline]
+  fn to_limbs(&self) -> &[u64; 4] {
+    &self.0
+  }
+}
+
+impl BarrettField for T256Fq {
+  const TWO_POW_64: Self = T256Fq::from_raw([0, 1, 0, 0]);
+
+  #[inline]
+  fn from_limbs(limbs: [u64; 4]) -> Self {
+    T256Fq(limbs)
   }
 
   #[inline]

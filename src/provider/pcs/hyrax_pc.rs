@@ -154,7 +154,11 @@ where
         } else {
           let scalars_small = scalars
             .par_iter()
-            .map(|s| s.to_repr().as_ref()[0] as u64)
+            .map(|s| {
+              let bytes = s.to_repr();
+              let bytes = bytes.as_ref();
+              u64::from_le_bytes(bytes[..8].try_into().unwrap())
+            })
             .collect::<Vec<_>>();
           E::GE::vartime_multiscalar_mul_small(
             &scalars_small,

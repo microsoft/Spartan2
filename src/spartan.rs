@@ -15,12 +15,14 @@ use crate::{
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
+  lagrange_accumulator::{AccumulateProduct, MatVecMLE},
   math::Math,
   polys::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
   r1cs::{SplitR1CSInstance, SplitR1CSShape},
+  small_field::{DelayedReduction, SmallValueField},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -109,7 +111,12 @@ pub struct SpartanSNARK<E: Engine> {
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
-impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
+impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E>
+where
+  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  MultilinearPolynomial<i64>: MatVecMLE<E::Scalar>,
+  <MultilinearPolynomial<i64> as MatVecMLE<E::Scalar>>::Product: AccumulateProduct<E::Scalar>,
+{
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
   type PrepSNARK = SpartanPrepSNARK<E>;
@@ -171,6 +178,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     // absorb the public values into the transcript
     transcript.absorb(b"public_values", &public_values.as_slice());
 
+    let (_sat_span, sat_t) = start_span!("r1cs_instance_and_witness");
     let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
       &mut prep_snark.ps,
       &pk.S,
@@ -188,6 +196,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       U.challenges.clone(),
     ]
     .concat();
+    info!(elapsed_ms = %sat_t.elapsed().as_millis(), "r1cs_instance_and_witness");
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (
@@ -209,6 +218,28 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       "matrix_vector_multiply"
     );
 
+    // Convert Az/Bz to small i64 values for optimized sumcheck
+    let small_polys = if is_small {
+      let small_err = || SpartanError::InternalError {
+        reason: "is_small=true but witness values do not fit in i64".to_string(),
+      };
+      let (az_small, bz_small) = rayon::join(
+        || {
+          Az.par_iter()
+            .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+            .collect::<Result<Vec<i64>, _>>()
+        },
+        || {
+          Bz.par_iter()
+            .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+            .collect::<Result<Vec<i64>, _>>()
+        },
+      );
+      Some((az_small?, bz_small?))
+    } else {
+      None
+    };
+
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
       MultilinearPolynomial::new(Az),
@@ -220,14 +251,27 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     // outer sum-check
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
-    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
-      &E::Scalar::ZERO, // claim is zero
-      tau,
-      &mut poly_Az,
-      &mut poly_Bz,
-      &mut poly_Cz,
-      &mut transcript,
-    )?;
+    let (sc_proof_outer, r_x, claims_outer) = if let Some((az_i64, bz_i64)) = small_polys {
+      SumcheckProof::prove_cubic_with_three_inputs_small_value(
+        &E::Scalar::ZERO,
+        tau,
+        &MultilinearPolynomial::new(az_i64),
+        &MultilinearPolynomial::new(bz_i64),
+        &mut poly_Az,
+        &mut poly_Bz,
+        &mut poly_Cz,
+        &mut transcript,
+      )?
+    } else {
+      SumcheckProof::prove_cubic_with_three_inputs(
+        &E::Scalar::ZERO,
+        tau,
+        &mut poly_Az,
+        &mut poly_Bz,
+        &mut poly_Cz,
+        &mut transcript,
+      )?
+    };
 
     // claims from the end of sum-check
     let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
@@ -591,7 +635,7 @@ mod tests {
     type S = SpartanSNARK<E>;
     test_snark_with::<E, S>();
 
-    type E2 = crate::provider::T256HyraxEngine;
+    type E2 = crate::provider::VestaHyraxEngine;
     type S2 = SpartanSNARK<E2>;
     test_snark_with::<E2, S2>();
   }

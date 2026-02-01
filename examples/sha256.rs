@@ -16,29 +16,40 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[path = "circuits/mod.rs"]
 mod circuits;
+mod spartan_timing_phases;
+mod timing;
 
-use circuits::Sha256Circuit;
+use circuits::SmallSha256Circuit;
 use spartan2::{
-  provider::T256HyraxEngine,
+  provider::{PallasHyraxEngine, T256HyraxEngine},
   spartan::SpartanSNARK,
   traits::{Engine, snark::R1CSSNARKTrait},
 };
+use spartan_timing_phases::{PHASES, print_table};
 use std::time::Instant;
+use timing::{TimingLayer, clear_timings, snapshot_timings};
 use tracing::{info, info_span};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
 type E = T256HyraxEngine;
 
 fn main() {
-  tracing_subscriber::fmt()
-    .with_target(false)
-    .with_ansi(true)
-    .with_env_filter(EnvFilter::from_default_env())
+  let (timing_layer, timing_data, constraints_data) = TimingLayer::new();
+
+  tracing_subscriber::registry()
+    .with(timing_layer)
+    .with(
+      tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(true)
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::from_default_env()),
+    )
     .init();
 
   // Message lengths: 2^10 … 2^11 bytes.
   let circuits: Vec<_> = (10..=11)
-    .map(|k| Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k]))
+    .map(|k| SmallSha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k], true))
     .collect();
 
   for circuit in circuits {
@@ -46,37 +57,65 @@ fn main() {
     let root_span = info_span!("bench", msg_len).entered();
     info!("======= message_len={} bytes =======", msg_len);
 
-    // SETUP
+    // SETUP (once per circuit)
     let t0 = Instant::now();
     let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup failed");
     let setup_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = setup_ms, "setup");
 
-    // PREPARE
-    let t0 = Instant::now();
-    let prep_snark =
-      SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
-    let prep_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = prep_ms, "prep_prove");
+    let mut small_timings: Vec<u64> = Vec::new();
+    let mut large_timings: Vec<u64> = Vec::new();
 
-    // PROVE
-    let t0 = Instant::now();
-    let proof =
-      SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true).expect("prove failed");
-    let prove_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = prove_ms, "prove");
+    for is_small in [true, false] {
+      let mode = if is_small { "small" } else { "large" };
+      let _mode_span = info_span!("mode", mode).entered();
+      info!("--- is_small={} ---", is_small);
 
-    // VERIFY
-    let t0 = Instant::now();
-    proof.verify(&vk).expect("verify errored");
-    let verify_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = verify_ms, "verify");
+      // Clear timing data before prove
+      clear_timings(&timing_data);
 
-    // Summary
-    info!(
-      "SUMMARY msg={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
-      msg_len, setup_ms, prep_ms, prove_ms, verify_ms
-    );
+      // PREPARE
+      let t0 = Instant::now();
+      let prep_snark =
+        SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), is_small).expect("prep_prove failed");
+      let prep_ms = t0.elapsed().as_millis();
+      info!(elapsed_ms = prep_ms, "prep_prove");
+
+      // PROVE
+      let t0 = Instant::now();
+      let proof = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, is_small)
+        .expect("prove failed");
+      let prove_ms = t0.elapsed().as_millis();
+      info!(elapsed_ms = prove_ms, "prove");
+
+      // Snapshot timings from prove
+      let timings = snapshot_timings(&timing_data, PHASES);
+      if is_small {
+        small_timings = timings;
+      } else {
+        large_timings = timings;
+      }
+
+      // VERIFY
+      let t0 = Instant::now();
+      proof.verify(&vk).expect("verify errored");
+      let verify_ms = t0.elapsed().as_millis();
+      info!(elapsed_ms = verify_ms, "verify");
+
+      info!(
+        "SUMMARY msg={}B, is_small={}, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
+        msg_len, is_small, setup_ms, prep_ms, prove_ms, verify_ms
+      );
+    }
+
+    // Print comparison table
+    let constraints = constraints_data.lock().unwrap().take();
+    let header = match constraints {
+      Some(c) => format!("===== msg={}B, constraints={} =====", msg_len, c),
+      None => format!("===== msg={}B =====", msg_len),
+    };
+    print_table(&header, &small_timings, &large_timings);
+
     drop(root_span);
   }
 }

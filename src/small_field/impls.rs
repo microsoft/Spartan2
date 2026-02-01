@@ -14,6 +14,7 @@ use super::{
 };
 use ff::PrimeField;
 use halo2curves::bn256::Fr as Bn254Fr;
+use halo2curves::t256::Fq as T256Fq;
 
 // ============================================================================
 // Helper function for try_field_to_small
@@ -59,6 +60,8 @@ impl SupportsSmallI32 for halo2curves::pasta::Fq {}
 impl SupportsSmallI64 for halo2curves::pasta::Fp {}
 impl SupportsSmallI64 for halo2curves::pasta::Fq {}
 impl SupportsSmallI64 for Bn254Fr {}
+impl SupportsSmallI32 for T256Fq {}
+impl SupportsSmallI64 for T256Fq {}
 
 // ============================================================================
 // Blanket SmallValueField<i32> for all SupportsSmallI32 fields

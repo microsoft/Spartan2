@@ -22,7 +22,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use spartan2::{
-  polys::multilinear::MultilinearPolynomial,
+  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{Bn254Engine, PallasHyraxEngine, VestaHyraxEngine},
   small_field::{DelayedReduction, SmallValueField},
   sumcheck::SumcheckProof,
@@ -185,6 +185,7 @@ where
 
   // Claim = 0 for satisfying witness
   let claim: F<E> = F::<E>::from(0u64);
+  let taus_for_verify = taus.clone();
 
   // ===== ORIGINAL METHOD =====
   // Run in scope so memory is freed before next benchmark
@@ -198,7 +199,7 @@ where
     let setup_us = t_setup.elapsed().as_micros();
 
     let t_prove = Instant::now();
-    let (_proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+    let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
       &claim,
       taus.clone(),
       &mut az1,
@@ -207,6 +208,16 @@ where
       &mut transcript1,
     )
     .unwrap();
+
+    // Verify sumcheck proof
+    {
+      let mut transcript_v = E::TE::new(b"bench");
+      let (final_claim, r_v) = proof1.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+      assert_eq!(r_v, r1, "Verify challenges must match prover");
+      let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
+      let expected = tau_eval * (evals1[0] * evals1[1] - evals1[2]);
+      assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (base)");
+    }
     let prove_us = t_prove.elapsed().as_micros();
     info!(setup_us, prove_us, "prove_cubic_with_three_inputs");
     (
@@ -230,7 +241,7 @@ where
       let setup_us = t_setup.elapsed().as_micros();
 
       let t_prove = Instant::now();
-      let (_proof2, r2, evals2) =
+      let (proof2, r2, evals2) =
         SumcheckProof::<E>::prove_cubic_with_three_inputs_split_eq_delayed::<i64>(
           &claim,
           taus.clone(),
@@ -240,6 +251,16 @@ where
           &mut transcript2,
         )
         .unwrap();
+
+      // Verify sumcheck proof
+      {
+        let mut transcript_v = E::TE::new(b"bench");
+        let (final_claim, r_v) = proof2.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+        assert_eq!(r_v, r2, "Verify challenges must match prover (split-eq)");
+        let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
+        let expected = tau_eval * (evals2[0] * evals2[1] - evals2[2]);
+        assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (split-eq)");
+      }
       let prove_us = t_prove.elapsed().as_micros();
       info!(
         setup_us,
@@ -274,7 +295,7 @@ where
     let setup_us = t_setup.elapsed().as_micros();
 
     let t_prove = Instant::now();
-    let (_proof3, r3, evals3) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+    let (proof3, r3, evals3) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
       &claim,
       taus,
       &az_small_i64,
@@ -285,6 +306,16 @@ where
       &mut transcript3,
     )
     .unwrap();
+
+    // Verify sumcheck proof
+    {
+      let mut transcript_v = E::TE::new(b"bench");
+      let (final_claim, r_v) = proof3.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+      assert_eq!(r_v, r3, "Verify challenges must match prover (i64)");
+      let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
+      let expected = tau_eval * (evals3[0] * evals3[1] - evals3[2]);
+      assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (i64)");
+    }
     let prove_us = t_prove.elapsed().as_micros();
     info!(
       setup_us,
@@ -352,8 +383,10 @@ where
   let mut transcript2 = E::TE::new(b"bench");
   let setup_us = t_setup.elapsed().as_micros();
 
+  let taus_for_verify = taus.clone();
+
   let t_prove = Instant::now();
-  let (_proof2, _r2, _evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
+  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
     &claim,
     taus,
     &az_small,
@@ -365,6 +398,16 @@ where
   )
   .unwrap();
   let prove_us = t_prove.elapsed().as_micros();
+
+  // Verify sumcheck proof
+  {
+    let mut transcript_v = E::TE::new(b"bench");
+    let (final_claim, r_v) = proof2.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+    assert_eq!(r_v, r2, "Verify challenges must match prover (i32)");
+    let tau_eval = EqPolynomial::new(taus_for_verify).evaluate(&r_v);
+    let expected = tau_eval * (evals2[0] * evals2[1] - evals2[2]);
+    assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (i32)");
+  }
   info!(
     setup_us,
     prove_us, "prove_cubic_with_three_inputs_small_value (i32/i64)"

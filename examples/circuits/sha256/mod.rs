@@ -32,15 +32,9 @@ use spartan2::traits::Engine;
 // Helper Functions
 // ============================================================================
 
-/// Compute SHA-256 hash and convert to public value scalars.
-///
-/// Each bit of the 256-bit hash becomes a field element (0 or 1).
-pub fn hash_to_public_scalars<F: PrimeField>(data: &[u8]) -> Vec<F> {
-  let mut hasher = Sha256::new();
-  hasher.update(data);
-  let hash = hasher.finalize();
-
-  hash
+/// Convert raw bytes to public value scalars (one field element per bit).
+pub fn bytes_to_public_scalars<F: PrimeField>(bytes: &[u8]) -> Vec<F> {
+  bytes
     .iter()
     .flat_map(|&byte| {
       (0..8).rev().map(move |i| {
@@ -52,6 +46,16 @@ pub fn hash_to_public_scalars<F: PrimeField>(data: &[u8]) -> Vec<F> {
       })
     })
     .collect()
+}
+
+/// Compute SHA-256 hash and convert to public value scalars.
+///
+/// Each bit of the 256-bit hash becomes a field element (0 or 1).
+pub fn hash_to_public_scalars<F: PrimeField>(data: &[u8]) -> Vec<F> {
+  let mut hasher = Sha256::new();
+  hasher.update(data);
+  let hash = hasher.finalize();
+  bytes_to_public_scalars(&hash)
 }
 
 /// Allocate preimage bytes as witness bits.
