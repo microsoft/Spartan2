@@ -10,7 +10,7 @@ use super::{
   DelayedReduction, SmallValueField, SupportsSmallI32, SupportsSmallI64, barrett,
   barrett::BarrettField,
   i64_to_field, i128_to_field,
-  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
+  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, mul_and_accumulate_6_by_2, sub_mag},
   try_field_to_i64,
 };
 use ff::PrimeField;
@@ -192,6 +192,21 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   }
 
   #[inline(always)]
+  fn unreduced_field_int_product_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    field: &Self,
+    ext_a: i64,
+    ext_b: i64,
+  ) {
+    let is_neg = (ext_a < 0) ^ (ext_b < 0);
+    let mag_a = ext_a.unsigned_abs() as u128;
+    let mag_b = ext_b.unsigned_abs() as u128;
+    let tmp6 = mul_4_by_2_ext(field.to_limbs(), mag_a);
+    let target = if is_neg { &mut acc.neg } else { &mut acc.pos };
+    mul_and_accumulate_6_by_2::<6>(&mut target.0, &tmp6, mag_b);
+  }
+
+  #[inline(always)]
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
     match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
@@ -342,6 +357,21 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
         b[3].to_limbs(),
       ],
     );
+  }
+
+  #[inline(always)]
+  fn unreduced_field_int_product_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    field: &Self,
+    ext_a: i128,
+    ext_b: i128,
+  ) {
+    let is_neg = (ext_a < 0) ^ (ext_b < 0);
+    let mag_a = ext_a.unsigned_abs();
+    let mag_b = ext_b.unsigned_abs();
+    let tmp6 = mul_4_by_2_ext(field.to_limbs(), mag_a);
+    let target = if is_neg { &mut acc.neg } else { &mut acc.pos };
+    mul_and_accumulate_6_by_2::<7>(&mut target.0, &tmp6, mag_b);
   }
 
   #[inline(always)]

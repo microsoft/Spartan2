@@ -114,6 +114,52 @@ where
     Self::unreduced_field_field_mul_add(acc3, a[3], b[3]);
   }
 
+  /// Fused three-way: `acc += field × (ext_a × ext_b)`, zero field reductions.
+  ///
+  /// # Bit-width contract
+  ///
+  /// `ext_a` and `ext_b` are typed as `IntermediateSmallValue` (i64 for i32, i128 for i64)
+  /// but their **actual** bit-width is `SmallValue_bits + l_b`, where `l_b` is the number
+  /// of Lagrange extension rounds (= log2(num_instances) for NeutronNova).
+  ///
+  /// Specifically:
+  /// - i32 witnesses (SmallValue = i32): ext values use at most 32 + l_b bits
+  ///   (e.g., l_b = 4 → 36 bits, fits in i64)
+  /// - i64 witnesses (SmallValue = i64): ext values use at most 64 + l_b bits
+  ///   (e.g., l_b = 4 → 68 bits, fits in i128)
+  ///
+  /// The product `field(256b) × ext_a × ext_b` per term is at most:
+  /// - i32: 256 + 2*(32 + l_b) = 320 + 2*l_b bits
+  /// - i64: 256 + 2*(64 + l_b) = 384 + 2*l_b bits
+  ///
+  /// Accumulating N = 2^(l/2) terms (where l = log2(num_constraints)) adds l/2 bits:
+  /// - i32: 320 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<6> (384b) → l_b ≤ 20, l ≤ 128
+  /// - i64: 384 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<7> (448b) → l_b ≤ 20, l ≤ 128
+  ///
+  /// For practical NeutronNova (l_b ≤ 8, l ≤ 26): well within bounds.
+  fn unreduced_field_int_product_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    field: &Self,
+    ext_a: Self::IntermediateSmallValue,
+    ext_b: Self::IntermediateSmallValue,
+  );
+
+  /// Batch 4 independent fused three-way multiply-accumulates for ILP.
+  /// Same bit-width contract as [`Self::unreduced_field_int_product_mul_add`].
+  #[inline(always)]
+  fn unreduced_field_int_product_mul_add_batch4(
+    accs: [&mut Self::UnreducedFieldInt; 4],
+    field: &Self,
+    ext_a: [Self::IntermediateSmallValue; 4],
+    ext_b: [Self::IntermediateSmallValue; 4],
+  ) {
+    let [acc0, acc1, acc2, acc3] = accs;
+    Self::unreduced_field_int_product_mul_add(acc0, field, ext_a[0], ext_b[0]);
+    Self::unreduced_field_int_product_mul_add(acc1, field, ext_a[1], ext_b[1]);
+    Self::unreduced_field_int_product_mul_add(acc2, field, ext_a[2], ext_b[2]);
+    Self::unreduced_field_int_product_mul_add(acc3, field, ext_a[3], ext_b[3]);
+  }
+
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 

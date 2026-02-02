@@ -35,7 +35,7 @@ use spartan2::{
   math::Math,
   neutronnova_zk::{NeutronNovaNIFS, NeutronNovaZkSNARK},
   provider::{Bn254Engine, PallasHyraxEngine},
-  small_field::SmallValueField,
+  small_field::{DelayedReduction, SmallValueField},
   traits::{
     Engine,
     circuit::SpartanCircuit,
@@ -165,13 +165,8 @@ fn run_nifs_prove<E: Engine>(
 )
 where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64>,
-  <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-    + Default
-    + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + Send
-    + Sync,
+  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+    + DelayedReduction<i64, IntermediateSmallValue = i128>,
 {
   let n_padded = instances.len().next_power_of_two();
   let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
@@ -255,13 +250,8 @@ fn run_full_nifs_prove<E: Engine>(
   timing_data: &timing::TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64>,
-  <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-    + Default
-    + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + Send
-    + Sync,
+  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+    + DelayedReduction<i64, IntermediateSmallValue = i128>,
 {
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();
@@ -381,13 +371,8 @@ fn run_sumcheck_comparison<E: Engine>(
   timing_data: &timing::TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64>,
-  <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-    + Default
-    + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-    + Send
-    + Sync,
+  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+    + DelayedReduction<i64, IntermediateSmallValue = i128>,
 {
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();
@@ -407,8 +392,13 @@ fn run_sumcheck_comparison<E: Engine>(
     NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, true).expect("prep_prove");
   let (instances, witnesses) = generate_instances_and_witnesses(&pk, &prep, &circuits, true);
 
-  let sumcheck_phases = &["nifs_folding_rounds", "vc_commit"];
-  let sumcheck_short = &["nifs_fold", "vc_commit"];
+  let sumcheck_phases = &[
+    "nifs_folding_rounds",
+    "build_accumulators_neutronnova",
+    "nifs_eq_fold",
+    "vc_commit",
+  ];
+  let sumcheck_short = &["nifs_fold", "acc_build", "eq_fold", "vc_commit"];
 
   let mut small_timings_all: Vec<Vec<u64>> = Vec::new();
   let mut large_timings_all: Vec<Vec<u64>> = Vec::new();

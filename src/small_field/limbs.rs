@@ -275,6 +275,51 @@ pub fn mul_4_by_2_ext(a: &[u64; 4], b: u128) -> [u64; 6] {
   result
 }
 
+/// Multiply 6-limb × 2-limb (u128), accumulating into N-limb wide accumulator.
+///
+/// Used for fused three-way DMR: after `mul_4_by_2_ext(field, ext_a)` produces 6 limbs,
+/// this multiplies by `ext_b` and streams the result directly into the accumulator.
+/// 12 mac operations total (two passes of 6), no intermediate buffer.
+///
+/// # Safety (overflow)
+///
+/// Caller must ensure the accumulator has enough headroom. The product of a 6-limb
+/// value and a 2-limb value is at most 8 limbs (512 bits). With `N ≥ 8`, the carry
+/// chain terminates safely via `wrapping_add` into `acc[6]`/`acc[7]`.
+#[inline(always)]
+pub fn mul_and_accumulate_6_by_2<const N: usize>(acc: &mut [u64; N], a: &[u64; 6], b: u128) {
+  let b_lo = b as u64;
+  let b_hi = (b >> 64) as u64;
+
+  // Pass 1: a × b_lo at offset 0
+  let (r0, c) = mac(acc[0], a[0], b_lo, 0);
+  let (r1, c) = mac(acc[1], a[1], b_lo, c);
+  let (r2, c) = mac(acc[2], a[2], b_lo, c);
+  let (r3, c) = mac(acc[3], a[3], b_lo, c);
+  let (r4, c) = mac(acc[4], a[4], b_lo, c);
+  let (r5, c) = mac(acc[5], a[5], b_lo, c);
+  acc[0] = r0;
+  // Propagate carry into position 6
+  let (r6, of1) = acc[6].overflowing_add(c);
+  let c1 = of1 as u64;
+
+  // Pass 2: a × b_hi at offset 1
+  let (r1, c) = mac(r1, a[0], b_hi, 0);
+  let (r2, c) = mac(r2, a[1], b_hi, c);
+  let (r3, c) = mac(r3, a[2], b_hi, c);
+  let (r4, c) = mac(r4, a[3], b_hi, c);
+  let (r5, c) = mac(r5, a[4], b_hi, c);
+  let (r6, c) = mac(r6, a[5], b_hi, c);
+  // Add both carries (c from pass 2, c1 from pass 1) into position 7
+  acc[1] = r1;
+  acc[2] = r2;
+  acc[3] = r3;
+  acc[4] = r4;
+  acc[5] = r5;
+  acc[6] = r6;
+  acc[N - 1] = acc[N - 1].wrapping_add(c).wrapping_add(c1);
+}
+
 /// Multiply 4-limb by 1-limb, producing a 5-limb result.
 #[inline(always)]
 pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {

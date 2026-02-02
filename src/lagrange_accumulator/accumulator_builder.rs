@@ -26,8 +26,9 @@ use crate::{
     multilinear::MultilinearPolynomial,
   },
 };
-use crate::small_field::SmallValueField;
+use crate::small_field::{DelayedReduction, SmallValueField};
 use ff::PrimeField;
+use num_traits::Zero;
 use rayon::prelude::*;
 
 use super::index::compute_idx4;
@@ -239,9 +240,9 @@ where
 /// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b.
 /// * `left` - Number of left constraint indices
 /// * `right` - Number of right constraint indices
-pub fn build_accumulators_neutronnova<S, SmallValue>(
-  a_layers: &[Vec<SmallValue>],
-  b_layers: &[Vec<SmallValue>],
+pub fn build_accumulators_neutronnova<S>(
+  a_layers: &[Vec<i64>],
+  b_layers: &[Vec<i64>],
   e_left: &[S],
   e_right: &[S],
   rhos: &[S],
@@ -249,27 +250,7 @@ pub fn build_accumulators_neutronnova<S, SmallValue>(
   right: usize,
 ) -> LagrangeAccumulators<S, 2>
 where
-  S: PrimeField + Send + Sync,
-  SmallValue: Copy
-    + Clone
-    + Default
-    + std::fmt::Debug
-    + PartialEq
-    + Eq
-    + std::ops::Add<Output = SmallValue>
-    + std::ops::Sub<Output = SmallValue>
-    + std::ops::Neg<Output = SmallValue>
-    + std::ops::AddAssign
-    + std::ops::SubAssign
-    + Send
-    + Sync,
-  S: SmallValueField<SmallValue>,
-  S::IntermediateSmallValue: Copy
-    + Default
-    + std::ops::Add<Output = S::IntermediateSmallValue>
-    + std::ops::Sub<Output = S::IntermediateSmallValue>
-    + Send
-    + Sync,
+  S: PrimeField + SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64, IntermediateSmallValue = i128> + Send + Sync,
 {
   let n = a_layers.len();
   let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
@@ -307,13 +288,13 @@ where
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
 
-  type State<S, ISV> = NeutronNovaThreadState<S, ISV, 2>;
+  type State<S> = NeutronNovaThreadState<S, i128, <S as DelayedReduction<i64>>::UnreducedFieldInt, 2>;
 
-  let fold_results: Vec<State<S, S::IntermediateSmallValue>> = (0..right)
+  let fold_results: Vec<State<S>> = (0..right)
     .into_par_iter()
     .fold(
-      || State::<S, S::IntermediateSmallValue>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S, S::IntermediateSmallValue>, x_r| {
+      || State::<S>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S>, x_r| {
         state.reset_partial_sums();
 
         let e_r = e_right[x_r];
@@ -348,18 +329,25 @@ where
           // Only process betas with ∞ — binary betas contribute 0 for satisfying witnesses
           // because Az_b * Bz_b = Cz_b at boolean points. At ∞ points, compute A*B only
           // (C is degree 1, so its ∞ component doesn't contribute to the degree-2 part).
+          //
+          // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
+          // az_ext/bz_ext are i128 (at most 64 + l_b bits each). The fused primitive
+          // computes field(256b) × i128 × i128 and accumulates into SignedWideLimbs<7>.
           for &beta_idx in &betas_with_infty {
-            let a_val = S::intermediate_to_field(az_ext[beta_idx]);
-            let b_val = S::intermediate_to_field(bz_ext[beta_idx]);
-            let prod = a_val * b_val;
-            state.partial_sums[beta_idx] += e_l * prod;
+            S::unreduced_field_int_product_mul_add(
+              &mut state.partial_sums[beta_idx],
+              &e_l,
+              az_ext[beta_idx],
+              bz_ext[beta_idx],
+            );
           }
         }
 
-        // Filter non-zero partial sums (only infinity betas were populated)
+        // Reduce unreduced partial sums to field elements and filter non-zero
         for &beta_idx in &betas_with_infty {
-          let val = state.partial_sums[beta_idx];
-          if !bool::from(ff::Field::is_zero(&val)) {
+          let unreduced = &state.partial_sums[beta_idx];
+          if !unreduced.is_zero() {
+            let val = S::reduce_field_int(unreduced);
             state.beta_values.push((beta_idx, val));
           }
         }

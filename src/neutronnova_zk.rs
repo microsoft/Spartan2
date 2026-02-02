@@ -34,7 +34,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness,
     SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
-  small_field::SmallValueField,
+  small_field::{DelayedReduction, SmallValueField},
   start_span,
   sumcheck::{SumcheckProof, lagrange_sumcheck},
   traits::{
@@ -189,9 +189,9 @@ where
   /// All rounds are Lagrange rounds — no transition phase, no remaining rounds.
   ///
   /// Returns (polys, r_bs, T_cur, acc_eq).
-  pub fn prove_neutronnova_small_value_sumcheck<SmallValue>(
-    a_layers: &[Vec<SmallValue>],
-    b_layers: &[Vec<SmallValue>],
+  pub fn prove_neutronnova_small_value_sumcheck(
+    a_layers: &[Vec<i64>],
+    b_layers: &[Vec<i64>],
     e_left: &[E::Scalar],
     e_right: &[E::Scalar],
     rhos: &[E::Scalar],
@@ -212,28 +212,8 @@ where
     SpartanError,
   >
   where
-    SmallValue: Copy
-      + Clone
-      + Default
-      + std::fmt::Debug
-      + PartialEq
-      + Eq
-      + std::ops::Add<Output = SmallValue>
-      + std::ops::Sub<Output = SmallValue>
-      + std::ops::Neg<Output = SmallValue>
-      + std::ops::AddAssign
-      + std::ops::SubAssign
-      + Send
-      + Sync,
-    E::Scalar: SmallValueField<SmallValue>,
-    <E::Scalar as SmallValueField<SmallValue>>::IntermediateSmallValue: Copy
-      + Default
-      + std::ops::Add<
-        Output = <E::Scalar as SmallValueField<SmallValue>>::IntermediateSmallValue,
-      > + std::ops::Sub<
-        Output = <E::Scalar as SmallValueField<SmallValue>>::IntermediateSmallValue,
-      > + Send
-      + Sync,
+    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+      + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
     let ell_b = rhos.len();
 
@@ -336,13 +316,8 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64>,
-    <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-      + Default
-      + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + Send
-      + Sync,
+    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+      + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
     // Determine padding and NIFS rounds
     let n = Us.len();
@@ -418,29 +393,43 @@ where
       let small_err = || SpartanError::InternalError {
         reason: "use_small_value=true but witness values do not fit in i64".to_string(),
       };
-      let (a_small, b_small) = rayon::join(
+      let ((a_small, b_small), c_small) = rayon::join(
         || {
-          A_layers
-            .iter()
-            .map(|a| {
-              a.iter()
-                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                .collect::<Result<Vec<i64>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()
+          rayon::join(
+            || {
+              A_layers
+                .iter()
+                .map(|a| {
+                  a.iter()
+                    .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+                    .collect::<Result<Vec<i64>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()
+            },
+            || {
+              B_layers
+                .iter()
+                .map(|b| {
+                  b.iter()
+                    .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+                    .collect::<Result<Vec<i64>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()
+            },
+          )
         },
         || {
-          B_layers
+          C_layers
             .iter()
-            .map(|b| {
-              b.iter()
+            .map(|c| {
+              c.iter()
                 .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
                 .collect::<Result<Vec<i64>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()
         },
       );
-      let (a_small, b_small) = (a_small?, b_small?);
+      let (a_small, b_small, c_small) = (a_small?, b_small?, c_small?);
 
       // Accumulator-based sumcheck (build + all ℓ_b rounds)
       let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck(
@@ -455,17 +444,68 @@ where
       // Reverse r_bs so that evals_from_points produces little-endian ordering.
       let r_bs_rev: Vec<_> = r_bs.iter().rev().cloned().collect();
       let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
-      let num_cons = A_layers[0].len();
-      let mut az_folded = vec![E::Scalar::ZERO; num_cons];
-      let mut bz_folded = vec![E::Scalar::ZERO; num_cons];
-      let mut cz_folded = vec![E::Scalar::ZERO; num_cons];
-      for (i, eq_i) in eq_evals.iter().enumerate() {
-        for k in 0..num_cons {
-          az_folded[k] += *eq_i * A_layers[i][k];
-          bz_folded[k] += *eq_i * B_layers[i][k];
-          cz_folded[k] += *eq_i * C_layers[i][k];
-        }
-      }
+      let num_cons = a_small[0].len();
+      // Parallel eq-weighted fold with field×int DMR: for each coordinate k,
+      // az_folded[k] = Σ_i eq_i * a_small[i][k]
+      // Uses unreduced_field_int_mul_add (~8 MACs) instead of field_field (~16 MACs).
+      let n_inst = eq_evals.len();
+      let (az_folded, (bz_folded, cz_folded)) = rayon::join(
+        || {
+          (0..num_cons)
+            .into_par_iter()
+            .map(|k| {
+              let mut acc =
+                <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
+              for i in 0..n_inst {
+                E::Scalar::unreduced_field_int_mul_add(
+                  &mut acc,
+                  &eq_evals[i],
+                  a_small[i][k] as i128,
+                );
+              }
+              E::Scalar::reduce_field_int(&acc)
+            })
+            .collect::<Vec<_>>()
+        },
+        || {
+          rayon::join(
+            || {
+              (0..num_cons)
+                .into_par_iter()
+                .map(|k| {
+                  let mut acc =
+                    <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
+                  for i in 0..n_inst {
+                    E::Scalar::unreduced_field_int_mul_add(
+                      &mut acc,
+                      &eq_evals[i],
+                      b_small[i][k] as i128,
+                    );
+                  }
+                  E::Scalar::reduce_field_int(&acc)
+                })
+                .collect::<Vec<_>>()
+            },
+            || {
+              (0..num_cons)
+                .into_par_iter()
+                .map(|k| {
+                  let mut acc =
+                    <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
+                  for i in 0..n_inst {
+                    E::Scalar::unreduced_field_int_mul_add(
+                      &mut acc,
+                      &eq_evals[i],
+                      c_small[i][k] as i128,
+                    );
+                  }
+                  E::Scalar::reduce_field_int(&acc)
+                })
+                .collect::<Vec<_>>()
+            },
+          )
+        },
+      );
       info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
 
       (r_bs, T_cur, acc_eq, az_folded, bz_folded, cz_folded)
@@ -814,13 +854,8 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError>
   where
-    E::Scalar: SmallValueField<i64>,
-    <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-      + Default
-      + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + Send
-      + Sync,
+    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+      + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
@@ -1591,13 +1626,8 @@ mod tests {
     is_small: bool,
   ) where
     E::PCS: FoldingEngineTrait<E>,
-    E::Scalar: SmallValueField<i64>,
-    <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue: Copy
-      + Default
-      + std::ops::Add<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + std::ops::Sub<Output = <E::Scalar as SmallValueField<i64>>::IntermediateSmallValue>
-      + Send
-      + Sync,
+    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+      + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}, is_small: {is_small}",

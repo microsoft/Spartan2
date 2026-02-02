@@ -52,6 +52,11 @@ pub trait MatVecMLE<S: PrimeField>: Sync {
   /// Convert a product to a field element (for immediate reduction path).
   /// This is used by `DelayedModularReductionDisabled` to avoid going through unreduced form.
   fn product_to_field(prod: Self::Product) -> S;
+
+  /// Convert a single witness value to a field element.
+  /// Used by `DelayedModularReductionDisabled::accumulate_eq_product_fused` which
+  /// converts each factor to field separately (avoiding product overflow).
+  fn value_to_field(v: Self::Value) -> S;
 }
 
 /// Macro to implement MatVecMLE for field-element polynomials.
@@ -81,6 +86,11 @@ macro_rules! impl_mat_vec_mle_for_field {
         #[inline]
         fn product_to_field(prod: $field) -> $field {
           prod // Already a field element
+        }
+
+        #[inline]
+        fn value_to_field(v: $field) -> $field {
+          v // Already a field element
         }
       }
     )*
@@ -121,6 +131,11 @@ impl<S: PrimeField + SmallValueField<i32, IntermediateSmallValue = i64> + Sync> 
   fn product_to_field(prod: i64) -> S {
     S::intermediate_to_field(prod)
   }
+
+  #[inline]
+  fn value_to_field(v: i32) -> S {
+    S::small_to_field(v)
+  }
 }
 
 /// Implementation for i64-valued polynomials (i64 coefficients, i128 products).
@@ -148,5 +163,10 @@ impl<S: PrimeField + SmallValueField<i64, IntermediateSmallValue = i128> + Sync>
   #[inline]
   fn product_to_field(prod: i128) -> S {
     S::intermediate_to_field(prod)
+  }
+
+  #[inline]
+  fn value_to_field(v: i64) -> S {
+    S::small_to_field(v)
   }
 }

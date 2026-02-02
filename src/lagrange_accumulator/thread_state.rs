@@ -137,9 +137,11 @@ where
 /// - `S`: Field type for partial sums and scatter accumulators
 /// - `V`: Intermediate value type for pref/extension buffers (i64 for i32 path, i128 for i64 path)
 /// - `D`: Polynomial degree bound
-pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, const D: usize> {
+pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, PS: Copy + Default, const D: usize>
+{
   /// Partial sums indexed by β, accumulated over the x_L loop. Reset each x_R iteration.
-  pub partial_sums: Vec<S>,
+  /// Type is `S` for immediate reduction, or `UnreducedFieldInt` for delayed reduction.
+  pub partial_sums: Vec<PS>,
   /// Bucket accumulators for scatter phase.
   pub scatter_acc: LagrangeAccumulators<S, D>,
   /// Prefix evaluations of Az for current x_R. Size: 2^l_b
@@ -158,10 +160,12 @@ pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, const
   pub beta_values: Vec<(usize, S)>,
 }
 
-impl<S: PrimeField, V: Copy + Default, const D: usize> NeutronNovaThreadState<S, V, D> {
+impl<S: PrimeField, V: Copy + Default, PS: Copy + Default, const D: usize>
+  NeutronNovaThreadState<S, V, PS, D>
+{
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![S::ZERO; num_betas],
+      partial_sums: vec![PS::default(); num_betas],
       scatter_acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![V::default(); prefix_size],
       bz_prefix_boolean_evals: vec![V::default(); prefix_size],
@@ -176,7 +180,7 @@ impl<S: PrimeField, V: Copy + Default, const D: usize> NeutronNovaThreadState<S,
   /// Zero out partial sums for the next x_R iteration.
   #[inline]
   pub fn reset_partial_sums(&mut self) {
-    self.partial_sums.fill(S::ZERO);
+    self.partial_sums.fill(PS::default());
     self.beta_values.clear();
   }
 }
