@@ -176,15 +176,15 @@ where
     let mut acc_b = UFI::<F, SV>::default();
     let mut acc_c = UFI::<F, SV>::default();
 
-    for p in 0..num_prefixes {
+    for (p, eq_p) in eq_table.iter().enumerate() {
       let idx = p * stride + s;
       let a_int = F::small_to_intermediate(poly_a_small.Z[idx]);
       let b_int = F::small_to_intermediate(poly_b_small.Z[idx]);
       let c_int = F::small_to_intermediate(poly_c_small.Z[idx]);
 
-      F::unreduced_field_int_mul_add(&mut acc_a, &eq_table[p], a_int);
-      F::unreduced_field_int_mul_add(&mut acc_b, &eq_table[p], b_int);
-      F::unreduced_field_int_mul_add(&mut acc_c, &eq_table[p], c_int);
+      F::unreduced_field_int_mul_add(&mut acc_a, eq_p, a_int);
+      F::unreduced_field_int_mul_add(&mut acc_b, eq_p, b_int);
+      F::unreduced_field_int_mul_add(&mut acc_c, eq_p, c_int);
     }
 
     (
@@ -908,8 +908,8 @@ impl<E: Engine> SumcheckProof<E> {
 
     // Create EqSumCheckInstance with ALL taus and advance it by l0 rounds.
     let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.clone());
-    for i in 0..l0 {
-      eq_instance.bound(&r[i]);
+    for r_i in &r[..l0] {
+      eq_instance.bound(r_i);
     }
 
     // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====

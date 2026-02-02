@@ -17,7 +17,7 @@ use super::{
   extension::LagrangeEvaluatedMultilinearPolynomial,
   index::CachedPrefixIndex,
   mat_vec_mle::MatVecMLE,
-  thread_state::{GenericThreadState, SpartanThreadState},
+  thread_state::{GenericThreadState, NeutronNovaThreadState, SpartanThreadState},
 };
 use crate::{
   csr::Csr,
@@ -26,6 +26,7 @@ use crate::{
     multilinear::MultilinearPolynomial,
   },
 };
+use crate::small_field::SmallValueField;
 use ff::PrimeField;
 use rayon::prelude::*;
 
@@ -42,7 +43,7 @@ struct EqSplitTables<S: PrimeField> {
   e_y_sizes: Vec<usize>,
 }
 
-struct BetaPrefixCache {
+pub(crate) struct BetaPrefixCache {
   cache: Csr<CachedPrefixIndex>,
   num_betas: usize,
 }
@@ -98,20 +99,9 @@ where
     num_betas,
   } = build_beta_cache::<2>(l0);
 
-  let beta_has_infinity: Vec<bool> = (0..num_betas)
-    .map(|mut t| {
-      for _ in 0..l0 {
-        if t % base == 0 {
-          return true;
-        }
-        t /= base;
-      }
-      false
-    })
+  let betas_with_infty: Vec<usize> = (0..num_betas)
+    .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
-
-  // Precompute indices of betas with infinity to avoid filter in hot loop
-  let betas_with_infty: Vec<usize> = (0..num_betas).filter(|&i| beta_has_infinity[i]).collect();
 
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
@@ -141,24 +131,24 @@ where
           #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
-            state.az_pref[prefix] = az.get(idx);
-            state.bz_pref[prefix] = bz.get(idx);
+            state.az_prefix_boolean_evals[prefix] = az.get(idx);
+            state.bz_prefix_boolean_evals[prefix] = bz.get(idx);
           }
 
           // Extend Az and Bz to Lagrange domain in-place (zero allocation)
           let az_size = LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
-            &state.az_pref,
-            &mut state.az_buf_curr,
-            &mut state.az_buf_scratch,
+            &state.az_prefix_boolean_evals,
+            &mut state.az_extended_evals,
+            &mut state.az_extended_scratch,
           );
-          let az_ext = &state.az_buf_curr[..az_size];
+          let az_ext = &state.az_extended_evals[..az_size];
 
           let bz_size = LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
-            &state.bz_pref,
-            &mut state.bz_buf_curr,
-            &mut state.bz_buf_scratch,
+            &state.bz_prefix_boolean_evals,
+            &mut state.bz_extended_evals,
+            &mut state.bz_extended_scratch,
           );
-          let bz_ext = &state.bz_buf_curr[..bz_size];
+          let bz_ext = &state.bz_extended_evals[..bz_size];
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
           // Accumulation strategy determined by Mode (unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled)
@@ -229,6 +219,175 @@ where
     }
   }
   result
+}
+
+/// Build accumulators for NeutronNova's NIFS small-value sumcheck.
+///
+/// Computes accumulators for: g(b) = Σ_{x} eq(τ, x) · (Ã_b(x) · B̃_b(x) − C̃_b(x))
+/// where b ranges over U₂^{ℓ_b} and x ranges over the constraint space.
+///
+/// Unlike Spartan (which gathers from a single polynomial), NeutronNova gathers
+/// across instances: `a_layers[p][x_L * right + x_R]` for each instance p.
+///
+/// Phase 1 MVP: immediate reduction, no DMR. All ℓ_b rounds are Lagrange (l0 = ℓ_b).
+///
+/// # Arguments
+/// * `a_layers` - Az evaluations per instance, each of length left*right
+/// * `b_layers` - Bz evaluations per instance
+/// * `e_left` - Left tensor factor of eq(τ, x): e_left[j] = eq(τ_left, j). From constraint-space challenge τ.
+/// * `e_right` - Right tensor factor of eq(τ, x): e_right[i] = eq(τ_right, i). From constraint-space challenge τ.
+/// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b.
+/// * `left` - Number of left constraint indices
+/// * `right` - Number of right constraint indices
+pub fn build_accumulators_neutronnova<S, SmallValue>(
+  a_layers: &[Vec<SmallValue>],
+  b_layers: &[Vec<SmallValue>],
+  e_left: &[S],
+  e_right: &[S],
+  rhos: &[S],
+  left: usize,
+  right: usize,
+) -> LagrangeAccumulators<S, 2>
+where
+  S: PrimeField + Send + Sync,
+  SmallValue: Copy
+    + Clone
+    + Default
+    + std::fmt::Debug
+    + PartialEq
+    + Eq
+    + std::ops::Add<Output = SmallValue>
+    + std::ops::Sub<Output = SmallValue>
+    + std::ops::Neg<Output = SmallValue>
+    + std::ops::AddAssign
+    + std::ops::SubAssign
+    + Send
+    + Sync,
+  S: SmallValueField<SmallValue>,
+  S::IntermediateSmallValue: Copy
+    + Default
+    + std::ops::Add<Output = S::IntermediateSmallValue>
+    + std::ops::Sub<Output = S::IntermediateSmallValue>
+    + Send
+    + Sync,
+{
+  let n = a_layers.len();
+  let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
+  debug_assert_eq!(n, 1 << l0, "number of instances must be power of 2");
+  debug_assert_eq!(b_layers.len(), n);
+  debug_assert_eq!(rhos.len(), l0);
+  debug_assert_eq!(e_left.len(), left);
+  debug_assert_eq!(e_right.len(), right);
+  debug_assert!(a_layers[0].len() == left * right);
+
+  let base: usize = 3; // D + 1 = 2 + 1 = 3
+  let prefix_size = n; // 2^l_b
+
+  // Build bit-reversal permutation: the vanilla path uses little-endian layer indexing
+  // (layer = b₁ + 2*b₂, where b₁ is the round-0 variable), but extend_in_place uses
+  // big-endian (flat = b₁*2 + b₂). We bit-reverse the instance index during gather
+  // so that the extension's variable ordering matches the vanilla sumcheck rounds.
+  let bit_rev: Vec<usize> = (0..prefix_size)
+    .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
+    .collect();
+  let ext_size = base.pow(l0 as u32); // 3^l_b
+
+  // Suffix eq weights over instance-folding challenges ρ.
+  // e_b[round][y] = eq(ρ_{round+1..ℓ_b}, y) — used in scatter to weight
+  // accumulator contributions by the suffix of the instance index.
+  let e_b = compute_suffix_eq_pyramid(rhos, l0);
+
+  let BetaPrefixCache {
+    cache: beta_prefix_cache,
+    num_betas,
+  } = build_beta_cache::<2>(l0);
+
+  // Precompute which betas have infinity (same as Spartan builder)
+  let betas_with_infty: Vec<usize> = (0..num_betas)
+    .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
+    .collect();
+
+  type State<S, ISV> = NeutronNovaThreadState<S, ISV, 2>;
+
+  let fold_results: Vec<State<S, S::IntermediateSmallValue>> = (0..right)
+    .into_par_iter()
+    .fold(
+      || State::<S, S::IntermediateSmallValue>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S, S::IntermediateSmallValue>, x_r| {
+        state.reset_partial_sums();
+
+        let e_r = e_right[x_r];
+
+        for (x_l, &e_l) in e_left.iter().enumerate() {
+          // Gather: collect Az_p(x_L, x_R) for each instance p, widen to IntermediateSmallValue
+          #[allow(clippy::needless_range_loop)]
+          for p in 0..prefix_size {
+            let idx = x_r * left + x_l;
+            let layer = bit_rev[p];
+            state.az_prefix_boolean_evals[p] = S::small_to_intermediate(a_layers[layer][idx]);
+            state.bz_prefix_boolean_evals[p] = S::small_to_intermediate(b_layers[layer][idx]);
+          }
+
+          // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
+          let az_size =
+            LagrangeEvaluatedMultilinearPolynomial::<S::IntermediateSmallValue, 2>::extend_in_place(
+              &state.az_prefix_boolean_evals,
+              &mut state.az_extended_evals,
+              &mut state.az_extended_scratch,
+            );
+          let az_ext = &state.az_extended_evals[..az_size];
+
+          let bz_size =
+            LagrangeEvaluatedMultilinearPolynomial::<S::IntermediateSmallValue, 2>::extend_in_place(
+              &state.bz_prefix_boolean_evals,
+              &mut state.bz_extended_evals,
+              &mut state.bz_extended_scratch,
+            );
+          let bz_ext = &state.bz_extended_evals[..bz_size];
+
+          // Only process betas with ∞ — binary betas contribute 0 for satisfying witnesses
+          // because Az_b * Bz_b = Cz_b at boolean points. At ∞ points, compute A*B only
+          // (C is degree 1, so its ∞ component doesn't contribute to the degree-2 part).
+          for &beta_idx in &betas_with_infty {
+            let a_val = S::intermediate_to_field(az_ext[beta_idx]);
+            let b_val = S::intermediate_to_field(bz_ext[beta_idx]);
+            let prod = a_val * b_val;
+            state.partial_sums[beta_idx] += e_l * prod;
+          }
+        }
+
+        // Filter non-zero partial sums (only infinity betas were populated)
+        for &beta_idx in &betas_with_infty {
+          let val = state.partial_sums[beta_idx];
+          if !bool::from(ff::Field::is_zero(&val)) {
+            state.beta_values.push((beta_idx, val));
+          }
+        }
+
+        // Scatter: weight each partial sum by e_r and e_b, then dispatch into accumulator buckets
+        for &(beta_idx, val) in &state.beta_values {
+          let z_beta = e_r * val;
+          for pref in &beta_prefix_cache[beta_idx] {
+            state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx] +=
+              e_b[pref.round_0][pref.y_idx] * z_beta;
+          }
+        }
+
+        state
+      },
+    )
+    .collect();
+
+  // Merge thread-local scatter accumulators
+  let merged = fold_results
+    .into_iter()
+    .reduce(|mut a, b| {
+      a.scatter_acc.merge(&b.scatter_acc);
+      a
+    })
+    .expect("right > 0 guarantees non-empty fold results");
+
+  merged.scatter_acc
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.
@@ -402,7 +561,7 @@ fn precompute_eq_tables<S: PrimeField>(taus: &[S], l0: usize) -> (EqSplitTables<
   )
 }
 
-fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
+pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
   let base: usize = D + 1;
   let num_betas = base.pow(l0 as u32);
   let mut cache: Csr<CachedPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
@@ -548,14 +707,14 @@ mod tests {
       for x_in_bits in 0..(1 << in_vars) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-        let az_pref = az.gather_prefix_evals(l0, suffix);
-        let bz_pref = bz.gather_prefix_evals(l0, suffix);
+        let az_prefix_boolean_evals = az.gather_prefix_evals(l0, suffix);
+        let bz_prefix_boolean_evals = bz.gather_prefix_evals(l0, suffix);
         let cz_pref = cz.gather_prefix_evals(l0, suffix);
 
         let az_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_prefix_boolean_evals);
         let bz_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_prefix_boolean_evals);
         let cz_ext =
           LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
@@ -980,14 +1139,14 @@ mod tests {
       for x_in_bits in 0..(1 << in_vars) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-        let az_pref = az.gather_prefix_evals(L0, suffix);
-        let bz_pref = bz.gather_prefix_evals(L0, suffix);
+        let az_prefix_boolean_evals = az.gather_prefix_evals(L0, suffix);
+        let bz_prefix_boolean_evals = bz.gather_prefix_evals(L0, suffix);
         let cz_pref = cz.gather_prefix_evals(L0, suffix);
 
         let az_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_pref);
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_prefix_boolean_evals);
         let bz_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_pref);
+          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_prefix_boolean_evals);
         let cz_ext =
           LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 

@@ -50,7 +50,10 @@ pub use extension::LagrangeEvaluatedMultilinearPolynomial;
 pub use accumulator::{LagrangeAccumulators, RoundAccumulator};
 
 // Builder functions
-pub use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators, build_accumulators_spartan};
+pub use accumulator_builder::{
+  SPARTAN_T_DEGREE, build_accumulators, build_accumulators_neutronnova,
+  build_accumulators_spartan,
+};
 
 // Delayed modular reduction mode selection
 pub use delay_modular_reduction_mode::{

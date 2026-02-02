@@ -25,8 +25,8 @@ use ff::PrimeField;
 /// ```ignore
 /// |mut acc, x_out_bits| {
 ///     let mut beta_partial_sums = vec![S::ZERO; num_betas];     // ALLOC
-///     let mut az_pref = vec![...];                               // ALLOC
-///     let mut bz_pref = vec![...];                               // ALLOC
+///     let mut az_prefix_boolean_evals = vec![...];                               // ALLOC
+///     let mut bz_prefix_boolean_evals = vec![...];                               // ALLOC
 ///     let mut buf_a = vec![...];                                 // ALLOC
 ///     let mut buf_b = vec![...];                                 // ALLOC
 ///     ...
@@ -45,7 +45,7 @@ use ff::PrimeField;
 ///
 /// # Buffer Layout
 ///
-/// - `az_buf_curr/scratch`, `bz_buf_curr/scratch`: Separate buffer pairs for Az and Bz
+/// - `az_extended_evals/scratch`, `bz_extended_evals/scratch`: Separate buffer pairs for Az and Bz
 ///   Lagrange extensions. After `extend_in_place`, the result is always in `*_buf_curr`.
 ///   We need 4 buffers (not 2) because both extension results must be available
 ///   simultaneously to compute Az(β) × Bz(β) for each β.
@@ -77,17 +77,17 @@ where
   /// Type determined by Mode: unreduced F×F for DelayedModularReductionEnabled, LagrangeAccumulator for DelayedModularReductionDisabled.
   pub scatter_acc: LagrangeAccumulators<Mode::ScatterElement, D>,
   /// Prefix evaluations of Az for current suffix. Size: 2^l0
-  pub az_pref: Vec<V>,
+  pub az_prefix_boolean_evals: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
-  pub bz_pref: Vec<V>,
+  pub bz_prefix_boolean_evals: Vec<V>,
   /// Result buffer for Az Lagrange extension. After `extend_in_place`, contains the extended values.
-  pub az_buf_curr: Vec<V>,
+  pub az_extended_evals: Vec<V>,
   /// Scratch buffer for Az Lagrange extension. Used during iterative extension.
-  pub az_buf_scratch: Vec<V>,
+  pub az_extended_scratch: Vec<V>,
   /// Result buffer for Bz Lagrange extension. After `extend_in_place`, contains the extended values.
-  pub bz_buf_curr: Vec<V>,
+  pub bz_extended_evals: Vec<V>,
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
-  pub bz_buf_scratch: Vec<V>,
+  pub bz_extended_scratch: Vec<V>,
   /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
   /// Eliminates per-x_out allocation overhead.
   pub beta_values: Vec<(usize, S)>,
@@ -104,12 +104,12 @@ where
     Self {
       partial_sums: vec![Mode::PartialSum::default(); num_betas],
       scatter_acc: LagrangeAccumulators::new(l0),
-      az_pref: vec![V::default(); prefix_size],
-      bz_pref: vec![V::default(); prefix_size],
-      az_buf_curr: vec![V::default(); ext_size],
-      az_buf_scratch: vec![V::default(); ext_size],
-      bz_buf_curr: vec![V::default(); ext_size],
-      bz_buf_scratch: vec![V::default(); ext_size],
+      az_prefix_boolean_evals: vec![V::default(); prefix_size],
+      bz_prefix_boolean_evals: vec![V::default(); prefix_size],
+      az_extended_evals: vec![V::default(); ext_size],
+      az_extended_scratch: vec![V::default(); ext_size],
+      bz_extended_evals: vec![V::default(); ext_size],
+      bz_extended_scratch: vec![V::default(); ext_size],
       beta_values: Vec::with_capacity(num_betas),
     }
   }
@@ -121,6 +121,62 @@ where
     for sum in &mut self.partial_sums {
       *sum = Mode::PartialSum::default();
     }
+    self.beta_values.clear();
+  }
+}
+
+/// Thread-local scratch buffers for `build_accumulators_neutronnova`.
+///
+/// Simplified version of `SpartanThreadState` — no `Mode` generics, no `MatVecMLE`.
+/// Phase 1 MVP uses immediate reduction (field elements for partial_sums/scatter).
+/// Pref/extension buffers use `IntermediateSmallValue` (i64/i128) to avoid overflow
+/// during ExtendToU₂ which adds up to ℓ_b bits of growth.
+///
+/// # Type Parameters
+///
+/// - `S`: Field type for partial sums and scatter accumulators
+/// - `V`: Intermediate value type for pref/extension buffers (i64 for i32 path, i128 for i64 path)
+/// - `D`: Polynomial degree bound
+pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, const D: usize> {
+  /// Partial sums indexed by β, accumulated over the x_L loop. Reset each x_R iteration.
+  pub partial_sums: Vec<S>,
+  /// Bucket accumulators for scatter phase.
+  pub scatter_acc: LagrangeAccumulators<S, D>,
+  /// Prefix evaluations of Az for current x_R. Size: 2^l_b
+  pub az_prefix_boolean_evals: Vec<V>,
+  /// Prefix evaluations of Bz for current x_R. Size: 2^l_b
+  pub bz_prefix_boolean_evals: Vec<V>,
+  /// Result buffer for Az Lagrange extension. Size: 3^l_b
+  pub az_extended_evals: Vec<V>,
+  /// Scratch buffer for Az Lagrange extension.
+  pub az_extended_scratch: Vec<V>,
+  /// Result buffer for Bz Lagrange extension.
+  pub bz_extended_evals: Vec<V>,
+  /// Scratch buffer for Bz Lagrange extension.
+  pub bz_extended_scratch: Vec<V>,
+  /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
+  pub beta_values: Vec<(usize, S)>,
+}
+
+impl<S: PrimeField, V: Copy + Default, const D: usize> NeutronNovaThreadState<S, V, D> {
+  pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
+    Self {
+      partial_sums: vec![S::ZERO; num_betas],
+      scatter_acc: LagrangeAccumulators::new(l0),
+      az_prefix_boolean_evals: vec![V::default(); prefix_size],
+      bz_prefix_boolean_evals: vec![V::default(); prefix_size],
+      az_extended_evals: vec![V::default(); ext_size],
+      az_extended_scratch: vec![V::default(); ext_size],
+      bz_extended_evals: vec![V::default(); ext_size],
+      bz_extended_scratch: vec![V::default(); ext_size],
+      beta_values: Vec::with_capacity(num_betas),
+    }
+  }
+
+  /// Zero out partial sums for the next x_R iteration.
+  #[inline]
+  pub fn reset_partial_sums(&mut self) {
+    self.partial_sums.fill(S::ZERO);
     self.beta_values.clear();
   }
 }
