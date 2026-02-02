@@ -42,7 +42,7 @@ where
 {
   /// Unreduced accumulator for field × integer products.
   /// - For i32/i64: SignedWideLimbs<6> (384 bits)
-  /// - For i64/i128: SignedWideLimbs<8> (512 bits)
+  /// - For i64/i128: SignedWideLimbs<7> (448 bits)
   ///
   /// Sized to safely sum 2^(l/2) terms without overflow, assuming:
   /// `field_bits + product_bits + (l/2) < 64*N`

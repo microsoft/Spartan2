@@ -35,7 +35,6 @@ use std::ops::Neg;
 /// | `R256_MOD` | 2^256 mod p | Reducing 5th limb (bits 256-319) |
 /// | `R320_MOD` | 2^320 mod p | Reducing 6th limb (bits 320-383) |
 /// | `R384_MOD` | 2^384 mod p | Reducing 7th limb (bits 384-447) |
-/// | `R448_MOD` | 2^448 mod p | Reducing 8th limb (bits 448-511) |
 /// | `R512_MOD` | 2^512 mod p | Reducing 9th limb (bits 512-575) |
 ///
 /// # Example: 6-limb Reduction
@@ -87,9 +86,6 @@ pub trait FieldReductionConstants {
   /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
   const R384_MOD: [u64; 4];
 
-  /// 2^448 mod p - reduces the 8th limb (index 7) of a wide integer
-  const R448_MOD: [u64; 4];
-
   /// 2^512 mod p - reduces the 9th limb (index 8) of a wide integer
   const R512_MOD: [u64; 4];
 
@@ -137,14 +133,6 @@ impl FieldReductionConstants for Fp {
     0x66d3caf41be6eb52,
     0x9b4b3c4bfffffffc,
     0x36e59c0fdacc1b91,
-  ];
-
-  // 2^448 mod p
-  const R448_MOD: [u64; 4] = [
-    0x9b9858f294cf91ba,
-    0x8635bd2c4252b065,
-    0x496d41af7b9cb714,
-    0x1b4b3c4bfffffffc,
   ];
 
   // 2^512 mod p
@@ -200,13 +188,6 @@ impl FieldReductionConstants for Fq {
     0x36e59c0fd9ad5c89,
   ];
 
-  // 2^448 mod q
-  const R448_MOD: [u64; 4] = [
-    0xcc920bb9994a8dd9,
-    0x87a7dcbe1ff6e0d7,
-    0x496d41af7ccfdaa9,
-    0x0ee4537bfffffffc,
-  ];
 
   // 2^512 mod q
   const R512_MOD: [u64; 4] = [
@@ -261,13 +242,6 @@ impl FieldReductionConstants for Bn254Fr {
     0x03d581d748ffa25e,
   ];
 
-  // 2^448 mod r
-  const R448_MOD: [u64; 4] = [
-    0x5665c3b5c177f51a,
-    0x00e7f02ade75c713,
-    0xb09192e52f747168,
-    0x0621c0bbcccdc65d,
-  ];
 
   // 2^512 mod r
   const R512_MOD: [u64; 4] = [
@@ -322,13 +296,6 @@ impl FieldReductionConstants for T256Fq {
     0xfffffffe00000001,
   ];
 
-  // 2^448 mod p
-  const R448_MOD: [u64; 4] = [
-    0xfffffffeffffffff,
-    0xfffffffffffffffe,
-    0x0000000200000000,
-    0x0000000000000003,
-  ];
 
   // 2^512 mod p
   const R512_MOD: [u64; 4] = [
@@ -571,36 +538,30 @@ pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64
 }
 
 // ==========================================================================
-// 8-limb Barrett reduction (for i64/i128 UnreducedFieldInt accumulator)
+// 7-limb Barrett reduction (for i64/i128 UnreducedFieldInt accumulator)
 // ==========================================================================
 
-/// Generic 8-limb Barrett reduction using trait constants.
+/// Generic 7-limb Barrett reduction using trait constants.
 ///
-/// Reduces an 8-limb value (up to 512 bits) modulo p using precomputed
-/// R384 = 2^384 mod p and R448 = 2^448 mod p constants, then delegates
-/// to 6-limb reduction.
+/// Reduces a 7-limb value (up to 448 bits) modulo p by folding limb 6
+/// using R384 = 2^384 mod p, then delegating to 6-limb reduction.
 #[inline]
-pub(crate) fn barrett_reduce_8<F: FieldReductionConstants>(c: &[u64; 8]) -> [u64; 4] {
-  // Reduce high limbs: c[6] * 2^384 + c[7] * 2^448
+pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
   let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);
-  let c7_contrib = mul_4_by_1(&F::R448_MOD, c[7]);
 
-  // Sum: c[0..6] + c6_contrib + c7_contrib
   let mut sum = [0u64; 6];
   let mut carry = 0u128;
   for i in 0..4 {
-    let s = (c[i] as u128) + (c6_contrib[i] as u128) + (c7_contrib[i] as u128) + carry;
+    let s = (c[i] as u128) + (c6_contrib[i] as u128) + carry;
     sum[i] = s as u64;
     carry = s >> 64;
   }
-  // Limbs 4-5: add c[4], c[5], and carry from high contributions
-  let s = (c[4] as u128) + (c6_contrib[4] as u128) + (c7_contrib[4] as u128) + carry;
+  let s = (c[4] as u128) + (c6_contrib[4] as u128) + carry;
   sum[4] = s as u64;
   carry = s >> 64;
   let s = (c[5] as u128) + carry;
   sum[5] = s as u64;
 
-  // Now reduce the 6-limb result
   barrett_reduce_6::<F>(&sum)
 }
 

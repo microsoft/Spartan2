@@ -9,12 +9,12 @@
 use super::{
   DelayedReduction, SmallValueField, SupportsSmallI32, SupportsSmallI64, barrett,
   barrett::BarrettField,
-  i64_to_field, i128_to_field, try_field_to_i64,
+  i64_to_field, i128_to_field,
   limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
+  try_field_to_i64,
 };
 use ff::PrimeField;
-use halo2curves::bn256::Fr as Bn254Fr;
-use halo2curves::t256::Fq as T256Fq;
+use halo2curves::{bn256::Fr as Bn254Fr, t256::Fq as T256Fq};
 
 // ============================================================================
 // Helper function for try_field_to_small
@@ -176,8 +176,18 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   ) {
     batch_unreduced_field_field_mul_add_x4(
       accs,
-      [a[0].to_limbs(), a[1].to_limbs(), a[2].to_limbs(), a[3].to_limbs()],
-      [b[0].to_limbs(), b[1].to_limbs(), b[2].to_limbs(), b[3].to_limbs()],
+      [
+        a[0].to_limbs(),
+        a[1].to_limbs(),
+        a[2].to_limbs(),
+        a[3].to_limbs(),
+      ],
+      [
+        b[0].to_limbs(),
+        b[1].to_limbs(),
+        b[2].to_limbs(),
+        b[3].to_limbs(),
+      ],
     );
   }
 
@@ -246,7 +256,7 @@ impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
 
   fn try_field_to_small(val: &Self) -> Option<i64> {
     try_field_to_i64(val)
-  }
+  } 
 }
 
 // ============================================================================
@@ -254,7 +264,7 @@ impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
 // ============================================================================
 
 impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
-  type UnreducedFieldInt = SignedWideLimbs<8>;
+  type UnreducedFieldInt = SignedWideLimbs<7>;
   type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
@@ -292,9 +302,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
     target.0[4] = r4;
     target.0[5] = r5;
     // Propagate final carry through remaining limbs (just add)
-    let (r6, of) = target.0[6].overflowing_add(c);
-    target.0[6] = r6;
-    target.0[7] = target.0[7].wrapping_add(of as u64);
+    target.0[6] = target.0[6].wrapping_add(c);
   }
 
   #[inline(always)]
@@ -321,17 +329,27 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   ) {
     batch_unreduced_field_field_mul_add_x4(
       accs,
-      [a[0].to_limbs(), a[1].to_limbs(), a[2].to_limbs(), a[3].to_limbs()],
-      [b[0].to_limbs(), b[1].to_limbs(), b[2].to_limbs(), b[3].to_limbs()],
+      [
+        a[0].to_limbs(),
+        a[1].to_limbs(),
+        a[2].to_limbs(),
+        a[3].to_limbs(),
+      ],
+      [
+        b[0].to_limbs(),
+        b[1].to_limbs(),
+        b[2].to_limbs(),
+        b[3].to_limbs(),
+      ],
     );
   }
 
   #[inline(always)]
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self {
     // Subtract in limb space first, then reduce once (saves one Barrett reduction)
-    match sub_mag::<8>(&acc.pos.0, &acc.neg.0) {
-      SubMagResult::Positive(mag) => F::from_limbs(barrett::barrett_reduce_8::<F>(&mag)),
-      SubMagResult::Negative(mag) => -F::from_limbs(barrett::barrett_reduce_8::<F>(&mag)),
+    match sub_mag::<7>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => F::from_limbs(barrett::barrett_reduce_7::<F>(&mag)),
+      SubMagResult::Negative(mag) => -F::from_limbs(barrett::barrett_reduce_7::<F>(&mag)),
     }
   }
 
