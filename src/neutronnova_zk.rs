@@ -189,7 +189,7 @@ where
   /// All rounds are Lagrange rounds — no transition phase, no remaining rounds.
   ///
   /// Returns (polys, r_bs, T_cur, acc_eq).
-  fn prove_neutronnova_small_value_sumcheck<SmallValue>(
+  pub fn prove_neutronnova_small_value_sumcheck<SmallValue>(
     a_layers: &[Vec<SmallValue>],
     b_layers: &[Vec<SmallValue>],
     e_left: &[E::Scalar],
@@ -255,7 +255,6 @@ where
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO;
     let mut acc_eq = E::Scalar::ONE;
-
     // 3. Run ℓ_b sumcheck rounds
     for (i, rho_i) in rhos.iter().enumerate() {
       let (_round_span, round_t) = start_span!("nifs_smallvalue_round", round = i);
@@ -279,10 +278,12 @@ where
       let c = &poly.coeffs;
       vc.nifs_polys[i] = [c[0], c[1], c[2], c[3]];
 
-      // Transcript interaction
+      // Transcript interaction (vc_commit)
+      let (_vc_span, vc_t) = start_span!("vc_commit");
       let chals = SatisfyingAssignment::<E>::process_round(
         vc_state, vc_shape, vc_ck, vc, i, transcript,
       )?;
+      info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
       let r_i = chals[0];
 
       // Update state
@@ -301,7 +302,6 @@ where
         "nifs_smallvalue_round"
       );
     }
-
     Ok((polys, r_bs, T_cur, acc_eq))
   }
 
@@ -524,8 +524,10 @@ where
         let c = &poly_t.coeffs;
         vc.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
 
+        let (_vc_span, vc_t) = start_span!("vc_commit");
         let chals =
           SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, t, transcript)?;
+        info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
         let r_b = chals[0];
         r_bs.push(r_b);
 
@@ -600,13 +602,20 @@ where
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaProverKey<E: Engine> {
-  ck: CommitmentKey<E>,
-  S_step: SplitR1CSShape<E>,
-  S_core: SplitR1CSShape<E>,
-  vk_digest: SpartanDigest, // digest of the verifier's key
-  vc_shape: SplitMultiRoundR1CSShape<E>,
-  vc_shape_regular: R1CSShape<E>,
-  vc_ck: CommitmentKey<E>,
+  /// Commitment key
+  pub ck: CommitmentKey<E>,
+  /// Step circuit R1CS shape
+  pub S_step: SplitR1CSShape<E>,
+  /// Core circuit R1CS shape
+  pub S_core: SplitR1CSShape<E>,
+  /// Digest of the verifier's key
+  pub vk_digest: SpartanDigest,
+  /// Verifier circuit multi-round shape
+  pub vc_shape: SplitMultiRoundR1CSShape<E>,
+  /// Verifier circuit regular shape
+  pub vc_shape_regular: R1CSShape<E>,
+  /// Verifier circuit commitment key
+  pub vc_ck: CommitmentKey<E>,
 }
 
 /// A type that represents the verifier's key
@@ -646,8 +655,10 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct NeutronNovaPrepZkSNARK<E: Engine> {
-  ps_step: Vec<PrecommittedState<E>>,
-  ps_core: PrecommittedState<E>,
+  /// Pre-committed state for each step circuit
+  pub ps_step: Vec<PrecommittedState<E>>,
+  /// Pre-committed state for the core circuit
+  pub ps_core: PrecommittedState<E>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK

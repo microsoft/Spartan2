@@ -23,10 +23,16 @@
 // private modules
 mod csr;
 mod digest;
-mod math;
+/// Math utilities (log2, etc.).
+#[allow(missing_docs)]
+pub mod math;
 mod nifs;
-mod r1cs;
-mod zk;
+/// R1CS types: instances, witnesses, shapes.
+#[allow(missing_docs)]
+pub mod r1cs;
+/// Zero-knowledge helpers: verifier circuits, satisfying assignments.
+#[allow(missing_docs)]
+pub mod zk;
 
 /// Lagrange accumulator algorithm for small-value sumcheck optimization (Algorithm 6).
 pub mod lagrange_accumulator;

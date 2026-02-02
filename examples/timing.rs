@@ -80,7 +80,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for TimingLayer {
 
     if let (Some(ms), Some(msg)) = (visitor.elapsed_ms, visitor.message) {
       if let Ok(mut map) = self.data.lock() {
-        map.insert(msg, ms);
+        *map.entry(msg).or_insert(0) += ms;
       }
     }
     if let Some(c) = visitor.constraints {

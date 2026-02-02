@@ -67,17 +67,22 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSWitness<E: Engine> {
-  pub(crate) is_small: bool, // whether the witness elements fit in machine words
-  pub(crate) W: Vec<E::Scalar>,
-  pub(crate) r_W: Blind<E>,
+  /// Whether the witness elements fit in machine words.
+  pub is_small: bool,
+  /// The witness vector.
+  pub W: Vec<E::Scalar>,
+  /// Blinding factor for the witness commitment.
+  pub r_W: Blind<E>,
 }
 
 /// A type that holds an R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct R1CSInstance<E: Engine> {
-  pub(crate) comm_W: Commitment<E>,
-  pub(crate) X: Vec<E::Scalar>,
+  /// Commitment to the witness.
+  pub comm_W: Commitment<E>,
+  /// Public input/output vector.
+  pub X: Vec<E::Scalar>,
 }
 
 /// A type that holds a witness for a given Relaxed R1CS instance
@@ -646,21 +651,34 @@ impl<E: Engine> TranscriptReprTrait<E::GE> for R1CSInstance<E> {
 /// A type that holds a split R1CS shape
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitR1CSShape<E: Engine> {
-  pub(crate) num_cons: usize,
+  /// Number of constraints (padded).
+  pub num_cons: usize,
 
-  pub(crate) num_cons_unpadded: usize, // number of constraints before padding
-  pub(crate) num_shared_unpadded: usize, // shared variables before padding
-  pub(crate) num_precommitted_unpadded: usize, // precommitted variables before padding
-  pub(crate) num_rest_unpadded: usize, // rest of the variables before padding
+  /// Number of constraints before padding.
+  pub num_cons_unpadded: usize,
+  /// Shared variables before padding.
+  pub num_shared_unpadded: usize,
+  /// Precommitted variables before padding.
+  pub num_precommitted_unpadded: usize,
+  /// Rest of variables before padding.
+  pub num_rest_unpadded: usize,
 
-  pub(crate) num_shared: usize,       // shared variables
-  pub(crate) num_precommitted: usize, // precommitted variables
-  pub(crate) num_rest: usize,         // rest of the variables
-  pub(crate) num_public: usize,       // number of public variables
-  pub(crate) num_challenges: usize,   // number of public challenges
-  pub(crate) A: SparseMatrix<E::Scalar>,
-  pub(crate) B: SparseMatrix<E::Scalar>,
-  pub(crate) C: SparseMatrix<E::Scalar>,
+  /// Number of shared variables.
+  pub num_shared: usize,
+  /// Number of precommitted variables.
+  pub num_precommitted: usize,
+  /// Number of rest variables.
+  pub num_rest: usize,
+  /// Number of public variables.
+  pub num_public: usize,
+  /// Number of public challenges.
+  pub num_challenges: usize,
+  /// A matrix.
+  pub A: SparseMatrix<E::Scalar>,
+  /// B matrix.
+  pub B: SparseMatrix<E::Scalar>,
+  /// C matrix.
+  pub C: SparseMatrix<E::Scalar>,
   #[serde(skip, default = "OnceCell::new")]
   pub(crate) digest: OnceCell<E::Scalar>,
 }
