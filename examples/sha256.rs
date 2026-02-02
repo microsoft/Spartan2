@@ -20,18 +20,18 @@ mod spartan_timing_phases;
 mod timing;
 
 use circuits::SmallSha256Circuit;
+use spartan_timing_phases::{PHASES, print_table};
 use spartan2::{
-  provider::{PallasHyraxEngine, T256HyraxEngine},
+  provider::Bn254Engine,
   spartan::SpartanSNARK,
   traits::{Engine, snark::R1CSSNARKTrait},
 };
-use spartan_timing_phases::{PHASES, print_table};
 use std::time::Instant;
 use timing::{TimingLayer, clear_timings, snapshot_timings};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
-type E = T256HyraxEngine;
+type E = Bn254Engine;
 
 fn main() {
   let (timing_layer, timing_data, constraints_data) = TimingLayer::new();

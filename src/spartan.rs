@@ -223,19 +223,28 @@ where
       let small_err = || SpartanError::InternalError {
         reason: "is_small=true but witness values do not fit in i64".to_string(),
       };
-      let (az_small, bz_small) = rayon::join(
+      let ((az_small, bz_small), cz_small) = rayon::join(
         || {
-          Az.par_iter()
-            .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-            .collect::<Result<Vec<i64>, _>>()
+          rayon::join(
+            || {
+              Az.par_iter()
+                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+                .collect::<Result<Vec<i64>, _>>()
+            },
+            || {
+              Bz.par_iter()
+                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
+                .collect::<Result<Vec<i64>, _>>()
+            },
+          )
         },
         || {
-          Bz.par_iter()
+          Cz.par_iter()
             .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
             .collect::<Result<Vec<i64>, _>>()
         },
       );
-      Some((az_small?, bz_small?))
+      Some((az_small?, bz_small?, cz_small?))
     } else {
       None
     };
@@ -251,18 +260,17 @@ where
     // outer sum-check
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
-    let (sc_proof_outer, r_x, claims_outer) = if let Some((az_i64, bz_i64)) = small_polys {
-      SumcheckProof::prove_cubic_with_three_inputs_small_value(
-        &E::Scalar::ZERO,
-        tau,
-        &MultilinearPolynomial::new(az_i64),
-        &MultilinearPolynomial::new(bz_i64),
-        &mut poly_Az,
-        &mut poly_Bz,
-        &mut poly_Cz,
-        &mut transcript,
-      )?
-    } else {
+    let (sc_proof_outer, r_x, claims_outer) =
+      if let Some((az_i64, bz_i64, cz_i64)) = small_polys {
+        SumcheckProof::prove_cubic_with_three_inputs_small_value(
+          &E::Scalar::ZERO,
+          tau,
+          &MultilinearPolynomial::new(az_i64),
+          &MultilinearPolynomial::new(bz_i64),
+          &MultilinearPolynomial::new(cz_i64),
+          &mut transcript,
+        )?
+      } else {
       SumcheckProof::prove_cubic_with_three_inputs(
         &E::Scalar::ZERO,
         tau,

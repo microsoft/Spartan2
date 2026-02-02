@@ -283,14 +283,11 @@ where
     // Create i64 small-value polynomials
     let az_i64: Vec<i64> = az_i32.iter().map(|&v| v as i64).collect();
     let bz_i64: Vec<i64> = bz_i32.iter().map(|&v| v as i64).collect();
+    let cz_i64: Vec<i64> = az_i64.iter().zip(bz_i64.iter()).map(|(&a, &b)| a * b).collect();
     let az_small_i64 = MultilinearPolynomial::new(az_i64);
     let bz_small_i64 = MultilinearPolynomial::new(bz_i64);
+    let cz_small_i64 = MultilinearPolynomial::new(cz_i64);
 
-    // Need fresh field-element polynomials for binding in later rounds
-    let (az_vals, bz_vals, cz_vals) = make_field_polys::<F<E>>(&az_i32, &bz_i32);
-    let mut az3 = MultilinearPolynomial::new(az_vals);
-    let mut bz3 = MultilinearPolynomial::new(bz_vals);
-    let mut cz3 = MultilinearPolynomial::new(cz_vals);
     let mut transcript3 = E::TE::new(b"bench");
     let setup_us = t_setup.elapsed().as_micros();
 
@@ -300,9 +297,7 @@ where
       taus,
       &az_small_i64,
       &bz_small_i64,
-      &mut az3,
-      &mut bz3,
-      &mut cz3,
+      &cz_small_i64,
       &mut transcript3,
     )
     .unwrap();
@@ -375,11 +370,9 @@ where
   let t_setup = Instant::now();
   let az_small = MultilinearPolynomial::new(az_i32.to_vec());
   let bz_small = MultilinearPolynomial::new(bz_i32.to_vec());
+  let cz_small_vals: Vec<i32> = az_i32.iter().zip(bz_i32.iter()).map(|(&a, &b)| a * b).collect();
+  let cz_small = MultilinearPolynomial::new(cz_small_vals);
 
-  let (az_vals, bz_vals, cz_vals) = make_field_polys::<F<E>>(az_i32, bz_i32);
-  let mut az2 = MultilinearPolynomial::new(az_vals);
-  let mut bz2 = MultilinearPolynomial::new(bz_vals);
-  let mut cz2 = MultilinearPolynomial::new(cz_vals);
   let mut transcript2 = E::TE::new(b"bench");
   let setup_us = t_setup.elapsed().as_micros();
 
@@ -391,9 +384,7 @@ where
     taus,
     &az_small,
     &bz_small,
-    &mut az2,
-    &mut bz2,
-    &mut cz2,
+    &cz_small,
     &mut transcript2,
   )
   .unwrap();

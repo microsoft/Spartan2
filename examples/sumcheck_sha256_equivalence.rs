@@ -160,7 +160,7 @@ where
   let (proof1, r1, evals1, original_us) = {
     let mut az1 = MultilinearPolynomial::new(az.clone());
     let mut bz1 = MultilinearPolynomial::new(bz.clone());
-    let mut cz1 = MultilinearPolynomial::new(cz.clone());
+    let mut cz1 = MultilinearPolynomial::new(cz);
 
     info!("Running prove_cubic_with_three_inputs (original method)...");
     let mut transcript1 = <E as Engine>::TE::new(b"test_equivalence");
@@ -224,9 +224,12 @@ where
 
       // Run in scope so memory is freed after benchmark
       let (proof2, r2, evals2, smallvalue_us) = {
-        let mut az2 = MultilinearPolynomial::new(az);
-        let mut bz2 = MultilinearPolynomial::new(bz);
-        let mut cz2 = MultilinearPolynomial::new(cz);
+        let cz_small_vals: Vec<i64> = az.iter().zip(bz.iter()).map(|(a, b)| {
+          let a_small = <F as SmallValueField<i64>>::try_field_to_small(a).unwrap();
+          let b_small = <F as SmallValueField<i64>>::try_field_to_small(b).unwrap();
+          a_small * b_small
+        }).collect();
+        let cz_small = MultilinearPolynomial::new(cz_small_vals);
         let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
 
         info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
@@ -236,9 +239,7 @@ where
           tau,
           &az_small,
           &bz_small,
-          &mut az2,
-          &mut bz2,
-          &mut cz2,
+          &cz_small,
           &mut transcript2,
         )
         .expect("prove_cubic_with_three_inputs_small_value failed");

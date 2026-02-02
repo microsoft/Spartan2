@@ -72,6 +72,9 @@ where
   /// Convert IntermediateSmallValue to field element.
   fn intermediate_to_field(val: Self::IntermediateSmallValue) -> Self;
 
+  /// Widen SmallValue to IntermediateSmallValue (i32 → i64, or i64 → i128).
+  fn small_to_intermediate(val: SmallValue) -> Self::IntermediateSmallValue;
+
   /// Try to convert a field element to SmallValue.
   /// Returns None if the value doesn't fit.
   fn try_field_to_small(val: &Self) -> Option<SmallValue>;

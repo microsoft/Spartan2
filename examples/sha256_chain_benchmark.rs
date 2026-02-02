@@ -29,22 +29,22 @@ mod timing;
 use circuits::SmallSha256ChainCircuit;
 use clap::{Parser, Subcommand};
 use ff::Field;
+use spartan_timing_phases::{PHASES, print_table};
 use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
-  provider::PallasHyraxEngine,
+  provider::Bn254Engine,
   small_field::SmallValueField,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
   traits::{Engine, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait},
 };
 use std::{io::Write, time::Instant};
-use spartan_timing_phases::{PHASES, print_table};
 use timing::{TimingLayer, clear_timings, snapshot_timings};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
 // Use PallasHyraxEngine which has Barrett-optimized SmallLargeMul for Fq
-type E = PallasHyraxEngine;
+type E = Bn254Engine;
 type F = <E as Engine>::Scalar;
 
 #[derive(Parser)]
@@ -88,7 +88,10 @@ fn run_spartan_benchmark(
   let small_circuit = SmallSha256ChainCircuit::<F>::new(input, chain_length);
 
   let root_span = info_span!("bench", num_vars, chain_length).entered();
-  info!("======= num_vars={}, chain_length={} =======", num_vars, chain_length);
+  info!(
+    "======= num_vars={}, chain_length={} =======",
+    num_vars, chain_length
+  );
 
   // SETUP (once per circuit)
   let t0 = Instant::now();
@@ -108,8 +111,8 @@ fn run_spartan_benchmark(
 
     // PREPARE
     let t0 = Instant::now();
-    let prep_snark =
-      SpartanSNARK::<E>::prep_prove(&pk, small_circuit.clone(), is_small).expect("prep_prove failed");
+    let prep_snark = SpartanSNARK::<E>::prep_prove(&pk, small_circuit.clone(), is_small)
+      .expect("prep_prove failed");
     let prep_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prep_ms, "prep_prove");
 
@@ -141,7 +144,10 @@ fn run_spartan_benchmark(
 
   let constraints = constraints_data.lock().unwrap().take();
   let header = match constraints {
-    Some(c) => format!("===== chain={}, num_vars={}, constraints={} =====", chain_length, num_vars, c),
+    Some(c) => format!(
+      "===== chain={}, num_vars={}, constraints={} =====",
+      chain_length, num_vars, c
+    ),
     None => format!("===== chain={}, num_vars={} =====", chain_length, num_vars),
   };
   print_table(&header, &small_timings, &large_timings);
@@ -205,7 +211,7 @@ where
   let (proof1, r1, evals1, orig_sumcheck_ms) = {
     let mut az1 = MultilinearPolynomial::new(az.clone());
     let mut bz1 = MultilinearPolynomial::new(bz.clone());
-    let mut cz1 = MultilinearPolynomial::new(cz.clone());
+    let mut cz1 = MultilinearPolynomial::new(cz);
     let mut transcript1 = <E as Engine>::TE::new(b"sha256_chain_bench");
 
     let t0 = Instant::now();
@@ -225,16 +231,23 @@ where
 
   // ===== SMALL-VALUE SUMCHECK =====
   let (proof2, r2, evals2, small_sumcheck_ms) = {
-    let az_poly = MultilinearPolynomial::new(az.clone());
-    let bz_poly = MultilinearPolynomial::new(bz.clone());
-    let az_small =
-      MultilinearPolynomial::<i64>::try_from_field(&az_poly).expect("Az values too large for i64");
-    let bz_small =
-      MultilinearPolynomial::<i64>::try_from_field(&bz_poly).expect("Bz values too large for i64");
+    let az_small_vals: Vec<i64> = az
+      .iter()
+      .map(|v| <F as SmallValueField<i64>>::try_field_to_small(v).expect("Az too large for i64"))
+      .collect();
+    let bz_small_vals: Vec<i64> = bz
+      .iter()
+      .map(|v| <F as SmallValueField<i64>>::try_field_to_small(v).expect("Bz too large for i64"))
+      .collect();
+    let cz_small_vals: Vec<i64> = az_small_vals
+      .iter()
+      .zip(bz_small_vals.iter())
+      .map(|(&a, &b)| a * b)
+      .collect();
+    let az_small = MultilinearPolynomial::new(az_small_vals);
+    let bz_small = MultilinearPolynomial::new(bz_small_vals);
+    let cz_small = MultilinearPolynomial::new(cz_small_vals);
 
-    let mut az2 = MultilinearPolynomial::new(az);
-    let mut bz2 = MultilinearPolynomial::new(bz);
-    let mut cz2 = MultilinearPolynomial::new(cz);
     let mut transcript2 = <E as Engine>::TE::new(b"sha256_chain_bench");
 
     let t0 = Instant::now();
@@ -243,9 +256,7 @@ where
       tau,
       &az_small,
       &bz_small,
-      &mut az2,
-      &mut bz2,
-      &mut cz2,
+      &cz_small,
       &mut transcript2,
     )
     .expect("prove_cubic_with_three_inputs_small_value failed");
@@ -268,7 +279,10 @@ where
     // Check: final_claim == tau(r_x) * (Az(r_x)*Bz(r_x) - Cz(r_x))
     let tau_eval = EqPolynomial::new(tau_for_verify.clone()).evaluate(&r_v);
     let expected = tau_eval * (evals1[0] * evals1[1] - evals1[2]);
-    assert_eq!(final_claim, expected, "Sumcheck final claim must match expected");
+    assert_eq!(
+      final_claim, expected,
+      "Sumcheck final claim must match expected"
+    );
     info!("sumcheck verification passed");
   }
 

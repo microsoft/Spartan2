@@ -99,6 +99,11 @@ impl<F: SupportsSmallI32 + PrimeField> SmallValueField<i32> for F {
     i64_to_field(val)
   }
 
+  #[inline]
+  fn small_to_intermediate(val: i32) -> i64 {
+    val as i64
+  }
+
   fn try_field_to_small(val: &Self) -> Option<i32> {
     try_field_to_small_impl(val)
   }
@@ -232,6 +237,11 @@ impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
   #[inline]
   fn intermediate_to_field(val: i128) -> Self {
     i128_to_field(val)
+  }
+
+  #[inline]
+  fn small_to_intermediate(val: i64) -> i128 {
+    val as i128
   }
 
   fn try_field_to_small(val: &Self) -> Option<i64> {
