@@ -16,18 +16,18 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[path = "circuits/mod.rs"]
 mod circuits;
-mod spartan_timing_phases;
-mod timing;
+#[path = "common/mod.rs"]
+mod common;
 
 use circuits::SmallSha256Circuit;
-use spartan_timing_phases::{PHASES, print_table};
+use common::spartan_timing_phases::{PHASES, print_table};
+use common::timing::{TimingLayer, clear_timings, snapshot_timings};
 use spartan2::{
   provider::Bn254Engine,
   spartan::SpartanSNARK,
   traits::{Engine, snark::R1CSSNARKTrait},
 };
 use std::time::Instant;
-use timing::{TimingLayer, clear_timings, snapshot_timings};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 

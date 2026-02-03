@@ -24,7 +24,6 @@ use crate::{
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
-    power::PowPolynomial,
   },
 };
 use crate::small_field::{DelayedReduction, SmallValueField};
@@ -242,10 +241,12 @@ where
 /// loop and non-Montgomery scatter with precomputed `e_rb_cache`.
 ///
 /// # Arguments
-/// * `a_layers` - Az evaluations per instance, each of length `2^ell_cons`
+/// * `a_layers` - Az evaluations per instance, each of length `left * right`
 /// * `b_layers` - Bz evaluations per instance
-/// * `tau` - Constraint-folding challenge; eq table is `[1, τ, τ², ..., τ^{2^ℓ - 1}]`
-/// * `ell_cons` - log₂(num_constraints), determines total eq table size
+/// * `e_eq` - Pre-computed power polynomial split evals: `[e_left | e_right]` where
+///            `e_left[x_l] = tau^{x_l}` and `e_right[x_r] = tau^{x_r * left}`
+/// * `left` - Size of left tensor component (from `compute_tensor_decomp`)
+/// * `right` - Size of right tensor component (from `compute_tensor_decomp`)
 /// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b
 ///
 /// # Scatter optimization
@@ -255,18 +256,12 @@ where
 /// 2. `e_rb_cache` is precomputed as non-R-scaled raw limbs: `from_mont(e_right[x_r] * e_b[round][y])`
 /// 3. Scatter accumulates raw 4×4 limb products into `WideLimbs<9>` (no Montgomery ops)
 /// 4. Final `barrett_reduce_9` per bucket converts back to field elements
-///
-/// # Balanced split
-///
-/// Internally computes a balanced split `k` of the constraint space to minimize
-/// `|e_left_size - e_rb_cache_size|`, where `e_left` has `2^(ℓ-k)` entries and
-/// `e_rb_cache` has `2^k × Σ|e_b[round]|` entries. This balances the two tables
-/// that are iterated in the inner and scatter loops respectively.
 pub fn build_accumulators_neutronnova<S>(
   a_layers: &[Vec<i64>],
   b_layers: &[Vec<i64>],
-  tau: &S,
-  ell_cons: usize,
+  e_eq: &[S],
+  left: usize,
+  right: usize,
   rhos: &[S],
 ) -> LagrangeAccumulators<S, 2>
 where
@@ -277,34 +272,19 @@ where
   debug_assert_eq!(n, 1 << l0, "number of instances must be power of 2");
   debug_assert_eq!(b_layers.len(), n);
   debug_assert_eq!(rhos.len(), l0);
+  debug_assert_eq!(e_eq.len(), left + right, "E_eq must have length left + right");
+  debug_assert_eq!(a_layers[0].len(), left * right);
 
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let prefix_size = n; // 2^l_b
 
   // Suffix eq weights over instance-folding challenges ρ.
   let e_b = compute_suffix_eq_pyramid(rhos, l0);
-  let e_b_total: usize = e_b.iter().map(|r| r.len()).sum(); // total entries across all rounds
 
-  // Compute balanced split k: minimize |e_left_size - e_rb_cache_size|
-  // e_left has 2^(ell-k) entries, e_rb_cache has 2^k * e_b_total entries.
-  let k = (0..=ell_cons)
-    .min_by_key(|&k| {
-      let e_left_size = 1usize << (ell_cons - k);
-      let e_rb_size = (1usize << k) * e_b_total;
-      (e_left_size as isize - e_rb_size as isize).unsigned_abs()
-    })
-    .unwrap();
-  let left = 1usize << (ell_cons - k);
-  let right = 1usize << k;
-
-  debug_assert_eq!(a_layers[0].len(), left * right);
-
-  // Compute eq tables from tau with balanced split:
-  // e_left[x_l] = tau^{x_l} for x_l = 0..left
-  // e_right[x_r] = tau^{x_r * left} for x_r = 0..right
-  let e_left = PowPolynomial::split_evals(*tau, ell_cons, left, right);
-  let e_right = &e_left[left..]; // second half
-  let e_left_slice = &e_left[..left]; // first half
+  // Extract e_left and e_right from pre-computed E_eq
+  // Uses the same tensor decomposition split as the field path
+  let e_left_slice = &e_eq[..left];
+  let e_right = &e_eq[left..];
 
   // Precompute e_rb_cache: non-R-scaled raw limbs of e_right[x_r] * e_b[round][y].
   // Layout: e_rb_cache[round][y * right + x_r] = from_mont(e_right[x_r] * e_b[round][y])

@@ -17,12 +17,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[path = "circuits/mod.rs"]
 mod circuits;
-mod spartan_timing_phases;
-mod timing;
+#[path = "common/mod.rs"]
+mod common;
 
 use circuits::SmallSha256ChainCircuit;
 use clap::{Parser, Subcommand};
-use spartan_timing_phases::{NEUTRONNOVA_PHASES, NEUTRONNOVA_SHORT_NAMES};
+use common::spartan_timing_phases::{NEUTRONNOVA_PHASES, NEUTRONNOVA_SHORT_NAMES};
+use common::timing::{TimingLayer, clear_timings, snapshot_timings};
 use spartan2::{
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, SpartanWitness},
@@ -41,7 +42,6 @@ use spartan2::{
   zk::NeutronNovaVerifierCircuit,
 };
 use std::time::Instant;
-use timing::{TimingLayer, clear_timings, snapshot_timings};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -166,18 +166,31 @@ where
   let mut transcript = E::TE::new(b"neutronnova_prove");
   transcript.absorb(b"vk", &pk.vk_digest);
 
-  let (e_eq, az, bz, cz, folded_w, folded_u) = NeutronNovaNIFS::<E>::prove(
-    &pk.S_step,
-    instances,
-    witnesses,
-    is_small,
-    &mut vc,
-    &mut vc_state,
-    &pk.vc_shape,
-    &pk.vc_ck,
-    &mut transcript,
-  )
-  .expect("NeutronNovaNIFS::prove failed");
+  let (e_eq, az, bz, cz, folded_w, folded_u) = if is_small {
+    NeutronNovaNIFS::<E>::prove_small_value(
+      &pk.S_step,
+      instances,
+      witnesses,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &mut transcript,
+    )
+    .expect("NeutronNovaNIFS::prove_small_value failed")
+  } else {
+    NeutronNovaNIFS::<E>::prove(
+      &pk.S_step,
+      instances,
+      witnesses,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &mut transcript,
+    )
+    .expect("NeutronNovaNIFS::prove failed")
+  };
 
   (e_eq, az, bz, cz, folded_w, folded_u)
 }
@@ -232,7 +245,7 @@ fn run_full_nifs_prove<E: Engine>(
   num_instances: usize,
   chain_length: usize,
   rounds: usize,
-  timing_data: &timing::TimingData,
+  timing_data: &common::timing::TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
