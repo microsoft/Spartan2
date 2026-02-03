@@ -9,8 +9,7 @@
 //! produce identical proofs when used with a SmallSha256 circuit.
 //!
 //! This tests Algorithm 6 (small-value sumcheck optimization) against the standard method.
-//! Unlike bellpepper's SHA-256 which has coefficients ~2^237, our SmallSha256Circuit uses
-//! SmallMultiEq to keep coefficients within bounded ranges.
+//! SmallSha256Circuit uses SmallMultiEq to keep coefficients within bounded ranges.
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sumcheck_sha256_equivalence`
 
@@ -18,11 +17,8 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[path = "circuits/mod.rs"]
-mod circuits;
-
 use bellpepper_core::{Circuit, test_cs::TestConstraintSystem};
-use circuits::{Sha256Circuit, SmallSha256Circuit};
+use spartan2::sha256_circuits::SmallSha256Circuit;
 use ff::Field;
 use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
@@ -115,30 +111,19 @@ where
   };
   let _span = info_span!("test", msg_len = preimage_len, config = config_name).entered();
 
-  // Create both circuits
+  // Create circuit
   let preimage = vec![0u8; preimage_len];
-  let small_circuit = SmallSha256Circuit::<F>::new(preimage.clone(), use_batching);
-  let bellpepper_circuit = Sha256Circuit::<F>::new(preimage);
+  let small_circuit = SmallSha256Circuit::<F>::new(preimage, use_batching);
 
-  // Synthesize and count constraints for SmallSha256
-  let mut cs1 = TestConstraintSystem::<F>::new();
+  // Synthesize and count constraints
+  let mut cs = TestConstraintSystem::<F>::new();
   small_circuit
     .clone()
-    .synthesize(&mut cs1)
+    .synthesize(&mut cs)
     .expect("small_sha256 synthesis failed");
-  let small_sha256_constraints = cs1.num_constraints();
+  let num_constraints = cs.num_constraints();
 
-  // Synthesize and count constraints for bellpepper SHA256
-  let mut cs2 = TestConstraintSystem::<F>::new();
-  bellpepper_circuit
-    .synthesize(&mut cs2)
-    .expect("bellpepper synthesis failed");
-  let bellpepper_sha256_constraints = cs2.num_constraints();
-
-  info!(
-    msg_len = preimage_len,
-    small_sha256_constraints, bellpepper_sha256_constraints, "Constraint comparison"
-  );
+  info!(msg_len = preimage_len, num_constraints, "Circuit synthesized");
 
   let (pk, _vk) = run_setup(small_circuit.clone());
   let prep_snark = run_prep_prove(&pk, small_circuit.clone());
@@ -284,8 +269,7 @@ where
 
       info!(
         msg_len = preimage_len,
-        small_sha256_constraints,
-        bellpepper_sha256_constraints,
+        num_constraints,
         original_sumcheck_us = original_us,
         small_value_sumcheck_us = smallvalue_us,
         speedup = format!("{:.2}x", speedup),

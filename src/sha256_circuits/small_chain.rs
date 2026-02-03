@@ -13,11 +13,12 @@ use super::{
 use bellpepper_core::{Circuit, ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::{PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
-use spartan2::{
+use std::marker::PhantomData;
+
+use crate::{
   gadgets::small_sha256_with_prefix,
   traits::{Engine, circuit::SpartanCircuit},
 };
-use std::marker::PhantomData;
 
 /// SHA-256 chain circuit using small_sha256 (small-value compatible).
 ///
@@ -33,6 +34,7 @@ pub struct SmallSha256ChainCircuit<Scalar: PrimeField> {
 }
 
 impl<Scalar: PrimeField + PrimeFieldBits> SmallSha256ChainCircuit<Scalar> {
+  /// Create a new SHA-256 chain circuit.
   pub fn new(input: [u8; 32], chain_length: usize) -> Self {
     Self {
       input,
@@ -41,7 +43,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> SmallSha256ChainCircuit<Scalar> {
     }
   }
 
-  /// Compute the expected final hash by applying SHA-256 chain_length times
+  /// Compute the expected final hash by applying SHA-256 chain_length times.
   pub fn expected_output(&self) -> [u8; 32] {
     let mut current = self.input;
     for _ in 0..self.chain_length {

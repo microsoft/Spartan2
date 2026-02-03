@@ -57,6 +57,13 @@ pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_zk; // Spartan with zero-knowledge
 
+/// Timing utilities for benchmarks (tracing layer, phase constants).
+pub mod timing;
+
+/// SHA-256 circuits using small_sha256 gadget (small-value compatible).
+#[allow(missing_docs)]
+pub mod sha256_circuits;
+
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {
     ($name:expr $(, $($fmt:tt)+)?) => {{

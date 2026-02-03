@@ -4,19 +4,16 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SHA-256 circuits for examples and benchmarks.
+//! SHA-256 circuits using small_sha256 gadget (small-value compatible).
 //!
 //! This module provides reusable SHA-256 circuit implementations:
-//! - [`Sha256Circuit`]: Uses bellpepper's SHA-256 (baseline, not small-value compatible)
-//! - [`SmallSha256Circuit`]: Uses small_sha256 gadget (small-value compatible)
+//! - [`SmallSha256Circuit`]: Single SHA-256 hash (small-value compatible)
 //! - [`SmallSha256ChainCircuit`]: Chains multiple small_sha256 calls
 
-mod bellpepper;
-mod chain;
 mod small;
+mod small_chain;
 
-pub use bellpepper::Sha256Circuit;
-pub use chain::SmallSha256ChainCircuit;
+pub use small_chain::SmallSha256ChainCircuit;
 pub use small::SmallSha256Circuit;
 
 use bellpepper_core::{
@@ -26,7 +23,8 @@ use bellpepper_core::{
 };
 use ff::{Field, PrimeField};
 use sha2::{Digest, Sha256};
-use spartan2::traits::Engine;
+
+use crate::traits::Engine;
 
 // ============================================================================
 // Helper Functions

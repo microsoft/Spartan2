@@ -21,15 +21,9 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[path = "circuits/mod.rs"]
-mod circuits;
-#[path = "common/mod.rs"]
-mod common;
-
-use circuits::SmallSha256ChainCircuit;
+use spartan2::sha256_circuits::SmallSha256ChainCircuit;
 use clap::{Parser, Subcommand};
-use common::spartan_timing_phases::{PHASES, print_table};
-use common::timing::{TimingLayer, clear_timings, snapshot_timings};
+use spartan2::timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings};
 use ff::Field;
 use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
@@ -81,8 +75,8 @@ fn num_vars_to_chain_length(num_vars: usize) -> usize {
 fn run_spartan_benchmark(
   input: [u8; 32],
   num_vars: usize,
-  timing_data: &common::timing::TimingData,
-  constraints_data: &common::timing::ConstraintsData,
+  timing_data: &spartan2::timing::TimingData,
+  constraints_data: &spartan2::timing::ConstraintsData,
 ) {
   let chain_length = num_vars_to_chain_length(num_vars);
   let small_circuit = SmallSha256ChainCircuit::<F>::new(input, chain_length);

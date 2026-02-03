@@ -15,15 +15,9 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[path = "circuits/mod.rs"]
-mod circuits;
-#[path = "common/mod.rs"]
-mod common;
-
-use circuits::SmallSha256ChainCircuit;
+use spartan2::sha256_circuits::SmallSha256ChainCircuit;
 use clap::{Parser, Subcommand};
-use common::spartan_timing_phases::{NEUTRONNOVA_PHASES, NEUTRONNOVA_SHORT_NAMES};
-use common::timing::{TimingLayer, clear_timings, snapshot_timings};
+use spartan2::timing::{NEUTRONNOVA_PHASES, NEUTRONNOVA_SHORT_NAMES, TimingLayer, clear_timings, snapshot_timings};
 use spartan2::{
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, SpartanWitness},
@@ -245,7 +239,7 @@ fn run_full_nifs_prove<E: Engine>(
   num_instances: usize,
   chain_length: usize,
   rounds: usize,
-  timing_data: &common::timing::TimingData,
+  timing_data: &spartan2::timing::TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>

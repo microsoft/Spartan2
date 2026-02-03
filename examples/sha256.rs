@@ -14,14 +14,8 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[path = "circuits/mod.rs"]
-mod circuits;
-#[path = "common/mod.rs"]
-mod common;
-
-use circuits::SmallSha256Circuit;
-use common::spartan_timing_phases::{PHASES, print_table};
-use common::timing::{TimingLayer, clear_timings, snapshot_timings};
+use spartan2::sha256_circuits::SmallSha256Circuit;
+use spartan2::timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings};
 use spartan2::{
   provider::Bn254Engine,
   spartan::SpartanSNARK,
