@@ -151,10 +151,17 @@ where
   // Inner loop operations (F×int)
   // ===========================================================================
 
+  /// Precompute e_in cache in appropriate form for inner loop.
+  ///
+  /// - `Enabled`: converts to raw limbs via `to_unreduced()` (eliminates `from_mont` in reduction)
+  /// - `Disabled`: returns as-is (UnreducedField = F)
+  fn precompute_e_in(e_in: &[F]) -> Vec<Self::UnreducedField>;
+
   /// Accumulate eq-weighted product into partial sum.
   ///
   /// Called in hot inner loop over x_in for each beta with infinity.
-  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, prod: MLE::Product, e: &F);
+  /// Takes two small values directly (not pre-multiplied) for better optimization.
+  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, e: &Self::UnreducedField, a: MLE::Value, b: MLE::Value);
 
   /// Check if partial sum is zero.
   fn partial_sum_is_zero(sum: &Self::AccumulatedFieldInt) -> bool;
@@ -231,16 +238,20 @@ where
     + SubAssign
     + Send
     + Sync,
-  MLE: MatVecMLE<F>,
-  MLE::Product: AccumulateProduct<F>,
+  MLE: MatVecMLE<F, Value = SmallValue>,
 {
-  type AccumulatedFieldInt = <MLE::Product as AccumulateProduct<F>>::Unreduced;
+  type AccumulatedFieldInt = F::UnreducedFieldInt;
   type AccumulatedFieldField = F::UnreducedFieldField;
   type UnreducedField = F::UnreducedField;
 
+  fn precompute_e_in(e_in: &[F]) -> Vec<Self::UnreducedField> {
+    e_in.iter().map(|e| e.to_unreduced()).collect()
+  }
+
   #[inline]
-  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, prod: MLE::Product, e: &F) {
-    MLE::Product::accumulate(sum, e, prod);
+  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, e: &Self::UnreducedField, a: MLE::Value, b: MLE::Value) {
+    // Use raw limb accumulation - e is already non-R-scaled
+    F::unreduced_raw_small_mul_add(sum, e, a, b);
   }
 
   #[inline]
@@ -262,8 +273,9 @@ where
 
   #[inline]
   fn reduce_field_int(sum: &Self::AccumulatedFieldInt) -> Self::UnreducedField {
-    // Reduce via AccumulateProduct, then convert to unreduced form
-    MLE::Product::reduce(sum).to_unreduced()
+    // Accumulator is already non-R-scaled (from using unreduced_raw_small_mul_add),
+    // so just Barrett reduce without from_mont conversion
+    F::reduce_raw_field_int_to_unreduced(sum)
   }
 
   #[inline]
@@ -311,9 +323,14 @@ where
   type AccumulatedFieldField = F;
   type UnreducedField = F;
 
+  fn precompute_e_in(e_in: &[F]) -> Vec<Self::UnreducedField> {
+    e_in.to_vec()
+  }
+
   #[inline]
-  fn accumulate_eq_product(sum: &mut F, prod: MLE::Product, e: &F) {
-    // Immediate reduction: convert product to field element directly
+  fn accumulate_eq_product(sum: &mut F, e: &F, a: MLE::Value, b: MLE::Value) {
+    // Immediate reduction: compute product and multiply by e
+    let prod = MLE::multiply_witnesses(a, b);
     let field_prod = MLE::product_to_field(prod);
     *sum += *e * field_prod;
   }

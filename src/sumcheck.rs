@@ -18,8 +18,8 @@ use crate::{
   },
   errors::SpartanError,
   lagrange_accumulator::{
-    AccumulateProduct, DelayedModularReductionEnabled, MatVecMLE, SPARTAN_T_DEGREE,
-    build_accumulators_spartan, derive_t1,
+    DelayedModularReductionEnabled, MatVecMLE, SPARTAN_T_DEGREE, build_accumulators_spartan,
+    derive_t1,
   },
   polys::{
     multilinear::MultilinearPolynomial,
@@ -802,9 +802,7 @@ impl<E: Engine> SumcheckProof<E> {
       + Send
       + Sync,
     E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
-    MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar>,
-    <MultilinearPolynomial<SmallValue> as MatVecMLE<E::Scalar>>::Product:
-      AccumulateProduct<E::Scalar>,
+    MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar, Value = SmallValue>,
   {
     let num_rounds = taus.len();
     let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);

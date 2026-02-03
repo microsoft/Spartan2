@@ -112,6 +112,11 @@ where
   // For Disabled: stores field elements, eliminating ex * ey computation per scatter
   let eq_cache = Mode::build_eq_cache(&eq_tables.e_xout, &eq_tables.e_y);
 
+  // Precompute e_in cache in appropriate form for Mode
+  // For Enabled: converts to raw limbs (eliminates from_mont in reduce_field_int)
+  // For Disabled: returns as-is (UnreducedField = F)
+  let e_in_cache = Mode::precompute_e_in(&eq_tables.e_in);
+
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
   // State type determined by Mode: DelayedModularReductionEnabled uses unreduced accumulators, DelayedModularReductionDisabled uses reduced
   type State<S, P, Mode> = SpartanThreadState<S, <P as MatVecMLE<S>>::Value, P, Mode, 2>;
@@ -129,7 +134,7 @@ where
         // Safety bound for UnreducedFieldInt (N limbs, 64 bits per limb):
         //   field_bits + product_bits + (l/2) < 64*N
         // i32 path: N=6, product_bits<=62; i64 path: N=8, product_bits<=126.
-        for (x_in_bits, &e_in_eval) in eq_tables.e_in.iter().enumerate() {
+        for (x_in_bits, e_in_eval) in e_in_cache.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           // Fill prefix buffers by index assignment (no allocation)
@@ -158,9 +163,9 @@ where
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
           // Accumulation strategy determined by Mode (unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled)
           // Use precomputed indices to avoid filter overhead in inner loop
+          // Pass small values directly for raw limb accumulation (no pre-multiplication)
           for &beta_idx in &betas_with_infty {
-            let prod = P::multiply_witnesses(az_ext[beta_idx], bz_ext[beta_idx]);
-            Mode::accumulate_eq_product(&mut state.partial_sums[beta_idx], prod, &e_in_eval);
+            Mode::accumulate_eq_product(&mut state.partial_sums[beta_idx], e_in_eval, az_ext[beta_idx], bz_ext[beta_idx]);
           }
         }
 

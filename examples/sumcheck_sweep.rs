@@ -370,7 +370,20 @@ where
   let t_setup = Instant::now();
   let az_small = MultilinearPolynomial::new(az_i32.to_vec());
   let bz_small = MultilinearPolynomial::new(bz_i32.to_vec());
-  let cz_small_vals: Vec<i32> = az_i32.iter().zip(bz_i32.iter()).map(|(&a, &b)| a * b).collect();
+  // Compute products using i64 to avoid silent overflow, then convert to i32
+  let cz_small_vals: Vec<i32> = az_i32
+    .iter()
+    .zip(bz_i32.iter())
+    .map(|(&a, &b)| {
+      let prod = (a as i64) * (b as i64);
+      i32::try_from(prod).unwrap_or_else(|_| {
+        panic!(
+          "i32 overflow: {} * {} = {} exceeds i32::MAX. Use smaller test values or n <= 15 for i32 benchmark.",
+          a, b, prod
+        )
+      })
+    })
+    .collect();
   let cz_small = MultilinearPolynomial::new(cz_small_vals);
 
   let mut transcript2 = E::TE::new(b"bench");

@@ -208,4 +208,31 @@ where
   /// The accumulated value is non-R-scaled; this function Barrett-reduces
   /// and then converts to Montgomery form.
   fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
+
+  // ========================================================================
+  // Raw limb accumulation (non-Montgomery e_in optimization)
+  // ========================================================================
+
+  /// Multiply raw limbs by product of two small values and add to accumulator.
+  /// `acc += e_raw × (small_a × small_b)` where e_raw is non-R-scaled.
+  ///
+  /// Unlike [`Self::unreduced_field_small_mul_add`], this takes raw limbs instead of
+  /// a Montgomery-form field element. The accumulator becomes non-R-scaled, which
+  /// eliminates the need for `from_mont` when reducing.
+  ///
+  /// Used to optimize the Spartan accumulator inner loop by precomputing `e_in`
+  /// as raw limbs.
+  fn unreduced_raw_small_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    e_raw: &Self::UnreducedField,
+    small_a: SmallValue,
+    small_b: SmallValue,
+  );
+
+  /// Barrett-reduce a non-R-scaled field×int accumulator to raw limbs.
+  ///
+  /// Unlike [`Self::reduce_field_int_to_unreduced`], this assumes the accumulator
+  /// is already non-R-scaled (from using [`Self::unreduced_raw_small_mul_add`]).
+  /// No `from_mont` conversion is needed.
+  fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;
 }

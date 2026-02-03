@@ -282,6 +282,49 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
     let raw = barrett::barrett_reduce_9::<F>(&acc.0);
     F::from_raw_limbs(raw)
   }
+
+  #[inline(always)]
+  fn unreduced_raw_small_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    e_raw: &[u64; 4],
+    small_a: i32,
+    small_b: i32,
+  ) {
+    // Compute product of two small values (i32 × i32 → i64)
+    let intermediate = (small_a as i64) * (small_b as i64);
+    // Handle sign: accumulate into pos or neg based on sign of intermediate
+    let (target, mag) = if intermediate >= 0 {
+      (&mut acc.pos, intermediate as u64)
+    } else {
+      (&mut acc.neg, (-intermediate) as u64)
+    };
+    // Fused multiply-accumulate using raw limbs directly (no to_limbs() call)
+    let (r0, c) = mac(target.0[0], e_raw[0], mag, 0);
+    let (r1, c) = mac(target.0[1], e_raw[1], mag, c);
+    let (r2, c) = mac(target.0[2], e_raw[2], mag, c);
+    let (r3, c) = mac(target.0[3], e_raw[3], mag, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(of as u64);
+  }
+
+  #[inline(always)]
+  fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> [u64; 4] {
+    // Barrett reduce only - accumulator is already non-R-scaled, no from_mont needed
+    match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => barrett::barrett_reduce_6::<F>(&mag),
+      SubMagResult::Negative(mag) => {
+        // Negate in limb space: p - x
+        let pos = barrett::barrett_reduce_6::<F>(&mag);
+        barrett::negate_limbs::<F>(&pos)
+      }
+    }
+  }
 }
 
 // ============================================================================
@@ -503,6 +546,63 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     let raw = barrett::barrett_reduce_9::<F>(&acc.0);
     F::from_raw_limbs(raw)
+  }
+
+  #[inline(always)]
+  fn unreduced_raw_small_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    e_raw: &[u64; 4],
+    small_a: i64,
+    small_b: i64,
+  ) {
+    // Compute product of two small values (i64 × i64 → i128)
+    let intermediate = (small_a as i128) * (small_b as i128);
+    let (target, mag) = if intermediate >= 0 {
+      (&mut acc.pos, intermediate as u128)
+    } else {
+      (&mut acc.neg, (-intermediate) as u128)
+    };
+    // Fused 4×2 multiply-accumulate using raw limbs directly (no to_limbs() call)
+    let b_lo = mag as u64;
+    let b_hi = (mag >> 64) as u64;
+
+    // Pass 1: multiply by b_lo at offset 0
+    let (r0, c) = mac(target.0[0], e_raw[0], b_lo, 0);
+    let (r1, c) = mac(target.0[1], e_raw[1], b_lo, c);
+    let (r2, c) = mac(target.0[2], e_raw[2], b_lo, c);
+    let (r3, c) = mac(target.0[3], e_raw[3], b_lo, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of1) = target.0[4].overflowing_add(c);
+    let c1 = of1 as u64;
+    target.0[0] = r0;
+
+    // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
+    let (r1, c) = mac(r1, e_raw[0], b_hi, 0);
+    let (r2, c) = mac(r2, e_raw[1], b_hi, c);
+    let (r3, c) = mac(r3, e_raw[2], b_hi, c);
+    let (r4, c) = mac(r4, e_raw[3], b_hi, c);
+    // Add both carries (c from pass 2, c1 from pass 1) into position 5
+    let (r5, c) = mac(target.0[5], c1, 1, c);
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = r5;
+    // Propagate final carry through remaining limbs (just add)
+    target.0[6] = target.0[6].wrapping_add(c);
+  }
+
+  #[inline(always)]
+  fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> [u64; 4] {
+    // Barrett reduce only - accumulator is already non-R-scaled, no from_mont needed
+    match sub_mag::<7>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => barrett::barrett_reduce_7::<F>(&mag),
+      SubMagResult::Negative(mag) => {
+        // Negate in limb space: p - x
+        let pos = barrett::barrett_reduce_7::<F>(&mag);
+        barrett::negate_limbs::<F>(&pos)
+      }
+    }
   }
 }
 

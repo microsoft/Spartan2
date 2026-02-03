@@ -670,6 +670,15 @@ pub(crate) fn from_mont_limbs<F: FieldReductionConstants>(limbs: &[u64; 4]) -> [
   montgomery_reduce_8::<F>(&[limbs[0], limbs[1], limbs[2], limbs[3], 0, 0, 0, 0])
 }
 
+/// Negate a 4-limb value in the field: computes p - x.
+///
+/// Used for negating raw (non-Montgomery) limbs when the accumulator
+/// result is negative. Assumes x < p.
+#[inline]
+pub(crate) fn negate_limbs<F: FieldReductionConstants>(x: &[u64; 4]) -> [u64; 4] {
+  sub_4_4(&F::MODULUS, x)
+}
+
 // ==========================================================================
 // 9-limb Montgomery REDC (for UnreducedFieldField accumulator)
 // ==========================================================================
