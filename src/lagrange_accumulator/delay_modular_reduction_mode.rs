@@ -111,7 +111,7 @@ where
 /// Compile-time selection of delayed modular reduction strategy.
 ///
 /// This trait defines element-level accumulation operations for both
-/// F×int (inner loop) and F×F (scatter phase) accumulation.
+/// F×int (inner loop) and F×F (accumulator building) phases.
 ///
 /// # Type Parameters
 ///
@@ -121,52 +121,77 @@ where
 ///
 /// # Associated Types
 ///
-/// - `PartialSum`: Element type for F×int accumulation (per-beta)
-/// - `ScatterElement`: Element type for F×F accumulation (per-bucket)
+/// - `AccumulatedFieldInt`: Accumulator for F×int products (per-beta)
+/// - `AccumulatedFieldField`: Accumulator for F×F products (per-bucket)
+/// - `UnreducedField`: Unreduced field representation for cache and intermediate values
 pub trait DelayedModularReductionMode<F, MLE, const D: usize>: Sized
 where
   F: PrimeField + Send + Sync,
   MLE: MatVecMLE<F>,
 {
-  /// Element type for F×int partial sums (per-beta accumulation).
+  /// Accumulator for Field × Int products (inner loop).
   ///
-  /// - `Enabled`: `<MLE::Product as AccumulateProduct<F>>::Unreduced` (delayed reduction)
+  /// - `Enabled`: `<MLE::Product as AccumulateProduct<F>>::Unreduced` (wide limbs)
   /// - `Disabled`: `F` (immediate reduction)
-  type PartialSum: Copy + Default + Send;
+  type AccumulatedFieldInt: Copy + Default + Send;
 
-  /// Element type for F×F scatter buckets.
+  /// Accumulator for Field × Field products (accumulator building).
   ///
-  /// - `Enabled`: `F::UnreducedFieldField` (delayed F×F)
-  /// - `Disabled`: `F` (immediate F×F)
-  type ScatterElement: Copy + Default + Send + AddAssign;
+  /// - `Enabled`: `F::UnreducedFieldField` (9-limb accumulator)
+  /// - `Disabled`: `F` (immediate reduction)
+  type AccumulatedFieldField: Copy + Default + Send + AddAssign;
+
+  /// Unreduced field representation for cache and intermediate values.
+  ///
+  /// - `Enabled`: `F::UnreducedField` (raw [u64;4])
+  /// - `Disabled`: `F`
+  type UnreducedField: Copy + Default + PartialEq + Send + Sync;
 
   // ===========================================================================
-  // F×int operations (inner loop)
+  // Inner loop operations (F×int)
   // ===========================================================================
 
   /// Accumulate eq-weighted product into partial sum.
   ///
   /// Called in hot inner loop over x_in for each beta with infinity.
-  fn accumulate_eq_product(sum: &mut Self::PartialSum, prod: MLE::Product, e: &F);
-
-  /// Reduce partial sum to field element.
-  fn modular_reduction_partial_sum(sum: &Self::PartialSum) -> F;
+  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, prod: MLE::Product, e: &F);
 
   /// Check if partial sum is zero.
-  fn partial_sum_is_zero(sum: &Self::PartialSum) -> bool;
+  fn partial_sum_is_zero(sum: &Self::AccumulatedFieldInt) -> bool;
 
   // ===========================================================================
-  // F×F operations (scatter phase)
+  // Accumulator building operations
   // ===========================================================================
 
-  /// Accumulate `ey × z_beta` into scatter element.
-  fn accumulate_scatter(elem: &mut Self::ScatterElement, ey: &F, z_beta: &F);
+  /// Build eq cache by precomputing `e_xout[x] × e_y[round][y]` for all combinations.
+  ///
+  /// Returns a nested vector indexed as `cache[round][y_idx * num_x_out + x_out]`.
+  fn build_eq_cache(e_xout: &[F], e_y: &[Vec<F>]) -> Vec<Vec<Self::UnreducedField>>;
 
-  /// Reduce scatter element to field element.
-  fn modular_reduction_scatter(elem: &Self::ScatterElement) -> F;
+  /// Reduce accumulated F×int to unreduced field representation.
+  fn reduce_field_int(sum: &Self::AccumulatedFieldInt) -> Self::UnreducedField;
 
-  /// Check if scatter element is zero.
-  fn scatter_element_is_zero(elem: &Self::ScatterElement) -> bool;
+  /// Check if unreduced field value is zero.
+  fn unreduced_is_zero(val: &Self::UnreducedField) -> bool;
+
+  /// Multiply-accumulate two unreduced field values into F×F accumulator.
+  ///
+  /// `elem += val × eq_eval`
+  fn unreduced_mul_add(
+    elem: &mut Self::AccumulatedFieldField,
+    val: &Self::UnreducedField,
+    eq_eval: &Self::UnreducedField,
+  );
+
+  // ===========================================================================
+  // Final reduction operations
+  // ===========================================================================
+
+  /// Check if accumulated F×F value is zero.
+  fn is_accumulated_field_field_zero(elem: &Self::AccumulatedFieldField) -> bool;
+
+  /// Reduce accumulated F×F to field element.
+  fn reduce_field_field(elem: &Self::AccumulatedFieldField) -> F;
 }
 
 // =============================================================================
@@ -209,37 +234,60 @@ where
   MLE: MatVecMLE<F>,
   MLE::Product: AccumulateProduct<F>,
 {
-  type PartialSum = <MLE::Product as AccumulateProduct<F>>::Unreduced;
-  type ScatterElement = F::UnreducedFieldField;
+  type AccumulatedFieldInt = <MLE::Product as AccumulateProduct<F>>::Unreduced;
+  type AccumulatedFieldField = F::UnreducedFieldField;
+  type UnreducedField = F::UnreducedField;
 
   #[inline]
-  fn accumulate_eq_product(sum: &mut Self::PartialSum, prod: MLE::Product, e: &F) {
+  fn accumulate_eq_product(sum: &mut Self::AccumulatedFieldInt, prod: MLE::Product, e: &F) {
     MLE::Product::accumulate(sum, e, prod);
   }
 
   #[inline]
-  fn modular_reduction_partial_sum(sum: &Self::PartialSum) -> F {
-    MLE::Product::reduce(sum)
-  }
-
-  #[inline]
-  fn partial_sum_is_zero(sum: &Self::PartialSum) -> bool {
+  fn partial_sum_is_zero(sum: &Self::AccumulatedFieldInt) -> bool {
     sum.is_zero()
   }
 
-  #[inline]
-  fn accumulate_scatter(elem: &mut Self::ScatterElement, ey: &F, z_beta: &F) {
-    F::unreduced_field_field_mul_add(elem, ey, z_beta);
+  fn build_eq_cache(e_xout: &[F], e_y: &[Vec<F>]) -> Vec<Vec<Self::UnreducedField>> {
+    e_y
+      .iter()
+      .map(|round_ey| {
+        round_ey
+          .iter()
+          .flat_map(|ey| e_xout.iter().map(|ex| (*ey * *ex).to_unreduced()))
+          .collect()
+      })
+      .collect()
   }
 
   #[inline]
-  fn modular_reduction_scatter(elem: &Self::ScatterElement) -> F {
-    F::reduce_field_field(elem)
+  fn reduce_field_int(sum: &Self::AccumulatedFieldInt) -> Self::UnreducedField {
+    // Reduce via AccumulateProduct, then convert to unreduced form
+    MLE::Product::reduce(sum).to_unreduced()
   }
 
   #[inline]
-  fn scatter_element_is_zero(elem: &Self::ScatterElement) -> bool {
+  fn unreduced_is_zero(val: &Self::UnreducedField) -> bool {
+    *val == Self::UnreducedField::default()
+  }
+
+  #[inline]
+  fn unreduced_mul_add(
+    elem: &mut Self::AccumulatedFieldField,
+    val: &Self::UnreducedField,
+    eq_eval: &Self::UnreducedField,
+  ) {
+    F::unreduced_raw_mul_add(elem, val, eq_eval);
+  }
+
+  #[inline]
+  fn is_accumulated_field_field_zero(elem: &Self::AccumulatedFieldField) -> bool {
     elem.is_zero()
+  }
+
+  #[inline]
+  fn reduce_field_field(elem: &Self::AccumulatedFieldField) -> F {
+    F::barrett_reduce_field_field(elem)
   }
 }
 
@@ -259,8 +307,9 @@ where
   F: PrimeField + Send + Sync,
   MLE: MatVecMLE<F>,
 {
-  type PartialSum = F;
-  type ScatterElement = F;
+  type AccumulatedFieldInt = F;
+  type AccumulatedFieldField = F;
+  type UnreducedField = F;
 
   #[inline]
   fn accumulate_eq_product(sum: &mut F, prod: MLE::Product, e: &F) {
@@ -270,27 +319,44 @@ where
   }
 
   #[inline]
-  fn modular_reduction_partial_sum(sum: &F) -> F {
-    *sum // Already reduced
-  }
-
-  #[inline]
   fn partial_sum_is_zero(sum: &F) -> bool {
     ff::Field::is_zero(sum).into()
   }
 
-  #[inline]
-  fn accumulate_scatter(elem: &mut F, ey: &F, z_beta: &F) {
-    *elem += *ey * *z_beta; // Immediate F×F
+  fn build_eq_cache(e_xout: &[F], e_y: &[Vec<F>]) -> Vec<Vec<Self::UnreducedField>> {
+    e_y
+      .iter()
+      .map(|round_ey| {
+        round_ey
+          .iter()
+          .flat_map(|ey| e_xout.iter().map(|ex| *ey * *ex))
+          .collect()
+      })
+      .collect()
   }
 
   #[inline]
-  fn modular_reduction_scatter(elem: &F) -> F {
-    *elem // Already reduced
+  fn reduce_field_int(sum: &F) -> F {
+    *sum // Already reduced
   }
 
   #[inline]
-  fn scatter_element_is_zero(elem: &F) -> bool {
+  fn unreduced_is_zero(val: &F) -> bool {
+    ff::Field::is_zero(val).into()
+  }
+
+  #[inline]
+  fn unreduced_mul_add(elem: &mut F, val: &F, eq_eval: &F) {
+    *elem += *eq_eval * *val;
+  }
+
+  #[inline]
+  fn is_accumulated_field_field_zero(elem: &F) -> bool {
     ff::Field::is_zero(elem).into()
+  }
+
+  #[inline]
+  fn reduce_field_field(elem: &F) -> F {
+    *elem // Already reduced
   }
 }

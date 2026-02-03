@@ -73,10 +73,10 @@ where
   /// Partial sums indexed by β, accumulated over the x_in loop.
   /// Type determined by Mode: unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled.
   /// Reset each x_out iteration.
-  pub partial_sums: Vec<Mode::PartialSum>,
-  /// Bucket accumulators for scatter phase.
-  /// Type determined by Mode: unreduced F×F for DelayedModularReductionEnabled, LagrangeAccumulator for DelayedModularReductionDisabled.
-  pub scatter_acc: LagrangeAccumulators<Mode::ScatterElement, D>,
+  pub partial_sums: Vec<Mode::AccumulatedFieldInt>,
+  /// Bucket accumulators for accumulator building phase.
+  /// Type determined by Mode: unreduced F×F for DelayedModularReductionEnabled, F for DelayedModularReductionDisabled.
+  pub acc: LagrangeAccumulators<Mode::AccumulatedFieldField, D>,
   /// Prefix evaluations of Az for current suffix. Size: 2^l0
   pub az_prefix_boolean_evals: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
@@ -89,9 +89,9 @@ where
   pub bz_extended_evals: Vec<V>,
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
   pub bz_extended_scratch: Vec<V>,
-  /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
+  /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in accumulator building phase.
   /// Eliminates per-x_out allocation overhead.
-  pub beta_values: Vec<(usize, S)>,
+  pub beta_values: Vec<(usize, Mode::UnreducedField)>,
 }
 
 impl<S, V, P, Mode, const D: usize> SpartanThreadState<S, V, P, Mode, D>
@@ -103,8 +103,8 @@ where
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![Mode::PartialSum::default(); num_betas],
-      scatter_acc: LagrangeAccumulators::new(l0),
+      partial_sums: vec![Mode::AccumulatedFieldInt::default(); num_betas],
+      acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![V::default(); prefix_size],
       bz_prefix_boolean_evals: vec![V::default(); prefix_size],
       az_extended_evals: vec![V::default(); ext_size],
@@ -120,7 +120,7 @@ where
   #[inline]
   pub fn reset_partial_sums(&mut self) {
     for sum in &mut self.partial_sums {
-      *sum = Mode::PartialSum::default();
+      *sum = Mode::AccumulatedFieldInt::default();
     }
     self.beta_values.clear();
   }

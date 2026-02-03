@@ -107,6 +107,11 @@ where
 
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
+  // Build eq cache (precomputes ex * ey for all combinations)
+  // For Enabled: stores non-R-scaled raw limbs, eliminating Montgomery multiplications
+  // For Disabled: stores field elements, eliminating ex * ey computation per scatter
+  let eq_cache = Mode::build_eq_cache(&eq_tables.e_xout, &eq_tables.e_y);
+
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
   // State type determined by Mode: DelayedModularReductionEnabled uses unreduced accumulators, DelayedModularReductionDisabled uses reduced
   type State<S, P, Mode> = SpartanThreadState<S, <P as MatVecMLE<S>>::Value, P, Mode, 2>;
@@ -118,8 +123,6 @@ where
       |mut state: State<S, P, Mode>, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
-
-        let ex = eq_tables.e_xout[x_out_bits];
 
         // Inner loop over x_in - accumulate into UNREDUCED form
         // Each beta_partial_sums[beta_idx] accumulates 2^(l/2) terms per x_out.
@@ -162,31 +165,30 @@ where
         }
 
         // Pre-compute and filter: reduce all non-zero betas upfront
-        // This eliminates closure call overhead in the scatter loop
+        // This eliminates closure call overhead in the accumulator building loop
         // Reuse pre-allocated buffer to avoid per-iteration allocations
         for &beta_idx in &betas_with_infty {
           if Mode::partial_sum_is_zero(&state.partial_sums[beta_idx]) {
             continue;
           }
-          let val = Mode::modular_reduction_partial_sum(&state.partial_sums[beta_idx]);
-          if ff::Field::is_zero(&val).into() {
+          let val = Mode::reduce_field_int(&state.partial_sums[beta_idx]);
+          if Mode::unreduced_is_zero(&val) {
             continue;
           }
           state.beta_values.push((beta_idx, val));
         }
 
-        // Distribute beta values → A_i(v,u) via idx4
+        // Distribute beta values → A_i(v,u) via idx4 using precomputed eq cache
         // Accumulation strategy determined by Mode:
-        // - DelayedModularReductionEnabled: Unreduced F×F accumulation, final reduction once after merge
+        // - DelayedModularReductionEnabled: Raw limb multiply-accumulate (no Montgomery ops), final Barrett reduction after merge
         // - DelayedModularReductionDisabled: Immediate F×F reduction on each accumulation
-        for &(beta_idx, val) in &state.beta_values {
-          let z_beta = ex * val;
+        for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            let ey = &eq_tables.e_y[pref.round_0][pref.y_idx];
-            Mode::accumulate_scatter(
-              &mut state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
-              ey,
-              &z_beta,
+            let eq_eval = &eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
+            Mode::unreduced_mul_add(
+              &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
+              val,
+              eq_eval,
             );
           }
         }
@@ -202,20 +204,20 @@ where
   let merged = fold_results
     .into_iter()
     .reduce(|mut a, b| {
-      a.scatter_acc.merge(&b.scatter_acc);
+      a.acc.merge(&b.acc);
       a
     })
     .expect("num_x_out > 0 guarantees non-empty fold results");
 
-  // Finalize: convert scatter accumulator to LagrangeAccumulator
-  // For DelayedModularReductionEnabled: performs final Montgomery reductions on each element
+  // Finalize: convert accumulated values to LagrangeAccumulator
+  // For DelayedModularReductionEnabled: performs final Barrett reductions on each element
   // For DelayedModularReductionDisabled: elements are already reduced (identity operation)
   let mut result: LagrangeAccumulators<S, 2> = LagrangeAccumulators::new(l0);
-  for (round_idx, round) in merged.scatter_acc.rounds.iter().enumerate() {
+  for (round_idx, round) in merged.acc.rounds.iter().enumerate() {
     for (v_idx, row) in round.data().iter().enumerate() {
       for (u_idx, elem) in row.iter().enumerate() {
-        if !Mode::scatter_element_is_zero(elem) {
-          result.rounds[round_idx].data_mut()[v_idx][u_idx] = Mode::modular_reduction_scatter(elem);
+        if !Mode::is_accumulated_field_field_zero(elem) {
+          result.rounds[round_idx].data_mut()[v_idx][u_idx] = Mode::reduce_field_field(elem);
         }
       }
     }

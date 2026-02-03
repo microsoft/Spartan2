@@ -186,7 +186,7 @@ where
 
   /// Non-R-scaled raw limbs (not in Montgomery form). `[u64; 4]` for 256-bit fields.
   /// Used to avoid Montgomery multiplications in the scatter hot path.
-  type UnreducedField: Copy + Clone + Default + Debug + Send + Sync;
+  type UnreducedField: Copy + Clone + Default + Debug + PartialEq + Send + Sync;
 
   /// Barrett-reduce a field×int accumulator to non-R-scaled raw limbs.
   /// Equivalent to `from_mont(reduce_field_int(acc))` but avoids constructing
