@@ -97,10 +97,7 @@ fn mul_opt<F: Field>(a: &F, b: &F) -> F {
 }
 
 /// Convert layers of field elements to small values (i64).
-fn layers_to_small<E: Engine>(
-  layers: &[Vec<E::Scalar>],
-  err_fn: &dyn Fn() -> SpartanError,
-) -> Result<Vec<Vec<i64>>, SpartanError>
+fn layers_to_small<E: Engine>(layers: &[Vec<E::Scalar>]) -> Result<Vec<Vec<i64>>, SpartanError>
 where
   E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>,
 {
@@ -108,8 +105,12 @@ where
     .iter()
     .map(|layer| {
       layer
-        .iter()
-        .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(err_fn))
+        .par_iter()
+        .map(|v| {
+          E::Scalar::try_field_to_small(v).ok_or_else(|| SpartanError::InternalError {
+            reason: "use_small_value=true but witness values do not fit in i64".into(),
+          })
+        })
         .collect::<Result<Vec<i64>, _>>()
     })
     .collect()
@@ -135,7 +136,11 @@ where
       let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
       for i in 0..n_inst {
         // Single-value accumulation (layers[i][k] is already i64)
-        E::Scalar::unreduced_field_intermediate_mul_add(&mut acc, &eq_evals[i], layers[i][k] as i128);
+        E::Scalar::unreduced_field_intermediate_mul_add(
+          &mut acc,
+          &eq_evals[i],
+          layers[i][k] as i128,
+        );
       }
       E::Scalar::reduce_field_int(&acc)
     })
@@ -263,9 +268,7 @@ where
 
     // 1. Build accumulators
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
-    let accumulators = build_accumulators_neutronnova(
-      a_layers, b_layers, tau, ell_cons, rhos,
-    );
+    let accumulators = build_accumulators_neutronnova(a_layers, b_layers, tau, ell_cons, rhos);
     info!(
       elapsed_ms = %acc_t.elapsed().as_millis(),
       "build_accumulators_neutronnova"
@@ -304,9 +307,8 @@ where
 
       // Transcript interaction (vc_commit)
       let (_vc_span, vc_t) = start_span!("vc_commit");
-      let chals = SatisfyingAssignment::<E>::process_round(
-        vc_state, vc_shape, vc_ck, vc, i, transcript,
-      )?;
+      let chals =
+        SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, i, transcript)?;
       info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
       let r_i = chals[0];
 
@@ -432,24 +434,20 @@ where
 
     let (r_bs, T_cur, acc_eq, az_folded, bz_folded, cz_folded) = if use_small_value {
       // Convert field elements to i64 small values
-      let small_err = || SpartanError::InternalError {
-        reason: "use_small_value=true but witness values do not fit in i64".to_string(),
-      };
       let ((a_small, b_small), c_small) = rayon::join(
         || {
           rayon::join(
-            || layers_to_small::<E>(&A_layers, &small_err),
-            || layers_to_small::<E>(&B_layers, &small_err),
+            || layers_to_small::<E>(&A_layers),
+            || layers_to_small::<E>(&B_layers),
           )
         },
-        || layers_to_small::<E>(&C_layers, &small_err),
+        || layers_to_small::<E>(&C_layers),
       );
       let (a_small, b_small, c_small) = (a_small?, b_small?, c_small?);
 
       // Accumulator-based sumcheck (build + all ℓ_b rounds)
       let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck(
-        &a_small, &b_small, &tau, ell_cons, &rhos, vc, vc_state,
-        vc_shape, vc_ck, transcript,
+        &a_small, &b_small, &tau, ell_cons, &rhos, vc, vc_state, vc_shape, vc_ck, transcript,
       )?;
 
       // Post-sumcheck: direct eq-weighted fold over original field-element layers
@@ -584,23 +582,18 @@ where
       SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
+    // TODO: small-value fold when W stored as i64
     let folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_witnesses");
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_instances");
+    // TODO: small-value fold when U.X stored as i64
     let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
 
     info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove_total");
 
-    Ok((
-      E_eq,
-      az_folded,
-      bz_folded,
-      cz_folded,
-      folded_W,
-      folded_U,
-    ))
+    Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }
 }
 
@@ -1689,7 +1682,15 @@ mod tests {
       // x^2 + x + 5 = sum
       cs.enforce(
         || "x_sq + x + 5 = sum",
-        |lc| lc + x_sq.get_variable() + x.get_variable() + CS::one() + CS::one() + CS::one() + CS::one() + CS::one(),
+        |lc| {
+          lc + x_sq.get_variable()
+            + x.get_variable()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+            + CS::one()
+        },
         |lc| lc + CS::one(),
         |lc| lc + sum.get_variable(),
       );
@@ -1710,11 +1711,17 @@ mod tests {
     type E = T256HyraxEngine;
 
     let num_circuits = 4;
-    let template = SmallWitnessCircuit::<E> { x: 0, _p: Default::default() };
+    let template = SmallWitnessCircuit::<E> {
+      x: 0,
+      _p: Default::default(),
+    };
     let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&template, &template, num_circuits).unwrap();
 
     let circuits: Vec<_> = (0..num_circuits as u64)
-      .map(|i| SmallWitnessCircuit::<E> { x: i + 1, _p: Default::default() })
+      .map(|i| SmallWitnessCircuit::<E> {
+        x: i + 1,
+        _p: Default::default(),
+      })
       .collect();
 
     // Verify vanilla path works
@@ -1723,7 +1730,11 @@ mod tests {
       let snark_v = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps_v, false)
         .expect("vanilla prove should succeed");
       let res_v = snark_v.verify(&vk, circuits.len());
-      assert!(res_v.is_ok(), "vanilla proof should verify: {:?}", res_v.err());
+      assert!(
+        res_v.is_ok(),
+        "vanilla proof should verify: {:?}",
+        res_v.err()
+      );
     }
 
     // Verify small-value path works
@@ -1732,7 +1743,11 @@ mod tests {
       let snark_s = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps_s, true)
         .expect("small-value prove should succeed");
       let res_s = snark_s.verify(&vk, circuits.len());
-      assert!(res_s.is_ok(), "small-value proof should verify: {:?}", res_s.err());
+      assert!(
+        res_s.is_ok(),
+        "small-value proof should verify: {:?}",
+        res_s.err()
+      );
     }
   }
 }
