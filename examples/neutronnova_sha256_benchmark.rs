@@ -278,26 +278,28 @@ fn run_full_nifs_prove<E: Engine>(
 
       clear_timings(timing_data);
 
+      let t_total = Instant::now();
+
       // Witness generation: prep_prove
       let t0 = Instant::now();
       let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, is_small)
         .expect("prep_prove");
       let prep_ms = t0.elapsed().as_millis();
-      info!(elapsed_ms = prep_ms as u64, "prep_prove");
 
       // Witness generation: synthesize instances
       let t0 = Instant::now();
       let (instances, witnesses) =
         generate_instances_and_witnesses(&pk, &prep, &circuits, is_small);
       let gen_ms = t0.elapsed().as_millis();
-      info!(elapsed_ms = gen_ms as u64, "generate_instances_witnesses");
 
       // NIFS prove
       let t0 = Instant::now();
       let (_e_eq, _az, _bz, _cz, _folded_w, _folded_u) =
         run_nifs_prove(&pk, &instances, &witnesses, is_small);
       let nifs_ms = t0.elapsed().as_millis();
-      info!(elapsed_ms = nifs_ms as u64, "NIFS_prove_total");
+
+      let total_ms = t_total.elapsed().as_millis();
+      info!(elapsed_ms = total_ms as u64, "end_to_end_total");
 
       let timings = snapshot_timings(timing_data, NEUTRONNOVA_PHASES);
       if is_small {
@@ -307,8 +309,8 @@ fn run_full_nifs_prove<E: Engine>(
       }
 
       eprintln!(
-        "  [round {}] mode={}, prep={} ms, gen={} ms, nifs={} ms",
-        round, mode, prep_ms, gen_ms, nifs_ms,
+        "  [round {}] mode={}, prep={} ms, gen={} ms, nifs={} ms, total={} ms",
+        round, mode, prep_ms, gen_ms, nifs_ms, total_ms,
       );
     }
 
@@ -352,8 +354,8 @@ fn run_full_nifs_prove<E: Engine>(
   };
 
   let header = format!(
-    "===== NeutronNova NIFS: instances={}, chain_length={}, rounds={} =====",
-    num_instances, chain_length, rounds,
+    "===== NeutronNova NIFS: instances={}, chain_length={}, constraints={}, rounds={} =====",
+    num_instances, chain_length, pk.S_step.num_cons, rounds,
   );
   print_hierarchical_table(
     &header,
