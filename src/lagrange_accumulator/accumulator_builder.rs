@@ -24,6 +24,7 @@ use crate::{
   polys::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
+    power::PowPolynomial,
   },
 };
 use crate::small_field::{DelayedReduction, SmallValueField};
@@ -228,26 +229,38 @@ where
 /// where b ranges over U₂^{ℓ_b} and x ranges over the constraint space.
 ///
 /// Unlike Spartan (which gathers from a single polynomial), NeutronNova gathers
-/// across instances: `a_layers[p][x_L * right + x_R]` for each instance p.
+/// across instances: `a_layers[p][x_R * left + x_L]` for each instance p.
 ///
-/// Phase 1 MVP: immediate reduction, no DMR. All ℓ_b rounds are Lagrange (l0 = ℓ_b).
+/// All ℓ_b rounds are Lagrange (l0 = ℓ_b). Uses fused three-way DMR in the inner
+/// loop and non-Montgomery scatter with precomputed `e_rb_cache`.
 ///
 /// # Arguments
-/// * `a_layers` - Az evaluations per instance, each of length left*right
+/// * `a_layers` - Az evaluations per instance, each of length `2^ell_cons`
 /// * `b_layers` - Bz evaluations per instance
-/// * `e_left` - Left tensor factor of eq(τ, x): e_left[j] = eq(τ_left, j). From constraint-space challenge τ.
-/// * `e_right` - Right tensor factor of eq(τ, x): e_right[i] = eq(τ_right, i). From constraint-space challenge τ.
-/// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b.
-/// * `left` - Number of left constraint indices
-/// * `right` - Number of right constraint indices
+/// * `tau` - Constraint-folding challenge; eq table is `[1, τ, τ², ..., τ^{2^ℓ - 1}]`
+/// * `ell_cons` - log₂(num_constraints), determines total eq table size
+/// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b
+///
+/// # Scatter optimization
+///
+/// The scatter phase eliminates all Montgomery multiplications from the hot path:
+/// 1. Partial sums are Barrett-reduced to non-R-scaled raw limbs (`UnreducedField`)
+/// 2. `e_rb_cache` is precomputed as non-R-scaled raw limbs: `from_mont(e_right[x_r] * e_b[round][y])`
+/// 3. Scatter accumulates raw 4×4 limb products into `WideLimbs<9>` (no Montgomery ops)
+/// 4. Final `barrett_reduce_9` per bucket converts back to field elements
+///
+/// # Balanced split
+///
+/// Internally computes a balanced split `k` of the constraint space to minimize
+/// `|e_left_size - e_rb_cache_size|`, where `e_left` has `2^(ℓ-k)` entries and
+/// `e_rb_cache` has `2^k × Σ|e_b[round]|` entries. This balances the two tables
+/// that are iterated in the inner and scatter loops respectively.
 pub fn build_accumulators_neutronnova<S>(
   a_layers: &[Vec<i64>],
   b_layers: &[Vec<i64>],
-  e_left: &[S],
-  e_right: &[S],
+  tau: &S,
+  ell_cons: usize,
   rhos: &[S],
-  left: usize,
-  right: usize,
 ) -> LagrangeAccumulators<S, 2>
 where
   S: PrimeField + SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64, IntermediateSmallValue = i128> + Send + Sync,
@@ -257,26 +270,52 @@ where
   debug_assert_eq!(n, 1 << l0, "number of instances must be power of 2");
   debug_assert_eq!(b_layers.len(), n);
   debug_assert_eq!(rhos.len(), l0);
-  debug_assert_eq!(e_left.len(), left);
-  debug_assert_eq!(e_right.len(), right);
-  debug_assert!(a_layers[0].len() == left * right);
 
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let prefix_size = n; // 2^l_b
 
-  // Build bit-reversal permutation: the vanilla path uses little-endian layer indexing
-  // (layer = b₁ + 2*b₂, where b₁ is the round-0 variable), but extend_in_place uses
-  // big-endian (flat = b₁*2 + b₂). We bit-reverse the instance index during gather
-  // so that the extension's variable ordering matches the vanilla sumcheck rounds.
+  // Suffix eq weights over instance-folding challenges ρ.
+  let e_b = compute_suffix_eq_pyramid(rhos, l0);
+  let e_b_total: usize = e_b.iter().map(|r| r.len()).sum(); // total entries across all rounds
+
+  // Compute balanced split k: minimize |e_left_size - e_rb_cache_size|
+  // e_left has 2^(ell-k) entries, e_rb_cache has 2^k * e_b_total entries.
+  let k = (0..=ell_cons)
+    .min_by_key(|&k| {
+      let e_left_size = 1usize << (ell_cons - k);
+      let e_rb_size = (1usize << k) * e_b_total;
+      (e_left_size as isize - e_rb_size as isize).unsigned_abs()
+    })
+    .unwrap();
+  let left = 1usize << (ell_cons - k);
+  let right = 1usize << k;
+
+  debug_assert_eq!(a_layers[0].len(), left * right);
+
+  // Compute eq tables from tau with balanced split:
+  // e_left[x_l] = tau^{x_l} for x_l = 0..left
+  // e_right[x_r] = tau^{x_r * left} for x_r = 0..right
+  let e_left = PowPolynomial::split_evals(*tau, ell_cons, left, right);
+  let e_right = &e_left[left..]; // second half
+  let e_left_slice = &e_left[..left]; // first half
+
+  // Precompute e_rb_cache: non-R-scaled raw limbs of e_right[x_r] * e_b[round][y].
+  // Layout: e_rb_cache[round][y * right + x_r] = from_mont(e_right[x_r] * e_b[round][y])
+  let e_rb_cache: Vec<Vec<S::UnreducedField>> = e_b
+    .iter()
+    .map(|round_ey| {
+      round_ey
+        .iter()
+        .flat_map(|ey| e_right.iter().map(|er| (*er * *ey).to_unreduced()))
+        .collect()
+    })
+    .collect();
+
+  // Build bit-reversal permutation
   let bit_rev: Vec<usize> = (0..prefix_size)
     .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
     .collect();
   let ext_size = base.pow(l0 as u32); // 3^l_b
-
-  // Suffix eq weights over instance-folding challenges ρ.
-  // e_b[round][y] = eq(ρ_{round+1..ℓ_b}, y) — used in scatter to weight
-  // accumulator contributions by the suffix of the instance index.
-  let e_b = compute_suffix_eq_pyramid(rhos, l0);
 
   let BetaPrefixCache {
     cache: beta_prefix_cache,
@@ -297,9 +336,7 @@ where
       |mut state: State<S>, x_r| {
         state.reset_partial_sums();
 
-        let e_r = e_right[x_r];
-
-        for (x_l, &e_l) in e_left.iter().enumerate() {
+        for (x_l, &e_l) in e_left_slice.iter().enumerate() {
           // Gather: collect Az_p(x_L, x_R) for each instance p, widen to IntermediateSmallValue
           #[allow(clippy::needless_range_loop)]
           for p in 0..prefix_size {
@@ -326,13 +363,7 @@ where
             );
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
-          // Only process betas with ∞ — binary betas contribute 0 for satisfying witnesses
-          // because Az_b * Bz_b = Cz_b at boolean points. At ∞ points, compute A*B only
-          // (C is degree 1, so its ∞ component doesn't contribute to the degree-2 part).
-          //
           // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
-          // az_ext/bz_ext are i128 (at most 64 + l_b bits each). The fused primitive
-          // computes field(256b) × i128 × i128 and accumulates into SignedWideLimbs<7>.
           for &beta_idx in &betas_with_infty {
             S::unreduced_field_int_product_mul_add(
               &mut state.partial_sums[beta_idx],
@@ -343,21 +374,25 @@ where
           }
         }
 
-        // Reduce unreduced partial sums to field elements and filter non-zero
+        // Reduce partial sums to non-R-scaled raw limbs and filter non-zero
         for &beta_idx in &betas_with_infty {
           let unreduced = &state.partial_sums[beta_idx];
           if !unreduced.is_zero() {
-            let val = S::reduce_field_int(unreduced);
+            let val = S::reduce_field_int_to_unreduced(unreduced);
             state.beta_values.push((beta_idx, val));
           }
         }
 
-        // Scatter: weight each partial sum by e_r and e_b, then dispatch into accumulator buckets
+        // Scatter: raw limb multiply-accumulate (no Montgomery multiplications)
+        // val is non-R-scaled, e_rb_cache is non-R-scaled → product is non-R-scaled
         for &(beta_idx, val) in &state.beta_values {
-          let z_beta = e_r * val;
           for pref in &beta_prefix_cache[beta_idx] {
-            state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx] +=
-              e_b[pref.round_0][pref.y_idx] * z_beta;
+            let e_rb = &e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
+            S::unreduced_raw_mul_add(
+              &mut state.scatter_acc.rounds[pref.round_0].data[pref.v_idx][pref.u_idx],
+              &val,
+              e_rb,
+            );
           }
         }
 
@@ -375,7 +410,8 @@ where
     })
     .expect("right > 0 guarantees non-empty fold results");
 
-  merged.scatter_acc
+  // Barrett-reduce each bucket from raw 9-limb to field element
+  merged.scatter_acc.map(|acc| S::barrett_reduce_field_field(acc))
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.

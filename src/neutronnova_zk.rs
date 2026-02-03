@@ -96,6 +96,51 @@ fn mul_opt<F: Field>(a: &F, b: &F) -> F {
   }
 }
 
+/// Convert layers of field elements to small values (i64).
+fn layers_to_small<E: Engine>(
+  layers: &[Vec<E::Scalar>],
+  err_fn: &dyn Fn() -> SpartanError,
+) -> Result<Vec<Vec<i64>>, SpartanError>
+where
+  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>,
+{
+  layers
+    .iter()
+    .map(|layer| {
+      layer
+        .iter()
+        .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(err_fn))
+        .collect::<Result<Vec<i64>, _>>()
+    })
+    .collect()
+}
+
+/// Eq-weighted fold with field×int delayed modular reduction.
+///
+/// Computes `folded[k] = Σ_i eq_evals[i] * layers[i][k]` for each coordinate k,
+/// using unreduced_field_int_mul_add to delay modular reduction until the end.
+fn small_value_eq_weighted_fold<E: Engine>(
+  eq_evals: &[E::Scalar],
+  layers: &[Vec<i64>],
+  num_cons: usize,
+) -> Vec<E::Scalar>
+where
+  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
+    + DelayedReduction<i64, IntermediateSmallValue = i128>,
+{
+  let n_inst = eq_evals.len();
+  (0..num_cons)
+    .into_par_iter()
+    .map(|k| {
+      let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
+      for i in 0..n_inst {
+        E::Scalar::unreduced_field_int_mul_add(&mut acc, &eq_evals[i], layers[i][k] as i128);
+      }
+      E::Scalar::reduce_field_int(&acc)
+    })
+    .collect()
+}
+
 impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
@@ -192,11 +237,9 @@ where
   pub fn prove_neutronnova_small_value_sumcheck(
     a_layers: &[Vec<i64>],
     b_layers: &[Vec<i64>],
-    e_left: &[E::Scalar],
-    e_right: &[E::Scalar],
+    tau: &E::Scalar,
+    ell_cons: usize,
     rhos: &[E::Scalar],
-    left: usize,
-    right: usize,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
     vc_shape: &SplitMultiRoundR1CSShape<E>,
@@ -220,7 +263,7 @@ where
     // 1. Build accumulators
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
     let accumulators = build_accumulators_neutronnova(
-      a_layers, b_layers, e_left, e_right, rhos, left, right,
+      a_layers, b_layers, tau, ell_cons, rhos,
     );
     info!(
       elapsed_ms = %acc_t.elapsed().as_millis(),
@@ -319,6 +362,8 @@ where
     E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
       + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
+    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove_total");
+
     // Determine padding and NIFS rounds
     let n = Us.len();
     let n_padded = Us.len().next_power_of_two();
@@ -381,10 +426,6 @@ where
     }
     info!(elapsed_ms = %matrix_t.elapsed().as_millis(), instances = n_padded, "matrix_vector_multiply_instances");
 
-    // Split E_eq into e_left and e_right for the small-value path
-    let e_left = &E_eq[..left];
-    let e_right = &E_eq[left..];
-
     // Execute NIFS rounds — either via Lagrange accumulators (small-value) or vanilla binding
     let (_nifs_rounds_span, nifs_rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
 
@@ -396,44 +437,17 @@ where
       let ((a_small, b_small), c_small) = rayon::join(
         || {
           rayon::join(
-            || {
-              A_layers
-                .iter()
-                .map(|a| {
-                  a.iter()
-                    .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                    .collect::<Result<Vec<i64>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()
-            },
-            || {
-              B_layers
-                .iter()
-                .map(|b| {
-                  b.iter()
-                    .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                    .collect::<Result<Vec<i64>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()
-            },
+            || layers_to_small::<E>(&A_layers, &small_err),
+            || layers_to_small::<E>(&B_layers, &small_err),
           )
         },
-        || {
-          C_layers
-            .iter()
-            .map(|c| {
-              c.iter()
-                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                .collect::<Result<Vec<i64>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()
-        },
+        || layers_to_small::<E>(&C_layers, &small_err),
       );
       let (a_small, b_small, c_small) = (a_small?, b_small?, c_small?);
 
       // Accumulator-based sumcheck (build + all ℓ_b rounds)
       let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck(
-        &a_small, &b_small, e_left, e_right, &rhos, left, right, vc, vc_state,
+        &a_small, &b_small, &tau, ell_cons, &rhos, vc, vc_state,
         vc_shape, vc_ck, transcript,
       )?;
 
@@ -445,64 +459,13 @@ where
       let r_bs_rev: Vec<_> = r_bs.iter().rev().cloned().collect();
       let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
       let num_cons = a_small[0].len();
-      // Parallel eq-weighted fold with field×int DMR: for each coordinate k,
-      // az_folded[k] = Σ_i eq_i * a_small[i][k]
-      // Uses unreduced_field_int_mul_add (~8 MACs) instead of field_field (~16 MACs).
-      let n_inst = eq_evals.len();
+      // Parallel eq-weighted fold: folded[k] = Σ_i eq_i * layers[i][k]
       let (az_folded, (bz_folded, cz_folded)) = rayon::join(
-        || {
-          (0..num_cons)
-            .into_par_iter()
-            .map(|k| {
-              let mut acc =
-                <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
-              for i in 0..n_inst {
-                E::Scalar::unreduced_field_int_mul_add(
-                  &mut acc,
-                  &eq_evals[i],
-                  a_small[i][k] as i128,
-                );
-              }
-              E::Scalar::reduce_field_int(&acc)
-            })
-            .collect::<Vec<_>>()
-        },
+        || small_value_eq_weighted_fold::<E>(&eq_evals, &a_small, num_cons),
         || {
           rayon::join(
-            || {
-              (0..num_cons)
-                .into_par_iter()
-                .map(|k| {
-                  let mut acc =
-                    <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
-                  for i in 0..n_inst {
-                    E::Scalar::unreduced_field_int_mul_add(
-                      &mut acc,
-                      &eq_evals[i],
-                      b_small[i][k] as i128,
-                    );
-                  }
-                  E::Scalar::reduce_field_int(&acc)
-                })
-                .collect::<Vec<_>>()
-            },
-            || {
-              (0..num_cons)
-                .into_par_iter()
-                .map(|k| {
-                  let mut acc =
-                    <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
-                  for i in 0..n_inst {
-                    E::Scalar::unreduced_field_int_mul_add(
-                      &mut acc,
-                      &eq_evals[i],
-                      c_small[i][k] as i128,
-                    );
-                  }
-                  E::Scalar::reduce_field_int(&acc)
-                })
-                .collect::<Vec<_>>()
-            },
+            || small_value_eq_weighted_fold::<E>(&eq_evals, &b_small, num_cons),
+            || small_value_eq_weighted_fold::<E>(&eq_evals, &c_small, num_cons),
           )
         },
       );
@@ -626,6 +589,8 @@ where
     let (_fold_final_span, fold_final_t) = start_span!("fold_instances");
     let folded_U = R1CSInstance::fold_multiple(&r_bs, &Us)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
+
+    info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove_total");
 
     Ok((
       E_eq,

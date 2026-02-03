@@ -86,6 +86,9 @@ pub trait FieldReductionConstants {
   /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
   const R384_MOD: [u64; 4];
 
+  /// 2^448 mod p - reduces the 8th limb (index 7) of a wide integer
+  const R448_MOD: [u64; 4];
+
   /// 2^512 mod p - reduces the 9th limb (index 8) of a wide integer
   const R512_MOD: [u64; 4];
 
@@ -133,6 +136,14 @@ impl FieldReductionConstants for Fp {
     0x66d3caf41be6eb52,
     0x9b4b3c4bfffffffc,
     0x36e59c0fdacc1b91,
+  ];
+
+  // 2^448 mod p
+  const R448_MOD: [u64; 4] = [
+    0x9b9858f294cf91ba,
+    0x8635bd2c4252b065,
+    0x496d41af7b9cb714,
+    0x1b4b3c4bfffffffc,
   ];
 
   // 2^512 mod p
@@ -189,6 +200,14 @@ impl FieldReductionConstants for Fq {
   ];
 
 
+  // 2^448 mod q
+  const R448_MOD: [u64; 4] = [
+    0xcc920bb9994a8dd9,
+    0x87a7dcbe1ff6e0d7,
+    0x496d41af7ccfdaa9,
+    0x0ee4537bfffffffc,
+  ];
+
   // 2^512 mod q
   const R512_MOD: [u64; 4] = [
     0xfc9678ff0000000f,
@@ -242,6 +261,14 @@ impl FieldReductionConstants for Bn254Fr {
     0x03d581d748ffa25e,
   ];
 
+
+  // 2^448 mod r
+  const R448_MOD: [u64; 4] = [
+    0x5665c3b5c177f51a,
+    0x00e7f02ade75c713,
+    0xb09192e52f747168,
+    0x0621c0bbcccdc65d,
+  ];
 
   // 2^512 mod r
   const R512_MOD: [u64; 4] = [
@@ -297,6 +324,14 @@ impl FieldReductionConstants for T256Fq {
   ];
 
 
+  // 2^448 mod p
+  const R448_MOD: [u64; 4] = [
+    0x0000000000000001,
+    0x0000000000000000,
+    0xc000000000000000,
+    0xffffffffffffffff,
+  ];
+
   // 2^512 mod p
   const R512_MOD: [u64; 4] = [
     0x0000000000000003,
@@ -324,6 +359,10 @@ pub(crate) trait BarrettField: FieldReductionConstants + Neg<Output = Self> + Co
   /// Construct a field element from 4 Montgomery-form limbs.
   fn from_limbs(limbs: [u64; 4]) -> Self;
 
+  /// Construct a field element from non-Montgomery (raw integer) limbs.
+  /// Converts x mod p → x·R mod p (Montgomery form).
+  fn from_raw_limbs(limbs: [u64; 4]) -> Self;
+
   /// Access the internal Montgomery-form limbs.
   fn to_limbs(&self) -> &[u64; 4];
 }
@@ -334,6 +373,11 @@ impl BarrettField for Fp {
   #[inline]
   fn from_limbs(limbs: [u64; 4]) -> Self {
     Fp(limbs)
+  }
+
+  #[inline]
+  fn from_raw_limbs(limbs: [u64; 4]) -> Self {
+    Fp::from_raw(limbs)
   }
 
   #[inline]
@@ -351,6 +395,11 @@ impl BarrettField for Fq {
   }
 
   #[inline]
+  fn from_raw_limbs(limbs: [u64; 4]) -> Self {
+    Fq::from_raw(limbs)
+  }
+
+  #[inline]
   fn to_limbs(&self) -> &[u64; 4] {
     &self.0
   }
@@ -365,6 +414,11 @@ impl BarrettField for Bn254Fr {
   }
 
   #[inline]
+  fn from_raw_limbs(limbs: [u64; 4]) -> Self {
+    Bn254Fr::from_raw(limbs)
+  }
+
+  #[inline]
   fn to_limbs(&self) -> &[u64; 4] {
     &self.0
   }
@@ -376,6 +430,11 @@ impl BarrettField for T256Fq {
   #[inline]
   fn from_limbs(limbs: [u64; 4]) -> Self {
     T256Fq(limbs)
+  }
+
+  #[inline]
+  fn from_raw_limbs(limbs: [u64; 4]) -> Self {
+    T256Fq::from_raw(limbs)
   }
 
   #[inline]
@@ -563,6 +622,52 @@ pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64
   sum[5] = s as u64;
 
   barrett_reduce_6::<F>(&sum)
+}
+
+// ==========================================================================
+// 9-limb Barrett reduction (for raw limb × raw limb accumulator)
+// ==========================================================================
+
+/// Generic 9-limb Barrett reduction using trait constants.
+///
+/// Reduces a 9-limb value (up to 576 bits) modulo p by folding limbs 8 and 7
+/// using R512 and R448, then delegating to 7-limb reduction.
+#[inline]
+pub(crate) fn barrett_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
+  // Fold c[8] via R512 and c[7] via R448
+  let c8_contrib = mul_4_by_1(&F::R512_MOD, c[8]);
+  let c7_contrib = mul_4_by_1(&F::R448_MOD, c[7]);
+
+  let mut sum = [0u64; 7];
+  let mut carry = 0u128;
+  for i in 0..4 {
+    let s = (c[i] as u128) + (c8_contrib[i] as u128) + (c7_contrib[i] as u128) + carry;
+    sum[i] = s as u64;
+    carry = s >> 64;
+  }
+  let s = (c[4] as u128) + (c8_contrib[4] as u128) + (c7_contrib[4] as u128) + carry;
+  sum[4] = s as u64;
+  carry = s >> 64;
+  let s = (c[5] as u128) + carry;
+  sum[5] = s as u64;
+  carry = s >> 64;
+  let s = (c[6] as u128) + carry;
+  sum[6] = s as u64;
+
+  barrett_reduce_7::<F>(&sum)
+}
+
+// ==========================================================================
+// from_mont_limbs - Convert Montgomery form to non-R-scaled raw limbs
+// ==========================================================================
+
+/// Convert a Montgomery-form field element to non-R-scaled raw limbs.
+///
+/// Given x·R mod p (Montgomery form), returns x mod p as raw [u64; 4].
+/// Uses Montgomery REDC with zero-padded 8-limb input.
+#[inline]
+pub(crate) fn from_mont_limbs<F: FieldReductionConstants>(limbs: &[u64; 4]) -> [u64; 4] {
+  montgomery_reduce_8::<F>(&[limbs[0], limbs[1], limbs[2], limbs[3], 0, 0, 0, 0])
 }
 
 // ==========================================================================
@@ -1053,5 +1158,152 @@ mod tests {
 
     let result = Fq(montgomery_reduce_9::<Fq>(&acc));
     assert_eq!(result, expected_sum);
+  }
+
+  // ========================================================================
+  // 9-limb Barrett reduction tests
+  // ========================================================================
+
+  #[test]
+  fn test_barrett_9_fp_single_product() {
+    // Two non-Montgomery values multiplied → 8 limbs, extend to 9
+    let a = Fp::from(12345u64);
+    let b = Fp::from(67890u64);
+
+    // Get non-Montgomery limbs
+    let a_raw = from_mont_limbs::<Fp>(&a.0);
+    let b_raw = from_mont_limbs::<Fp>(&b.0);
+
+    // Raw multiply
+    let product = mul_4_by_4(&a_raw, &b_raw);
+    let c = [
+      product[0], product[1], product[2], product[3], product[4], product[5], product[6],
+      product[7], 0,
+    ];
+
+    // Barrett reduce → should give (a*b) as non-Montgomery raw limbs
+    let result = barrett_reduce_9::<Fp>(&c);
+
+    // Expected: (12345 * 67890) mod p as raw limbs
+    let expected = from_mont_limbs::<Fp>(&(a * b).0);
+    assert_eq!(result, expected);
+  }
+
+  #[test]
+  fn test_barrett_9_fp_sum_of_products() {
+    let mut rng = OsRng;
+    let mut acc = [0u64; 9];
+    let mut expected_sum = Fp::ZERO;
+
+    for _ in 0..100 {
+      let a = Fp::random(&mut rng);
+      let b = Fp::random(&mut rng);
+
+      expected_sum += a * b;
+
+      let a_raw = from_mont_limbs::<Fp>(&a.0);
+      let b_raw = from_mont_limbs::<Fp>(&b.0);
+      let product = mul_4_by_4(&a_raw, &b_raw);
+
+      let mut carry = 0u128;
+      for i in 0..8 {
+        let sum = (acc[i] as u128) + (product[i] as u128) + carry;
+        acc[i] = sum as u64;
+        carry = sum >> 64;
+      }
+      acc[8] = acc[8].wrapping_add(carry as u64);
+    }
+
+    let result = barrett_reduce_9::<Fp>(&acc);
+    let expected = from_mont_limbs::<Fp>(&expected_sum.0);
+    assert_eq!(result, expected);
+  }
+
+  #[test]
+  fn test_barrett_9_fq_sum_of_products() {
+    let mut rng = OsRng;
+    let mut acc = [0u64; 9];
+    let mut expected_sum = Fq::ZERO;
+
+    for _ in 0..100 {
+      let a = Fq::random(&mut rng);
+      let b = Fq::random(&mut rng);
+
+      expected_sum += a * b;
+
+      let a_raw = from_mont_limbs::<Fq>(&a.0);
+      let b_raw = from_mont_limbs::<Fq>(&b.0);
+      let product = mul_4_by_4(&a_raw, &b_raw);
+
+      let mut carry = 0u128;
+      for i in 0..8 {
+        let sum = (acc[i] as u128) + (product[i] as u128) + carry;
+        acc[i] = sum as u64;
+        carry = sum >> 64;
+      }
+      acc[8] = acc[8].wrapping_add(carry as u64);
+    }
+
+    let result = barrett_reduce_9::<Fq>(&acc);
+    let expected = from_mont_limbs::<Fq>(&expected_sum.0);
+    assert_eq!(result, expected);
+  }
+
+  #[test]
+  fn test_barrett_9_bn254fr_sum_of_products() {
+    let mut rng = OsRng;
+    let mut acc = [0u64; 9];
+    let mut expected_sum = Bn254Fr::ZERO;
+
+    for _ in 0..100 {
+      let a = Bn254Fr::random(&mut rng);
+      let b = Bn254Fr::random(&mut rng);
+
+      expected_sum += a * b;
+
+      let a_raw = from_mont_limbs::<Bn254Fr>(&a.0);
+      let b_raw = from_mont_limbs::<Bn254Fr>(&b.0);
+      let product = mul_4_by_4(&a_raw, &b_raw);
+
+      let mut carry = 0u128;
+      for i in 0..8 {
+        let sum = (acc[i] as u128) + (product[i] as u128) + carry;
+        acc[i] = sum as u64;
+        carry = sum >> 64;
+      }
+      acc[8] = acc[8].wrapping_add(carry as u64);
+    }
+
+    let result = barrett_reduce_9::<Bn254Fr>(&acc);
+    let expected = from_mont_limbs::<Bn254Fr>(&expected_sum.0);
+    assert_eq!(result, expected);
+  }
+
+  // ========================================================================
+  // from_mont_limbs tests
+  // ========================================================================
+
+  #[test]
+  fn test_from_mont_limbs_fp() {
+    // from_mont(ONE) should give 1
+    let one_raw = from_mont_limbs::<Fp>(&Fp::ONE.0);
+    assert_eq!(one_raw, [1, 0, 0, 0]);
+
+    // from_mont(from(42)) should give [42, 0, 0, 0]
+    let val = Fp::from(42u64);
+    let raw = from_mont_limbs::<Fp>(&val.0);
+    assert_eq!(raw, [42, 0, 0, 0]);
+  }
+
+  #[test]
+  fn test_from_mont_limbs_roundtrip() {
+    let mut rng = OsRng;
+    for _ in 0..100 {
+      let a = Fp::random(&mut rng);
+      let raw = from_mont_limbs::<Fp>(&a.0);
+      // Reconstruct: from_raw converts plain integer to Montgomery form
+      let reconstructed = Fp::from_raw(raw);
+      assert_eq!(a, reconstructed);
+    }
   }
 }

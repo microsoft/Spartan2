@@ -397,8 +397,9 @@ fn run_sumcheck_comparison<E: Engine>(
     "build_accumulators_neutronnova",
     "nifs_eq_fold",
     "vc_commit",
+    "nifs_prove_total",
   ];
-  let sumcheck_short = &["nifs_fold", "acc_build", "eq_fold", "vc_commit"];
+  let sumcheck_short = &["nifs_fold", "acc_build", "eq_fold", "vc_commit", "total"];
 
   let mut small_timings_all: Vec<Vec<u64>> = Vec::new();
   let mut large_timings_all: Vec<Vec<u64>> = Vec::new();

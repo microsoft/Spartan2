@@ -15,6 +15,7 @@ use super::{
   accumulator::LagrangeAccumulators, delay_modular_reduction_mode::DelayedModularReductionMode,
   mat_vec_mle::MatVecMLE,
 };
+use crate::small_field::DelayedReduction;
 use ff::PrimeField;
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
@@ -137,13 +138,15 @@ where
 /// - `S`: Field type for partial sums and scatter accumulators
 /// - `V`: Intermediate value type for pref/extension buffers (i64 for i32 path, i128 for i64 path)
 /// - `D`: Polynomial degree bound
-pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, PS: Copy + Default, const D: usize>
+pub(crate) struct NeutronNovaThreadState<S, V: Copy + Default, PS: Copy + Default, const D: usize>
+where
+  S: PrimeField + DelayedReduction<i64>,
 {
   /// Partial sums indexed by β, accumulated over the x_L loop. Reset each x_R iteration.
   /// Type is `S` for immediate reduction, or `UnreducedFieldInt` for delayed reduction.
   pub partial_sums: Vec<PS>,
-  /// Bucket accumulators for scatter phase.
-  pub scatter_acc: LagrangeAccumulators<S, D>,
+  /// Bucket accumulators for scatter phase (9-limb raw product accumulators).
+  pub scatter_acc: LagrangeAccumulators<S::UnreducedFieldField, D>,
   /// Prefix evaluations of Az for current x_R. Size: 2^l_b
   pub az_prefix_boolean_evals: Vec<V>,
   /// Prefix evaluations of Bz for current x_R. Size: 2^l_b
@@ -157,11 +160,13 @@ pub(crate) struct NeutronNovaThreadState<S: PrimeField, V: Copy + Default, PS: C
   /// Scratch buffer for Bz Lagrange extension.
   pub bz_extended_scratch: Vec<V>,
   /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
-  pub beta_values: Vec<(usize, S)>,
+  /// Values are non-R-scaled raw limbs from Barrett-reducing partial sums.
+  pub beta_values: Vec<(usize, S::UnreducedField)>,
 }
 
-impl<S: PrimeField, V: Copy + Default, PS: Copy + Default, const D: usize>
-  NeutronNovaThreadState<S, V, PS, D>
+impl<S, V: Copy + Default, PS: Copy + Default, const D: usize> NeutronNovaThreadState<S, V, PS, D>
+where
+  S: PrimeField + DelayedReduction<i64>,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {

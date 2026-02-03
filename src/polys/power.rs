@@ -72,14 +72,15 @@ impl<Scalar: PrimeField> PowPolynomial<Scalar> {
       .take(len_left)
       .collect::<Vec<_>>();
 
-    // right = [1, t^{2^{ell/2}}, t^{2^{ell/2 + 1}}, ..., t^{2^{ell} - 1}]
-    // take the last entry from left, multiply with t to get the second entry in right
-    let left_last_times_t = left[left.len() - 1] * t;
+    // right = [1, t^{len_left}, t^{2*len_left}, ..., t^{(len_right-1)*len_left}]
+    // t^{len_left} = left[len_left-1] * t
     let mut right = vec![Scalar::ONE; len_right];
-    right[0] = Scalar::ONE;
-    right[1] = left_last_times_t;
-    for i in 2..len_right {
-      right[i] = right[i - 1] * left_last_times_t;
+    if len_right > 1 {
+      let stride = left[left.len() - 1] * t;
+      right[1] = stride;
+      for i in 2..len_right {
+        right[i] = right[i - 1] * stride;
+      }
     }
 
     [left, right].concat()

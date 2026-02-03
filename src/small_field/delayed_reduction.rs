@@ -165,4 +165,33 @@ where
 
   /// Reduce an unreduced field×field accumulator to a field element.
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
+
+  // ========================================================================
+  // Non-Montgomery scatter support
+  // ========================================================================
+
+  /// Non-R-scaled raw limbs (not in Montgomery form). `[u64; 4]` for 256-bit fields.
+  /// Used to avoid Montgomery multiplications in the scatter hot path.
+  type UnreducedField: Copy + Clone + Default + Debug + Send + Sync;
+
+  /// Barrett-reduce a field×int accumulator to non-R-scaled raw limbs.
+  /// Equivalent to `from_mont(reduce_field_int(acc))` but avoids constructing
+  /// an intermediate field element.
+  fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;
+
+  /// Convert a Montgomery-form field element to non-R-scaled raw limbs.
+  fn to_unreduced(&self) -> Self::UnreducedField;
+
+  /// Raw (non-Montgomery) 4×4 limb multiply-accumulate into a 9-limb accumulator.
+  /// `acc += a_raw × b_raw` where both inputs are non-R-scaled.
+  fn unreduced_raw_mul_add(
+    acc: &mut Self::UnreducedFieldField,
+    a: &Self::UnreducedField,
+    b: &Self::UnreducedField,
+  );
+
+  /// Barrett-reduce a 9-limb raw product accumulator to a field element.
+  /// The accumulated value is non-R-scaled; this function Barrett-reduces
+  /// and then converts to Montgomery form.
+  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
 }

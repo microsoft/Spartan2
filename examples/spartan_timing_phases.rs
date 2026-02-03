@@ -37,12 +37,13 @@ pub const NEUTRONNOVA_PHASES: &[&str] = &[
   "vc_commit",
   "fold_witnesses",
   "fold_instances",
+  "nifs_prove_total",
 ];
 
 pub const NEUTRONNOVA_SHORT_NAMES: &[&str] = &[
   "shared_syn", "commit_sh", "precom_syn", "commit_pre",
   "r1cs_iw", "commit_rst", "mat_vec", "nifs_fold",
-  "vc_commit", "fold_W", "fold_U",
+  "vc_commit", "fold_W", "fold_U", "total",
 ];
 
 pub fn print_table(header: &str, small: &[u64], large: &[u64]) {

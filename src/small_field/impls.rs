@@ -219,6 +219,46 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     F::from_limbs(barrett::montgomery_reduce_9::<F>(&acc.0))
   }
+
+  type UnreducedField = [u64; 4];
+
+  #[inline(always)]
+  fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> [u64; 4] {
+    // Barrett reduce to Montgomery form, then from_mont to raw limbs
+    let mont = match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => barrett::barrett_reduce_6::<F>(&mag),
+      SubMagResult::Negative(mag) => {
+        // Negate in limb space: p - x
+        let pos = barrett::barrett_reduce_6::<F>(&mag);
+        let neg = F::from_limbs(pos).neg();
+        *neg.to_limbs()
+      }
+    };
+    barrett::from_mont_limbs::<F>(&mont)
+  }
+
+  #[inline(always)]
+  fn to_unreduced(&self) -> [u64; 4] {
+    barrett::from_mont_limbs::<F>(self.to_limbs())
+  }
+
+  #[inline(always)]
+  fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
+    let product = mul_4_by_4_ext(a, b);
+    let mut carry = 0u128;
+    for i in 0..8 {
+      let sum = (acc.0[i] as u128) + (product[i] as u128) + carry;
+      acc.0[i] = sum as u64;
+      carry = sum >> 64;
+    }
+    acc.0[8] = acc.0[8].wrapping_add(carry as u64);
+  }
+
+  #[inline(always)]
+  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
+    let raw = barrett::barrett_reduce_9::<F>(&acc.0);
+    F::from_raw_limbs(raw)
+  }
 }
 
 // ============================================================================
@@ -386,6 +426,44 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   #[inline(always)]
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     F::from_limbs(barrett::montgomery_reduce_9::<F>(&acc.0))
+  }
+
+  type UnreducedField = [u64; 4];
+
+  #[inline(always)]
+  fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> [u64; 4] {
+    let mont = match sub_mag::<7>(&acc.pos.0, &acc.neg.0) {
+      SubMagResult::Positive(mag) => barrett::barrett_reduce_7::<F>(&mag),
+      SubMagResult::Negative(mag) => {
+        let pos = barrett::barrett_reduce_7::<F>(&mag);
+        let neg = F::from_limbs(pos).neg();
+        *neg.to_limbs()
+      }
+    };
+    barrett::from_mont_limbs::<F>(&mont)
+  }
+
+  #[inline(always)]
+  fn to_unreduced(&self) -> [u64; 4] {
+    barrett::from_mont_limbs::<F>(self.to_limbs())
+  }
+
+  #[inline(always)]
+  fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
+    let product = mul_4_by_4_ext(a, b);
+    let mut carry = 0u128;
+    for i in 0..8 {
+      let sum = (acc.0[i] as u128) + (product[i] as u128) + carry;
+      acc.0[i] = sum as u64;
+      carry = sum >> 64;
+    }
+    acc.0[8] = acc.0[8].wrapping_add(carry as u64);
+  }
+
+  #[inline(always)]
+  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
+    let raw = barrett::barrett_reduce_9::<F>(&acc.0);
+    F::from_raw_limbs(raw)
   }
 }
 

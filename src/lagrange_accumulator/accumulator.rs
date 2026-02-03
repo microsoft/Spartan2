@@ -32,7 +32,7 @@ use super::domain::{LagrangeHatPoint, LagrangeIndex};
 /// - No runtime bounds checks on inner dimension (compile-time D)
 pub struct RoundAccumulator<T, const D: usize> {
   /// Flat storage: data[v_idx] = [A_i(v, ∞), A_i(v, 0), A_i(v, 2), ...]
-  data: Vec<[T; D]>,
+  pub(crate) data: Vec<[T; D]>,
 }
 
 impl<T: Copy + Default, const D: usize> RoundAccumulator<T, D> {
@@ -183,6 +183,30 @@ impl<T: Copy + Default, const D: usize> LagrangeAccumulators<T, D> {
   /// Number of rounds.
   pub fn num_rounds(&self) -> usize {
     self.rounds.len()
+  }
+
+  /// Transform each element using a mapping function, producing a new accumulator.
+  pub fn map<U: Copy + Default, F: Fn(&T) -> U>(&self, f: F) -> LagrangeAccumulators<U, D> {
+    LagrangeAccumulators {
+      rounds: self
+        .rounds
+        .iter()
+        .map(|round| {
+          let data = round
+            .data()
+            .iter()
+            .map(|row| {
+              let mut out = [U::default(); D];
+              for i in 0..D {
+                out[i] = f(&row[i]);
+              }
+              out
+            })
+            .collect();
+          RoundAccumulator { data }
+        })
+        .collect(),
+    }
   }
 
   /// Check if all elements are zero (equal to default).
