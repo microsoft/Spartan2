@@ -244,7 +244,7 @@ where
 /// * `a_layers` - Az evaluations per instance, each of length `left * right`
 /// * `b_layers` - Bz evaluations per instance
 /// * `e_eq` - Pre-computed power polynomial split evals: `[e_left | e_right]` where
-///            `e_left[x_l] = tau^{x_l}` and `e_right[x_r] = tau^{x_r * left}`
+///   `e_left[x_l] = tau^{x_l}` and `e_right[x_r] = tau^{x_r * left}`
 /// * `left` - Size of left tensor component (from `compute_tensor_decomp`)
 /// * `right` - Size of right tensor component (from `compute_tensor_decomp`)
 /// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b

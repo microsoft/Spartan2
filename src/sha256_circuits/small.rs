@@ -69,9 +69,7 @@ where
       small_sha256(cs, &preimage_bits)?
     } else {
       let mut eq = NoBatchEq::<E::Scalar, _>::new(cs);
-      let bits = small_sha256_with_small_multi_eq(&mut eq, &preimage_bits, "")?;
-      drop(eq);
-      bits
+      small_sha256_with_small_multi_eq(&mut eq, &preimage_bits, "")?
     };
 
     // Verify against native SHA-256
@@ -105,9 +103,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for SmallSha256Circuit
       small_sha256(cs, &preimage_bits)?
     } else {
       let mut eq = NoBatchEq::<Scalar, _>::new(cs);
-      let bits = small_sha256_with_small_multi_eq(&mut eq, &preimage_bits, "")?;
-      drop(eq);
-      bits
+      small_sha256_with_small_multi_eq(&mut eq, &preimage_bits, "")?
     };
     Ok(())
   }

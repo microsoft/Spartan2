@@ -266,6 +266,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   }
 
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
     let product = mul_4_by_4_ext(a, b);
     let mut carry = 0u128;
@@ -531,6 +532,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   }
 
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
     let product = mul_4_by_4_ext(a, b);
     let mut carry = 0u128;

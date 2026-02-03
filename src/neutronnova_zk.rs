@@ -459,7 +459,7 @@ where
     let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove_small_value_total");
 
     // === SHARED SETUP ===
-    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(&Us, &Ws, transcript)?;
+    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
     let n_padded = Us.len();
 
     // === TENSOR DECOMPOSITION (same split as field path) ===
@@ -574,7 +574,7 @@ where
     let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove_total");
 
     // === SHARED SETUP ===
-    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(&Us, &Ws, transcript)?;
+    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
     let n_padded = Us.len();
 
     // === TENSOR DECOMPOSITION ===
