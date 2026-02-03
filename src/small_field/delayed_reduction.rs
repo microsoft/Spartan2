@@ -68,12 +68,23 @@ where
     + Sync
     + num_traits::Zero;
 
-  /// Multiply field element by signed integer and add to unreduced accumulator.
-  /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
-  fn unreduced_field_int_mul_add(
+  /// Multiply field element by product of two small values and add to unreduced accumulator.
+  /// acc += field × (small_a × small_b) (keeps result in unreduced form, handles sign internally)
+  fn unreduced_field_small_mul_add(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
-    small: Self::IntermediateSmallValue,
+    small_a: SmallValue,
+    small_b: SmallValue,
+  );
+
+  /// Multiply field element by a single intermediate value and add to unreduced accumulator.
+  /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
+  ///
+  /// Use this for single-value accumulation where you don't have two factors to multiply.
+  fn unreduced_field_intermediate_mul_add(
+    acc: &mut Self::UnreducedFieldInt,
+    field: &Self,
+    intermediate: Self::IntermediateSmallValue,
   );
 
   /// Multiply two field elements and add to unreduced accumulator.
@@ -84,19 +95,20 @@ where
     field_b: &Self,
   );
 
-  /// Batch 4 independent field×int multiply-accumulates for ILP optimization.
+  /// Batch 4 independent field×(small×small) multiply-accumulates for ILP optimization.
   /// Default implementation calls single version 4 times.
   #[inline(always)]
-  fn unreduced_field_int_mul_add_batch4(
+  fn unreduced_field_small_mul_add_batch4(
     accs: [&mut Self::UnreducedFieldInt; 4],
     field: &Self,
-    smalls: [Self::IntermediateSmallValue; 4],
+    smalls_a: [SmallValue; 4],
+    smalls_b: [SmallValue; 4],
   ) {
     let [acc0, acc1, acc2, acc3] = accs;
-    Self::unreduced_field_int_mul_add(acc0, field, smalls[0]);
-    Self::unreduced_field_int_mul_add(acc1, field, smalls[1]);
-    Self::unreduced_field_int_mul_add(acc2, field, smalls[2]);
-    Self::unreduced_field_int_mul_add(acc3, field, smalls[3]);
+    Self::unreduced_field_small_mul_add(acc0, field, smalls_a[0], smalls_b[0]);
+    Self::unreduced_field_small_mul_add(acc1, field, smalls_a[1], smalls_b[1]);
+    Self::unreduced_field_small_mul_add(acc2, field, smalls_a[2], smalls_b[2]);
+    Self::unreduced_field_small_mul_add(acc3, field, smalls_a[3], smalls_b[3]);
   }
 
   /// Batch 4 independent field×field multiply-accumulates for ILP optimization.
@@ -115,6 +127,8 @@ where
   }
 
   /// Fused three-way: `acc += field × (ext_a × ext_b)`, zero field reductions.
+  ///
+  /// For extended domain evaluations (after Lagrange interpolation).
   ///
   /// # Bit-width contract
   ///
@@ -137,7 +151,7 @@ where
   /// - i64: 384 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<7> (448b) → l_b ≤ 20, l ≤ 128
   ///
   /// For practical NeutronNova (l_b ≤ 8, l ≤ 26): well within bounds.
-  fn unreduced_field_int_product_mul_add(
+  fn unreduced_field_ext_mul_add(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     ext_a: Self::IntermediateSmallValue,
@@ -145,19 +159,19 @@ where
   );
 
   /// Batch 4 independent fused three-way multiply-accumulates for ILP.
-  /// Same bit-width contract as [`Self::unreduced_field_int_product_mul_add`].
+  /// Same bit-width contract as [`Self::unreduced_field_ext_mul_add`].
   #[inline(always)]
-  fn unreduced_field_int_product_mul_add_batch4(
+  fn unreduced_field_ext_mul_add_batch4(
     accs: [&mut Self::UnreducedFieldInt; 4],
     field: &Self,
     ext_a: [Self::IntermediateSmallValue; 4],
     ext_b: [Self::IntermediateSmallValue; 4],
   ) {
     let [acc0, acc1, acc2, acc3] = accs;
-    Self::unreduced_field_int_product_mul_add(acc0, field, ext_a[0], ext_b[0]);
-    Self::unreduced_field_int_product_mul_add(acc1, field, ext_a[1], ext_b[1]);
-    Self::unreduced_field_int_product_mul_add(acc2, field, ext_a[2], ext_b[2]);
-    Self::unreduced_field_int_product_mul_add(acc3, field, ext_a[3], ext_b[3]);
+    Self::unreduced_field_ext_mul_add(acc0, field, ext_a[0], ext_b[0]);
+    Self::unreduced_field_ext_mul_add(acc1, field, ext_a[1], ext_b[1]);
+    Self::unreduced_field_ext_mul_add(acc2, field, ext_a[2], ext_b[2]);
+    Self::unreduced_field_ext_mul_add(acc3, field, ext_a[3], ext_b[3]);
   }
 
   /// Reduce an unreduced field×integer accumulator to a field element.

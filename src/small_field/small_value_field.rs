@@ -50,7 +50,15 @@ where
 {
   /// Intermediate type for products (i64 for i32 inputs, i128 for i64 inputs).
   /// Used when multiplying two SmallValues together.
-  type IntermediateSmallValue: Copy + Clone + Default + Debug + PartialEq + Eq + Send + Sync;
+  type IntermediateSmallValue: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Send
+    + Sync
+    + num_traits::One;
 
   // ===== Core Multiplications =====
 

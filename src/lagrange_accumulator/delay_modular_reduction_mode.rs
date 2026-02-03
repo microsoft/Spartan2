@@ -71,7 +71,8 @@ where
 
   #[inline]
   fn accumulate(acc: &mut Self::Unreduced, e: &F, prod: i64) {
-    F::unreduced_field_int_mul_add(acc, e, prod);
+    // Single-value accumulation
+    F::unreduced_field_intermediate_mul_add(acc, e, prod);
   }
 
   #[inline]
@@ -89,7 +90,8 @@ where
 
   #[inline]
   fn accumulate(acc: &mut Self::Unreduced, e: &F, prod: i128) {
-    F::unreduced_field_int_mul_add(acc, e, prod);
+    // Single-value accumulation
+    F::unreduced_field_intermediate_mul_add(acc, e, prod);
   }
 
   #[inline]

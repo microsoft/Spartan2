@@ -134,7 +134,8 @@ where
     .map(|k| {
       let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
       for i in 0..n_inst {
-        E::Scalar::unreduced_field_int_mul_add(&mut acc, &eq_evals[i], layers[i][k] as i128);
+        // Single-value accumulation (layers[i][k] is already i64)
+        E::Scalar::unreduced_field_intermediate_mul_add(&mut acc, &eq_evals[i], layers[i][k] as i128);
       }
       E::Scalar::reduce_field_int(&acc)
     })

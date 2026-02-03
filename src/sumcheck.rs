@@ -182,9 +182,10 @@ where
       let b_int = F::small_to_intermediate(poly_b_small.Z[idx]);
       let c_int = F::small_to_intermediate(poly_c_small.Z[idx]);
 
-      F::unreduced_field_int_mul_add(&mut acc_a, eq_p, a_int);
-      F::unreduced_field_int_mul_add(&mut acc_b, eq_p, b_int);
-      F::unreduced_field_int_mul_add(&mut acc_c, eq_p, c_int);
+      // Single-value accumulation
+      F::unreduced_field_intermediate_mul_add(&mut acc_a, eq_p, a_int);
+      F::unreduced_field_intermediate_mul_add(&mut acc_b, eq_p, b_int);
+      F::unreduced_field_intermediate_mul_add(&mut acc_c, eq_p, c_int);
     }
 
     (

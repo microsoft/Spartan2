@@ -9,10 +9,6 @@
 //! - Small-value NIFS sumcheck
 //! - Large-value (vanilla) NIFS sumcheck
 //!
-//! Subcommands:
-//!   full-nifs-prove  - Witness gen + NeutronNovaNIFS::prove with phase breakdown
-//!   sumcheck         - Sumcheck-only comparison with equivalence assertions
-//!
 //! Run with: `RUST_LOG=info cargo run --release --example neutronnova_sha256_benchmark -- full-nifs-prove`
 
 #[cfg(feature = "jem")]
@@ -60,17 +56,6 @@ struct Args {
 enum Command {
   /// Full NIFS prove with phase breakdown table (small vs large)
   FullNifsProve {
-    #[arg(long, default_value = "4")]
-    instances: usize,
-    #[arg(long, default_value = "4")]
-    chain_length: usize,
-    #[arg(long, default_value = "1")]
-    rounds: usize,
-    #[arg(long, default_value = "bn254")]
-    field: String,
-  },
-  /// Sumcheck-only comparison with equivalence assertions
-  Sumcheck {
     #[arg(long, default_value = "4")]
     instances: usize,
     #[arg(long, default_value = "4")]
@@ -366,111 +351,6 @@ fn run_full_nifs_prove<E: Engine>(
   );
 }
 
-fn run_sumcheck_comparison<E: Engine>(
-  num_instances: usize,
-  chain_length: usize,
-  rounds: usize,
-  timing_data: &timing::TimingData,
-) where
-  E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-    + DelayedReduction<i64, IntermediateSmallValue = i128>,
-{
-  let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
-  let core_circuit = circuits[0].clone();
-
-  eprintln!(
-    "Setting up NeutronNova for {} instances, chain_length={}...",
-    num_instances, chain_length
-  );
-  let t0 = Instant::now();
-  let (pk, _vk) =
-    NeutronNovaZkSNARK::<E>::setup(&circuits[0], &core_circuit, num_instances).expect("setup");
-  let setup_ms = t0.elapsed().as_millis();
-  eprintln!("Setup done in {} ms", setup_ms);
-
-  // Generate instances once (shared between small and large)
-  let prep =
-    NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, true).expect("prep_prove");
-  let (instances, witnesses) = generate_instances_and_witnesses(&pk, &prep, &circuits, true);
-
-  let sumcheck_phases = &[
-    "nifs_folding_rounds",
-    "build_accumulators_neutronnova",
-    "nifs_eq_fold",
-    "vc_commit",
-    "nifs_prove_total",
-  ];
-  let sumcheck_short = &["nifs_fold", "acc_build", "eq_fold", "vc_commit", "total"];
-
-  let mut small_timings_all: Vec<Vec<u64>> = Vec::new();
-  let mut large_timings_all: Vec<Vec<u64>> = Vec::new();
-
-  for round in 0..rounds {
-    eprintln!("--- round {} ---", round);
-
-    // Small-value NIFS
-    clear_timings(timing_data);
-    let t0 = Instant::now();
-    let (_e_eq_small, _az_small, _bz_small, _cz_small, _folded_w_small, _folded_u_small) =
-      run_nifs_prove(&pk, &instances, &witnesses, true);
-    let small_ms = t0.elapsed().as_millis();
-    let small_timings = snapshot_timings(timing_data, sumcheck_phases);
-    small_timings_all.push(small_timings);
-
-    // Large-value NIFS
-    clear_timings(timing_data);
-    let t0 = Instant::now();
-    let (_e_eq_large, _az_large, _bz_large, _cz_large, _folded_w_large, _folded_u_large) =
-      run_nifs_prove(&pk, &instances, &witnesses, false);
-    let large_ms = t0.elapsed().as_millis();
-    let large_timings = snapshot_timings(timing_data, sumcheck_phases);
-    large_timings_all.push(large_timings);
-
-    eprintln!(
-      "  small={} ms, large={} ms, speedup={:.2}x",
-      small_ms,
-      large_ms,
-      large_ms as f64 / small_ms as f64
-    );
-
-    // Note: small-value path does bulk eq-fold while large-value path folds per-round,
-    // so intermediate Az/Bz/Cz/E_eq vectors may differ even though both produce valid proofs.
-    // We only verify that both paths complete successfully (verified above via run_nifs_prove).
-    eprintln!("  equivalence: PASS");
-  }
-
-  // Aggregate timings
-  let small_timings = if rounds == 1 {
-    small_timings_all.into_iter().next().unwrap()
-  } else {
-    let n = small_timings_all[0].len();
-    (0..n)
-      .map(|i| small_timings_all.iter().map(|t| t[i]).min().unwrap())
-      .collect()
-  };
-  let large_timings = if rounds == 1 {
-    large_timings_all.into_iter().next().unwrap()
-  } else {
-    let n = large_timings_all[0].len();
-    (0..n)
-      .map(|i| large_timings_all.iter().map(|t| t[i]).min().unwrap())
-      .collect()
-  };
-
-  let header = format!(
-    "===== NeutronNova Sumcheck: instances={}, chain_length={}, rounds={} =====",
-    num_instances, chain_length, rounds,
-  );
-  print_hierarchical_table(
-    &header,
-    sumcheck_phases,
-    sumcheck_short,
-    &small_timings,
-    &large_timings,
-  );
-}
-
 fn main() {
   let args = Args::parse();
 
@@ -497,20 +377,6 @@ fn main() {
       "bn254" => run_full_nifs_prove::<Bn254Engine>(instances, chain_length, rounds, &timing_data),
       "pallas" => {
         run_full_nifs_prove::<PallasHyraxEngine>(instances, chain_length, rounds, &timing_data)
-      }
-      _ => panic!("Unknown field: {}. Use 'bn254' or 'pallas'.", field),
-    },
-    Some(Command::Sumcheck {
-      instances,
-      chain_length,
-      rounds,
-      field,
-    }) => match field.as_str() {
-      "bn254" => {
-        run_sumcheck_comparison::<Bn254Engine>(instances, chain_length, rounds, &timing_data)
-      }
-      "pallas" => {
-        run_sumcheck_comparison::<PallasHyraxEngine>(instances, chain_length, rounds, &timing_data)
       }
       _ => panic!("Unknown field: {}. Use 'bn254' or 'pallas'.", field),
     },
