@@ -20,7 +20,7 @@ use crate::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
-  r1cs::{SplitR1CSInstance, SplitR1CSShape},
+  r1cs::{R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
   small_field::{DelayedReduction, SmallValueField, vec_to_small},
   start_span,
   sumcheck::SumcheckProof,
@@ -153,215 +153,21 @@ where
     Ok(SpartanPrepSNARK { ps })
   }
 
-  /// produces a succinct proof of satisfiability of an R1CS instance
+  /// Produces a succinct proof of satisfiability of an R1CS instance.
+  ///
+  /// Dispatches to either `prove_small` (optimized for small witness values)
+  /// or `prove_regular` (standard field arithmetic) based on `is_small`.
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
     prep_snark: &Self::PrepSNARK,
     is_small: bool,
   ) -> Result<Self, SpartanError> {
-    let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
-    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
-
-    let mut transcript = E::TE::new(b"SpartanSNARK");
-    transcript.absorb(b"vk", &pk.vk_digest);
-
-    let public_values = circuit
-      .public_values()
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Circuit does not provide public IO: {e}"),
-      })?;
-
-    // absorb the public values into the transcript
-    transcript.absorb(b"public_values", &public_values.as_slice());
-
-    let (_sat_span, sat_t) = start_span!("r1cs_instance_and_witness");
-    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
-      &mut prep_snark.ps,
-      &pk.S,
-      &pk.ck,
-      &circuit,
-      is_small,
-      &mut transcript,
-    )?;
-
-    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
-    let mut z = [
-      W.W.clone(),
-      vec![E::Scalar::ONE],
-      U.public_values.clone(),
-      U.challenges.clone(),
-    ]
-    .concat();
-    info!(elapsed_ms = %sat_t.elapsed().as_millis(), "r1cs_instance_and_witness");
-
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
-    );
-
-    // outer sum-check preparation
-    let tau = (0..num_rounds_x)
-      .map(|_i| transcript.squeeze(b"t"))
-      .collect::<Result<Vec<_>, SpartanError>>()?;
-
-    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
-    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
-    info!(
-      elapsed_ms = %mv_t.elapsed().as_millis(),
-      constraints = %pk.S.num_cons,
-      vars = %num_vars,
-      "matrix_vector_multiply"
-    );
-
-    // Convert Az/Bz to small i64 values for optimized sumcheck
-    let small_polys = if is_small {
-      let ((az_small, bz_small), cz_small) = rayon::join(
-        || {
-          rayon::join(
-            || vec_to_small::<E::Scalar, i64>(&Az),
-            || vec_to_small::<E::Scalar, i64>(&Bz),
-          )
-        },
-        || vec_to_small::<E::Scalar, i64>(&Cz),
-      );
-      Some((az_small?, bz_small?, cz_small?))
+    if is_small {
+      Self::prove_small(pk, circuit, prep_snark)
     } else {
-      None
-    };
-
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
-      MultilinearPolynomial::new(Az),
-      MultilinearPolynomial::new(Bz),
-      MultilinearPolynomial::new(Cz),
-    );
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-
-    // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
-
-    let (sc_proof_outer, r_x, claims_outer) =
-      if let Some((az_i64, bz_i64, cz_i64)) = small_polys {
-        SumcheckProof::prove_cubic_with_three_inputs_small_value(
-          &E::Scalar::ZERO,
-          tau,
-          &MultilinearPolynomial::new(az_i64),
-          &MultilinearPolynomial::new(bz_i64),
-          &MultilinearPolynomial::new(cz_i64),
-          &mut transcript,
-        )?
-      } else {
-      SumcheckProof::prove_cubic_with_three_inputs(
-        &E::Scalar::ZERO,
-        tau,
-        &mut poly_Az,
-        &mut poly_Bz,
-        &mut poly_Cz,
-        &mut transcript,
-      )?
-    };
-
-    // claims from the end of sum-check
-    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[0], claims_outer[1], claims_outer[2]);
-    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
-
-    // inner sum-check preparation
-    let (_r_span, r_t) = start_span!("prepare_inner_claims");
-    let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
-    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
-
-    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
-    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
-    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
-
-    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = pk.S.bind_row_vars(&evals_rx);
-    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
-
-    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
-    assert_eq!(evals_A.len(), evals_B.len());
-    assert_eq!(evals_A.len(), evals_C.len());
-    let poly_ABC = (0..evals_A.len())
-      .into_par_iter()
-      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-      .collect::<Vec<E::Scalar>>();
-    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
-
-    let (_z_span, z_t) = start_span!("prepare_poly_z");
-    let poly_z = {
-      z.resize(num_vars * 2, E::Scalar::ZERO);
-      z
-    };
-    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
-
-    // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
-
-    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
-    debug!(
-      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
-      poly_ABC.len(),
-      poly_z.len()
-    );
-    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
-      *poly_A_comp * *poly_B_comp
-    };
-    let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
-      &claim_inner_joint,
-      num_rounds_y,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
-      comb_func,
-      &mut transcript,
-    )?;
-    let eval_Z = claims_inner[1]; // evaluation of Z at r_y
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
-
-    // Compute final evaluations needed for the inner-final round
-    let U_regular = U.to_regular_instance()?;
-    let eval_X = {
-      let X = vec![E::Scalar::ONE]
-        .into_iter()
-        .chain(U_regular.X.iter().cloned())
-        .collect::<Vec<E::Scalar>>();
-      SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
-    };
-
-    // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
-
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
-    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?; // commitment to eval_W
-    let U_regular = U.to_regular_instance()?;
-    let eval_arg = E::PCS::prove(
-      &pk.ck,
-      &pk.ck_s,
-      &mut transcript,
-      &U_regular.comm_W,
-      &W.W,
-      &W.r_W,
-      &r_y[1..],
-      &comm_eval_W,
-      &blind_eval_W,
-    )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
-    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
-    Ok(SpartanSNARK {
-      U,
-      sc_proof_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
-      sc_proof_inner,
-      eval_W,
-      blind_eval_W,
-      eval_arg,
-    })
+      Self::prove_regular(pk, circuit, prep_snark)
+    }
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
@@ -478,6 +284,370 @@ where
 }
 
 impl<E: Engine> SpartanSNARK<E> {
+  /// Shared continuation after outer sumcheck completes.
+  ///
+  /// Both `prove` and `prove_small` call this after computing the outer sumcheck.
+  /// This performs the inner sumcheck and PCS evaluation proof.
+  #[allow(clippy::too_many_arguments)]
+  fn prove_inner_and_pcs(
+    pk: &SpartanProverKey<E>,
+    U: SplitR1CSInstance<E>,
+    W: R1CSWitness<E>,
+    mut z: Vec<E::Scalar>,
+    r_x: Vec<E::Scalar>,
+    claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+    sc_proof_outer: SumcheckProof<E>,
+    transcript: &mut E::TE,
+  ) -> Result<Self, SpartanError> {
+    let (claim_Az, claim_Bz, claim_Cz) = claims_outer;
+
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+
+    // inner sum-check preparation
+    let (_r_span, r_t) = start_span!("prepare_inner_claims");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
+
+    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
+    let evals_rx = EqPolynomial::evals_from_points(&r_x);
+    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
+
+    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
+
+    let (evals_A, evals_B, evals_C) = pk.S.bind_row_vars(&evals_rx);
+    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
+
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
+    assert_eq!(evals_A.len(), evals_B.len());
+    assert_eq!(evals_A.len(), evals_C.len());
+    let poly_ABC = (0..evals_A.len())
+      .into_par_iter()
+      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .collect::<Vec<E::Scalar>>();
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
+
+    let (_z_span, z_t) = start_span!("prepare_poly_z");
+    let poly_z = {
+      z.resize(num_vars * 2, E::Scalar::ZERO);
+      z
+    };
+    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
+
+    // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
+    let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
+      &claim_inner_joint,
+      num_rounds_y,
+      &mut MultilinearPolynomial::new(poly_ABC),
+      &mut MultilinearPolynomial::new(poly_z),
+      comb_func,
+      transcript,
+    )?;
+    let eval_Z = claims_inner[1]; // evaluation of Z at r_y
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
+
+    // Compute final evaluations needed for the inner-final round
+    let U_regular = U.to_regular_instance()?;
+    let eval_X = {
+      let X = vec![E::Scalar::ONE]
+        .into_iter()
+        .chain(U_regular.X.iter().cloned())
+        .collect::<Vec<E::Scalar>>();
+      SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
+    };
+
+    // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
+    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
+    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?; // commitment to eval_W
+    let eval_arg = E::PCS::prove(
+      &pk.ck,
+      &pk.ck_s,
+      transcript,
+      &U_regular.comm_W,
+      &W.W,
+      &W.r_W,
+      &r_y[1..],
+      &comm_eval_W,
+      &blind_eval_W,
+    )?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
+
+    Ok(SpartanSNARK {
+      U,
+      sc_proof_outer,
+      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_inner,
+      eval_W,
+      blind_eval_W,
+      eval_arg,
+    })
+  }
+
+  /// Build witness vector z = [W | 1 | public_values | challenges] for matrix-vector multiplication (small values).
+  #[inline]
+  fn build_z_small(w: &[i64], public_values: &[i64], challenges: &[i64]) -> Vec<i64> {
+    let mut z = Vec::with_capacity(w.len() + 1 + public_values.len() + challenges.len());
+    z.extend_from_slice(w);
+    z.push(1i64);
+    z.extend_from_slice(public_values);
+    z.extend_from_slice(challenges);
+    z
+  }
+
+  /// Common transcript setup for prove and prove_small.
+  /// Returns initialized transcript with vk and public values absorbed.
+  fn prove_transcript_setup<C: SpartanCircuit<E>>(
+    pk: &SpartanProverKey<E>,
+    circuit: &C,
+  ) -> Result<E::TE, SpartanError> {
+    let mut transcript = E::TE::new(b"SpartanSNARK");
+    transcript.absorb(b"vk", &pk.vk_digest);
+
+    let public_values = circuit
+      .public_values()
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })?;
+
+    // absorb the public values into the transcript
+    transcript.absorb(b"public_values", &public_values.as_slice());
+
+    Ok(transcript)
+  }
+
+  /// Proves satisfiability using standard field arithmetic (non-small-value path).
+  ///
+  /// This is the regular proving path that uses full field arithmetic for the outer
+  /// sumcheck. Use `prove_small` for optimized proving when witness values fit in i64.
+  fn prove_regular<C: SpartanCircuit<E>>(
+    pk: &SpartanProverKey<E>,
+    circuit: C,
+    prep_snark: &SpartanPrepSNARK<E>,
+  ) -> Result<Self, SpartanError> {
+    let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
+    let mut prep_snark = prep_snark.clone();
+
+    let mut transcript = Self::prove_transcript_setup(pk, &circuit)?;
+
+    let (_sat_span, sat_t) = start_span!("r1cs_instance_and_witness");
+    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps,
+      &pk.S,
+      &pk.ck,
+      &circuit,
+      false, // is_small: standard commitment path
+      &mut transcript,
+    )?;
+    info!(elapsed_ms = %sat_t.elapsed().as_millis(), "r1cs_instance_and_witness");
+
+    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
+    let z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
+
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+
+    // outer sum-check preparation
+    let tau = (0..num_rounds_x)
+      .map(|_i| transcript.squeeze(b"t"))
+      .collect::<Result<Vec<_>, SpartanError>>()?;
+
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
+    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      constraints = %pk.S.num_cons,
+      vars = %num_vars,
+      "matrix_vector_multiply"
+    );
+
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+      MultilinearPolynomial::new(Az),
+      MultilinearPolynomial::new(Bz),
+      MultilinearPolynomial::new(Cz),
+    );
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
+
+    // outer sum-check (field path)
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+
+    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
+      &E::Scalar::ZERO,
+      tau,
+      &mut poly_Az,
+      &mut poly_Bz,
+      &mut poly_Cz,
+      &mut transcript,
+    )?;
+
+    // claims from the end of sum-check
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[0], claims_outer[1], claims_outer[2]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+
+    // inner sum-check, PCS proof, and SNARK construction
+    let snark = Self::prove_inner_and_pcs(
+      pk,
+      U,
+      W,
+      z,
+      r_x,
+      (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_outer,
+      &mut transcript,
+    )?;
+
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
+    Ok(snark)
+  }
+
+  /// Proves satisfiability of an R1CS instance using small-value optimizations.
+  ///
+  /// This is an optimized version of `prove` that uses small-value arithmetic
+  /// for the outer sumcheck when witness values fit in i64. It computes Az, Bz, Cz
+  /// directly using small-value multiplication (avoiding field conversion overhead)
+  /// and runs the small-value sumcheck path.
+  ///
+  /// # Errors
+  /// Returns `SpartanError::SmallValueOverflow` if any witness or public value
+  /// doesn't fit in i64.
+  fn prove_small<C: SpartanCircuit<E>>(
+    pk: &SpartanProverKey<E>,
+    circuit: C,
+    prep_snark: &SpartanPrepSNARK<E>,
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
+    let mut prep_snark = prep_snark.clone();
+
+    let mut transcript = Self::prove_transcript_setup(pk, &circuit)?;
+
+    let (_sat_span, sat_t) = start_span!("r1cs_instance_and_witness");
+    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps,
+      &pk.S,
+      &pk.ck,
+      &circuit,
+      true, // is_small
+      &mut transcript,
+    )?;
+    info!(elapsed_ms = %sat_t.elapsed().as_millis(), "r1cs_instance_and_witness");
+
+    // Convert W, X, and challenges to small values early (fail if too large)
+    let (_conv_span, conv_t) = start_span!("convert_to_small");
+    let ((W_small, X_small), challenges_small) = rayon::join(
+      || {
+        rayon::join(
+          || vec_to_small::<E::Scalar, i64>(&W.W),
+          || vec_to_small::<E::Scalar, i64>(&U.public_values),
+        )
+      },
+      || vec_to_small::<E::Scalar, i64>(&U.challenges),
+    );
+    let W_small = W_small?;
+    let X_small = X_small?;
+    let challenges_small = challenges_small?;
+    info!(elapsed_ms = %conv_t.elapsed().as_millis(), "convert_to_small");
+
+    // Build z_small directly from small values
+    let z_small = Self::build_z_small(&W_small, &X_small, &challenges_small);
+
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+
+    // outer sum-check preparation
+    let tau = (0..num_rounds_x)
+      .map(|_i| transcript.squeeze(b"t"))
+      .collect::<Result<Vec<_>, SpartanError>>()?;
+
+    // Compute Az, Bz, Cz using multiply_vec_small
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
+    let ((Az_small, Bz_small), Cz_small) = rayon::join(
+      || {
+        rayon::join(
+          || pk.S.A.multiply_vec_small(&z_small),
+          || pk.S.B.multiply_vec_small(&z_small),
+        )
+      },
+      || pk.S.C.multiply_vec_small(&z_small),
+    );
+    let Az_small = Az_small?;
+    let Bz_small = Bz_small?;
+    let Cz_small = Cz_small?;
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      constraints = %pk.S.num_cons,
+      vars = %num_vars,
+      "matrix_vector_multiply"
+    );
+
+    // outer sum-check with small-value polynomials
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+    let (sc_proof_outer, r_x, claims_outer) =
+      SumcheckProof::prove_cubic_with_three_inputs_small_value(
+        &E::Scalar::ZERO,
+        tau,
+        &MultilinearPolynomial::new(Az_small),
+        &MultilinearPolynomial::new(Bz_small),
+        &MultilinearPolynomial::new(Cz_small),
+        &mut transcript,
+      )?;
+
+    // claims from the end of sum-check
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[0], claims_outer[1], claims_outer[2]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+
+    // Build field z for inner sumcheck (needs field elements)
+    let z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
+
+    // inner sum-check, PCS proof, and SNARK construction
+    let snark = Self::prove_inner_and_pcs(
+      pk,
+      U,
+      W,
+      z,
+      r_x,
+      (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_outer,
+      &mut transcript,
+    )?;
+
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
+    Ok(snark)
+  }
+
   /// Extract the Az, Bz, Cz polynomials and tau challenges from a circuit.
   ///
   /// This is useful for testing sumcheck methods with real circuit-derived data.
@@ -639,7 +809,7 @@ mod tests {
     // generate pre-processed state for proving
     let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
 
-    // generate a witness and proof
+    // generate a witness and proof (is_small=false for standard field path)
     let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
     assert!(res.is_ok());
     let snark = res.unwrap();
@@ -648,5 +818,93 @@ mod tests {
     let res = snark.verify(&vk);
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
+  }
+
+  #[test]
+  fn test_snark_prove_small() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+
+    type E = crate::provider::PallasHyraxEngine;
+    test_snark_prove_small_with::<E>();
+
+    type E2 = crate::provider::VestaHyraxEngine;
+    test_snark_prove_small_with::<E2>();
+  }
+
+  fn test_snark_prove_small_with<E: Engine>()
+  where
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    let circuit = CubicCircuit::default();
+
+    // produce keys
+    let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+
+    // generate pre-processed state for proving (with is_small=true)
+    let prep_snark = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+
+    // generate a witness and proof using prove with is_small=true (small-value path)
+    let res = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true);
+    assert!(res.is_ok());
+    let snark = res.unwrap();
+
+    // verify the SNARK
+    let res = snark.verify(&vk);
+    assert!(res.is_ok());
+    assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)])
+  }
+
+  #[test]
+  fn test_prove_vs_prove_small_equivalence() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+
+    type E = crate::provider::PallasHyraxEngine;
+    test_prove_equivalence_with::<E>();
+
+    type E2 = crate::provider::VestaHyraxEngine;
+    test_prove_equivalence_with::<E2>();
+  }
+
+  fn test_prove_equivalence_with<E: Engine>()
+  where
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    let circuit = CubicCircuit::default();
+
+    // produce keys
+    let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+
+    // generate pre-processed state for proving
+    // Use is_small=true for prep since we'll test both paths
+    let prep_snark_small = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+    let prep_snark_regular = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), false).unwrap();
+
+    // Run prove with is_small=false (field path)
+    let snark_prove = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_regular, false).unwrap();
+
+    // Run prove with is_small=true (small-value path)
+    let snark_small = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_small, true).unwrap();
+
+    // Note: We cannot compare claims_outer or eval_W directly because each prove call
+    // generates fresh random blinding factors (via PCS::blind), which affects the
+    // commitment absorbed into the transcript, leading to different tau challenges.
+    // This is expected ZK behavior - both proofs are valid but not identical.
+
+    // Both should verify successfully and return the same public output
+    let res_prove = snark_prove.verify(&vk);
+    assert!(res_prove.is_ok(), "prove should verify");
+    assert_eq!(res_prove.unwrap(), [E::Scalar::from(15u64)]);
+
+    let res_small = snark_small.verify(&vk);
+    assert!(res_small.is_ok(), "prove_small should verify");
+    assert_eq!(res_small.unwrap(), [E::Scalar::from(15u64)]);
   }
 }
