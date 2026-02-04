@@ -437,7 +437,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
     let (target, mag) = if small >= 0 {
       (&mut acc.pos, small as u64)
     } else {
-      (&mut acc.neg, (-small) as u64)
+      (&mut acc.neg, small.wrapping_neg() as u64)
     };
     // Fused multiply-accumulate: field × small (single 64-bit multiplier)
     let a = field.to_limbs();
