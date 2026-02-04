@@ -17,10 +17,7 @@ use crate::{
     solver::SatisfyingAssignment,
   },
   errors::SpartanError,
-  lagrange_accumulator::{
-    DelayedModularReductionEnabled, MatVecMLE, SPARTAN_T_DEGREE, build_accumulators_spartan,
-    derive_t1,
-  },
+  lagrange_accumulator::{SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1},
   polys::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
@@ -183,9 +180,9 @@ where
       let c_int = F::small_to_intermediate(poly_c_small.Z[idx]);
 
       // Single-value accumulation
-      F::unreduced_field_intermediate_mul_add(&mut acc_a, eq_p, a_int);
-      F::unreduced_field_intermediate_mul_add(&mut acc_b, eq_p, b_int);
-      F::unreduced_field_intermediate_mul_add(&mut acc_c, eq_p, c_int);
+      F::accumulate_field_intermediate_val(&mut acc_a, eq_p, a_int);
+      F::accumulate_field_intermediate_val(&mut acc_b, eq_p, b_int);
+      F::accumulate_field_intermediate_val(&mut acc_c, eq_p, c_int);
     }
 
     (
@@ -802,7 +799,6 @@ impl<E: Engine> SumcheckProof<E> {
       + Send
       + Sync,
     E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
-    MultilinearPolynomial<SmallValue>: MatVecMLE<E::Scalar, Value = SmallValue>,
   {
     let num_rounds = taus.len();
     let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
@@ -837,12 +833,7 @@ impl<E: Engine> SumcheckProof<E> {
     // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic
     // ss: i32 × i32 → i64 for polynomial products
     // isl: i64 × field for eq weighting
-    let accumulators = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<SmallValue>>(
-      poly_A_small,
-      poly_B_small,
-      &taus,
-      l0,
-    );
+    let accumulators = build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
     let mut small_value =
       lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(
         accumulators,
@@ -1873,9 +1864,7 @@ pub mod lagrange_sumcheck {
   mod tests {
     use super::*;
     use crate::{
-      lagrange_accumulator::{
-        DelayedModularReductionDisabled, SPARTAN_T_DEGREE, build_accumulators_spartan,
-      },
+      lagrange_accumulator::{SPARTAN_T_DEGREE, build_accumulators_spartan},
       polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
       provider::PallasHyraxEngine,
       sumcheck::eq_sumcheck::EqSumCheckInstance,
@@ -1897,13 +1886,21 @@ pub mod lagrange_sumcheck {
         .map(|i| F::from((i + 2) as u64))
         .collect::<Vec<_>>();
 
-      let az_vals = (0..n).map(|i| F::from((i + 1) as u64)).collect::<Vec<_>>();
-      let bz_vals = (0..n).map(|i| F::from((i + 3) as u64)).collect::<Vec<_>>();
-      let cz_vals = az_vals
+      // Small-value polynomials for build_accumulators_spartan
+      let az_i32: Vec<i32> = (0..n).map(|i| (i + 1) as i32).collect();
+      let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
+
+      let az_small = MultilinearPolynomial::new(az_i32.clone());
+      let bz_small = MultilinearPolynomial::new(bz_i32.clone());
+
+      // Field polynomials for reference computation
+      let az_vals: Vec<F> = az_i32.iter().map(|&v| F::from(v as u64)).collect();
+      let bz_vals: Vec<F> = bz_i32.iter().map(|&v| F::from(v as u64)).collect();
+      let cz_vals: Vec<F> = az_vals
         .iter()
         .zip(bz_vals.iter())
         .map(|(a, b)| *a * *b)
-        .collect::<Vec<_>>();
+        .collect();
 
       let az = MultilinearPolynomial::new(az_vals);
       let bz = MultilinearPolynomial::new(bz_vals);
@@ -1915,12 +1912,7 @@ pub mod lagrange_sumcheck {
         claim += eq_evals[i] * (az.Z[i] * bz.Z[i] - cz.Z[i]);
       }
 
-      let accs = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
-        &az,
-        &bz,
-        &taus,
-        SMALL_VALUE_ROUNDS,
-      );
+      let accs = build_accumulators_spartan(&az_small, &bz_small, &taus, SMALL_VALUE_ROUNDS);
       let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
       let mut eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -2038,8 +2030,13 @@ pub mod lagrange_sumcheck {
       let n = 1usize << NUM_VARS;
 
       // Use satisfying witness: Cz = Az * Bz (required for build_accumulators_spartan)
-      let az_vals: Vec<F> = (0..n).map(|i| F::from((i + 1) as u64)).collect();
-      let bz_vals: Vec<F> = (0..n).map(|i| F::from((i + 3) as u64)).collect();
+      // Small-value polynomials for build_accumulators_spartan
+      let az_i32: Vec<i32> = (0..n).map(|i| (i + 1) as i32).collect();
+      let bz_i32: Vec<i32> = (0..n).map(|i| (i + 3) as i32).collect();
+
+      // Field-element polynomials for reference computation
+      let az_vals: Vec<F> = az_i32.iter().map(|&v| F::from(v as u64)).collect();
+      let bz_vals: Vec<F> = bz_i32.iter().map(|&v| F::from(v as u64)).collect();
       let cz_vals: Vec<F> = az_vals.iter().zip(&bz_vals).map(|(a, b)| *a * *b).collect();
 
       let taus: Vec<F> = (0..NUM_VARS).map(|i| F::from((i + 2) as u64)).collect();
@@ -2047,14 +2044,14 @@ pub mod lagrange_sumcheck {
       // Claim = 0 for satisfying witness
       let claim: F = F::ZERO;
 
-      // Create polynomials for standard method
-      let az1 = MultilinearPolynomial::new(az_vals.clone());
-      let bz1 = MultilinearPolynomial::new(bz_vals.clone());
+      // Create field polynomials for standard method
+      let az1 = MultilinearPolynomial::new(az_vals);
+      let bz1 = MultilinearPolynomial::new(bz_vals);
       let cz1 = MultilinearPolynomial::new(cz_vals);
 
-      // Create polynomials for small-value method
-      let az2 = MultilinearPolynomial::new(az_vals);
-      let bz2 = MultilinearPolynomial::new(bz_vals);
+      // Create small-value polynomials for small-value method
+      let az2 = MultilinearPolynomial::new(az_i32);
+      let bz2 = MultilinearPolynomial::new(bz_i32);
 
       // Run standard method - just get first polynomial's evaluations
       let eq_instance = EqSumCheckInstance::<E>::new(taus.clone());
@@ -2064,8 +2061,7 @@ pub mod lagrange_sumcheck {
 
       // Run small-value method - get first polynomial's evaluations
       let l0 = 3usize;
-      let accumulators =
-        build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az2, &bz2, &taus, l0);
+      let accumulators = build_accumulators_spartan(&az2, &bz2, &taus, l0);
       let small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
 
       let t_all = small_value.eval_t_all_u(0);

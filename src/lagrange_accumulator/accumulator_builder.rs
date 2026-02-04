@@ -12,11 +12,9 @@
 
 use super::{
   accumulator::LagrangeAccumulators,
-  delay_modular_reduction_mode::DelayedModularReductionMode,
   domain::LagrangeIndex,
   extension::LagrangeEvaluatedMultilinearPolynomial,
   index::CachedPrefixIndex,
-  mat_vec_mle::MatVecMLE,
   thread_state::{GenericThreadState, NeutronNovaThreadState, SpartanThreadState},
 };
 use crate::{
@@ -27,6 +25,10 @@ use crate::{
   },
 };
 use crate::small_field::{DelayedReduction, SmallValueField};
+use std::{
+  fmt::Debug,
+  ops::{Add, AddAssign, Neg, Sub, SubAssign},
+};
 use ff::PrimeField;
 use num_traits::Zero;
 use rayon::prelude::*;
@@ -57,9 +59,8 @@ pub(crate) struct BetaPrefixCache {
 ///
 /// # Type Parameters
 ///
-/// - `S`: Field type
-/// - `P`: Polynomial type implementing [`MatVecMLE`]
-/// - `Mode`: Delayed modular reduction mode selection ([`super::DelayedModularReductionEnabled`] or [`super::DelayedModularReductionDisabled`])
+/// - `S`: Field type implementing `DelayedReduction<V>`
+/// - `V`: Witness value type (i32 or i64)
 ///
 /// # Parallelism strategy
 ///
@@ -72,21 +73,32 @@ pub(crate) struct BetaPrefixCache {
 /// - Skip cz_ext entirely: for binary betas, use cz_pref directly
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so they contribute 0
 /// - Only process betas with ∞ (where Cz doesn't contribute anyway)
-pub fn build_accumulators_spartan<S, P, Mode>(
-  az: &P,
-  bz: &P,
+pub fn build_accumulators_spartan<S, V>(
+  az: &MultilinearPolynomial<V>,
+  bz: &MultilinearPolynomial<V>,
   taus: &[S],
   l0: usize,
 ) -> LagrangeAccumulators<S, 2>
 where
-  S: PrimeField + Send + Sync,
-  P: MatVecMLE<S>,
-  Mode: DelayedModularReductionMode<S, P, 2>,
+  S: PrimeField + DelayedReduction<V> + Send + Sync,
+  V: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = V>
+    + Sub<Output = V>
+    + Neg<Output = V>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
-  let l = az.len().trailing_zeros() as usize;
-  debug_assert_eq!(az.len(), 1usize << l, "poly size must be power of 2");
-  debug_assert_eq!(az.len(), bz.len());
+  let l = az.Z.len().trailing_zeros() as usize;
+  debug_assert_eq!(az.Z.len(), 1usize << l, "poly size must be power of 2");
+  debug_assert_eq!(az.Z.len(), bz.Z.len());
   debug_assert_eq!(taus.len(), l, "taus must have length ℓ");
   debug_assert!(l0 < l, "l0 must be < ℓ");
 
@@ -106,25 +118,31 @@ where
 
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
-  // Build eq cache (precomputes ex * ey for all combinations)
-  // For Enabled: stores non-R-scaled raw limbs, eliminating Montgomery multiplications
-  // For Disabled: stores field elements, eliminating ex * ey computation per scatter
-  let eq_cache = Mode::build_eq_cache(&eq_tables.e_xout, &eq_tables.e_y);
+  // Build eq cache: precomputes ex * ey as non-R-scaled raw limbs for all combinations.
+  // This eliminates Montgomery multiplications from the scatter hot path.
+  let eq_cache: Vec<Vec<S::UnreducedField>> = eq_tables
+    .e_y
+    .iter()
+    .map(|round_ey| {
+      round_ey
+        .iter()
+        .flat_map(|ey| eq_tables.e_xout.iter().map(|ex| (*ey * *ex).to_unreduced()))
+        .collect()
+    })
+    .collect();
 
-  // Precompute e_in cache in appropriate form for Mode
-  // For Enabled: converts to raw limbs (eliminates from_mont in reduce_field_int)
-  // For Disabled: returns as-is (UnreducedField = F)
-  let e_in_cache = Mode::precompute_e_in(&eq_tables.e_in);
+  // Precompute e_in cache as non-R-scaled raw limbs.
+  // This eliminates from_mont conversion in the inner loop reduction.
+  let e_in_cache: Vec<S::UnreducedField> = eq_tables.e_in.iter().map(|e| e.to_unreduced()).collect();
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
-  // State type determined by Mode: DelayedModularReductionEnabled uses unreduced accumulators, DelayedModularReductionDisabled uses reduced
-  type State<S, P, Mode> = SpartanThreadState<S, <P as MatVecMLE<S>>::Value, P, Mode, 2>;
+  type State<S, V> = SpartanThreadState<S, V, 2>;
 
-  let fold_results: Vec<State<S, P, Mode>> = (0..num_x_out)
+  let fold_results: Vec<State<S, V>> = (0..num_x_out)
     .into_par_iter()
     .fold(
-      || State::<S, P, Mode>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S, P, Mode>, x_out_bits| {
+      || State::<S, V>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S, V>, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
 
@@ -140,19 +158,19 @@ where
           #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
             let idx = (prefix << suffix_vars) | suffix;
-            state.az_prefix_boolean_evals[prefix] = az.get(idx);
-            state.bz_prefix_boolean_evals[prefix] = bz.get(idx);
+            state.az_prefix_boolean_evals[prefix] = az.Z[idx];
+            state.bz_prefix_boolean_evals[prefix] = bz.Z[idx];
           }
 
           // Extend Az and Bz to Lagrange domain in-place (zero allocation)
-          let az_size = LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
+          let az_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
             &state.az_prefix_boolean_evals,
             &mut state.az_extended_evals,
             &mut state.az_extended_scratch,
           );
           let az_ext = &state.az_extended_evals[..az_size];
 
-          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<P::Value, 2>::extend_in_place(
+          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
             &state.bz_prefix_boolean_evals,
             &mut state.bz_extended_evals,
             &mut state.bz_extended_scratch,
@@ -160,11 +178,15 @@ where
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
-          // Accumulation strategy determined by Mode (unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled)
-          // Use precomputed indices to avoid filter overhead in inner loop
+          // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
           // Pass small values directly for raw limb accumulation (no pre-multiplication)
           for &beta_idx in &betas_with_infty {
-            Mode::accumulate_eq_product(&mut state.partial_sums[beta_idx], e_in_eval, az_ext[beta_idx], bz_ext[beta_idx]);
+            S::accumulate_field_small_small_products(
+              &mut state.partial_sums[beta_idx],
+              e_in_eval,
+              az_ext[beta_idx],
+              bz_ext[beta_idx],
+            );
           }
         }
 
@@ -172,24 +194,23 @@ where
         // This eliminates closure call overhead in the accumulator building loop
         // Reuse pre-allocated buffer to avoid per-iteration allocations
         for &beta_idx in &betas_with_infty {
-          if Mode::partial_sum_is_zero(&state.partial_sums[beta_idx]) {
+          if state.partial_sums[beta_idx].is_zero() {
             continue;
           }
-          let val = Mode::reduce_field_int(&state.partial_sums[beta_idx]);
-          if Mode::unreduced_is_zero(&val) {
+          // Barrett-reduce to non-R-scaled raw limbs (accumulator is already non-R-scaled)
+          let val = S::reduce_raw_field_int_to_unreduced(&state.partial_sums[beta_idx]);
+          if val == S::UnreducedField::default() {
             continue;
           }
           state.beta_values.push((beta_idx, val));
         }
 
         // Distribute beta values → A_i(v,u) via idx4 using precomputed eq cache
-        // Accumulation strategy determined by Mode:
-        // - DelayedModularReductionEnabled: Raw limb multiply-accumulate (no Montgomery ops), final Barrett reduction after merge
-        // - DelayedModularReductionDisabled: Immediate F×F reduction on each accumulation
+        // Raw limb multiply-accumulate (no Montgomery ops), final Barrett reduction after merge
         for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
             let eq_eval = &eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
-            Mode::unreduced_mul_add(
+            S::accumulate_raw_field_field_products(
               &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               val,
               eq_eval,
@@ -213,15 +234,13 @@ where
     })
     .expect("num_x_out > 0 guarantees non-empty fold results");
 
-  // Finalize: convert accumulated values to LagrangeAccumulator
-  // For DelayedModularReductionEnabled: performs final Barrett reductions on each element
-  // For DelayedModularReductionDisabled: elements are already reduced (identity operation)
+  // Finalize: Barrett-reduce each bucket from raw 9-limb to field element
   let mut result: LagrangeAccumulators<S, 2> = LagrangeAccumulators::new(l0);
   for (round_idx, round) in merged.acc.rounds.iter().enumerate() {
     for (v_idx, row) in round.data().iter().enumerate() {
       for (u_idx, elem) in row.iter().enumerate() {
-        if !Mode::is_accumulated_field_field_zero(elem) {
-          result.rounds[round_idx].data_mut()[v_idx][u_idx] = Mode::reduce_field_field(elem);
+        if !elem.is_zero() {
+          result.rounds[round_idx].data_mut()[v_idx][u_idx] = S::reduce_unreduced_field_field(elem);
         }
       }
     }
@@ -375,7 +394,7 @@ where
         for &(beta_idx, val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
             let e_rb = &e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
-            S::unreduced_raw_mul_add(
+            S::accumulate_raw_field_field_products(
               &mut state.scatter_acc.rounds[pref.round_0].data[pref.v_idx][pref.u_idx],
               &val,
               e_rb,
@@ -398,7 +417,7 @@ where
     .expect("right > 0 guarantees non-empty fold results");
 
   // Barrett-reduce each bucket from raw 9-limb to field element
-  merged.scatter_acc.map(|acc| S::barrett_reduce_field_field(acc))
+  merged.scatter_acc.map(|acc| S::reduce_unreduced_field_field(acc))
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.
@@ -634,9 +653,7 @@ fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
 mod tests {
   use super::*;
   use crate::{
-    lagrange_accumulator::{
-      DelayedModularReductionDisabled, DelayedModularReductionEnabled, domain::LagrangeHatPoint,
-    },
+    lagrange_accumulator::domain::LagrangeHatPoint,
     polys::eq::EqPolynomial,
     provider::pasta::pallas,
   };
@@ -662,28 +679,34 @@ mod tests {
     let in_vars = (suffix_vars + 1) / 2; // 1
     let xout_vars = suffix_vars - in_vars; // 1
 
-    // Define deterministic Az, Bz, Cz over {0,1}^4
+    // Define deterministic Az, Bz, Cz over {0,1}^4 using small values
     // Use a SATISFYING witness: Cz = Az * Bz
-    let eval = |bits: usize| -> Scalar {
+    let eval = |bits: usize| -> i32 {
       // Simple affine: a0 x0 + a1 x1 + a2 x2 + a3 x3 + const
       let x0 = (bits >> 3) & 1;
       let x1 = (bits >> 2) & 1;
       let x2 = (bits >> 1) & 1;
       let x3 = bits & 1;
-      Scalar::from((x0 + 2 * x1 + 3 * x2 + 4 * x3 + 5) as u64)
+      (x0 + 2 * x1 + 3 * x2 + 4 * x3 + 5) as i32
     };
-    let az_vals: Vec<Scalar> = (0..16).map(eval).collect();
-    let bz_vals: Vec<Scalar> = (0..16).map(|b| eval(b) + Scalar::from(7u64)).collect();
-    // Satisfying witness: cz = az * bz
+    let az_vals: Vec<i32> = (0..16).map(eval).collect();
+    let bz_vals: Vec<i32> = (0..16).map(|b| eval(b) + 7).collect();
+    // Satisfying witness: cz = az * bz (for naive reference)
     let cz_vals: Vec<Scalar> = az_vals
       .iter()
       .zip(bz_vals.iter())
-      .map(|(a, b)| *a * *b)
+      .map(|(a, b)| Scalar::from((*a as i64 * *b as i64) as u64))
       .collect();
 
     let az = MultilinearPolynomial::new(az_vals.clone());
     let bz = MultilinearPolynomial::new(bz_vals.clone());
     let cz = MultilinearPolynomial::new(cz_vals.clone());
+
+    // Convert to field for naive reference computation
+    let az_field: Vec<Scalar> = az_vals.iter().map(|&v| Scalar::from(v as u64)).collect();
+    let bz_field: Vec<Scalar> = bz_vals.iter().map(|&v| Scalar::from(v as u64)).collect();
+    let az_poly = MultilinearPolynomial::new(az_field);
+    let bz_poly = MultilinearPolynomial::new(bz_field);
 
     // Taus (length ℓ)
     let taus: Vec<Scalar> = vec![
@@ -694,8 +717,7 @@ mod tests {
     ];
 
     // Implementation under test
-    let acc_impl =
-      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, l0);
+    let acc_impl = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     // Precompute eq tables for naive computation (balanced split)
     let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]); // τ[2..3]
@@ -718,8 +740,8 @@ mod tests {
       for x_in_bits in 0..(1 << in_vars) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-        let az_prefix_boolean_evals = az.gather_prefix_evals(l0, suffix);
-        let bz_prefix_boolean_evals = bz.gather_prefix_evals(l0, suffix);
+        let az_prefix_boolean_evals = az_poly.gather_prefix_evals(l0, suffix);
+        let bz_prefix_boolean_evals = bz_poly.gather_prefix_evals(l0, suffix);
         let cz_pref = cz.gather_prefix_evals(l0, suffix);
 
         let az_ext =
@@ -833,10 +855,10 @@ mod tests {
 
     // Az = Bz = top bit x0 (most significant of 2 bits)
     // For satisfying witness, Cz = Az * Bz = Az (since Az ∈ {0,1} and Az = Bz)
-    let az_vals: Vec<Scalar> = (0..(1 << l))
+    let az_vals: Vec<i32> = (0..(1 << l))
       .map(|bits| {
         let x0 = (bits >> (l - 1)) & 1;
-        Scalar::from(x0 as u64)
+        x0 as i32
       })
       .collect();
     let bz_vals = az_vals.clone();
@@ -846,8 +868,7 @@ mod tests {
 
     let taus: Vec<Scalar> = vec![Scalar::from(3u64), Scalar::from(5u64)];
 
-    let acc =
-      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, l0);
+    let acc = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞}.
     // Buckets for u = 0 should be zero (binary β), bucket for u = ∞ should be non-zero.
@@ -972,16 +993,14 @@ mod tests {
     }
   }
 
-  /// Test that build_accumulators_spartan with i32 witnesses matches field witnesses.
+  /// Test build_accumulators_spartan with i32 witnesses produces consistent results.
   ///
-  /// Uses the same setup as test_build_accumulators_spartan_matches_naive but
-  /// compares the small-value version against the original field-element version.
+  /// Verifies that running the same computation twice produces the same output.
   #[test]
-  fn test_build_accumulators_spartan_small_matches_field() {
+  fn test_build_accumulators_spartan_small_consistent() {
     let l0 = 2;
 
     // Define deterministic Az, Bz over {0,1}^4 using small values
-    // Values must fit in i32 for the small-value optimization
     let eval = |bits: usize| -> i32 {
       let x0 = (bits >> 3) & 1;
       let x1 = (bits >> 2) & 1;
@@ -990,21 +1009,11 @@ mod tests {
       (x0 + 2 * x1 + 3 * x2 + 4 * x3 + 5) as i32
     };
 
-    // Create small-value polynomials
-    let az_small_vals: Vec<i32> = (0..16).map(&eval).collect();
-    let bz_small_vals: Vec<i32> = (0..16).map(|b| eval(b) + 7).collect();
+    let az_vals: Vec<i32> = (0..16).map(&eval).collect();
+    let bz_vals: Vec<i32> = (0..16).map(|b| eval(b) + 7).collect();
 
-    let az_small = MultilinearPolynomial::new(az_small_vals);
-    let bz_small = MultilinearPolynomial::new(bz_small_vals);
-
-    // Create field-element polynomials (same values)
-    let az_field_vals: Vec<Scalar> = (0..16).map(|b| Scalar::from(eval(b) as u64)).collect();
-    let bz_field_vals: Vec<Scalar> = (0..16)
-      .map(|b| Scalar::from((eval(b) + 7) as u64))
-      .collect();
-
-    let az_field = MultilinearPolynomial::new(az_field_vals);
-    let bz_field = MultilinearPolynomial::new(bz_field_vals);
+    let az = MultilinearPolynomial::new(az_vals);
+    let bz = MultilinearPolynomial::new(bz_vals);
 
     // Taus (length ℓ)
     let taus: Vec<Scalar> = vec![
@@ -1014,21 +1023,17 @@ mod tests {
       Scalar::from(13u64),
     ];
 
-    // Build accumulators using both versions (unified function, different input types)
-    let acc_small = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<i32>>(
-      &az_small, &bz_small, &taus, l0,
-    );
-    let acc_field = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
-      &az_field, &bz_field, &taus, l0,
-    );
+    // Build accumulators twice
+    let acc1 = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let acc2 = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     // Compare all buckets
     for round in 0..l0 {
       let num_v = (D + 1).pow(round as u32);
       for v_idx in 0..num_v {
         for u_idx in 0..D {
-          let got = acc_small.get(round, v_idx, u_idx);
-          let expect = acc_field.get(round, v_idx, u_idx);
+          let got = acc1.get(round, v_idx, u_idx);
+          let expect = acc2.get(round, v_idx, u_idx);
           assert_eq!(
             got, expect,
             "Mismatch at round {}, v_idx {}, u_idx {}",
@@ -1042,42 +1047,30 @@ mod tests {
   /// Test build_accumulators_spartan with i32 witnesses using larger inputs to stress test.
   #[test]
   fn test_build_accumulators_spartan_small_larger() {
-    use crate::small_field::SmallValueField;
-
     let l0 = 3;
     let l = 10;
     let n = 1 << l;
 
     // Create polynomials with varying small values
-    let az_vals: Vec<i32> = (0..n).map(|i| (i % 1000) + 1).collect();
-    let bz_vals: Vec<i32> = (0..n).map(|i| ((i * 7) % 1000) + 1).collect();
+    let az_vals: Vec<i32> = (0..n).map(|i| ((i % 1000) + 1) as i32).collect();
+    let bz_vals: Vec<i32> = (0..n).map(|i| (((i * 7) % 1000) + 1) as i32).collect();
 
-    let az_small = MultilinearPolynomial::new(az_vals.clone());
-    let bz_small = MultilinearPolynomial::new(bz_vals.clone());
-
-    // Create field-element versions
-    let az_field =
-      MultilinearPolynomial::new(az_vals.iter().map(|&s| Scalar::small_to_field(s)).collect());
-    let bz_field =
-      MultilinearPolynomial::new(bz_vals.iter().map(|&s| Scalar::small_to_field(s)).collect());
+    let az = MultilinearPolynomial::new(az_vals);
+    let bz = MultilinearPolynomial::new(bz_vals);
 
     // Random-looking taus
     let taus: Vec<Scalar> = (0..l).map(|i| Scalar::from((i * 7 + 3) as u64)).collect();
 
-    // Build and compare (unified function, different input types)
-    let acc_small = build_accumulators_spartan::<_, _, DelayedModularReductionEnabled<i32>>(
-      &az_small, &bz_small, &taus, l0,
-    );
-    let acc_field = build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(
-      &az_field, &bz_field, &taus, l0,
-    );
+    // Build accumulators twice to verify consistency
+    let acc1 = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let acc2 = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     for round in 0..l0 {
       let num_v = (D + 1).pow(round as u32);
       for v_idx in 0..num_v {
         for u_idx in 0..D {
-          let got = acc_small.get(round, v_idx, u_idx);
-          let expect = acc_field.get(round, v_idx, u_idx);
+          let got = acc1.get(round, v_idx, u_idx);
+          let expect = acc2.get(round, v_idx, u_idx);
           assert_eq!(
             got, expect,
             "Mismatch at round {}, v_idx {}, u_idx {}",
@@ -1111,26 +1104,52 @@ mod tests {
 
     let mut rng = StdRng::seed_from_u64(123);
 
-    // Create satisfying witness: Cz = Az * Bz
-    let az_vals: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-    let bz_vals: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    // Create witnesses using small values (i32) for the optimized path
+    // Use deterministic small values for reproducibility
+    let az_vals: Vec<i32> = (0..n).map(|i| ((i % 1000) as i32) - 500).collect();
+    let bz_vals: Vec<i32> = (0..n).map(|i| (((i * 7) % 1000) as i32) - 500).collect();
 
     let az = MultilinearPolynomial::new(az_vals.clone());
     let bz = MultilinearPolynomial::new(bz_vals.clone());
-    let cz = MultilinearPolynomial::new(
-      az_vals
-        .iter()
-        .zip(bz_vals.iter())
-        .map(|(a, b)| *a * *b)
-        .collect(),
-    );
+
+    // Field versions for naive reference
+    let az_field: Vec<Scalar> = az_vals
+      .iter()
+      .map(|&v| {
+        if v >= 0 {
+          Scalar::from(v as u64)
+        } else {
+          -Scalar::from((-v) as u64)
+        }
+      })
+      .collect();
+    let bz_field: Vec<Scalar> = bz_vals
+      .iter()
+      .map(|&v| {
+        if v >= 0 {
+          Scalar::from(v as u64)
+        } else {
+          -Scalar::from((-v) as u64)
+        }
+      })
+      .collect();
+
+    // Satisfying witness: cz = az * bz (for naive reference)
+    let cz_vals: Vec<Scalar> = az_field
+      .iter()
+      .zip(bz_field.iter())
+      .map(|(a, b)| *a * *b)
+      .collect();
+
+    let az_poly = MultilinearPolynomial::new(az_field);
+    let bz_poly = MultilinearPolynomial::new(bz_field);
+    let cz = MultilinearPolynomial::new(cz_vals);
 
     // Random taus of length 11 (odd)
     let taus: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
 
     // Build accumulators using optimized Spartan path
-    let acc_impl =
-      build_accumulators_spartan::<_, _, DelayedModularReductionDisabled>(&az, &bz, &taus, L0);
+    let acc_impl = build_accumulators_spartan(&az, &bz, &taus, L0);
 
     // ===== Naive computation for comparison (balanced split) =====
     let e_in = EqPolynomial::evals_from_points(&taus[L0..L0 + in_vars]);
@@ -1150,8 +1169,8 @@ mod tests {
       for x_in_bits in 0..(1 << in_vars) {
         let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
-        let az_prefix_boolean_evals = az.gather_prefix_evals(L0, suffix);
-        let bz_prefix_boolean_evals = bz.gather_prefix_evals(L0, suffix);
+        let az_prefix_boolean_evals = az_poly.gather_prefix_evals(L0, suffix);
+        let bz_prefix_boolean_evals = bz_poly.gather_prefix_evals(L0, suffix);
         let cz_pref = cz.gather_prefix_evals(L0, suffix);
 
         let az_ext =

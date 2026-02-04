@@ -20,18 +20,15 @@
 //! - [`index`]: Index mapping (Definition A.5)
 //! - [`thread_state`]: Thread-local buffers for parallel execution
 //! - [`eq_round`]: Per-round equality factor tracking
-//! - [`witness`]: Witness polynomial abstraction (MatVecMLE trait)
 
 mod accumulator;
 mod accumulator_builder;
 mod basis;
-mod delay_modular_reduction_mode;
 mod domain;
 mod eq_round;
 mod evals;
 mod extension;
 mod index;
-mod mat_vec_mle;
 mod thread_state;
 
 // Domain types
@@ -55,15 +52,8 @@ pub use accumulator_builder::{
   build_accumulators_spartan,
 };
 
-// Delayed modular reduction mode selection
-pub use delay_modular_reduction_mode::{
-  AccumulateProduct, DelayedModularReductionDisabled, DelayedModularReductionEnabled,
-  DelayedModularReductionMode,
-};
-
 // Index computation
 pub use index::{AccumulatorPrefixIndex, CachedPrefixIndex, compute_idx4};
 
 // Eq round factor and derivation
 pub use eq_round::{EqRoundFactor, derive_t1};
-pub use mat_vec_mle::MatVecMLE;

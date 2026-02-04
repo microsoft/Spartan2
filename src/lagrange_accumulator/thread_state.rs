@@ -11,12 +11,14 @@
 //! allocations to the fold identity closure (called once per Rayon thread subdivision),
 //! we reduce allocations from O(num_x_out) to O(num_threads).
 
-use super::{
-  accumulator::LagrangeAccumulators, delay_modular_reduction_mode::DelayedModularReductionMode,
-  mat_vec_mle::MatVecMLE,
-};
+use super::accumulator::LagrangeAccumulators;
 use crate::small_field::DelayedReduction;
 use ff::PrimeField;
+use num_traits::Zero;
+use std::{
+  fmt::Debug,
+  ops::{Add, AddAssign, Neg, Sub, SubAssign},
+};
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
 ///
@@ -50,33 +52,37 @@ use ff::PrimeField;
 ///   Lagrange extensions. After `extend_in_place`, the result is always in `*_buf_curr`.
 ///   We need 4 buffers (not 2) because both extension results must be available
 ///   simultaneously to compute Az(β) × Bz(β) for each β.
-/// - `scatter_acc`: Bucket accumulators for scatter phase (type determined by Mode).
-///
-/// Note: `eyx` precomputation has been removed. We now use `e_y` directly in the
-/// scatter phase, computing `z_beta = ex * tA_red` once per beta instead of
-/// precomputing `eyx = ey * ex` for all y indices.
+/// - `acc`: Bucket accumulators for scatter phase (unreduced F×F).
 ///
 /// # Type Parameters
 ///
-/// - `S`: Field type for final accumulator values
-/// - `V`: Witness value type (i32 for small-value, S for field)
-/// - `P`: Polynomial type implementing [`MatVecMLE`]
-/// - `Mode`: Delayed modular reduction mode selection ([`super::DelayedModularReductionEnabled`] or [`super::DelayedModularReductionDisabled`])
+/// - `S`: Field type implementing `DelayedReduction<V>`
+/// - `V`: Witness value type (i32 or i64 for small-value witnesses)
 /// - `D`: Polynomial degree bound
-pub(crate) struct SpartanThreadState<S, V, P, Mode, const D: usize>
+pub(crate) struct SpartanThreadState<S, V, const D: usize>
 where
-  S: PrimeField + Send + Sync,
-  V: Copy + Default,
-  P: MatVecMLE<S>,
-  Mode: DelayedModularReductionMode<S, P, D>,
+  S: PrimeField + DelayedReduction<V> + Send + Sync,
+  V: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = V>
+    + Sub<Output = V>
+    + Neg<Output = V>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync,
 {
   /// Partial sums indexed by β, accumulated over the x_in loop.
-  /// Type determined by Mode: unreduced for DelayedModularReductionEnabled, reduced for DelayedModularReductionDisabled.
+  /// Uses unreduced wide-limb form for delayed modular reduction.
   /// Reset each x_out iteration.
-  pub partial_sums: Vec<Mode::AccumulatedFieldInt>,
+  pub partial_sums: Vec<S::UnreducedFieldInt>,
   /// Bucket accumulators for accumulator building phase.
-  /// Type determined by Mode: unreduced F×F for DelayedModularReductionEnabled, F for DelayedModularReductionDisabled.
-  pub acc: LagrangeAccumulators<Mode::AccumulatedFieldField, D>,
+  /// Uses unreduced F×F form (9-limb accumulator).
+  pub acc: LagrangeAccumulators<S::UnreducedFieldField, D>,
   /// Prefix evaluations of Az for current suffix. Size: 2^l0
   pub az_prefix_boolean_evals: Vec<V>,
   /// Prefix evaluations of Bz for current suffix. Size: 2^l0
@@ -90,20 +96,31 @@ where
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
   pub bz_extended_scratch: Vec<V>,
   /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in accumulator building phase.
+  /// Values are non-R-scaled raw limbs from Barrett-reducing partial sums.
   /// Eliminates per-x_out allocation overhead.
-  pub beta_values: Vec<(usize, Mode::UnreducedField)>,
+  pub beta_values: Vec<(usize, S::UnreducedField)>,
 }
 
-impl<S, V, P, Mode, const D: usize> SpartanThreadState<S, V, P, Mode, D>
+impl<S, V, const D: usize> SpartanThreadState<S, V, D>
 where
-  S: PrimeField + Send + Sync,
-  V: Copy + Default,
-  P: MatVecMLE<S>,
-  Mode: DelayedModularReductionMode<S, P, D>,
+  S: PrimeField + DelayedReduction<V> + Send + Sync,
+  V: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = V>
+    + Sub<Output = V>
+    + Neg<Output = V>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![Mode::AccumulatedFieldInt::default(); num_betas],
+      partial_sums: vec![S::UnreducedFieldInt::zero(); num_betas],
       acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![V::default(); prefix_size],
       bz_prefix_boolean_evals: vec![V::default(); prefix_size],
@@ -120,7 +137,7 @@ where
   #[inline]
   pub fn reset_partial_sums(&mut self) {
     for sum in &mut self.partial_sums {
-      *sum = Mode::AccumulatedFieldInt::default();
+      *sum = S::UnreducedFieldInt::zero();
     }
     self.beta_values.clear();
   }
@@ -128,7 +145,6 @@ where
 
 /// Thread-local scratch buffers for `build_accumulators_neutronnova`.
 ///
-/// Simplified version of `SpartanThreadState` — no `Mode` generics, no `MatVecMLE`.
 /// Phase 1 MVP uses immediate reduction (field elements for partial_sums/scatter).
 /// Pref/extension buffers use `IntermediateSmallValue` (i64/i128) to avoid overflow
 /// during ExtendToU₂ which adds up to ℓ_b bits of growth.
@@ -138,7 +154,7 @@ where
 /// - `S`: Field type for partial sums and scatter accumulators
 /// - `V`: Intermediate value type for pref/extension buffers (i64 for i32 path, i128 for i64 path)
 /// - `D`: Polynomial degree bound
-pub(crate) struct NeutronNovaThreadState<S, V: Copy + Default, PS: Copy + Default, const D: usize>
+pub(crate) struct NeutronNovaThreadState<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize>
 where
   S: PrimeField + DelayedReduction<i64>,
 {
@@ -164,13 +180,13 @@ where
   pub beta_values: Vec<(usize, S::UnreducedField)>,
 }
 
-impl<S, V: Copy + Default, PS: Copy + Default, const D: usize> NeutronNovaThreadState<S, V, PS, D>
+impl<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize> NeutronNovaThreadState<S, V, PS, D>
 where
   S: PrimeField + DelayedReduction<i64>,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![PS::default(); num_betas],
+      partial_sums: vec![PS::zero(); num_betas],
       scatter_acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![V::default(); prefix_size],
       bz_prefix_boolean_evals: vec![V::default(); prefix_size],
@@ -185,7 +201,7 @@ where
   /// Zero out partial sums for the next x_R iteration.
   #[inline]
   pub fn reset_partial_sums(&mut self) {
-    self.partial_sums.fill(PS::default());
+    self.partial_sums.fill(PS::zero());
     self.beta_values.clear();
   }
 }

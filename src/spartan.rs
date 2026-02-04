@@ -15,7 +15,6 @@ use crate::{
   },
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
-  lagrange_accumulator::{AccumulateProduct, MatVecMLE},
   math::Math,
   polys::{
     eq::EqPolynomial,
@@ -114,8 +113,6 @@ pub struct SpartanSNARK<E: Engine> {
 impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E>
 where
   E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
-  MultilinearPolynomial<i64>: MatVecMLE<E::Scalar, Value = i64>,
-  <MultilinearPolynomial<i64> as MatVecMLE<E::Scalar>>::Product: AccumulateProduct<E::Scalar>,
 {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;

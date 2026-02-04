@@ -126,11 +126,30 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   ) {
     // Compute product of two small values (i32 × i32 → i64)
     let product = (small_a as i64) * (small_b as i64);
-    Self::unreduced_field_intermediate_mul_add(acc, field, product);
+    // Handle sign: accumulate into pos or neg based on sign of product
+    let (target, mag) = if product >= 0 {
+      (&mut acc.pos, product as u64)
+    } else {
+      (&mut acc.neg, (-product) as u64)
+    };
+    // Fused multiply-accumulate: no intermediate array
+    let a = field.to_limbs();
+    let (r0, c) = mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = mac(target.0[1], a[1], mag, c);
+    let (r2, c) = mac(target.0[2], a[2], mag, c);
+    let (r3, c) = mac(target.0[3], a[3], mag, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(of as u64);
   }
 
   #[inline(always)]
-  fn unreduced_field_intermediate_mul_add(
+  fn accumulate_field_intermediate_val(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     intermediate: i64,
@@ -267,7 +286,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
 
   #[inline(always)]
   #[allow(clippy::needless_range_loop)]
-  fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
+  fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
     let product = mul_4_by_4_ext(a, b);
     let mut carry = 0u128;
     for i in 0..8 {
@@ -279,13 +298,13 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   }
 
   #[inline(always)]
-  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
+  fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self {
     let raw = barrett::barrett_reduce_9::<F>(&acc.0);
     F::from_raw_limbs(raw)
   }
 
   #[inline(always)]
-  fn unreduced_raw_small_mul_add(
+  fn accumulate_field_small_small_products(
     acc: &mut Self::UnreducedFieldInt,
     e_raw: &[u64; 4],
     small_a: i32,
@@ -398,11 +417,44 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   ) {
     // Compute product of two small values (i64 × i64 → i128)
     let product = (small_a as i128) * (small_b as i128);
-    Self::unreduced_field_intermediate_mul_add(acc, field, product);
+    let (target, mag) = if product >= 0 {
+      (&mut acc.pos, product as u128)
+    } else {
+      (&mut acc.neg, (-product) as u128)
+    };
+    // Fused 4×2 multiply-accumulate: two passes at different offsets
+    let a = field.to_limbs();
+    let b_lo = mag as u64;
+    let b_hi = (mag >> 64) as u64;
+
+    // Pass 1: multiply by b_lo at offset 0
+    let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
+    let (r1, c) = mac(target.0[1], a[1], b_lo, c);
+    let (r2, c) = mac(target.0[2], a[2], b_lo, c);
+    let (r3, c) = mac(target.0[3], a[3], b_lo, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of1) = target.0[4].overflowing_add(c);
+    let c1 = of1 as u64;
+    target.0[0] = r0;
+
+    // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
+    let (r1, c) = mac(r1, a[0], b_hi, 0);
+    let (r2, c) = mac(r2, a[1], b_hi, c);
+    let (r3, c) = mac(r3, a[2], b_hi, c);
+    let (r4, c) = mac(r4, a[3], b_hi, c);
+    // Add both carries (c from pass 2, c1 from pass 1) into position 5
+    let (r5, c) = mac(target.0[5], c1, 1, c);
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = r5;
+    // Propagate final carry through remaining limbs (just add)
+    target.0[6] = target.0[6].wrapping_add(c);
   }
 
   #[inline(always)]
-  fn unreduced_field_intermediate_mul_add(
+  fn accumulate_field_intermediate_val(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     intermediate: i128,
@@ -533,7 +585,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
 
   #[inline(always)]
   #[allow(clippy::needless_range_loop)]
-  fn unreduced_raw_mul_add(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
+  fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &[u64; 4], b: &[u64; 4]) {
     let product = mul_4_by_4_ext(a, b);
     let mut carry = 0u128;
     for i in 0..8 {
@@ -545,13 +597,13 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   }
 
   #[inline(always)]
-  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
+  fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self {
     let raw = barrett::barrett_reduce_9::<F>(&acc.0);
     F::from_raw_limbs(raw)
   }
 
   #[inline(always)]
-  fn unreduced_raw_small_mul_add(
+  fn accumulate_field_small_small_products(
     acc: &mut Self::UnreducedFieldInt,
     e_raw: &[u64; 4],
     small_a: i64,

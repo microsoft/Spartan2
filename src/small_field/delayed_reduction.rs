@@ -77,11 +77,12 @@ where
     small_b: SmallValue,
   );
 
-  /// Multiply field element by a single intermediate value and add to unreduced accumulator.
+  /// Accumulate field element multiplied by an intermediate value into unreduced accumulator.
   /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
   ///
-  /// Use this for single-value accumulation where you don't have two factors to multiply.
-  fn unreduced_field_intermediate_mul_add(
+  /// Used for single-value accumulation (e.g., eq × poly[idx]) where the small value
+  /// has already been converted to IntermediateSmallValue via `small_to_intermediate`.
+  fn accumulate_field_intermediate_val(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     intermediate: Self::IntermediateSmallValue,
@@ -198,22 +199,22 @@ where
 
   /// Raw (non-Montgomery) 4×4 limb multiply-accumulate into a 9-limb accumulator.
   /// `acc += a_raw × b_raw` where both inputs are non-R-scaled.
-  fn unreduced_raw_mul_add(
+  fn accumulate_raw_field_field_products(
     acc: &mut Self::UnreducedFieldField,
     a: &Self::UnreducedField,
     b: &Self::UnreducedField,
   );
 
-  /// Barrett-reduce a 9-limb raw product accumulator to a field element.
+  /// Reduce a 9-limb unreduced field×field accumulator to a field element.
   /// The accumulated value is non-R-scaled; this function Barrett-reduces
   /// and then converts to Montgomery form.
-  fn barrett_reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
+  fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self;
 
   // ========================================================================
   // Raw limb accumulation (non-Montgomery e_in optimization)
   // ========================================================================
 
-  /// Multiply raw limbs by product of two small values and add to accumulator.
+  /// Accumulate field × (small × small) product into unreduced accumulator.
   /// `acc += e_raw × (small_a × small_b)` where e_raw is non-R-scaled.
   ///
   /// Unlike [`Self::unreduced_field_small_mul_add`], this takes raw limbs instead of
@@ -222,7 +223,7 @@ where
   ///
   /// Used to optimize the Spartan accumulator inner loop by precomputing `e_in`
   /// as raw limbs.
-  fn unreduced_raw_small_mul_add(
+  fn accumulate_field_small_small_products(
     acc: &mut Self::UnreducedFieldInt,
     e_raw: &Self::UnreducedField,
     small_a: SmallValue,
@@ -232,7 +233,7 @@ where
   /// Barrett-reduce a non-R-scaled field×int accumulator to raw limbs.
   ///
   /// Unlike [`Self::reduce_field_int_to_unreduced`], this assumes the accumulator
-  /// is already non-R-scaled (from using [`Self::unreduced_raw_small_mul_add`]).
+  /// is already non-R-scaled (from using [`Self::accumulate_field_small_small_products`]).
   /// No `from_mont` conversion is needed.
   fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;
 }

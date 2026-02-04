@@ -47,6 +47,7 @@ use crate::{
   zk::NeutronNovaVerifierCircuit,
 };
 use ff::Field;
+use num_traits::Zero;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -219,14 +220,10 @@ where
   (0..num_cons)
     .into_par_iter()
     .map(|k| {
-      let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::default();
+      let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::zero();
       for i in 0..n_inst {
         // Single-value accumulation (layers[i][k] is already i64)
-        E::Scalar::unreduced_field_intermediate_mul_add(
-          &mut acc,
-          &eq_evals[i],
-          layers[i][k] as i128,
-        );
+        E::Scalar::accumulate_field_intermediate_val(&mut acc, &eq_evals[i], layers[i][k] as i128);
       }
       E::Scalar::reduce_field_int(&acc)
     })
