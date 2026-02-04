@@ -33,7 +33,7 @@ fn eq01<F: Field>(bit: u8, r: &F) -> F {
 }
 
 #[inline]
-fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+pub(crate) fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
   let ell = r_bs.len();
   (0..n)
     .map(|i| {

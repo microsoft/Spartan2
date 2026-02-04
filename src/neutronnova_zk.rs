@@ -97,13 +97,22 @@ fn mul_opt<F: Field>(a: &F, b: &F) -> F {
   }
 }
 
-/// Build witness vector z = [W | 1 | X] for matrix-vector multiplication.
-/// Shared by both prove and prove_small_value.
+/// Build witness vector z = [W | 1 | X] for matrix-vector multiplication (field elements).
 #[inline]
 fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
   let mut z = Vec::with_capacity(w.len() + 1 + x.len());
   z.extend_from_slice(w);
   z.push(E::Scalar::ONE);
+  z.extend_from_slice(x);
+  z
+}
+
+/// Build witness vector z = [W | 1 | X] for matrix-vector multiplication (small values).
+#[inline]
+fn build_z_small<SV: Copy + num_traits::One>(w: &[SV], x: &[SV]) -> Vec<SV> {
+  let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+  z.extend_from_slice(w);
+  z.push(SV::one());
   z.extend_from_slice(x);
   z
 }
@@ -184,6 +193,174 @@ where
 
   let (_fold_span, fold_t) = start_span!("fold_instances");
   let folded_U = R1CSInstance::fold_multiple(r_bs, Us)?;
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
+
+  Ok((folded_W, folded_U))
+}
+
+/// Fold multiple witness vectors using small-value optimization.
+/// Uses `accumulate_field_small_prod` for efficient field × small accumulation.
+fn fold_witness_small<E, SV>(
+  r_bs: &[E::Scalar],
+  ws_small: &[Vec<SV>],
+  r_Ws: &[crate::Blind<E>],
+) -> Result<(Vec<E::Scalar>, crate::Blind<E>), SpartanError>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  E::PCS: FoldingEngineTrait<E>,
+  SV: Copy
+    + Clone
+    + Default
+    + std::fmt::Debug
+    + PartialEq
+    + Eq
+    + std::ops::Add<Output = SV>
+    + std::ops::Sub<Output = SV>
+    + std::ops::Neg<Output = SV>
+    + std::ops::AddAssign
+    + std::ops::SubAssign
+    + Send
+    + Sync,
+{
+  use crate::r1cs::weights_from_r;
+
+  let n = ws_small.len();
+  if n == 0 {
+    return Err(SpartanError::InvalidInputLength {
+      reason: "fold_witness_small: empty witness list".into(),
+    });
+  }
+
+  let w = weights_from_r::<E::Scalar>(r_bs, n);
+  let dim = ws_small[0].len();
+
+  // Fold witness values: acc_W[k] = Σ_i w[i] * ws_small[i][k]
+  let acc_W: Vec<E::Scalar> = (0..dim)
+    .into_par_iter()
+    .map(|k| {
+      let mut acc = <E::Scalar as DelayedReduction<SV>>::UnreducedFieldInt::default();
+      for (i, wi) in w.iter().enumerate() {
+        E::Scalar::accumulate_field_small_prod(&mut acc, wi, ws_small[i][k]);
+      }
+      E::Scalar::reduce_field_int(&acc)
+    })
+    .collect();
+
+  // Fold blinds (still uses field arithmetic - blinds are random, not small)
+  let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(r_Ws, &w)?;
+
+  Ok((acc_W, acc_r))
+}
+
+/// Fold multiple instance X vectors using small-value optimization.
+/// Uses `accumulate_field_small_prod` for efficient field × small accumulation.
+fn fold_instance_x_small<E, SV>(
+  r_bs: &[E::Scalar],
+  xs_small: &[Vec<SV>],
+) -> Vec<E::Scalar>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  SV: Copy
+    + Clone
+    + Default
+    + std::fmt::Debug
+    + PartialEq
+    + Eq
+    + std::ops::Add<Output = SV>
+    + std::ops::Sub<Output = SV>
+    + std::ops::Neg<Output = SV>
+    + std::ops::AddAssign
+    + std::ops::SubAssign
+    + Send
+    + Sync,
+{
+  use crate::r1cs::weights_from_r;
+
+  let n = xs_small.len();
+  let w = weights_from_r::<E::Scalar>(r_bs, n);
+  let dim = xs_small[0].len();
+
+  // Fold X values: X_acc[j] = Σ_i w[i] * xs_small[i][j]
+  (0..dim)
+    .into_par_iter()
+    .map(|j| {
+      let mut acc = <E::Scalar as DelayedReduction<SV>>::UnreducedFieldInt::default();
+      for (i, wi) in w.iter().enumerate() {
+        E::Scalar::accumulate_field_small_prod(&mut acc, wi, xs_small[i][j]);
+      }
+      E::Scalar::reduce_field_int(&acc)
+    })
+    .collect()
+}
+
+/// Fold witnesses and instances using small-value optimization, update VC.
+fn fold_and_update_vc_small<E, SV>(
+  r_bs: &[E::Scalar],
+  T_cur: E::Scalar,
+  acc_eq: E::Scalar,
+  ws_small: &[Vec<SV>],
+  xs_small: &[Vec<SV>],
+  Us: &[R1CSInstance<E>],
+  Ws: &[R1CSWitness<E>],
+  ell_b: usize,
+  vc: &mut NeutronNovaVerifierCircuit<E>,
+  vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
+  vc_shape: &SplitMultiRoundR1CSShape<E>,
+  vc_ck: &CommitmentKey<E>,
+  transcript: &mut E::TE,
+) -> Result<(R1CSWitness<E>, R1CSInstance<E>), SpartanError>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  E::PCS: FoldingEngineTrait<E>,
+  SV: Copy
+    + Clone
+    + Default
+    + std::fmt::Debug
+    + PartialEq
+    + Eq
+    + std::ops::Add<Output = SV>
+    + std::ops::Sub<Output = SV>
+    + std::ops::Neg<Output = SV>
+    + std::ops::AddAssign
+    + std::ops::SubAssign
+    + Send
+    + Sync,
+{
+  use crate::r1cs::weights_from_r;
+
+  // T_out = poly_last(r_last) / eq(r_b, rho)
+  let T_out = T_cur * acc_eq.invert().unwrap();
+  vc.t_out_step = T_out;
+  vc.eq_rho_at_rb = acc_eq;
+  SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+
+  // Fold witnesses using small-value optimization
+  let (_fold_span, fold_t) = start_span!("fold_witnesses");
+  let r_Ws: Vec<_> = Ws.iter().map(|w| w.r_W.clone()).collect();
+  let (folded_W_vec, folded_r_W) = fold_witness_small::<E, SV>(r_bs, ws_small, &r_Ws)?;
+  let folded_W = R1CSWitness {
+    W: folded_W_vec,
+    r_W: folded_r_W,
+    is_small: false, // After folding with random challenges, no longer small
+  };
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_witnesses");
+
+  // Fold instances using small-value optimization for X, group ops for commitments
+  let (_fold_span, fold_t) = start_span!("fold_instances");
+  let folded_X = fold_instance_x_small::<E, SV>(r_bs, xs_small);
+
+  let w = weights_from_r::<E::Scalar>(r_bs, Us.len());
+  let comm_W_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+    &Us.iter().map(|u| u.comm_W.clone()).collect::<Vec<_>>(),
+    &w,
+  )?;
+  let folded_U = R1CSInstance {
+    X: folded_X,
+    comm_W: comm_W_acc,
+  };
   info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
 
   Ok((folded_W, folded_U))
@@ -445,21 +622,33 @@ where
     let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
     let n_padded = Us.len();
 
+    // === EXTRACT SMALL VECTORS EARLY ===
+    // Convert all W and X to small values once at the start (parallel over instances)
+    let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
+    let ws_small: Vec<Vec<i64>> = Ws
+      .par_iter()
+      .map(|w| vec_to_small::<E::Scalar, i64>(&w.W))
+      .collect::<Result<_, _>>()?;
+    let xs_small: Vec<Vec<i64>> = Us
+      .par_iter()
+      .map(|u| vec_to_small::<E::Scalar, i64>(&u.X))
+      .collect::<Result<_, _>>()?;
+    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
+
     // === TENSOR DECOMPOSITION (same split as field path) ===
     // E_eq split must match what callers expect (compute_tensor_decomp's split)
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
     let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
 
     // === MATRIX-VECTOR MULTIPLY (small-value optimized) ===
-    // Convert z to small values, then use field × small multiplication with delayed reduction
+    // Build z_small directly from small W and X, then use field × small multiplication
     let (_matrix_span, matrix_t) =
       start_span!("matrix_vector_multiply_instances", instances = n_padded);
 
     let smalls: Vec<(Vec<i64>, Vec<i64>, Vec<i64>)> = (0..n_padded)
       .into_par_iter()
       .map(|i| {
-        let z = build_z::<E>(&Ws[i].W, &Us[i].X);
-        let z_small = vec_to_small::<E::Scalar, i64>(&z)?;
+        let z_small = build_z_small(&ws_small[i], &xs_small[i]);
         let Az = S.A.multiply_vec_small(&z_small)?;
         let Bz = S.B.multiply_vec_small(&z_small)?;
         let Cz = S.C.multiply_vec_small(&z_small)?;
@@ -519,9 +708,10 @@ where
     );
     info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
 
-    // === FOLD WITNESSES/INSTANCES AND UPDATE VC ===
-    let (folded_W, folded_U) = fold_and_update_vc(
-      &r_bs, T_cur, acc_eq, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck, transcript,
+    // === FOLD WITNESSES/INSTANCES AND UPDATE VC (small-value optimized) ===
+    let (folded_W, folded_U) = fold_and_update_vc_small::<E, i64>(
+      &r_bs, T_cur, acc_eq, &ws_small, &xs_small, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck,
+      transcript,
     )?;
 
     info!(
