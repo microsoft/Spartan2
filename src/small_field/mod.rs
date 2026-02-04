@@ -34,21 +34,23 @@
 
 pub(crate) mod barrett;
 mod delayed_reduction;
+pub(crate) mod field_reduction_constants;
 mod impls;
 pub(crate) mod limbs;
+pub(crate) mod montgomery;
 mod small_value_field;
 
 pub use delayed_reduction::DelayedReduction;
 pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
 pub use small_value_field::SmallValueField;
 
-use barrett::BarrettField;
+use montgomery::MontgomeryLimbs;
 
 /// Marker trait: field supports `SmallValueField<i32>` via blanket impl.
-pub(crate) trait SupportsSmallI32: BarrettField {}
+pub(crate) trait SupportsSmallI32: MontgomeryLimbs {}
 
 /// Marker trait: field supports `SmallValueField<i64>` via blanket impl.
-pub(crate) trait SupportsSmallI64: BarrettField {}
+pub(crate) trait SupportsSmallI64: MontgomeryLimbs {}
 
 use ff::PrimeField;
 
@@ -130,4 +132,35 @@ fn two_pow_64<F: PrimeField>() -> F {
   // 2^64 = (2^32)^2
   let two_32 = F::from(1u64 << 32);
   two_32 * two_32
+}
+
+// ============================================================================
+// Small x Field Multiplication
+// ============================================================================
+
+/// Multiply field element by i64 (signed).
+///
+/// Uses Barrett reduction for efficiency (~3x faster than naive).
+#[inline]
+pub(crate) fn mul_by_i64<F: MontgomeryLimbs>(large: &F, small: i64) -> F {
+  if small >= 0 {
+    mul_by_u64(large, small as u64)
+  } else {
+    mul_by_u64(large, small.wrapping_neg() as u64).neg()
+  }
+}
+
+/// Multiply field element by u64 (unsigned).
+///
+/// Uses Barrett reduction for efficiency.
+#[inline]
+fn mul_by_u64<F: MontgomeryLimbs>(large: &F, small: u64) -> F {
+  if small == 0 {
+    return F::from_limbs([0, 0, 0, 0]);
+  }
+  if small == 1 {
+    return *large;
+  }
+  let c = limbs::mul_4_by_1(large.to_limbs(), small);
+  F::from_limbs(barrett::barrett_reduce_5::<F>(&c))
 }

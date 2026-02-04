@@ -270,11 +270,11 @@ where
 ///
 /// # Scatter optimization
 ///
-/// The scatter phase eliminates all Montgomery multiplications from the hot path:
-/// 1. Partial sums are Barrett-reduced to non-R-scaled raw limbs (`UnreducedField`)
-/// 2. `e_rb_cache` is precomputed as non-R-scaled raw limbs: `from_mont(e_right[x_r] * e_b[round][y])`
-/// 3. Scatter accumulates raw 4×4 limb products into `WideLimbs<9>` (no Montgomery ops)
-/// 4. Final `barrett_reduce_9` per bucket converts back to field elements
+/// All values stay in Montgomery form throughout (no conversions to raw limbs):
+/// 1. `e_rb_cache` is precomputed as Montgomery field elements: `e_right[x_r] * e_b[round][y]`
+/// 2. Partial sums are reduced to Montgomery field elements (`UnreducedField = Self`)
+/// 3. Scatter accumulates Montgomery×Montgomery products into `WideLimbs<9>` (R²-scaled)
+/// 4. Final Montgomery REDC per bucket converts back to field elements
 pub fn build_accumulators_neutronnova<S>(
   a_layers: &[Vec<i64>],
   b_layers: &[Vec<i64>],

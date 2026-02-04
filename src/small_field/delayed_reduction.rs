@@ -96,37 +96,6 @@ where
     field_b: &Self,
   );
 
-  /// Batch 4 independent field×(small×small) multiply-accumulates for ILP optimization.
-  /// Default implementation calls single version 4 times.
-  #[inline(always)]
-  fn unreduced_field_small_mul_add_batch4(
-    accs: [&mut Self::UnreducedFieldInt; 4],
-    field: &Self,
-    smalls_a: [SmallValue; 4],
-    smalls_b: [SmallValue; 4],
-  ) {
-    let [acc0, acc1, acc2, acc3] = accs;
-    Self::unreduced_field_small_mul_add(acc0, field, smalls_a[0], smalls_b[0]);
-    Self::unreduced_field_small_mul_add(acc1, field, smalls_a[1], smalls_b[1]);
-    Self::unreduced_field_small_mul_add(acc2, field, smalls_a[2], smalls_b[2]);
-    Self::unreduced_field_small_mul_add(acc3, field, smalls_a[3], smalls_b[3]);
-  }
-
-  /// Batch 4 independent field×field multiply-accumulates for ILP optimization.
-  /// Default implementation calls single version 4 times.
-  #[inline(always)]
-  fn unreduced_field_field_mul_add_batch4(
-    accs: [&mut Self::UnreducedFieldField; 4],
-    a: [&Self; 4],
-    b: [&Self; 4],
-  ) {
-    let [acc0, acc1, acc2, acc3] = accs;
-    Self::unreduced_field_field_mul_add(acc0, a[0], b[0]);
-    Self::unreduced_field_field_mul_add(acc1, a[1], b[1]);
-    Self::unreduced_field_field_mul_add(acc2, a[2], b[2]);
-    Self::unreduced_field_field_mul_add(acc3, a[3], b[3]);
-  }
-
   /// Fused three-way: `acc += field × (ext_a × ext_b)`, zero field reductions.
   ///
   /// For extended domain evaluations (after Lagrange interpolation).
@@ -159,22 +128,6 @@ where
     ext_b: Self::IntermediateSmallValue,
   );
 
-  /// Batch 4 independent fused three-way multiply-accumulates for ILP.
-  /// Same bit-width contract as [`Self::unreduced_field_ext_mul_add`].
-  #[inline(always)]
-  fn unreduced_field_ext_mul_add_batch4(
-    accs: [&mut Self::UnreducedFieldInt; 4],
-    field: &Self,
-    ext_a: [Self::IntermediateSmallValue; 4],
-    ext_b: [Self::IntermediateSmallValue; 4],
-  ) {
-    let [acc0, acc1, acc2, acc3] = accs;
-    Self::unreduced_field_ext_mul_add(acc0, field, ext_a[0], ext_b[0]);
-    Self::unreduced_field_ext_mul_add(acc1, field, ext_a[1], ext_b[1]);
-    Self::unreduced_field_ext_mul_add(acc2, field, ext_a[2], ext_b[2]);
-    Self::unreduced_field_ext_mul_add(acc3, field, ext_a[3], ext_b[3]);
-  }
-
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 
@@ -182,23 +135,22 @@ where
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self;
 
   // ========================================================================
-  // Non-Montgomery scatter support
+  // Scatter support
   // ========================================================================
 
-  /// Non-R-scaled raw limbs (not in Montgomery form). `[u64; 4]` for 256-bit fields.
-  /// Used to avoid Montgomery multiplications in the scatter hot path.
+  /// Cached field element type for scatter operations.
+  /// Can be `Self` (Montgomery form) or `[u64; 4]` (raw limbs).
+  /// Using `Self` avoids conversions; using raw limbs may have other benefits.
   type UnreducedField: Copy + Clone + Default + Debug + PartialEq + Send + Sync;
 
-  /// Barrett-reduce a field×int accumulator to non-R-scaled raw limbs.
-  /// Equivalent to `from_mont(reduce_field_int(acc))` but avoids constructing
-  /// an intermediate field element.
+  /// Reduce a field×int accumulator to the scatter cache type.
   fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;
 
-  /// Convert a Montgomery-form field element to non-R-scaled raw limbs.
+  /// Convert a field element to the scatter cache type.
   fn to_unreduced(&self) -> Self::UnreducedField;
 
-  /// Raw (non-Montgomery) 4×4 limb multiply-accumulate into a 9-limb accumulator.
-  /// `acc += a_raw × b_raw` where both inputs are non-R-scaled.
+  /// Multiply-accumulate two cached field values into a 9-limb accumulator.
+  /// `acc += a × b`
   fn accumulate_raw_field_field_products(
     acc: &mut Self::UnreducedFieldField,
     a: &Self::UnreducedField,
@@ -206,34 +158,21 @@ where
   );
 
   /// Reduce a 9-limb unreduced field×field accumulator to a field element.
-  /// The accumulated value is non-R-scaled; this function Barrett-reduces
-  /// and then converts to Montgomery form.
   fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self;
 
   // ========================================================================
-  // Raw limb accumulation (non-Montgomery e_in optimization)
+  // Field × small accumulation with cached field values
   // ========================================================================
 
   /// Accumulate field × (small × small) product into unreduced accumulator.
-  /// `acc += e_raw × (small_a × small_b)` where e_raw is non-R-scaled.
-  ///
-  /// Unlike [`Self::unreduced_field_small_mul_add`], this takes raw limbs instead of
-  /// a Montgomery-form field element. The accumulator becomes non-R-scaled, which
-  /// eliminates the need for `from_mont` when reducing.
-  ///
-  /// Used to optimize the Spartan accumulator inner loop by precomputing `e_in`
-  /// as raw limbs.
+  /// `acc += e × (small_a × small_b)` where e is the cached field type.
   fn accumulate_field_small_small_products(
     acc: &mut Self::UnreducedFieldInt,
-    e_raw: &Self::UnreducedField,
+    e: &Self::UnreducedField,
     small_a: SmallValue,
     small_b: SmallValue,
   );
 
-  /// Barrett-reduce a non-R-scaled field×int accumulator to raw limbs.
-  ///
-  /// Unlike [`Self::reduce_field_int_to_unreduced`], this assumes the accumulator
-  /// is already non-R-scaled (from using [`Self::accumulate_field_small_small_products`]).
-  /// No `from_mont` conversion is needed.
+  /// Reduce a field×int accumulator to the scatter cache type.
   fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;
 }
