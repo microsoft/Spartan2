@@ -44,6 +44,10 @@ where
   /// - For i32/i64: SignedWideLimbs<6> (384 bits)
   /// - For i64/i128: SignedWideLimbs<7> (448 bits)
   ///
+  /// The accumulated value is 1R Montgomery-scaled: when we multiply
+  /// `(field_val × R) × small_int`, the result is `(field_val × small_int) × R`.
+  /// Barrett reduction produces 1R-scaled limbs directly usable with `from_limbs()`.
+  ///
   /// Sized to safely sum 2^(l/2) terms without overflow, assuming:
   /// `field_bits + product_bits + (l/2) < 64*N`
   /// (N = limb count for this accumulator, 64 bits per limb).
@@ -70,7 +74,7 @@ where
 
   /// Multiply field element by product of two small values and add to unreduced accumulator.
   /// acc += field × (small_a × small_b) (keeps result in unreduced form, handles sign internally)
-  fn unreduced_field_small_mul_add(
+  fn accumulate_field_small_small_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     small_a: SmallValue,
@@ -88,9 +92,20 @@ where
     intermediate: Self::IntermediateSmallValue,
   );
 
+  /// Accumulate field element multiplied by a small value into unreduced accumulator.
+  /// acc += field × small (keeps result in unreduced form, handles sign internally)
+  ///
+  /// Used for matrix-vector multiplication where matrix values are field elements
+  /// and vector values are small integers.
+  fn accumulate_field_small_prod(
+    acc: &mut Self::UnreducedFieldInt,
+    field: &Self,
+    small: SmallValue,
+  );
+
   /// Multiply two field elements and add to unreduced accumulator.
   /// acc += field_a × field_b (keeps result in 2R-scaled unreduced form)
-  fn unreduced_field_field_mul_add(
+  fn accumulate_field_field_prod(
     acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
@@ -121,7 +136,7 @@ where
   /// - i64: 384 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<7> (448b) → l_b ≤ 20, l ≤ 128
   ///
   /// For practical NeutronNova (l_b ≤ 8, l ≤ 26): well within bounds.
-  fn unreduced_field_ext_mul_add(
+  fn accumulate_field_ext_ext_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     ext_a: Self::IntermediateSmallValue,

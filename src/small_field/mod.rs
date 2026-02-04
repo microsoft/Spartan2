@@ -52,7 +52,11 @@ pub(crate) trait SupportsSmallI32: MontgomeryLimbs {}
 /// Marker trait: field supports `SmallValueField<i64>` via blanket impl.
 pub(crate) trait SupportsSmallI64: MontgomeryLimbs {}
 
+use crate::errors::SpartanError;
 use ff::PrimeField;
+use rayon::prelude::*;
+use std::fmt::Debug;
+use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 // ============================================================================
 // Helper Functions
@@ -132,6 +136,37 @@ fn two_pow_64<F: PrimeField>() -> F {
   // 2^64 = (2^32)^2
   let two_32 = F::from(1u64 << 32);
   two_32 * two_32
+}
+
+/// Convert a vector of field elements to small values (parallel).
+///
+/// Returns Error if any value doesn't fit in the small value type.
+pub fn vec_to_small<F, SV>(v: &[F]) -> Result<Vec<SV>, SpartanError>
+where
+  F: SmallValueField<SV> + Sync,
+  SV: Copy
+    + Clone
+    + Default
+    + Debug
+    + PartialEq
+    + Eq
+    + Add<Output = SV>
+    + Sub<Output = SV>
+    + Neg<Output = SV>
+    + AddAssign
+    + SubAssign
+    + Send
+    + Sync,
+{
+  v.par_iter()
+    .enumerate()
+    .map(|(i, f)| {
+      F::try_field_to_small(f).ok_or_else(|| SpartanError::SmallValueOverflow {
+        value: format!("{:?}", f),
+        context: format!("vec_to_small at index {}", i),
+      })
+    })
+    .collect()
 }
 
 // ============================================================================

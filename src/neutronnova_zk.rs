@@ -34,7 +34,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness,
     SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
-  small_field::{DelayedReduction, SmallValueField},
+  small_field::{DelayedReduction, SmallValueField, vec_to_small},
   start_span,
   sumcheck::{SumcheckProof, lagrange_sumcheck},
   traits::{
@@ -106,20 +106,6 @@ fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
   z.push(E::Scalar::ONE);
   z.extend_from_slice(x);
   z
-}
-
-/// Convert a vector of field elements to small values (i64).
-fn vec_to_small<E: Engine>(v: &[E::Scalar]) -> Result<Vec<i64>, SpartanError>
-where
-  E::Scalar: SmallValueField<i64>,
-{
-  v.iter()
-    .map(|f| {
-      E::Scalar::try_field_to_small(f).ok_or_else(|| SpartanError::InternalError {
-        reason: "witness value does not fit in i64".into(),
-      })
-    })
-    .collect()
 }
 
 /// Shared NIFS setup: padding, transcript absorption, tau/rhos squeezing.
@@ -453,7 +439,7 @@ where
     E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
       + DelayedReduction<i64, IntermediateSmallValue = i128>,
   {
-    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove_small_value_total");
+    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
 
     // === SHARED SETUP ===
     let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
@@ -464,22 +450,26 @@ where
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
     let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
 
-    // === MATRIX-VECTOR MULTIPLY + CONVERT TO SMALL (chained, memory-efficient) ===
+    // === MATRIX-VECTOR MULTIPLY (small-value optimized) ===
+    // Convert z to small values, then use field × small multiplication with delayed reduction
     let (_matrix_span, matrix_t) =
-      start_span!("matrix_vector_multiply_to_small", instances = n_padded);
+      start_span!("matrix_vector_multiply_instances", instances = n_padded);
+
     let smalls: Vec<(Vec<i64>, Vec<i64>, Vec<i64>)> = (0..n_padded)
       .into_par_iter()
       .map(|i| {
         let z = build_z::<E>(&Ws[i].W, &Us[i].X);
-        let (Az, Bz, Cz) = S.multiply_vec(&z)?;
-        Ok((vec_to_small::<E>(&Az)?, vec_to_small::<E>(&Bz)?, vec_to_small::<E>(&Cz)?))
+        let z_small = vec_to_small::<E::Scalar, i64>(&z)?;
+        let Az = S.A.multiply_vec_small(&z_small)?;
+        let Bz = S.B.multiply_vec_small(&z_small)?;
+        let Cz = S.C.multiply_vec_small(&z_small)?;
+        Ok((Az, Bz, Cz))
       })
       .collect::<Result<Vec<_>, SpartanError>>()?;
 
     // Unzip into separate layer vectors
-    let (a_small, b_small, c_small): (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<i64>>) = smalls
-      .into_iter()
-      .fold(
+    let (a_small, b_small, c_small): (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<i64>>) =
+      smalls.into_iter().fold(
         (
           Vec::with_capacity(n_padded),
           Vec::with_capacity(n_padded),
@@ -495,7 +485,7 @@ where
     info!(
       elapsed_ms = %matrix_t.elapsed().as_millis(),
       instances = n_padded,
-      "matrix_vector_multiply_to_small"
+      "matrix_vector_multiply_instances"
     );
 
     // === SMALL-VALUE SUMCHECK (with pre-computed E_eq) ===
@@ -536,7 +526,7 @@ where
 
     info!(
       elapsed_ms = %_nifs_total_t.elapsed().as_millis(),
-      "nifs_prove_small_value_total"
+      "nifs_prove"
     );
 
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
@@ -869,6 +859,7 @@ where
       vc_ck: vc_ck.clone(),
       digest: OnceCell::new(),
     };
+
     let pk = NeutronNovaProverKey {
       ck,
       S_step,

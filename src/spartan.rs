@@ -21,7 +21,7 @@ use crate::{
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
   r1cs::{SplitR1CSInstance, SplitR1CSShape},
-  small_field::{DelayedReduction, SmallValueField},
+  small_field::{DelayedReduction, SmallValueField, vec_to_small},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -217,29 +217,14 @@ where
 
     // Convert Az/Bz to small i64 values for optimized sumcheck
     let small_polys = if is_small {
-      let small_err = || SpartanError::InternalError {
-        reason: "is_small=true but witness values do not fit in i64".to_string(),
-      };
       let ((az_small, bz_small), cz_small) = rayon::join(
         || {
           rayon::join(
-            || {
-              Az.par_iter()
-                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                .collect::<Result<Vec<i64>, _>>()
-            },
-            || {
-              Bz.par_iter()
-                .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-                .collect::<Result<Vec<i64>, _>>()
-            },
+            || vec_to_small::<E::Scalar, i64>(&Az),
+            || vec_to_small::<E::Scalar, i64>(&Bz),
           )
         },
-        || {
-          Cz.par_iter()
-            .map(|v| E::Scalar::try_field_to_small(v).ok_or_else(&small_err))
-            .collect::<Result<Vec<i64>, _>>()
-        },
+        || vec_to_small::<E::Scalar, i64>(&Cz),
       );
       Some((az_small?, bz_small?, cz_small?))
     } else {

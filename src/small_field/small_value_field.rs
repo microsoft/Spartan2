@@ -58,7 +58,8 @@ where
     + Eq
     + Send
     + Sync
-    + num_traits::One;
+    + num_traits::One
+    + AddAssign;
 
   // ===== Core Multiplications =====
 

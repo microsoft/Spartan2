@@ -371,7 +371,7 @@ where
 
           // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
           for &beta_idx in &betas_with_infty {
-            S::unreduced_field_ext_mul_add(
+            S::accumulate_field_ext_ext_prod(
               &mut state.partial_sums[beta_idx],
               &e_l,
               az_ext[beta_idx],

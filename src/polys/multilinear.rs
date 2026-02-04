@@ -8,7 +8,10 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, small_field::SmallValueField, zip_with_for_each};
+use crate::{
+  math::Math, polys::eq::EqPolynomial, small_field::SmallValueField, small_field::vec_to_small,
+  zip_with_for_each,
+};
 use core::ops::Index;
 use ff::{Field, PrimeField};
 use rayon::prelude::*;
@@ -145,9 +148,10 @@ impl<T: Copy> MultilinearPolynomial<T> {
 impl MultilinearPolynomial<i32> {
   /// Try to create from a field-element polynomial.
   /// Returns None if any value doesn't fit in i32.
-  pub fn try_from_field<F: SmallValueField<i32>>(poly: &MultilinearPolynomial<F>) -> Option<Self> {
-    let evals: Option<Vec<i32>> = poly.Z.iter().map(|f| F::try_field_to_small(f)).collect();
-    evals.map(Self::new)
+  pub fn try_from_field<F: SmallValueField<i32> + Sync>(
+    poly: &MultilinearPolynomial<F>,
+  ) -> Option<Self> {
+    vec_to_small::<F, i32>(&poly.Z).ok().map(Self::new)
   }
 
   /// Get the number of variables.

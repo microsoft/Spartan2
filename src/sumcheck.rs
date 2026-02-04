@@ -175,14 +175,11 @@ where
 
     for (p, eq_p) in eq_table.iter().enumerate() {
       let idx = p * stride + s;
-      let a_int = F::small_to_intermediate(poly_a_small.Z[idx]);
-      let b_int = F::small_to_intermediate(poly_b_small.Z[idx]);
-      let c_int = F::small_to_intermediate(poly_c_small.Z[idx]);
 
-      // Single-value accumulation
-      F::accumulate_field_intermediate_val(&mut acc_a, eq_p, a_int);
-      F::accumulate_field_intermediate_val(&mut acc_b, eq_p, b_int);
-      F::accumulate_field_intermediate_val(&mut acc_c, eq_p, c_int);
+      // Single-value accumulation: field × small with delayed reduction
+      F::accumulate_field_small_prod(&mut acc_a, eq_p, poly_a_small.Z[idx]);
+      F::accumulate_field_small_prod(&mut acc_b, eq_p, poly_b_small.Z[idx]);
+      F::accumulate_field_small_prod(&mut acc_c, eq_p, poly_c_small.Z[idx]);
     }
 
     (
@@ -1535,9 +1532,9 @@ pub(crate) mod eq_sumcheck {
                 );
 
                 // Accumulate E_in * q_k in wide limbs (NO REDUCTION)
-                E::Scalar::unreduced_field_field_mul_add(&mut inner_0, e_in, &q0);
-                E::Scalar::unreduced_field_field_mul_add(&mut inner_2, e_in, &q2);
-                E::Scalar::unreduced_field_field_mul_add(&mut inner_3, e_in, &q3);
+                E::Scalar::accumulate_field_field_prod(&mut inner_0, e_in, &q0);
+                E::Scalar::accumulate_field_field_prod(&mut inner_2, e_in, &q2);
+                E::Scalar::accumulate_field_field_prod(&mut inner_3, e_in, &q3);
               }
 
               // Phase 2: Reduce inner sums ONCE, then multiply by E_out
@@ -1546,9 +1543,9 @@ pub(crate) mod eq_sumcheck {
               let inner_3_red = E::Scalar::reduce_field_field(&inner_3);
 
               // Accumulate E_out * inner_reduced in wide limbs (NO REDUCTION)
-              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.0, e_out, &inner_0_red);
-              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.1, e_out, &inner_2_red);
-              E::Scalar::unreduced_field_field_mul_add(&mut outer_acc.2, e_out, &inner_3_red);
+              E::Scalar::accumulate_field_field_prod(&mut outer_acc.0, e_out, &inner_0_red);
+              E::Scalar::accumulate_field_field_prod(&mut outer_acc.1, e_out, &inner_2_red);
+              E::Scalar::accumulate_field_field_prod(&mut outer_acc.2, e_out, &inner_3_red);
 
               outer_acc
             },
@@ -1605,9 +1602,9 @@ pub(crate) mod eq_sumcheck {
               );
 
               // Accumulate E * q_k in wide limbs (NO REDUCTION)
-              E::Scalar::unreduced_field_field_mul_add(&mut acc.0, e, &q0);
-              E::Scalar::unreduced_field_field_mul_add(&mut acc.1, e, &q2);
-              E::Scalar::unreduced_field_field_mul_add(&mut acc.2, e, &q3);
+              E::Scalar::accumulate_field_field_prod(&mut acc.0, e, &q0);
+              E::Scalar::accumulate_field_field_prod(&mut acc.1, e, &q2);
+              E::Scalar::accumulate_field_field_prod(&mut acc.2, e, &q3);
 
               acc
             },

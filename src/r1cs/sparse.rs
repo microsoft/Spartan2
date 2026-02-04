@@ -10,9 +10,12 @@
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
 use crate::errors::SpartanError;
+use crate::small_field::DelayedReduction;
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
+use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 /// CSR format sparse matrix, We follow the names used by scipy.
 /// Detailed explanation here: https://stackoverflow.com/questions/52299420/scipy-csr-matrix-understand-indptr
@@ -113,6 +116,67 @@ impl<F: PrimeField> SparseMatrix<F> {
           .get_row_unchecked(&row_ptrs)
           .map(|(val, col_idx)| *val * vector[*col_idx])
           .sum()
+      })
+      .collect()
+  }
+
+  /// Multiply by a dense small-value vector using delayed reduction.
+  ///
+  /// Uses `accumulate_field_small_prod` (field × small) with delayed reduction,
+  /// then coerces the result back to small values.
+  ///
+  /// # Errors
+  /// Returns `SpartanError::InvalidInputLength` if vector length doesn't match.
+  /// Returns `SpartanError::SmallValueOverflow` if any result doesn't fit in `SV`.
+  pub fn multiply_vec_small<SV>(&self, z: &[SV]) -> Result<Vec<SV>, SpartanError>
+  where
+    F: DelayedReduction<SV>,
+    SV: Copy
+      + Clone
+      + Default
+      + Debug
+      + PartialEq
+      + Eq
+      + Add<Output = SV>
+      + Sub<Output = SV>
+      + Neg<Output = SV>
+      + AddAssign
+      + SubAssign
+      + Send
+      + Sync,
+  {
+    if self.cols != z.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SparseMatrix multiply_vec_small: Expected {} elements, got {}",
+          self.cols,
+          z.len()
+        ),
+      });
+    }
+
+    self
+      .indptr
+      .par_windows(2)
+      .enumerate()
+      .map(|(row_idx, ptrs)| {
+        let start = ptrs[0];
+        let end = ptrs[1];
+
+        // Accumulate using delayed reduction: acc += matrix_val × z[col]
+        let mut acc = F::UnreducedFieldInt::default();
+        for i in start..end {
+          let matrix_val = &self.data[i];
+          let col_idx = self.indices[i];
+          F::accumulate_field_small_prod(&mut acc, matrix_val, z[col_idx]);
+        }
+
+        // Reduce to field element, then coerce to small value
+        let field_result = F::reduce_field_int(&acc);
+        F::try_field_to_small(&field_result).ok_or_else(|| SpartanError::SmallValueOverflow {
+          value: format!("{:?}", field_result),
+          context: format!("multiply_vec_small result at row {}", row_idx),
+        })
       })
       .collect()
   }

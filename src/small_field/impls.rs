@@ -117,7 +117,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_field_small_mul_add(
+  fn accumulate_field_small_small_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     small_a: i32,
@@ -176,7 +176,31 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   }
 
   #[inline(always)]
-  fn unreduced_field_field_mul_add(
+  fn accumulate_field_small_prod(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i32) {
+    // Handle sign: accumulate into pos or neg based on sign of small
+    let (target, mag) = if small >= 0 {
+      (&mut acc.pos, small as u64)
+    } else {
+      (&mut acc.neg, (-(small as i64)) as u64)
+    };
+    // Fused multiply-accumulate: field × small
+    let a = field.to_limbs();
+    let (r0, c) = mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = mac(target.0[1], a[1], mag, c);
+    let (r2, c) = mac(target.0[2], a[2], mag, c);
+    let (r3, c) = mac(target.0[3], a[3], mag, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(of as u64);
+  }
+
+  #[inline(always)]
+  fn accumulate_field_field_prod(
     acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
@@ -193,7 +217,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   }
 
   #[inline(always)]
-  fn unreduced_field_ext_mul_add(
+  fn accumulate_field_ext_ext_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     ext_a: i64,
@@ -235,7 +259,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
 
   #[inline(always)]
   fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &Self, b: &Self) {
-    Self::unreduced_field_field_mul_add(acc, a, b);
+    Self::accumulate_field_field_prod(acc, a, b);
   }
 
   #[inline(always)]
@@ -250,7 +274,7 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
     small_a: i32,
     small_b: i32,
   ) {
-    Self::unreduced_field_small_mul_add(acc, e, small_a, small_b);
+    Self::accumulate_field_small_small_prod(acc, e, small_a, small_b);
   }
 
   #[inline(always)]
@@ -309,7 +333,7 @@ impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
 
   fn try_field_to_small(val: &Self) -> Option<i64> {
     try_field_to_i64(val)
-  } 
+  }
 }
 
 // ============================================================================
@@ -321,7 +345,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   type UnreducedFieldField = WideLimbs<9>;
 
   #[inline(always)]
-  fn unreduced_field_small_mul_add(
+  fn accumulate_field_small_small_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     small_a: i64,
@@ -408,7 +432,31 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   }
 
   #[inline(always)]
-  fn unreduced_field_field_mul_add(
+  fn accumulate_field_small_prod(acc: &mut Self::UnreducedFieldInt, field: &Self, small: i64) {
+    // Handle sign: accumulate into pos or neg based on sign of small
+    let (target, mag) = if small >= 0 {
+      (&mut acc.pos, small as u64)
+    } else {
+      (&mut acc.neg, (-small) as u64)
+    };
+    // Fused multiply-accumulate: field × small (single 64-bit multiplier)
+    let a = field.to_limbs();
+    let (r0, c) = mac(target.0[0], a[0], mag, 0);
+    let (r1, c) = mac(target.0[1], a[1], mag, c);
+    let (r2, c) = mac(target.0[2], a[2], mag, c);
+    let (r3, c) = mac(target.0[3], a[3], mag, c);
+    // Propagate carry without multiply (just add)
+    let (r4, of) = target.0[4].overflowing_add(c);
+    target.0[0] = r0;
+    target.0[1] = r1;
+    target.0[2] = r2;
+    target.0[3] = r3;
+    target.0[4] = r4;
+    target.0[5] = target.0[5].wrapping_add(of as u64);
+  }
+
+  #[inline(always)]
+  fn accumulate_field_field_prod(
     acc: &mut Self::UnreducedFieldField,
     field_a: &Self,
     field_b: &Self,
@@ -424,7 +472,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   }
 
   #[inline(always)]
-  fn unreduced_field_ext_mul_add(
+  fn accumulate_field_ext_ext_prod(
     acc: &mut Self::UnreducedFieldInt,
     field: &Self,
     ext_a: i128,
@@ -466,7 +514,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
 
   #[inline(always)]
   fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &Self, b: &Self) {
-    Self::unreduced_field_field_mul_add(acc, a, b);
+    Self::accumulate_field_field_prod(acc, a, b);
   }
 
   #[inline(always)]
@@ -481,7 +529,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
     small_a: i64,
     small_b: i64,
   ) {
-    Self::unreduced_field_small_mul_add(acc, e, small_a, small_b);
+    Self::accumulate_field_small_small_prod(acc, e, small_a, small_b);
   }
 
   #[inline(always)]
@@ -705,7 +753,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unreduced_field_small_mul_add() {
+  fn test_accumulate_field_small_small_prod() {
     use crate::small_field::limbs::SignedWideLimbs;
     use ff::Field;
     use rand_core::{OsRng, RngCore};
@@ -723,7 +771,7 @@ mod tests {
       let small_a: i32 = if i % 2 == 0 { small_a_u } else { -small_a_u };
       let small_b: i32 = if i % 3 == 0 { small_b_u } else { -small_b_u };
 
-      <Scalar as DelayedReduction<i32>>::unreduced_field_small_mul_add(&mut acc, &field, small_a, small_b);
+      <Scalar as DelayedReduction<i32>>::accumulate_field_small_small_prod(&mut acc, &field, small_a, small_b);
       let product = (small_a as i64) * (small_b as i64);
       expected += field * i64_to_field::<Scalar>(product);
     }
@@ -733,7 +781,7 @@ mod tests {
   }
 
   #[test]
-  fn test_unreduced_field_field_mul_add() {
+  fn test_accumulate_field_field_prod() {
     use crate::small_field::limbs::WideLimbs;
     use ff::Field;
     use rand_core::OsRng;
@@ -747,7 +795,7 @@ mod tests {
       let a = Scalar::random(&mut rng);
       let b = Scalar::random(&mut rng);
 
-      <Scalar as DelayedReduction<i32>>::unreduced_field_field_mul_add(&mut acc, &a, &b);
+      <Scalar as DelayedReduction<i32>>::accumulate_field_field_prod(&mut acc, &a, &b);
       expected += a * b;
     }
 
@@ -779,7 +827,7 @@ mod tests {
         (0, small_b_u) // zero × positive
       };
 
-      <Scalar as DelayedReduction<i32>>::unreduced_field_small_mul_add(&mut acc, &field, small_a, small_b);
+      <Scalar as DelayedReduction<i32>>::accumulate_field_small_small_prod(&mut acc, &field, small_a, small_b);
       let product = (small_a as i64) * (small_b as i64);
       expected += field * i64_to_field::<Scalar>(product);
     }
@@ -803,7 +851,7 @@ mod tests {
       let a = Scalar::random(&mut rng);
       let b = Scalar::random(&mut rng);
 
-      <Scalar as DelayedReduction<i32>>::unreduced_field_field_mul_add(&mut acc, &a, &b);
+      <Scalar as DelayedReduction<i32>>::accumulate_field_field_prod(&mut acc, &a, &b);
       expected += a * b;
     }
 

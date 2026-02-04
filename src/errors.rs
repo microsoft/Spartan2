@@ -107,4 +107,12 @@ pub enum SpartanError {
     /// The maximum size that can be handled
     max: usize,
   },
+  /// returned when a small-value computation overflows
+  #[error("SmallValueOverflow: {context}")]
+  SmallValueOverflow {
+    /// The overflowing value (as string since i128 doesn't impl common traits)
+    value: String,
+    /// Context describing where the overflow occurred
+    context: String,
+  },
 }
