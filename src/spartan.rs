@@ -22,6 +22,7 @@ use crate::{
   },
   r1cs::{R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
   small_field::{DelayedReduction, SmallValueField, vec_to_small_for_extension},
+  small_sumcheck::prove_cubic_small_value,
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -603,15 +604,14 @@ impl<E: Engine> SpartanSNARK<E> {
 
     // outer sum-check with small-value polynomials
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
-    let (sc_proof_outer, r_x, claims_outer) =
-      SumcheckProof::prove_cubic_with_three_inputs_small_value::<_, LB>(
-        &E::Scalar::ZERO,
-        tau,
-        &MultilinearPolynomial::new(Az_small),
-        &MultilinearPolynomial::new(Bz_small),
-        &MultilinearPolynomial::new(Cz_small),
-        &mut transcript,
-      )?;
+    let (sc_proof_outer, r_x, claims_outer) = prove_cubic_small_value::<E, _, LB>(
+      &E::Scalar::ZERO,
+      tau,
+      &MultilinearPolynomial::new(Az_small),
+      &MultilinearPolynomial::new(Bz_small),
+      &MultilinearPolynomial::new(Cz_small),
+      &mut transcript,
+    )?;
 
     // claims from the end of sum-check
     let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =

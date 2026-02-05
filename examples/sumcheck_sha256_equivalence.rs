@@ -24,6 +24,7 @@ use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::PallasHyraxEngine,
   small_field::SmallValueField,
+  small_sumcheck::prove_cubic_small_value,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
   traits::{Engine, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait},
@@ -217,23 +218,19 @@ where
         let cz_small = MultilinearPolynomial::new(cz_small_vals);
         let mut transcript2 = <E as Engine>::TE::new(b"test_equivalence");
 
-        info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
+        info!("Running prove_cubic_small_value (Algorithm 6)...");
         let t0 = Instant::now();
-        let (proof2, r2, evals2) =
-          SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
-            &claim,
-            tau,
-            &az_small,
-            &bz_small,
-            &cz_small,
-            &mut transcript2,
-          )
-          .expect("prove_cubic_with_three_inputs_small_value failed");
+        let (proof2, r2, evals2) = prove_cubic_small_value::<E, _, 3>(
+          &claim,
+          tau,
+          &az_small,
+          &bz_small,
+          &cz_small,
+          &mut transcript2,
+        )
+        .expect("prove_cubic_small_value failed");
         let elapsed = t0.elapsed().as_micros();
-        info!(
-          elapsed_us = elapsed,
-          "prove_cubic_with_three_inputs_small_value"
-        );
+        info!(elapsed_us = elapsed, "prove_cubic_small_value");
         (proof2, r2, evals2, elapsed)
       };
 

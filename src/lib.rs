@@ -40,6 +40,7 @@ pub mod lagrange_accumulator;
 // modules with some public items for benchmarking
 pub mod polys;
 pub mod small_field;
+pub mod small_sumcheck;
 pub mod sumcheck;
 
 #[macro_use]

@@ -36,7 +36,8 @@ use crate::{
   },
   small_field::{DelayedReduction, SmallValueField, vec_to_small_for_extension},
   start_span,
-  sumcheck::{SumcheckProof, lagrange_sumcheck},
+  small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial},
+  sumcheck::SumcheckProof,
   traits::{
     Engine,
     circuit::SpartanCircuit,
@@ -490,8 +491,7 @@ where
     );
 
     // 2. Create SmallValueSumCheck state
-    let mut small_value =
-      lagrange_sumcheck::SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
@@ -514,7 +514,7 @@ where
         .ok_or(SpartanError::InvalidSumcheckProof)?;
 
       // Build cubic round polynomial
-      let poly = lagrange_sumcheck::build_univariate_round_polynomial(&li, t0, t1, t_inf);
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
 
       // Feed into verifier circuit
       let c = &poly.coeffs;
@@ -2096,6 +2096,7 @@ mod tests {
     let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
 
     // Helper to test prove and verify
+    #[allow(clippy::expect_fun_call)]
     let assert_prove_and_verify = |is_small: bool, path_name: &str| {
       let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, is_small)
         .expect(&format!("{path_name} prove should succeed for num_circuits={num_circuits}"));

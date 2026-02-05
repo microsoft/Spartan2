@@ -115,4 +115,12 @@ pub enum SpartanError {
     /// Context describing where the overflow occurred
     context: String,
   },
+  /// returned when small-value sumcheck has zero rounds (l0 == 0)
+  #[error("SmallValueRoundsZero: num_rounds={num_rounds}, LB={lb}")]
+  SmallValueRoundsZero {
+    /// The number of sumcheck rounds
+    num_rounds: usize,
+    /// The Lagrange bound constant
+    lb: usize,
+  },
 }

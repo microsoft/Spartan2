@@ -25,6 +25,7 @@ use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{Bn254Engine, PallasHyraxEngine, VestaHyraxEngine},
   small_field::{DelayedReduction, SmallValueField},
+  small_sumcheck::prove_cubic_small_value,
   sumcheck::SumcheckProof,
   traits::{Engine, transcript::TranscriptEngineTrait},
 };
@@ -306,16 +307,15 @@ where
     let setup_us = t_setup.elapsed().as_micros();
 
     let t_prove = Instant::now();
-    let (proof3, r3, evals3) =
-      SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
-        &claim,
-        taus,
-        &az_small_i64,
-        &bz_small_i64,
-        &cz_small_i64,
-        &mut transcript3,
-      )
-      .unwrap();
+    let (proof3, r3, evals3) = prove_cubic_small_value::<E, _, 3>(
+      &claim,
+      taus,
+      &az_small_i64,
+      &bz_small_i64,
+      &cz_small_i64,
+      &mut transcript3,
+    )
+    .unwrap();
 
     // Verify sumcheck proof
     {
@@ -409,7 +409,7 @@ where
   let taus_for_verify = taus.clone();
 
   let t_prove = Instant::now();
-  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+  let (proof2, r2, evals2) = prove_cubic_small_value::<E, _, 3>(
     &claim,
     taus,
     &az_small,
