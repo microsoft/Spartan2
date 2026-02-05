@@ -166,7 +166,7 @@ fn run_single_benchmark<E>(
 )
 where
   E: Engine,
-  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
 {
   type F<E> = <E as Engine>::Scalar;
 
@@ -212,11 +212,16 @@ where
     // Verify sumcheck proof
     {
       let mut transcript_v = E::TE::new(b"bench");
-      let (final_claim, r_v) = proof1.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+      let (final_claim, r_v) = proof1
+        .verify(claim, num_vars, 3, &mut transcript_v)
+        .unwrap();
       assert_eq!(r_v, r1, "Verify challenges must match prover");
       let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
       let expected = tau_eval * (evals1[0] * evals1[1] - evals1[2]);
-      assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (base)");
+      assert_eq!(
+        final_claim, expected,
+        "Sumcheck final claim mismatch (base)"
+      );
     }
     let prove_us = t_prove.elapsed().as_micros();
     info!(setup_us, prove_us, "prove_cubic_with_three_inputs");
@@ -255,11 +260,16 @@ where
       // Verify sumcheck proof
       {
         let mut transcript_v = E::TE::new(b"bench");
-        let (final_claim, r_v) = proof2.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+        let (final_claim, r_v) = proof2
+          .verify(claim, num_vars, 3, &mut transcript_v)
+          .unwrap();
         assert_eq!(r_v, r2, "Verify challenges must match prover (split-eq)");
         let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
         let expected = tau_eval * (evals2[0] * evals2[1] - evals2[2]);
-        assert_eq!(final_claim, expected, "Sumcheck final claim mismatch (split-eq)");
+        assert_eq!(
+          final_claim, expected,
+          "Sumcheck final claim mismatch (split-eq)"
+        );
       }
       let prove_us = t_prove.elapsed().as_micros();
       info!(
@@ -283,7 +293,11 @@ where
     // Create i64 small-value polynomials
     let az_i64: Vec<i64> = az_i32.iter().map(|&v| v as i64).collect();
     let bz_i64: Vec<i64> = bz_i32.iter().map(|&v| v as i64).collect();
-    let cz_i64: Vec<i64> = az_i64.iter().zip(bz_i64.iter()).map(|(&a, &b)| a * b).collect();
+    let cz_i64: Vec<i64> = az_i64
+      .iter()
+      .zip(bz_i64.iter())
+      .map(|(&a, &b)| a * b)
+      .collect();
     let az_small_i64 = MultilinearPolynomial::new(az_i64);
     let bz_small_i64 = MultilinearPolynomial::new(bz_i64);
     let cz_small_i64 = MultilinearPolynomial::new(cz_i64);
@@ -306,7 +320,9 @@ where
     // Verify sumcheck proof
     {
       let mut transcript_v = E::TE::new(b"bench");
-      let (final_claim, r_v) = proof3.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+      let (final_claim, r_v) = proof3
+        .verify(claim, num_vars, 3, &mut transcript_v)
+        .unwrap();
       assert_eq!(r_v, r3, "Verify challenges must match prover (i64)");
       let tau_eval = EqPolynomial::new(taus_for_verify.clone()).evaluate(&r_v);
       let expected = tau_eval * (evals3[0] * evals3[1] - evals3[2]);
@@ -359,7 +375,7 @@ where
 fn run_i32_benchmark<E>(num_vars: usize, az_i32: &[i32], bz_i32: &[i32]) -> Option<BenchResult>
 where
   E: Engine,
-  E::Scalar: SmallValueField<i32, IntermediateSmallValue = i64> + DelayedReduction<i32>,
+  E::Scalar: SmallValueField<i32> + DelayedReduction<i32>,
 {
   type F<E> = <E as Engine>::Scalar;
 
@@ -393,22 +409,23 @@ where
   let taus_for_verify = taus.clone();
 
   let t_prove = Instant::now();
-  let (proof2, r2, evals2) =
-    SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
-      &claim,
-      taus,
-      &az_small,
-      &bz_small,
-      &cz_small,
-      &mut transcript2,
-    )
-    .unwrap();
+  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+    &claim,
+    taus,
+    &az_small,
+    &bz_small,
+    &cz_small,
+    &mut transcript2,
+  )
+  .unwrap();
   let prove_us = t_prove.elapsed().as_micros();
 
   // Verify sumcheck proof
   {
     let mut transcript_v = E::TE::new(b"bench");
-    let (final_claim, r_v) = proof2.verify(claim, num_vars, 3, &mut transcript_v).unwrap();
+    let (final_claim, r_v) = proof2
+      .verify(claim, num_vars, 3, &mut transcript_v)
+      .unwrap();
     assert_eq!(r_v, r2, "Verify challenges must match prover (i32)");
     let tau_eval = EqPolynomial::new(taus_for_verify).evaluate(&r_v);
     let expected = tau_eval * (evals2[0] * evals2[1] - evals2[2]);
@@ -527,10 +544,7 @@ fn run_sumcheck_sweep_with_i32<E>(
   methods: &BenchMethods,
 ) where
   E: Engine,
-  E::Scalar: SmallValueField<i32, IntermediateSmallValue = i64>
-    + SmallValueField<i64, IntermediateSmallValue = i128>
-    + DelayedReduction<i32>
-    + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i32> + DelayedReduction<i32>,
 {
   println!("{}", build_csv_header(methods));
   std::io::stdout().flush().ok();
@@ -575,7 +589,7 @@ fn run_sumcheck_sweep_i64_only<E>(
   methods: &BenchMethods,
 ) where
   E: Engine,
-  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
 {
   // Use methods without i32 (will be skipped)
   let methods = methods.without_i32();

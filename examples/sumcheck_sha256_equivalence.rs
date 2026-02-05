@@ -102,7 +102,7 @@ fn extract_sumcheck_inputs(
 
 fn test_sumcheck_equivalence_for_message_len(preimage_len: usize, use_batching: bool)
 where
-  F: SmallValueField<i64, IntermediateSmallValue = i128>,
+  F: SmallValueField<i64>,
 {
   let config_name = if use_batching {
     "BatchingEq<21>"

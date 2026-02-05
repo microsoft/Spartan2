@@ -804,8 +804,9 @@ impl<E: Engine> SumcheckProof<E> {
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::with_capacity(num_rounds);
     let mut claim_per_round = *claim;
 
-    // Determine ℓ₀: number of small-value rounds (at most LB, at most num_rounds)
-    let l0 = std::cmp::min(LB, num_rounds);
+    // Determine ℓ₀: number of small-value rounds (at most LB, but must be < num_rounds
+    // to leave at least one suffix variable for the transition phase)
+    let l0 = std::cmp::min(LB, num_rounds.saturating_sub(1));
 
     // If l0 is 0, fall back to standard algorithm
     if l0 == 0 {
@@ -2111,7 +2112,6 @@ pub mod lagrange_sumcheck {
     }
 
     /// Test that i64 small-value polynomials produce identical results to standard.
-    /// This tests the i64/i128 path which uses isl_mul_128 Barrett reduction.
     #[test]
     fn test_small_value_equivalence_i64() {
       use crate::{sumcheck::SumcheckProof, traits::transcript::TranscriptEngineTrait};

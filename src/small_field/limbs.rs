@@ -246,35 +246,6 @@ pub fn mul_4_by_4_ext(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
   result
 }
 
-/// Multiply 4-limb field by 2-limb integer (u128), producing a 6-limb result.
-/// Used for i64/i128 small-value optimization where IntermediateSmallValue is i128.
-#[inline(always)]
-pub fn mul_4_by_2_ext(a: &[u64; 4], b: u128) -> [u64; 6] {
-  let b_lo = b as u64;
-  let b_hi = (b >> 64) as u64;
-
-  // Multiply a by b_lo (4x1 -> 5 limbs)
-  let mut result = [0u64; 6];
-  let mut carry = 0u128;
-  for i in 0..4 {
-    let prod = (a[i] as u128) * (b_lo as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[4] = carry as u64;
-
-  // Multiply a by b_hi and add at offset 1 (4x1 -> 5 limbs, shifted)
-  carry = 0u128;
-  for i in 0..4 {
-    let prod = (a[i] as u128) * (b_hi as u128) + (result[i + 1] as u128) + carry;
-    result[i + 1] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[5] = carry as u64;
-
-  result
-}
-
 /// Multiply 4-limb by 1-limb, producing a 5-limb result.
 #[inline(always)]
 pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
@@ -289,52 +260,9 @@ pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
   result
 }
 
-/// Multiply 5-limb by 1-limb, producing a 5-limb result (overflow ignored).
-#[inline(always)]
-pub(super) fn mul_5_by_1(a: &[u64; 5], b: u64) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut carry = 0u128;
-  for i in 0..5 {
-    let prod = (a[i] as u128) * (b as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result
-}
-
 // ============================================================================
 // Limb subtraction operations
 // ============================================================================
-
-/// Subtract two 5-limb values: a - b.
-#[inline(always)]
-pub(super) fn sub_5_5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut borrow = 0u64;
-  for i in 0..5 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-  }
-  result
-}
-
-/// Subtract 4-limb from 5-limb: a - b.
-#[inline(always)]
-pub(super) fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
-  let mut result = [0u64; 5];
-  let mut borrow = 0u64;
-  for i in 0..4 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-  }
-  let (diff, _) = a[4].overflowing_sub(borrow);
-  result[4] = diff;
-  result
-}
 
 /// Subtract two 4-limb values: a - b.
 #[inline(always)]
@@ -350,26 +278,25 @@ pub(super) fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
   result
 }
 
+/// Subtract 4-limb from 5-limb: a - b (returns 5 limbs).
+#[inline(always)]
+pub(super) fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut borrow = 0u64;
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  let (diff, _) = a[4].overflowing_sub(borrow);
+  result[4] = diff;
+  result
+}
+
 // ============================================================================
 // Limb comparison operations
 // ============================================================================
-
-/// Check if 5-limb value >= 4-limb value.
-#[inline(always)]
-pub(super) fn gte_5_4(a: &[u64; 5], b: &[u64; 4]) -> bool {
-  if a[4] > 0 {
-    return true;
-  }
-  for i in (0..4).rev() {
-    if a[i] > b[i] {
-      return true;
-    }
-    if a[i] < b[i] {
-      return false;
-    }
-  }
-  true
-}
 
 /// Check if 4-limb value a >= 4-limb value b.
 #[inline(always)]

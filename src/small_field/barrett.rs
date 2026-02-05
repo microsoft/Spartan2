@@ -7,29 +7,7 @@
 //! Barrett reduction for wide limb values.
 
 use super::field_reduction_constants::FieldReductionConstants;
-use super::limbs::{gte_4_4, gte_5_4, mul_4_by_1, mul_5_by_1, sub_4_4, sub_5_4, sub_5_5};
-
-// ==========================================================================
-// 5-limb Barrett reduction
-// ==========================================================================
-
-/// Generic 5-limb Barrett reduction using trait constants.
-/// Reduces a 5-limb value (up to 320 bits) modulo p.
-#[inline(always)]
-pub(crate) fn barrett_reduce_5<F: FieldReductionConstants>(c: &[u64; 5]) -> [u64; 4] {
-  let c_tilde = (c[3] >> 63) | (c[4] << 1);
-  let m = {
-    let product = (c_tilde as u128) * (F::MU as u128);
-    (product >> 64) as u64
-  };
-  let m_times_2p = mul_5_by_1(&F::MODULUS_2P, m);
-  let mut r = sub_5_5(c, &m_times_2p);
-  // At most 2 iterations needed: after Barrett approximation, 0 <= r < 2p
-  while gte_5_4(&r, &F::MODULUS) {
-    r = sub_5_4(&r, &F::MODULUS);
-  }
-  [r[0], r[1], r[2], r[3]]
-}
+use super::limbs::{gte_4_4, mul_4_by_1, sub_4_4};
 
 // ==========================================================================
 // 6-limb Barrett reduction (for UnreducedFieldInt accumulator)
@@ -116,64 +94,9 @@ pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::small_field::{mul_by_i64, mul_by_u64};
   use ff::Field;
   use halo2curves::pasta::{Fp, Fq};
   use rand_core::{OsRng, RngCore};
-
-  #[test]
-  fn test_barrett_fp_matches_naive() {
-    for small in [0u64, 1, 2, 42, 1000, u32::MAX as u64, u64::MAX] {
-      let large = Fp::random(&mut OsRng);
-      let naive = Fp::from(small) * large;
-      let barrett = mul_by_u64(&large, small);
-      assert_eq!(naive, barrett, "Fp mismatch for small = {}", small);
-    }
-  }
-
-  #[test]
-  fn test_barrett_fp_random() {
-    let mut rng = OsRng;
-    for _ in 0..1000 {
-      let large = Fp::random(&mut rng);
-      let small: u64 = rng.next_u64();
-      assert_eq!(Fp::from(small) * large, mul_by_u64(&large, small));
-    }
-  }
-
-  #[test]
-  fn test_barrett_fp_i64() {
-    let large = Fp::from(42u64);
-    assert_eq!(mul_by_i64(&large, 100i64), Fp::from(100u64) * large);
-    assert_eq!(mul_by_i64(&large, -100i64), -Fp::from(100u64) * large);
-  }
-
-  #[test]
-  fn test_barrett_fq_matches_naive() {
-    for small in [0u64, 1, 2, 42, 1000, u32::MAX as u64, u64::MAX] {
-      let large = Fq::random(&mut OsRng);
-      let naive = Fq::from(small) * large;
-      let barrett = mul_by_u64(&large, small);
-      assert_eq!(naive, barrett, "Fq mismatch for small = {}", small);
-    }
-  }
-
-  #[test]
-  fn test_barrett_fq_random() {
-    let mut rng = OsRng;
-    for _ in 0..1000 {
-      let large = Fq::random(&mut rng);
-      let small: u64 = rng.next_u64();
-      assert_eq!(Fq::from(small) * large, mul_by_u64(&large, small));
-    }
-  }
-
-  #[test]
-  fn test_barrett_fq_i64() {
-    let large = Fq::from(42u64);
-    assert_eq!(mul_by_i64(&large, 100i64), Fq::from(100u64) * large);
-    assert_eq!(mul_by_i64(&large, -100i64), -Fq::from(100u64) * large);
-  }
 
   #[test]
   fn test_constants_match_halo2curves() {

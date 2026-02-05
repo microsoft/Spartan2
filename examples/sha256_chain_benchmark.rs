@@ -167,7 +167,7 @@ fn run_chain_benchmark(
   expected_num_vars: usize,
 ) -> BenchmarkResult
 where
-  F: SmallValueField<i64, IntermediateSmallValue = i128>,
+  F: SmallValueField<i64>,
 {
   let small_circuit = SmallSha256ChainCircuit::<F>::new(input, chain_length);
 

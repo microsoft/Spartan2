@@ -40,6 +40,11 @@ where
     + Send
     + Sync,
 {
+  /// Cached field element type for scatter operations.
+  /// Can be `Self` (Montgomery form) or `[u64; 4]` (raw limbs).
+  /// Using `Self` avoids conversions; using raw limbs may have other benefits.
+  type UnreducedField: Copy + Clone + Default + Debug + PartialEq + Send + Sync;
+
   /// Unreduced accumulator for field × integer products.
   /// - For i32/i64: SignedWideLimbs<6> (384 bits)
   /// - For i64/i128: SignedWideLimbs<7> (448 bits)
@@ -81,17 +86,6 @@ where
     small_b: SmallValue,
   );
 
-  /// Accumulate field element multiplied by an intermediate value into unreduced accumulator.
-  /// acc += field × intermediate (keeps result in unreduced form, handles sign internally)
-  ///
-  /// Used for single-value accumulation (e.g., eq × poly[idx]) where the small value
-  /// has already been converted to IntermediateSmallValue via `small_to_intermediate`.
-  fn accumulate_field_intermediate_val(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    intermediate: Self::IntermediateSmallValue,
-  );
-
   /// Accumulate field element multiplied by a small value into unreduced accumulator.
   /// acc += field × small (keeps result in unreduced form, handles sign internally)
   ///
@@ -111,22 +105,6 @@ where
     field_b: &Self,
   );
 
-  /// Fused three-way: `acc += field × (ext_a × ext_b)`, zero field reductions.
-  ///
-  /// For extended domain evaluations (after Lagrange interpolation).
-  ///
-  /// # Bit-width contract
-  ///
-  /// `ext_a` and `ext_b` are typed as `IntermediateSmallValue` (i64 for i32, i128 for i64)
-  /// but their **actual** bit-width is `SmallValue_bits + l_b`, where `l_b` is the number
-  /// of Lagrange extension rounds (= log2(num_instances) for NeutronNova).
-  ///
-  /// Specifically:
-  /// - i32 witnesses (SmallValue = i32): ext values use at most 32 + l_b bits
-  ///   (e.g., l_b = 4 → 36 bits, fits in i64)
-  /// - i64 witnesses (SmallValue = i64): ext values use at most 64 + l_b bits
-  ///   (e.g., l_b = 4 → 68 bits, fits in i128)
-  ///
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 
@@ -136,11 +114,6 @@ where
   // ========================================================================
   // Scatter support
   // ========================================================================
-
-  /// Cached field element type for scatter operations.
-  /// Can be `Self` (Montgomery form) or `[u64; 4]` (raw limbs).
-  /// Using `Self` avoids conversions; using raw limbs may have other benefits.
-  type UnreducedField: Copy + Clone + Default + Debug + PartialEq + Send + Sync;
 
   /// Reduce a field×int accumulator to the scatter cache type.
   fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self::UnreducedField;

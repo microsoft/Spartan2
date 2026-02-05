@@ -68,13 +68,6 @@ pub trait FieldReductionConstants {
   /// The 4-limb prime modulus p (little-endian, 256 bits)
   const MODULUS: [u64; 4];
 
-  /// 2*p as a 5-limb value (for Barrett reduction comparisons)
-  const MODULUS_2P: [u64; 5];
-
-  /// Barrett approximation constant mu = floor(2^128 / (p >> 191))
-  /// Used to estimate the quotient in Barrett reduction
-  const MU: u64;
-
   /// 2^256 mod p - reduces the 5th limb (index 4) of a wide integer
   const R256_MOD: [u64; 4];
 
@@ -92,28 +85,6 @@ pub trait FieldReductionConstants {
   const MONT_INV: u64;
 }
 
-/// Computes 2*p, returning a 5-limb result.
-pub(crate) const fn double_limbs(p: [u64; 4]) -> [u64; 5] {
-  let (r0, c0) = p[0].overflowing_add(p[0]);
-  let (r1, c1) = {
-    let (sum, c1a) = p[1].overflowing_add(p[1]);
-    let (sum, c1b) = sum.overflowing_add(c0 as u64);
-    (sum, c1a || c1b)
-  };
-  let (r2, c2) = {
-    let (sum, c2a) = p[2].overflowing_add(p[2]);
-    let (sum, c2b) = sum.overflowing_add(c1 as u64);
-    (sum, c2a || c2b)
-  };
-  let (r3, c3) = {
-    let (sum, c3a) = p[3].overflowing_add(p[3]);
-    let (sum, c3b) = sum.overflowing_add(c2 as u64);
-    (sum, c3a || c3b)
-  };
-  let r4 = c3 as u64;
-  [r0, r1, r2, r3, r4]
-}
-
 // ==========================================================================
 // FieldReductionConstants implementation for Fp (Pallas base field)
 // ==========================================================================
@@ -126,10 +97,6 @@ impl FieldReductionConstants for Fp {
     0x0000000000000000,
     0x4000000000000000,
   ];
-
-  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
-
-  const MU: u64 = 0xffffffffffffffff;
 
   // 2^256 mod p = 0x3fffffffffffffff992c350be41914ad34786d38fffffffd
   const R256_MOD: [u64; 4] = [
@@ -180,10 +147,6 @@ impl FieldReductionConstants for Fq {
     0x4000000000000000,
   ];
 
-  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
-
-  const MU: u64 = 0xffffffffffffffff;
-
   // 2^256 mod q
   const R256_MOD: [u64; 4] = [
     0x5b2b3e9cfffffffd,
@@ -233,10 +196,6 @@ impl FieldReductionConstants for Bn254Fr {
     0x30644e72e131a029,
   ];
 
-  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
-
-  const MU: u64 = 0xffffffffffffffff;
-
   // 2^256 mod r
   const R256_MOD: [u64; 4] = [
     0xac96341c4ffffffb,
@@ -285,10 +244,6 @@ impl FieldReductionConstants for T256Fq {
     0x0000000000000000,
     0xffffffff00000001,
   ];
-
-  const MODULUS_2P: [u64; 5] = double_limbs(Self::MODULUS);
-
-  const MU: u64 = 0x800000007fffffff;
 
   // 2^256 mod p
   const R256_MOD: [u64; 4] = [

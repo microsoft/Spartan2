@@ -8,8 +8,8 @@
 
 use super::{
   DelayedReduction, SmallValueField, SupportsSmallI32, SupportsSmallI64, barrett, montgomery,
-  i64_to_field, i128_to_field, mul_by_i64,
-  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
+  i64_to_field,
+  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_4_ext, sub_mag},
   try_field_to_i64,
 };
 use ff::PrimeField;
@@ -67,23 +67,6 @@ impl SupportsSmallI64 for T256Fq {}
 // ============================================================================
 
 impl<F: SupportsSmallI32 + PrimeField> SmallValueField<i32> for F {
-  type IntermediateSmallValue = i64;
-
-  #[inline]
-  fn ss_mul(a: i32, b: i32) -> i64 {
-    (a as i64) * (b as i64)
-  }
-
-  #[inline]
-  fn sl_mul(small: i32, large: &Self) -> Self {
-    mul_by_i64(large, small as i64)
-  }
-
-  #[inline]
-  fn isl_mul(small: i64, large: &Self) -> Self {
-    mul_by_i64(large, small)
-  }
-
   #[inline]
   fn small_to_field(val: i32) -> Self {
     if val >= 0 {
@@ -91,16 +74,6 @@ impl<F: SupportsSmallI32 + PrimeField> SmallValueField<i32> for F {
     } else {
       -Self::from((-val) as u64)
     }
-  }
-
-  #[inline]
-  fn intermediate_to_field(val: i64) -> Self {
-    i64_to_field(val)
-  }
-
-  #[inline]
-  fn small_to_intermediate(val: i32) -> i64 {
-    val as i64
   }
 
   fn try_field_to_small(val: &Self) -> Option<i32> {
@@ -130,34 +103,6 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
       (&mut acc.pos, product as u64)
     } else {
       (&mut acc.neg, (-product) as u64)
-    };
-    // Fused multiply-accumulate: no intermediate array
-    let a = field.to_limbs();
-    let (r0, c) = mac(target.0[0], a[0], mag, 0);
-    let (r1, c) = mac(target.0[1], a[1], mag, c);
-    let (r2, c) = mac(target.0[2], a[2], mag, c);
-    let (r3, c) = mac(target.0[3], a[3], mag, c);
-    // Propagate carry without multiply (just add)
-    let (r4, of) = target.0[4].overflowing_add(c);
-    target.0[0] = r0;
-    target.0[1] = r1;
-    target.0[2] = r2;
-    target.0[3] = r3;
-    target.0[4] = r4;
-    target.0[5] = target.0[5].wrapping_add(of as u64);
-  }
-
-  #[inline(always)]
-  fn accumulate_field_intermediate_val(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    intermediate: i64,
-  ) {
-    // Handle sign: accumulate into pos or neg based on sign of intermediate
-    let (target, mag) = if intermediate >= 0 {
-      (&mut acc.pos, intermediate as u64)
-    } else {
-      (&mut acc.neg, (-intermediate) as u64)
     };
     // Fused multiply-accumulate: no intermediate array
     let a = field.to_limbs();
@@ -273,47 +218,9 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
 // ============================================================================
 
 impl<F: SupportsSmallI64 + PrimeField> SmallValueField<i64> for F {
-  type IntermediateSmallValue = i128;
-
-  #[inline]
-  fn ss_mul(a: i64, b: i64) -> i128 {
-    (a as i128) * (b as i128)
-  }
-
-  #[inline]
-  fn sl_mul(small: i64, large: &Self) -> Self {
-    mul_by_i64(large, small)
-  }
-
-  #[inline]
-  fn isl_mul(small: i128, large: &Self) -> Self {
-    if small == 0 {
-      return F::ZERO;
-    }
-    let (is_neg, mag) = if small >= 0 {
-      (false, small as u128)
-    } else {
-      (true, (-small) as u128)
-    };
-    // mul_4_by_2_ext produces 6 limbs, use barrett_reduce_6 directly (no padding)
-    let product = mul_4_by_2_ext(large.to_limbs(), mag);
-    let result = Self::from_limbs(barrett::barrett_reduce_6::<F>(&product));
-    if is_neg { -result } else { result }
-  }
-
   #[inline]
   fn small_to_field(val: i64) -> Self {
     i64_to_field(val)
-  }
-
-  #[inline]
-  fn intermediate_to_field(val: i128) -> Self {
-    i128_to_field(val)
-  }
-
-  #[inline]
-  fn small_to_intermediate(val: i64) -> i128 {
-    val as i128
   }
 
   fn try_field_to_small(val: &Self) -> Option<i64> {
@@ -342,48 +249,6 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
       (&mut acc.pos, product as u128)
     } else {
       (&mut acc.neg, (-product) as u128)
-    };
-    // Fused 4×2 multiply-accumulate: two passes at different offsets
-    let a = field.to_limbs();
-    let b_lo = mag as u64;
-    let b_hi = (mag >> 64) as u64;
-
-    // Pass 1: multiply by b_lo at offset 0
-    let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
-    let (r1, c) = mac(target.0[1], a[1], b_lo, c);
-    let (r2, c) = mac(target.0[2], a[2], b_lo, c);
-    let (r3, c) = mac(target.0[3], a[3], b_lo, c);
-    // Propagate carry without multiply (just add)
-    let (r4, of1) = target.0[4].overflowing_add(c);
-    let c1 = of1 as u64;
-    target.0[0] = r0;
-
-    // Pass 2: multiply by b_hi at offset 1 (add to r1..r5)
-    let (r1, c) = mac(r1, a[0], b_hi, 0);
-    let (r2, c) = mac(r2, a[1], b_hi, c);
-    let (r3, c) = mac(r3, a[2], b_hi, c);
-    let (r4, c) = mac(r4, a[3], b_hi, c);
-    // Add both carries (c from pass 2, c1 from pass 1) into position 5
-    let (r5, c) = mac(target.0[5], c1, 1, c);
-    target.0[1] = r1;
-    target.0[2] = r2;
-    target.0[3] = r3;
-    target.0[4] = r4;
-    target.0[5] = r5;
-    // Propagate final carry through remaining limbs (just add)
-    target.0[6] = target.0[6].wrapping_add(c);
-  }
-
-  #[inline(always)]
-  fn accumulate_field_intermediate_val(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    intermediate: i128,
-  ) {
-    let (target, mag) = if intermediate >= 0 {
-      (&mut acc.pos, intermediate as u128)
-    } else {
-      (&mut acc.neg, (-intermediate) as u128)
     };
     // Fused 4×2 multiply-accumulate: two passes at different offsets
     let a = field.to_limbs();
@@ -528,8 +393,7 @@ mod tests {
     assert_eq!(a + b, 13);
     assert_eq!(a - b, 7);
     assert_eq!(-a, -10);
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(a, b), 30i64);
-    assert_eq!(a * 5, 50); // ss_mul_const is just native multiplication
+    assert_eq!(a * 5, 50);
   }
 
   #[test]
@@ -539,7 +403,6 @@ mod tests {
 
     assert_eq!(a + b, -2);
     assert_eq!(a - b, -8);
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(a, b), -15i64);
 
     let field_a = <Scalar as SmallValueField<i32>>::small_to_field(a);
     assert_eq!(field_a, -Scalar::from(5u64));
@@ -621,93 +484,6 @@ mod tests {
   }
 
   #[test]
-  fn test_isl_mul() {
-    use ff::Field;
-    use rand_core::OsRng;
-
-    let large = Scalar::random(&mut OsRng);
-    let small: i64 = 12345;
-
-    let result = <Scalar as SmallValueField<i32>>::isl_mul(small, &large);
-    let expected = i64_to_field::<Scalar>(small) * large;
-
-    assert_eq!(result, expected);
-  }
-
-  #[test]
-  fn test_sl_mul() {
-    use ff::Field;
-    use rand_core::OsRng;
-
-    let large = Scalar::random(&mut OsRng);
-    let small: i32 = -999;
-
-    let result = <Scalar as SmallValueField<i32>>::sl_mul(small, &large);
-    let expected = <Scalar as SmallValueField<i32>>::small_to_field(small) * large;
-
-    assert_eq!(result, expected);
-  }
-
-  #[test]
-  fn test_overflow_bounds() {
-    let typical_witness = 1i32 << 20;
-    let extension_factor = 27i32;
-    let after_extension = typical_witness * extension_factor;
-
-    let prod = <Scalar as SmallValueField<i32>>::ss_mul(after_extension, after_extension);
-    assert!(prod > 0);
-    assert!(prod < (1i64 << 55));
-  }
-
-  #[test]
-  fn test_ss_sign_combinations() {
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(100, 200), 20000i64);
-    assert_eq!(
-      <Scalar as SmallValueField<i32>>::ss_mul(-100, -200),
-      20000i64
-    );
-    assert_eq!(
-      <Scalar as SmallValueField<i32>>::ss_mul(100, -200),
-      -20000i64
-    );
-    assert_eq!(
-      <Scalar as SmallValueField<i32>>::ss_mul(-100, 200),
-      -20000i64
-    );
-  }
-
-  #[test]
-  fn test_ss_zero_edge_cases() {
-    let zero = 0i32;
-    let val = 12345i32;
-
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(zero, val), 0i64);
-    assert_eq!(<Scalar as SmallValueField<i32>>::ss_mul(val, zero), 0i64);
-  }
-
-  #[test]
-  fn test_isl_with_random() {
-    use ff::Field;
-    use rand_core::{OsRng, RngCore};
-
-    let mut rng = OsRng;
-    for _ in 0..100 {
-      let large = Scalar::random(&mut rng);
-      let small = (rng.next_u64() % (i64::MAX as u64)) as i64;
-      let small = if rng.next_u32().is_multiple_of(2) {
-        small
-      } else {
-        -small
-      };
-
-      let result = <Scalar as SmallValueField<i32>>::isl_mul(small, &large);
-      let expected = i64_to_field::<Scalar>(small) * large;
-
-      assert_eq!(result, expected);
-    }
-  }
-
-  #[test]
   fn test_fp_small_value_field() {
     use halo2curves::pasta::Fp;
 
@@ -715,7 +491,6 @@ mod tests {
     let b: i32 = -10;
 
     assert_eq!(a + b, 32);
-    assert_eq!(<Fp as SmallValueField<i32>>::ss_mul(a, b), -420i64);
     assert_eq!(
       <Fp as SmallValueField<i32>>::small_to_field(a),
       Fp::from(42u64)
