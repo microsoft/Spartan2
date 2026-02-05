@@ -6,14 +6,15 @@
 
 //! Montgomery form operations: limb access and REDC reduction.
 
-use super::field_reduction_constants::FieldReductionConstants;
-use super::limbs::{gte_4_4, mul_4_by_1, sub_5_4};
+use super::{
+  field_reduction_constants::FieldReductionConstants,
+  limbs::{gte_4_4, mul_4_by_1, sub_5_4},
+};
 use halo2curves::{
   bn256::Fr as Bn254Fr,
   pasta::{Fp, Fq},
   t256::Fq as T256Fq,
 };
-use std::ops::Neg;
 
 // ==========================================================================
 // MontgomeryLimbs - Trait for accessing Montgomery-form limbs
@@ -23,7 +24,7 @@ use std::ops::Neg;
 ///
 /// Field elements are stored as `value * R mod p` where R = 2^256.
 /// This trait provides direct access to those R-scaled limbs.
-pub(crate) trait MontgomeryLimbs: FieldReductionConstants + Neg<Output = Self> + Copy {
+pub(crate) trait MontgomeryLimbs: FieldReductionConstants {
   /// Construct a field element from 4 Montgomery-form limbs.
   fn from_limbs(limbs: [u64; 4]) -> Self;
 
@@ -80,7 +81,7 @@ impl MontgomeryLimbs for T256Fq {
 }
 
 // ==========================================================================
-// 9-limb Montgomery REDC (for UnreducedFieldField accumulator)
+// 9-limb Montgomery REDC (for WideLimbs<9>, i.e. DelayedReduction<F>::Accumulator)
 // ==========================================================================
 
 /// Generic Montgomery REDC for 9-limb input using trait constants.
@@ -174,24 +175,10 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::small_field::limbs::mul_4_by_4;
   use ff::Field;
   use halo2curves::pasta::{Fp, Fq};
   use rand_core::OsRng;
-
-  /// Helper to multiply two 4-limb values, producing an 8-limb result
-  fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
-    let mut result = [0u64; 8];
-    for i in 0..4 {
-      let mut carry = 0u128;
-      for j in 0..4 {
-        let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
-        result[i + j] = prod as u64;
-        carry = prod >> 64;
-      }
-      result[i + 4] = carry as u64;
-    }
-    result
-  }
 
   #[test]
   fn test_montgomery_9_fp_single_product() {

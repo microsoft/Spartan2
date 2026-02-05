@@ -15,72 +15,24 @@
 pub(crate) mod barrett;
 mod delayed_reduction;
 pub(crate) mod field_reduction_constants;
-mod impls;
 pub(crate) mod limbs;
 pub(crate) mod montgomery;
 mod small_value_field;
+mod wide_mul;
 
+// Public exports
 pub use delayed_reduction::DelayedReduction;
 pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
-pub use small_value_field::SmallValueField;
-
-use montgomery::MontgomeryLimbs;
-
-/// Marker trait: field supports `SmallValueField<i32>` via blanket impl.
-pub(crate) trait SupportsSmallI32: MontgomeryLimbs {}
-
-/// Marker trait: field supports `SmallValueField<i64>` via blanket impl.
-pub(crate) trait SupportsSmallI64: MontgomeryLimbs {}
+pub use small_value_field::{SmallValueField, i64_to_field, try_field_to_i64};
+pub use wide_mul::WideMul;
 
 use crate::errors::SpartanError;
-use ff::PrimeField;
+use num_traits::Bounded;
 use rayon::prelude::*;
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Convert i64 to field element (handles negative values correctly).
-#[inline]
-pub fn i64_to_field<F: PrimeField>(val: i64) -> F {
-  if val >= 0 {
-    F::from(val as u64)
-  } else {
-    // Use wrapping_neg to handle i64::MIN correctly
-    -F::from(val.wrapping_neg() as u64)
-  }
-}
-
-/// Try to convert a field element to i64.
-/// Returns None if the value doesn't fit in the i64 range.
-#[inline]
-pub fn try_field_to_i64<F: PrimeField>(val: &F) -> Option<i64> {
-  let repr = val.to_repr();
-  let bytes = repr.as_ref();
-
-  // Check if value fits in positive i64 (high bytes all zero)
-  let high_zero = bytes[8..].iter().all(|&b| b == 0);
-  if high_zero {
-    let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-    if val_u64 <= i64::MAX as u64 {
-      return Some(val_u64 as i64);
-    }
-  }
-
-  // Check if negation fits in i64 (value is negative)
-  let neg_val = val.neg();
-  let neg_repr = neg_val.to_repr();
-  let neg_bytes = neg_repr.as_ref();
-  let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
-  if neg_high_zero {
-    let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
-    if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
-      return Some(-(neg_u64 as i128) as i64);
-    }
-  }
-
-  None
-}
 
 /// Convert a vector of field elements to small values (parallel).
 ///
@@ -154,10 +106,28 @@ pub fn try_field_to_small_for_extension<F, const D: usize>(val: &F, lb: usize) -
 where
   F: SmallValueField<i64>,
 {
+  try_field_to_small_for_extension_generic::<F, i64, D>(val, lb)
+}
+
+/// Generic version of [`try_field_to_small_for_extension`] that works with any SmallValue type.
+///
+/// Returns `Some(small)` if the field element can be represented as a SmallValue
+/// and is small enough to survive Lagrange extension with factor `(D+1)^lb`.
+#[inline]
+pub fn try_field_to_small_for_extension_generic<F, SmallValue, const D: usize>(
+  val: &F,
+  lb: usize,
+) -> Option<SmallValue>
+where
+  F: SmallValueField<SmallValue>,
+  SmallValue: Bounded + Into<i128> + Copy,
+{
   let small = F::try_field_to_small(val)?;
-  let base = (D + 1) as i64;
-  let max_safe = (i64::MAX / base.pow(lb as u32)) as u64;
-  if small.unsigned_abs() <= max_safe {
+  let base = (D + 1) as i128;
+  let max_value: i128 = SmallValue::max_value().into();
+  let max_safe = max_value / base.pow(lb as u32);
+  let abs_small = (small.into() as i128).abs();
+  if abs_small <= max_safe {
     Some(small)
   } else {
     None
@@ -211,4 +181,3 @@ where
     })
     .collect()
 }
-

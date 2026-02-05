@@ -10,8 +10,9 @@
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
 use crate::errors::SpartanError;
-use crate::small_field::{DelayedReduction, SmallValueField, try_field_to_small_for_extension};
+use crate::small_field::{DelayedReduction, SmallValueField, try_field_to_small_for_extension_generic};
 use ff::PrimeField;
+use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -121,11 +122,12 @@ impl<F: PrimeField> SparseMatrix<F> {
 
   /// Multiply by a dense small-value vector using delayed reduction.
   ///
-  /// Uses `accumulate_field_small_prod` (field × small) with delayed reduction,
+  /// Uses `DelayedReduction::unreduced_multiply_accumulate` (field × small) with delayed reduction,
   /// then coerces the result back to small values with Lagrange extension bound check.
   ///
   /// # Type Parameters
   ///
+  /// - `SmallValue`: The small value type (i32 or i64)
   /// - `D`: Polynomial degree for Lagrange extension (typically 2)
   ///
   /// # Arguments
@@ -136,10 +138,15 @@ impl<F: PrimeField> SparseMatrix<F> {
   /// # Errors
   /// Returns `SpartanError::InvalidInputLength` if vector length doesn't match.
   /// Returns `SpartanError::SmallValueOverflow` if any result exceeds the safe bound
-  /// for Lagrange extension (see `try_field_to_small_for_extension`).
-  pub fn multiply_vec_small<const D: usize>(&self, z: &[i64], lb: usize) -> Result<Vec<i64>, SpartanError>
+  /// for Lagrange extension (see `try_field_to_small_for_extension_generic`).
+  pub fn multiply_vec_small<const D: usize, SmallValue>(
+    &self,
+    z: &[SmallValue],
+    lb: usize,
+  ) -> Result<Vec<SmallValue>, SpartanError>
   where
-    F: DelayedReduction<i64> + SmallValueField<i64>,
+    F: DelayedReduction<SmallValue> + SmallValueField<SmallValue>,
+    SmallValue: num_traits::Bounded + Into<i128> + Copy + Send + Sync,
   {
     if self.cols != z.len() {
       return Err(SpartanError::InvalidInputLength {
@@ -160,16 +167,16 @@ impl<F: PrimeField> SparseMatrix<F> {
         let end = ptrs[1];
 
         // Accumulate using delayed reduction: acc += matrix_val × z[col]
-        let mut acc = F::UnreducedFieldInt::default();
+        let mut acc = <F as DelayedReduction<SmallValue>>::Accumulator::zero();
         for i in start..end {
           let matrix_val = &self.data[i];
           let col_idx = self.indices[i];
-          F::accumulate_field_small_prod(&mut acc, matrix_val, z[col_idx]);
+          <F as DelayedReduction<SmallValue>>::unreduced_multiply_accumulate(&mut acc, matrix_val, &z[col_idx]);
         }
 
         // Reduce to field element, then coerce to small value with extension bound check
-        let field_result = F::reduce_field_int(&acc);
-        try_field_to_small_for_extension::<F, D>(&field_result, lb).ok_or_else(|| {
+        let field_result = <F as DelayedReduction<SmallValue>>::reduce(&acc);
+        try_field_to_small_for_extension_generic::<F, SmallValue, D>(&field_result, lb).ok_or_else(|| {
           SpartanError::SmallValueOverflow {
             value: format!("{:?}", field_result),
             context: format!(

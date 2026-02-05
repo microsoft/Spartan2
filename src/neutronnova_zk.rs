@@ -9,6 +9,10 @@
 //! Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding)
 //! and then use Spartan to prove that folded instance.
 //! The proof system implemented here provides zero-knowledge via Nova's folding scheme.
+use std::ops::{Add, Sub};
+
+use ff::PrimeField;
+
 use crate::{
   CommitmentKey,
   bellpepper::{
@@ -34,9 +38,9 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness,
     SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
-  small_field::{DelayedReduction, SmallValueField, vec_to_small_for_extension},
-  start_span,
+  small_field::{DelayedReduction, SmallValueField, WideMul, vec_to_small_for_extension},
   small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial},
+  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -199,72 +203,22 @@ where
   Ok((folded_W, folded_U))
 }
 
-/// Fold multiple witness vectors using small-value optimization.
-/// Uses `accumulate_field_small_prod` for efficient field × small accumulation.
-fn fold_witness_small<E, SV>(
-  r_bs: &[E::Scalar],
-  ws_small: &[Vec<SV>],
-  r_Ws: &[crate::Blind<E>],
-) -> Result<(Vec<E::Scalar>, crate::Blind<E>), SpartanError>
+/// Fold multiple small-value vectors using delayed reduction.
+/// Result[j] = Σ_i weights[i] * vectors[i][j]
+fn fold_small_value_vectors<F, SV>(weights: &[F], vectors: &[Vec<SV>]) -> Vec<F>
 where
-  E: Engine,
-  E::Scalar: DelayedReduction<SV>,
-  E::PCS: FoldingEngineTrait<E>,
-  SV: Copy + Send + Sync,
+  F: PrimeField + DelayedReduction<SV>,
+  SV: Send + Sync,
 {
-  use crate::r1cs::weights_from_r;
-
-  let n = ws_small.len();
-  if n == 0 {
-    return Err(SpartanError::InvalidInputLength {
-      reason: "fold_witness_small: empty witness list".into(),
-    });
-  }
-
-  let w = weights_from_r::<E::Scalar>(r_bs, n);
-  let dim = ws_small[0].len();
-
-  // Fold witness values: acc_W[k] = Σ_i w[i] * ws_small[i][k]
-  let acc_W: Vec<E::Scalar> = (0..dim)
-    .into_par_iter()
-    .map(|k| {
-      let mut acc = <E::Scalar as DelayedReduction<SV>>::UnreducedFieldInt::default();
-      for (i, wi) in w.iter().enumerate() {
-        E::Scalar::accumulate_field_small_prod(&mut acc, wi, ws_small[i][k]);
-      }
-      E::Scalar::reduce_field_int(&acc)
-    })
-    .collect();
-
-  // Fold blinds (still uses field arithmetic - blinds are random, not small)
-  let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(r_Ws, &w)?;
-
-  Ok((acc_W, acc_r))
-}
-
-/// Fold multiple instance X vectors using small-value optimization.
-/// Uses `accumulate_field_small_prod` for efficient field × small accumulation.
-fn fold_instance_x_small<E, SV>(r_bs: &[E::Scalar], xs_small: &[Vec<SV>]) -> Vec<E::Scalar>
-where
-  E: Engine,
-  E::Scalar: DelayedReduction<SV>,
-  SV: Copy + Send + Sync,
-{
-  use crate::r1cs::weights_from_r;
-
-  let n = xs_small.len();
-  let w = weights_from_r::<E::Scalar>(r_bs, n);
-  let dim = xs_small[0].len();
-
-  // Fold X values: X_acc[j] = Σ_i w[i] * xs_small[i][j]
+  let dim = vectors[0].len();
   (0..dim)
     .into_par_iter()
     .map(|j| {
-      let mut acc = <E::Scalar as DelayedReduction<SV>>::UnreducedFieldInt::default();
-      for (i, wi) in w.iter().enumerate() {
-        E::Scalar::accumulate_field_small_prod(&mut acc, wi, xs_small[i][j]);
+      let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
+      for (i, wi) in weights.iter().enumerate() {
+        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, wi, &vectors[i][j]);
       }
-      E::Scalar::reduce_field_int(&acc)
+      <F as DelayedReduction<SV>>::reduce(&acc)
     })
     .collect()
 }
@@ -289,7 +243,7 @@ where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
   E::PCS: FoldingEngineTrait<E>,
-  SV: Copy + Send + Sync,
+  SV: Send + Sync,
 {
   use crate::r1cs::weights_from_r;
 
@@ -299,10 +253,14 @@ where
   vc.eq_rho_at_rb = acc_eq;
   SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
 
+  // Compute weights once for all folding operations
+  let w = weights_from_r::<E::Scalar>(r_bs, Us.len());
+
   // Fold witnesses using small-value optimization
   let (_fold_span, fold_t) = start_span!("fold_witnesses");
   let r_Ws: Vec<_> = Ws.iter().map(|w| w.r_W.clone()).collect();
-  let (folded_W_vec, folded_r_W) = fold_witness_small::<E, SV>(r_bs, ws_small, &r_Ws)?;
+  let folded_W_vec = fold_small_value_vectors(&w, ws_small);
+  let folded_r_W = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(&r_Ws, &w)?;
   let folded_W = R1CSWitness {
     W: folded_W_vec,
     r_W: folded_r_W,
@@ -312,9 +270,7 @@ where
 
   // Fold instances using small-value optimization for X, group ops for commitments
   let (_fold_span, fold_t) = start_span!("fold_instances");
-  let folded_X = fold_instance_x_small::<E, SV>(r_bs, xs_small);
-
-  let w = weights_from_r::<E::Scalar>(r_bs, Us.len());
+  let folded_X = fold_small_value_vectors(&w, xs_small);
   let comm_W_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
     &Us.iter().map(|u| u.comm_W.clone()).collect::<Vec<_>>(),
     &w,
@@ -338,18 +294,25 @@ fn small_value_eq_weighted_fold<E: Engine>(
   num_cons: usize,
 ) -> Vec<E::Scalar>
 where
-  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
 {
   let n_inst = eq_evals.len();
   (0..num_cons)
     .into_par_iter()
     .map(|k| {
-      let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::zero();
+      let mut acc = <E::Scalar as DelayedReduction<i64>>::Accumulator::zero();
       for i in 0..n_inst {
         // Single-value accumulation (field × small with delayed reduction)
-        E::Scalar::accumulate_field_small_prod(&mut acc, &eq_evals[i], layers[i][k]);
+        <E::Scalar as DelayedReduction<i64>>::unreduced_multiply_accumulate(
+          &mut acc,
+          &eq_evals[i],
+          &layers[i][k],
+        );
       }
-      E::Scalar::reduce_field_int(&acc)
+      <E::Scalar as DelayedReduction<i64>>::reduce(&acc)
     })
     .collect()
 }
@@ -455,9 +418,9 @@ where
   /// * `rhos` - Instance-folding challenges
   ///
   /// Returns (polys, r_bs, T_cur, acc_eq).
-  pub fn prove_neutronnova_small_value_sumcheck<V>(
-    a_layers: &[Vec<V>],
-    b_layers: &[Vec<V>],
+  pub fn prove_neutronnova_small_value_sumcheck<SmallValue>(
+    a_layers: &[Vec<SmallValue>],
+    b_layers: &[Vec<SmallValue>],
     e_eq: &[E::Scalar],
     left: usize,
     right: usize,
@@ -477,8 +440,11 @@ where
     SpartanError,
   >
   where
-    E::Scalar: DelayedReduction<V>,
-    V: Copy + Default + std::ops::Add<Output = V> + std::ops::Sub<Output = V> + Send + Sync,
+    E::Scalar: SmallValueField<SmallValue>
+      + DelayedReduction<SmallValue>
+      + DelayedReduction<SmallValue::Product>
+      + DelayedReduction<E::Scalar>,
+    SmallValue: WideMul + Copy + Default + Zero + Add<Output = SmallValue> + Sub<Output = SmallValue> + Send + Sync,
   {
     let ell_b = rhos.len();
 
@@ -573,7 +539,10 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
 
@@ -608,9 +577,9 @@ where
       .into_par_iter()
       .map(|i| {
         let z_small = build_z_small(&ws_small[i], &xs_small[i]);
-        let Az = S.A.multiply_vec_small::<2>(&z_small, ell_b)?;
-        let Bz = S.B.multiply_vec_small::<2>(&z_small, ell_b)?;
-        let Cz = S.C.multiply_vec_small::<2>(&z_small, ell_b)?;
+        let Az = S.A.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
+        let Bz = S.B.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
+        let Cz = S.C.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
         Ok((Az, Bz, Cz))
       })
       .collect::<Result<Vec<_>, SpartanError>>()?;
@@ -893,7 +862,10 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     if is_small {
       Self::prove_small_value(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
@@ -1120,7 +1092,10 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError>
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
@@ -1891,7 +1866,10 @@ mod tests {
     is_small: bool,
   ) where
     E::PCS: FoldingEngineTrait<E>,
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}, is_small: {is_small}",
@@ -2080,7 +2058,10 @@ mod tests {
   fn test_neutronnova_equivalence_for_num_circuits<E: Engine>(num_circuits: usize)
   where
     E::PCS: FoldingEngineTrait<E>,
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     const NUM_ROUNDS: usize = 6; // Fixed circuit size with ~64 constraints
     let circuit = CubicChainCircuit::for_rounds(NUM_ROUNDS);
@@ -2098,8 +2079,9 @@ mod tests {
     // Helper to test prove and verify
     #[allow(clippy::expect_fun_call)]
     let assert_prove_and_verify = |is_small: bool, path_name: &str| {
-      let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, is_small)
-        .expect(&format!("{path_name} prove should succeed for num_circuits={num_circuits}"));
+      let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, is_small).expect(
+        &format!("{path_name} prove should succeed for num_circuits={num_circuits}"),
+      );
       let res = snark.verify(&vk, circuits.len());
       assert!(
         res.is_ok(),

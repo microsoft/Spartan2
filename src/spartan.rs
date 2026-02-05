@@ -113,7 +113,10 @@ pub struct SpartanSNARK<E: Engine> {
 
 impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E>
 where
-  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
 {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
@@ -545,7 +548,10 @@ impl<E: Engine> SpartanSNARK<E> {
     prep_snark: &SpartanPrepSNARK<E>,
   ) -> Result<Self, SpartanError>
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
     let mut prep_snark = prep_snark.clone();
@@ -586,11 +592,11 @@ impl<E: Engine> SpartanSNARK<E> {
     let ((Az_small, Bz_small), Cz_small) = rayon::join(
       || {
         rayon::join(
-          || pk.S.A.multiply_vec_small::<2>(&z_small, LB),
-          || pk.S.B.multiply_vec_small::<2>(&z_small, LB),
+          || pk.S.A.multiply_vec_small::<2, _>(&z_small, LB),
+          || pk.S.B.multiply_vec_small::<2, _>(&z_small, LB),
         )
       },
-      || pk.S.C.multiply_vec_small::<2>(&z_small, LB),
+      || pk.S.C.multiply_vec_small::<2, _>(&z_small, LB),
     );
     let Az_small = Az_small?;
     let Bz_small = Bz_small?;
@@ -711,6 +717,7 @@ impl<E: Engine> SpartanSNARK<E> {
 mod tests {
   use super::*;
   use crate::gadgets::CubicChainCircuit;
+  use crate::small_field::{DelayedReduction, SmallValueField};
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
 
@@ -834,7 +841,10 @@ mod tests {
 
   fn test_snark_prove_small_with<E: Engine>()
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let circuit = CubicCircuit::default();
 
@@ -872,7 +882,10 @@ mod tests {
 
   fn test_prove_equivalence_with<E: Engine>()
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let circuit = CubicCircuit::default();
 
@@ -929,7 +942,10 @@ mod tests {
 
   fn test_prove_equivalence_for_rounds<E: Engine>(num_rounds: usize)
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
   {
     let circuit = CubicChainCircuit::for_rounds(num_rounds);
     let expected_output = circuit.expected_output::<E::Scalar>();

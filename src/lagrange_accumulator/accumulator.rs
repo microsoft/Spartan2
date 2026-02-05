@@ -42,7 +42,7 @@ impl<T: Copy + Default, const D: usize> RoundAccumulator<T, D> {
   /// Create a new accumulator for the given round (0-indexed).
   ///
   /// Allocates (D+1)^round prefix entries, each with D values.
-  /// Uses `Default::default()` which is zero for field elements.
+  /// Uses `Default::default()` which is zero for field and integer elements.
   pub fn new(round: usize) -> Self {
     let num_prefixes = Self::BASE.pow(round as u32);
     Self {

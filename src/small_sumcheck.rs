@@ -33,12 +33,13 @@ use crate::{
     LagrangeHatEvals, SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1,
   },
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, univariate::UniPoly},
-  small_field::{DelayedReduction, SmallValueField},
+  small_field::{DelayedReduction, SmallValueField, WideMul},
   start_span,
   sumcheck::{SumcheckProof, eq_sumcheck},
   traits::{Engine, transcript::TranscriptEngineTrait},
 };
 use ff::PrimeField;
+use num_traits::Zero;
 use rayon::prelude::*;
 use tracing::info;
 
@@ -158,27 +159,27 @@ where
   let eq_table = EqPolynomial::evals_from_points(challenges);
   debug_assert_eq!(eq_table.len(), num_prefixes);
 
-  type UFI<F2, SV2> = <F2 as DelayedReduction<SV2>>::UnreducedFieldInt;
+  type Acc<F2, SV2> = <F2 as DelayedReduction<SV2>>::Accumulator;
 
   // Suffix-outer parallel loop: accumulators live on stack per thread
   let compute = |s: usize| -> (F, F, F) {
-    let mut acc_a = UFI::<F, SV>::default();
-    let mut acc_b = UFI::<F, SV>::default();
-    let mut acc_c = UFI::<F, SV>::default();
+    let mut acc_a = Acc::<F, SV>::zero();
+    let mut acc_b = Acc::<F, SV>::zero();
+    let mut acc_c = Acc::<F, SV>::zero();
 
     for (p, eq_p) in eq_table.iter().enumerate() {
       let idx = p * stride + s;
 
       // Single-value accumulation: field × small with delayed reduction
-      F::accumulate_field_small_prod(&mut acc_a, eq_p, poly_a_small.Z[idx]);
-      F::accumulate_field_small_prod(&mut acc_b, eq_p, poly_b_small.Z[idx]);
-      F::accumulate_field_small_prod(&mut acc_c, eq_p, poly_c_small.Z[idx]);
+      F::unreduced_multiply_accumulate(&mut acc_a, eq_p, &poly_a_small.Z[idx]);
+      F::unreduced_multiply_accumulate(&mut acc_b, eq_p, &poly_b_small.Z[idx]);
+      F::unreduced_multiply_accumulate(&mut acc_c, eq_p, &poly_c_small.Z[idx]);
     }
 
     (
-      F::reduce_field_int(&acc_a),
-      F::reduce_field_int(&acc_b),
-      F::reduce_field_int(&acc_c),
+      F::reduce(&acc_a),
+      F::reduce(&acc_b),
+      F::reduce(&acc_c),
     )
   };
 
@@ -219,6 +220,7 @@ where
 /// - `LB`: Number of small-value rounds (ℓ₀). The actual number of rounds used is
 ///   `min(LB, num_rounds / 2)`. Caller should ensure input values are bounded by
 ///   `i64::MAX / 3^LB` for safe Lagrange extension (see `vec_to_small_for_extension`).
+///   Typical values are 3-4 for practical instances (3^4 = 81× growth factor).
 pub fn prove_cubic_small_value<E, SmallValue, const LB: usize>(
   claim: &E::Scalar,
   taus: Vec<E::Scalar>,
@@ -229,8 +231,11 @@ pub fn prove_cubic_small_value<E, SmallValue, const LB: usize>(
 ) -> Result<(SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
 where
   E: Engine,
-  SmallValue: Copy + Default + std::ops::Add<Output = SmallValue> + std::ops::Sub<Output = SmallValue> + Send + Sync,
-  E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
+  SmallValue: WideMul + Copy + Default + num_traits::Zero + std::ops::Add<Output = SmallValue> + std::ops::Sub<Output = SmallValue> + Send + Sync,
+  E::Scalar: SmallValueField<SmallValue>
+    + DelayedReduction<SmallValue>
+    + DelayedReduction<SmallValue::Product>
+    + DelayedReduction<E::Scalar>,
 {
   let num_rounds = taus.len();
   let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
@@ -325,9 +330,7 @@ where
     let poly = {
       let (_eval_span, eval_t) = start_span!("compute_eval_points");
       let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
-        .evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(
-          round, &poly_A, &poly_B, &poly_C,
-        );
+        .evaluation_points_cubic_with_three_inputs_delayed(round, &poly_A, &poly_B, &poly_C);
       if eval_t.elapsed().as_millis() > 0 {
         info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
       }
@@ -372,6 +375,7 @@ mod tests {
     gadgets::CubicChainCircuit,
     polys::multilinear::MultilinearPolynomial,
     provider::PallasHyraxEngine,
+    small_field::{DelayedReduction, SmallValueField, WideMul},
     spartan::SpartanSNARK,
     sumcheck::eq_sumcheck::EqSumCheckInstance,
     traits::{Engine, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait},
@@ -386,9 +390,9 @@ mod tests {
   /// evaluations as EqSumCheckInstance across multiple rounds.
   fn run_smallvalue_round_test<V>()
   where
-    V: Copy + Default + Add<Output = V> + Sub<Output = V> + Mul<Output = V> + Send + Sync + TryFrom<usize>,
+    V: WideMul + Copy + Default + num_traits::Zero + Add<Output = V> + Sub<Output = V> + Mul<Output = V> + Send + Sync + TryFrom<usize>,
     <V as TryFrom<usize>>::Error: std::fmt::Debug,
-    F: DelayedReduction<V>,
+    F: SmallValueField<V> + DelayedReduction<V> + DelayedReduction<V::Product> + DelayedReduction<F>,
   {
     const NUM_VARS: usize = 6;
     const SMALL_VALUE_ROUNDS: usize = 3;

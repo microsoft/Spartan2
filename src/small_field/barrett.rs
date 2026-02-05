@@ -10,7 +10,7 @@ use super::field_reduction_constants::FieldReductionConstants;
 use super::limbs::{gte_4_4, mul_4_by_1, sub_4_4};
 
 // ==========================================================================
-// 6-limb Barrett reduction (for UnreducedFieldInt accumulator)
+// 6-limb Barrett reduction (for SignedWideLimbs<6>, i.e. DelayedReduction<i64>::Accumulator)
 // ==========================================================================
 
 /// Generic 6-limb Barrett reduction using trait constants.
@@ -60,7 +60,7 @@ pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64
 }
 
 // ==========================================================================
-// 7-limb Barrett reduction (for i64/i128 UnreducedFieldInt accumulator)
+// 7-limb Barrett reduction (for SignedWideLimbs<7>, i.e. DelayedReduction<i128>::Accumulator)
 // ==========================================================================
 
 /// Generic 7-limb Barrett reduction using trait constants.

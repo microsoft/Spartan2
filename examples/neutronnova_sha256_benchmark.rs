@@ -144,7 +144,10 @@ fn run_nifs_prove<E: Engine>(
 )
 where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
 {
   let n_padded = instances.len().next_power_of_two();
   let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
@@ -228,7 +231,10 @@ fn run_full_nifs_prove<E: Engine>(
   timing_data: &spartan2::timing::TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
 {
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();

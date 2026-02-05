@@ -586,7 +586,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// in the eq polynomial evaluation to reduce Montgomery reductions from O(2^k)
   /// to O(2^{k/2}) per round. This isolates the delayed reduction optimization
   /// without small-value accumulator precomputation.
-  pub fn prove_cubic_with_three_inputs_split_eq_delayed<SmallValue>(
+  pub fn prove_cubic_with_three_inputs_split_eq_delayed(
     claim: &E::Scalar,
     taus: Vec<E::Scalar>,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,
@@ -595,8 +595,7 @@ impl<E: Engine> SumcheckProof<E> {
     transcript: &mut E::TE,
   ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    SmallValue: Copy + Send + Sync,
-    E::Scalar: DelayedReduction<SmallValue>,
+    E::Scalar: DelayedReduction<E::Scalar>,
   {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
@@ -612,10 +611,8 @@ impl<E: Engine> SumcheckProof<E> {
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         // Use delayed modular reduction version
-        let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
-          .evaluation_points_cubic_with_three_inputs_delayed::<SmallValue>(
-            round, poly_A, poly_B, poly_C,
-          );
+        let (eval_point_0, eval_point_2, eval_point_3) =
+          eq_instance.evaluation_points_cubic_with_three_inputs_delayed(round, poly_A, poly_B, poly_C);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -999,6 +996,7 @@ pub(crate) mod eq_sumcheck {
     polys::multilinear::MultilinearPolynomial, small_field::DelayedReduction, traits::Engine,
   };
   use ff::{Field, PrimeField};
+  use num_traits::Zero;
   use rayon::{iter::ZipEq, prelude::*, slice::Iter};
 
   pub struct EqSumCheckInstance<E: Engine> {
@@ -1170,7 +1168,7 @@ pub(crate) mod eq_sumcheck {
     /// Phase 2 (outer): Reduce once, then accumulate E_out[x_out] ⊗ inner_reduced
     /// Final: Reduce once at the end
     #[inline]
-    pub fn evaluation_points_cubic_with_three_inputs_delayed<Value>(
+    pub fn evaluation_points_cubic_with_three_inputs_delayed(
       &self,
       round_idx: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
@@ -1178,12 +1176,11 @@ pub(crate) mod eq_sumcheck {
       poly_C: &MultilinearPolynomial<E::Scalar>,
     ) -> (E::Scalar, E::Scalar, E::Scalar)
     where
-      Value: Copy + Send + Sync,
-      E::Scalar: DelayedReduction<Value>,
+      E::Scalar: DelayedReduction<E::Scalar>,
     {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
 
-      type UF<S, SV> = <S as DelayedReduction<SV>>::UnreducedFieldField;
+      type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
       let in_first_half = self.round < self.first_half;
       let half_p = poly_A.Z.len() / 2;
@@ -1202,18 +1199,18 @@ pub(crate) mod eq_sumcheck {
           .fold(
             || {
               (
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
               )
             },
             |mut outer_acc, x_out| {
               let e_out = &poly_eq_left[x_out];
 
               // Phase 1: Inner loop - accumulate E_in[x_in] ⊗ q_k(g) in wide limbs
-              let mut inner_0 = UF::<E::Scalar, Value>::default();
-              let mut inner_2 = UF::<E::Scalar, Value>::default();
-              let mut inner_3 = UF::<E::Scalar, Value>::default();
+              let mut inner_0 = Acc::<E::Scalar>::zero();
+              let mut inner_2 = Acc::<E::Scalar>::zero();
+              let mut inner_3 = Acc::<E::Scalar>::zero();
 
               for (x_in, e_in) in poly_eq_right.iter().enumerate() {
                 let id = (x_out << second_half) | x_in;
@@ -1228,20 +1225,20 @@ pub(crate) mod eq_sumcheck {
                 );
 
                 // Accumulate E_in * q_k in wide limbs (NO REDUCTION)
-                E::Scalar::accumulate_field_field_prod(&mut inner_0, e_in, &q0);
-                E::Scalar::accumulate_field_field_prod(&mut inner_2, e_in, &q2);
-                E::Scalar::accumulate_field_field_prod(&mut inner_3, e_in, &q3);
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_0, e_in, &q0);
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_2, e_in, &q2);
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_3, e_in, &q3);
               }
 
               // Phase 2: Reduce inner sums ONCE, then multiply by E_out
-              let inner_0_red = E::Scalar::reduce_field_field(&inner_0);
-              let inner_2_red = E::Scalar::reduce_field_field(&inner_2);
-              let inner_3_red = E::Scalar::reduce_field_field(&inner_3);
+              let inner_0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_0);
+              let inner_2_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_2);
+              let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
 
               // Accumulate E_out * inner_reduced in wide limbs (NO REDUCTION)
-              E::Scalar::accumulate_field_field_prod(&mut outer_acc.0, e_out, &inner_0_red);
-              E::Scalar::accumulate_field_field_prod(&mut outer_acc.1, e_out, &inner_2_red);
-              E::Scalar::accumulate_field_field_prod(&mut outer_acc.2, e_out, &inner_3_red);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.0, e_out, &inner_0_red);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.1, e_out, &inner_2_red);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.2, e_out, &inner_3_red);
 
               outer_acc
             },
@@ -1249,9 +1246,9 @@ pub(crate) mod eq_sumcheck {
           .reduce(
             || {
               (
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
               )
             },
             |mut a, b| {
@@ -1264,9 +1261,9 @@ pub(crate) mod eq_sumcheck {
 
         // Final reduction
         (
-          E::Scalar::reduce_field_field(&acc_0),
-          E::Scalar::reduce_field_field(&acc_2),
-          E::Scalar::reduce_field_field(&acc_3),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
         )
       } else {
         // Second half: only E_in (poly_eq_right), no E_out
@@ -1281,9 +1278,9 @@ pub(crate) mod eq_sumcheck {
           .fold(
             || {
               (
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
               )
             },
             |mut acc, id| {
@@ -1298,9 +1295,9 @@ pub(crate) mod eq_sumcheck {
               );
 
               // Accumulate E * q_k in wide limbs (NO REDUCTION)
-              E::Scalar::accumulate_field_field_prod(&mut acc.0, e, &q0);
-              E::Scalar::accumulate_field_field_prod(&mut acc.1, e, &q2);
-              E::Scalar::accumulate_field_field_prod(&mut acc.2, e, &q3);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.0, e, &q0);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.1, e, &q2);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.2, e, &q3);
 
               acc
             },
@@ -1308,9 +1305,9 @@ pub(crate) mod eq_sumcheck {
           .reduce(
             || {
               (
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
-                UF::<E::Scalar, Value>::default(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
               )
             },
             |mut a, b| {
@@ -1323,9 +1320,9 @@ pub(crate) mod eq_sumcheck {
 
         // Final reduction
         (
-          E::Scalar::reduce_field_field(&acc_0),
-          E::Scalar::reduce_field_field(&acc_2),
-          E::Scalar::reduce_field_field(&acc_3),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
         )
       };
 

@@ -23,12 +23,12 @@ use crate::{
     eq::{EqPolynomial, compute_suffix_eq_pyramid},
     multilinear::MultilinearPolynomial,
   },
+  small_field::{DelayedReduction, SmallValueField, WideMul},
 };
-use crate::small_field::DelayedReduction;
-use std::ops::{Add, Sub};
 use ff::PrimeField;
 use num_traits::Zero;
 use rayon::prelude::*;
+use std::ops::{Add, Sub};
 
 use super::index::compute_idx4;
 
@@ -56,8 +56,8 @@ pub(crate) struct BetaPrefixCache {
 ///
 /// # Type Parameters
 ///
-/// - `S`: Field type implementing `DelayedReduction<V>`
-/// - `V`: Witness value type (i32 or i64)
+/// - `F`: Field type with small-value and delayed reduction support
+/// - `SmallValue`: Witness value type (i32 or i64)
 ///
 /// # Parallelism strategy
 ///
@@ -70,15 +70,28 @@ pub(crate) struct BetaPrefixCache {
 /// - Skip cz_ext entirely: for binary betas, use cz_pref directly
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so they contribute 0
 /// - Only process betas with ∞ (where Cz doesn't contribute anyway)
-pub fn build_accumulators_spartan<S, V>(
-  az: &MultilinearPolynomial<V>,
-  bz: &MultilinearPolynomial<V>,
-  taus: &[S],
+pub fn build_accumulators_spartan<F, SmallValue>(
+  az: &MultilinearPolynomial<SmallValue>,
+  bz: &MultilinearPolynomial<SmallValue>,
+  taus: &[F],
   l0: usize,
-) -> LagrangeAccumulators<S, 2>
+) -> LagrangeAccumulators<F, 2>
 where
-  S: PrimeField + DelayedReduction<V> + Send + Sync,
-  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
+  F: PrimeField
+    + SmallValueField<SmallValue>
+    + DelayedReduction<SmallValue>
+    + DelayedReduction<SmallValue::Product>
+    + DelayedReduction<F>
+    + Send
+    + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let l = az.Z.len().trailing_zeros() as usize;
@@ -98,8 +111,10 @@ where
   } = build_beta_cache::<2>(l0);
 
   // Only betas containing at least one ∞ coordinate contribute non-zero values.
-  // On binary inputs, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
-  // Non-binary evaluations (those with ∞) are where we accumulate the sumcheck.
+  // On binary inputs {0,1}^n, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
+  // The ∞ coordinate corresponds to the "leading coefficient" of the Lagrange polynomial,
+  // which is non-zero only for non-constant polynomials. Non-binary evaluations (those
+  // with ∞) are where we accumulate the sumcheck.
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
@@ -107,7 +122,7 @@ where
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
   // Build eq cache: precomputes ex * ey products for all combinations.
-  let eq_cache: Vec<Vec<S>> = eq_tables
+  let eq_cache: Vec<Vec<F>> = eq_tables
     .e_y
     .iter()
     .map(|round_ey| {
@@ -119,24 +134,24 @@ where
     .collect();
 
   // Precompute e_in values.
-  let e_in_cache: Vec<S> = eq_tables.e_in.clone();
+  let e_in_cache: Vec<F> = eq_tables.e_in.clone();
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
-  type State<S, V> = SpartanThreadState<S, V, 2>;
+  type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
 
-  let fold_results: Vec<State<S, V>> = (0..num_x_out)
+  let fold_results: Vec<State<F, SmallValue>> = (0..num_x_out)
     .into_par_iter()
     .fold(
-      || State::<S, V>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S, V>, x_out_bits| {
+      || State::<F, SmallValue>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<F, SmallValue>, x_out_bits| {
         // Reset partial sums for this x_out iteration
         state.reset_partial_sums();
 
         // Inner loop over x_in - accumulate into UNREDUCED form
         // Each beta_partial_sums[beta_idx] accumulates 2^(l/2) terms per x_out.
-        // Safety bound for UnreducedFieldInt (N limbs, 64 bits per limb):
+        // Safety bound for SignedWideLimbs<N> (N limbs, 64 bits per limb):
         //   field_bits + product_bits + (l/2) < 64*N
-        // i32 path: N=6, product_bits<=62; i64 path: N=8, product_bits<=126.
+        // i32 path: N=5, product_bits<=62; i64 path: N=6, product_bits<=126.
         for (x_in_bits, e_in_eval) in e_in_cache.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
@@ -149,14 +164,14 @@ where
           }
 
           // Extend Az and Bz to Lagrange domain in-place (zero allocation)
-          let az_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
+          let az_size = LagrangeEvaluatedMultilinearPolynomial::<SmallValue, 2>::extend_in_place(
             &state.az_prefix_boolean_evals,
             &mut state.az_extended_evals,
             &mut state.az_extended_scratch,
           );
           let az_ext = &state.az_extended_evals[..az_size];
 
-          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
+          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<SmallValue, 2>::extend_in_place(
             &state.bz_prefix_boolean_evals,
             &mut state.bz_extended_evals,
             &mut state.bz_extended_scratch,
@@ -165,14 +180,10 @@ where
 
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
           // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
-          // Pass small values directly for raw limb accumulation (no pre-multiplication)
+          // wide_mul computes small × small → product, then unreduced_multiply_accumulate adds field × product
           for &beta_idx in &betas_with_infty {
-            S::accumulate_field_small_small_prod(
-              &mut state.partial_sums[beta_idx],
-              e_in_eval,
-              az_ext[beta_idx],
-              bz_ext[beta_idx],
-            );
+            let prod = SmallValue::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], e_in_eval, &prod);
           }
         }
 
@@ -184,8 +195,9 @@ where
             continue;
           }
           // Reduce partial sum to field element
-          let val = S::reduce_field_int(&state.partial_sums[beta_idx]);
-          if val == S::ZERO {
+          let val =
+            <F as DelayedReduction<SmallValue::Product>>::reduce(&state.partial_sums[beta_idx]);
+          if val == F::ZERO {
             continue;
           }
           state.beta_values.push((beta_idx, val));
@@ -195,11 +207,11 @@ where
         // Multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            let eq_eval = &eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
-            S::accumulate_field_field_prod(
+            let eq_eval = eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
+            <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
               &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               val,
-              eq_eval,
+              &eq_eval,
             );
           }
         }
@@ -221,12 +233,13 @@ where
     .expect("num_x_out > 0 guarantees non-empty fold results");
 
   // Finalize: reduce each bucket from wide 9-limb to field element
-  let mut result: LagrangeAccumulators<S, 2> = LagrangeAccumulators::new(l0);
+  let mut result: LagrangeAccumulators<F, 2> = LagrangeAccumulators::new(l0);
   for (round_idx, round) in merged.acc.rounds.iter().enumerate() {
     for (v_idx, row) in round.data().iter().enumerate() {
       for (u_idx, elem) in row.iter().enumerate() {
         if !elem.is_zero() {
-          result.rounds[round_idx].data_mut()[v_idx][u_idx] = S::reduce_field_field(elem);
+          result.rounds[round_idx].data_mut()[v_idx][u_idx] =
+            <F as DelayedReduction<F>>::reduce(elem);
         }
       }
     }
@@ -267,24 +280,41 @@ where
 /// 2. Partial sums are reduced to Montgomery field elements
 /// 3. Scatter accumulates Montgomery×Montgomery products into `WideLimbs<9>` (R²-scaled)
 /// 4. Final Montgomery REDC per bucket converts back to field elements
-pub fn build_accumulators_neutronnova<S, V>(
-  a_layers: &[Vec<V>],
-  b_layers: &[Vec<V>],
-  e_eq: &[S],
+pub fn build_accumulators_neutronnova<F, SmallValue>(
+  a_layers: &[Vec<SmallValue>],
+  b_layers: &[Vec<SmallValue>],
+  e_eq: &[F],
   left: usize,
   right: usize,
-  rhos: &[S],
-) -> LagrangeAccumulators<S, 2>
+  rhos: &[F],
+) -> LagrangeAccumulators<F, 2>
 where
-  S: PrimeField + DelayedReduction<V> + Send + Sync,
-  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
+  F: PrimeField
+    + SmallValueField<SmallValue>
+    + DelayedReduction<SmallValue>
+    + DelayedReduction<SmallValue::Product>
+    + DelayedReduction<F>
+    + Send
+    + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   let n = a_layers.len();
   let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
   debug_assert_eq!(n, 1 << l0, "number of instances must be power of 2");
   debug_assert_eq!(b_layers.len(), n);
   debug_assert_eq!(rhos.len(), l0);
-  debug_assert_eq!(e_eq.len(), left + right, "E_eq must have length left + right");
+  debug_assert_eq!(
+    e_eq.len(),
+    left + right,
+    "E_eq must have length left + right"
+  );
   debug_assert_eq!(a_layers[0].len(), left * right);
 
   let base: usize = 3; // D + 1 = 2 + 1 = 3
@@ -300,7 +330,7 @@ where
 
   // Precompute e_rb_cache: e_right[x_r] * e_b[round][y] products.
   // Layout: e_rb_cache[round][y * right + x_r] = e_right[x_r] * e_b[round][y]
-  let e_rb_cache: Vec<Vec<S>> = e_b
+  let e_rb_cache: Vec<Vec<F>> = e_b
     .iter()
     .map(|round_ey| {
       round_ey
@@ -323,19 +353,26 @@ where
 
   // Precompute which betas have infinity (same as Spartan builder)
   // Only betas containing at least one ∞ coordinate contribute non-zero values.
-  // On binary inputs, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
-  // Non-binary evaluations (those with ∞) are where we accumulate the sumcheck.
+  // On binary inputs {0,1}^n, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
+  // The ∞ coordinate corresponds to the "leading coefficient" of the Lagrange polynomial,
+  // which is non-zero only for non-constant polynomials. Non-binary evaluations (those
+  // with ∞) are where we accumulate the sumcheck.
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
 
-  type State<S2, V2> = NeutronNovaThreadState<S2, V2, <S2 as DelayedReduction<V2>>::UnreducedFieldInt, 2>;
+  type State<F2, SV2> = NeutronNovaThreadState<
+    F2,
+    SV2,
+    <F2 as DelayedReduction<<SV2 as WideMul>::Product>>::Accumulator,
+    2,
+  >;
 
-  let fold_results: Vec<State<S, V>> = (0..right)
+  let fold_results: Vec<State<F, SmallValue>> = (0..right)
     .into_par_iter()
     .fold(
-      || State::<S, V>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S, V>, x_r| {
+      || State::<F, SmallValue>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<F, SmallValue>, x_r| {
         state.reset_partial_sums();
 
         for (x_l, &e_l) in e_left_slice.iter().enumerate() {
@@ -350,14 +387,14 @@ where
 
           // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
           // Values stay in small value type throughout (safe due to bound check in vec_to_small_for_extension)
-          let az_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
+          let az_size = LagrangeEvaluatedMultilinearPolynomial::<SmallValue, 2>::extend_in_place(
             &state.az_prefix_boolean_evals,
             &mut state.az_extended_evals,
             &mut state.az_extended_scratch,
           );
           let az_ext = &state.az_extended_evals[..az_size];
 
-          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
+          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<SmallValue, 2>::extend_in_place(
             &state.bz_prefix_boolean_evals,
             &mut state.bz_extended_evals,
             &mut state.bz_extended_scratch,
@@ -365,14 +402,10 @@ where
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
           // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
-          // Uses small × small product with delayed reduction
+          // wide_mul computes small × small → product, then unreduced_multiply_accumulate adds field × product
           for &beta_idx in &betas_with_infty {
-            S::accumulate_field_small_small_prod(
-              &mut state.partial_sums[beta_idx],
-              &e_l,
-              az_ext[beta_idx],
-              bz_ext[beta_idx],
-            );
+            let prod = SmallValue::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], &e_l, &prod);
           }
         }
 
@@ -380,7 +413,7 @@ where
         for &beta_idx in &betas_with_infty {
           let unreduced = &state.partial_sums[beta_idx];
           if !unreduced.is_zero() {
-            let val = S::reduce_field_int(unreduced);
+            let val = <F as DelayedReduction<SmallValue::Product>>::reduce(unreduced);
             state.beta_values.push((beta_idx, val));
           }
         }
@@ -388,11 +421,11 @@ where
         // Scatter: multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            let e_rb = &e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
-            S::accumulate_field_field_prod(
+            let e_rb = e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
+            <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
               &mut state.scatter_acc.rounds[pref.round_0].data[pref.v_idx][pref.u_idx],
               &val,
-              e_rb,
+              &e_rb,
             );
           }
         }
@@ -412,7 +445,9 @@ where
     .expect("right > 0 guarantees non-empty fold results");
 
   // Reduce each bucket from wide 9-limb to field element
-  merged.scatter_acc.map(|acc| S::reduce_field_field(acc))
+  merged
+    .scatter_acc
+    .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.
@@ -648,8 +683,7 @@ fn scatter_beta_contributions<S: PrimeField, const D: usize, I, F>(
 mod tests {
   use super::*;
   use crate::{
-    lagrange_accumulator::domain::LagrangeHatPoint,
-    polys::eq::EqPolynomial,
+    lagrange_accumulator::domain::LagrangeHatPoint, polys::eq::EqPolynomial,
     provider::pasta::pallas,
   };
   use ff::Field;
@@ -739,10 +773,12 @@ mod tests {
         let bz_prefix_boolean_evals = bz_poly.gather_prefix_evals(l0, suffix);
         let cz_pref = cz.gather_prefix_evals(l0, suffix);
 
-        let az_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_prefix_boolean_evals);
-        let bz_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_prefix_boolean_evals);
+        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(
+          &az_prefix_boolean_evals,
+        );
+        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(
+          &bz_prefix_boolean_evals,
+        );
         let cz_ext =
           LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 
@@ -850,9 +886,7 @@ mod tests {
 
     // Az = Bz = top bit x0 (most significant of 2 bits)
     // For satisfying witness, Cz = Az * Bz = Az (since Az ∈ {0,1} and Az = Bz)
-    let az_vals: Vec<i32> = (0..(1 << l))
-      .map(|bits| (bits >> (l - 1)) & 1)
-      .collect();
+    let az_vals: Vec<i32> = (0..(1 << l)).map(|bits| (bits >> (l - 1)) & 1).collect();
     let bz_vals = az_vals.clone();
 
     let az = MultilinearPolynomial::new(az_vals);
@@ -1165,10 +1199,12 @@ mod tests {
         let bz_prefix_boolean_evals = bz_poly.gather_prefix_evals(L0, suffix);
         let cz_pref = cz.gather_prefix_evals(L0, suffix);
 
-        let az_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&az_prefix_boolean_evals);
-        let bz_ext =
-          LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&bz_prefix_boolean_evals);
+        let az_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(
+          &az_prefix_boolean_evals,
+        );
+        let bz_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(
+          &bz_prefix_boolean_evals,
+        );
         let cz_ext =
           LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&cz_pref);
 

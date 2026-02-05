@@ -32,8 +32,10 @@ use std::ops::{Add, AddAssign};
 /// # Type Parameters
 ///
 /// - `N`: Number of 64-bit limbs. Common values:
-///   - `N=6` (384 bits): For `UnreducedFieldInt` (field × integer products)
-///   - `N=9` (576 bits): For `UnreducedFieldField` (field × field products)
+///   - `N=5` (320 bits): For `DelayedReduction<i32>::Accumulator` (field × i32)
+///   - `N=6` (384 bits): For `DelayedReduction<i64>::Accumulator` (field × i64)
+///   - `N=7` (448 bits): For `DelayedReduction<i128>::Accumulator` (field × i128)
+///   - `N=9` (576 bits): For `DelayedReduction<F>::Accumulator` (field × field)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WideLimbs<const N: usize>(pub [u64; N]);
 
@@ -54,8 +56,9 @@ impl<const N: usize> AddAssign for WideLimbs<N> {
       self.0[i] = sum;
       carry = (c1 as u64) + (c2 as u64);
     }
-    // Note: We intentionally don't check for overflow here.
+    // Note: We intentionally don't check for overflow here in release builds.
     // The caller is responsible for ensuring the sum doesn't exceed N limbs.
+    debug_assert!(carry == 0, "WideLimbs overflow - increase N");
   }
 }
 
@@ -232,7 +235,7 @@ pub fn mac(acc: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
 
 /// Multiply two 4-limb values, producing an 8-limb result.
 #[inline(always)]
-pub fn mul_4_by_4_ext(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
+pub fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
   let mut result = [0u64; 8];
   for i in 0..4 {
     let mut carry = 0u128;
