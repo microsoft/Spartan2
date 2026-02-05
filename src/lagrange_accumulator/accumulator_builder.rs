@@ -24,11 +24,8 @@ use crate::{
     multilinear::MultilinearPolynomial,
   },
 };
-use crate::small_field::{DelayedReduction, SmallValueField};
-use std::{
-  fmt::Debug,
-  ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
+use crate::small_field::DelayedReduction;
+use std::ops::{Add, Sub};
 use ff::PrimeField;
 use num_traits::Zero;
 use rayon::prelude::*;
@@ -81,19 +78,7 @@ pub fn build_accumulators_spartan<S, V>(
 ) -> LagrangeAccumulators<S, 2>
 where
   S: PrimeField + DelayedReduction<V> + Send + Sync,
-  V: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = V>
-    + Sub<Output = V>
-    + Neg<Output = V>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   let base: usize = 3; // D + 1 = 2 + 1 = 3
   let l = az.Z.len().trailing_zeros() as usize;
@@ -112,6 +97,9 @@ where
     num_betas,
   } = build_beta_cache::<2>(l0);
 
+  // Only betas containing at least one ∞ coordinate contribute non-zero values.
+  // On binary inputs, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
+  // Non-binary evaluations (those with ∞) are where we accumulate the sumcheck.
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
@@ -251,6 +239,10 @@ where
 /// Computes accumulators for: g(b) = Σ_{x} eq(τ, x) · (Ã_b(x) · B̃_b(x) − C̃_b(x))
 /// where b ranges over U₂^{ℓ_b} and x ranges over the constraint space.
 ///
+/// Note: Cz is not passed because on the boolean hypercube Az·Bz = Cz (R1CS identity),
+/// so the Az·Bz - Cz term is zero for all binary evaluation points. We only need
+/// non-binary evaluations (infinity-containing betas) where Cz doesn't contribute.
+///
 /// Unlike Spartan (which gathers from a single polynomial), NeutronNova gathers
 /// across instances: `a_layers[p][x_R * left + x_L]` for each instance p.
 ///
@@ -264,7 +256,9 @@ where
 ///   `e_left[x_l] = tau^{x_l}` and `e_right[x_r] = tau^{x_r * left}`
 /// * `left` - Size of left tensor component (from `compute_tensor_decomp`)
 /// * `right` - Size of right tensor component (from `compute_tensor_decomp`)
-/// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}), one per sumcheck round over instance index b
+/// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}) for the NIFS folding sumcheck.
+///   These are the verifier challenges for folding n = 2^{ℓ_b} instances, not the main
+///   constraint-satisfiability sumcheck challenges.
 ///
 /// # Scatter optimization
 ///
@@ -273,16 +267,17 @@ where
 /// 2. Partial sums are reduced to Montgomery field elements
 /// 3. Scatter accumulates Montgomery×Montgomery products into `WideLimbs<9>` (R²-scaled)
 /// 4. Final Montgomery REDC per bucket converts back to field elements
-pub fn build_accumulators_neutronnova<S>(
-  a_layers: &[Vec<i64>],
-  b_layers: &[Vec<i64>],
+pub fn build_accumulators_neutronnova<S, V>(
+  a_layers: &[Vec<V>],
+  b_layers: &[Vec<V>],
   e_eq: &[S],
   left: usize,
   right: usize,
   rhos: &[S],
 ) -> LagrangeAccumulators<S, 2>
 where
-  S: PrimeField + SmallValueField<i64> + DelayedReduction<i64> + Send + Sync,
+  S: PrimeField + DelayedReduction<V> + Send + Sync,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   let n = a_layers.len();
   let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
@@ -327,21 +322,24 @@ where
   } = build_beta_cache::<2>(l0);
 
   // Precompute which betas have infinity (same as Spartan builder)
+  // Only betas containing at least one ∞ coordinate contribute non-zero values.
+  // On binary inputs, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
+  // Non-binary evaluations (those with ∞) are where we accumulate the sumcheck.
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
 
-  type State<S> = NeutronNovaThreadState<S, i64, <S as DelayedReduction<i64>>::UnreducedFieldInt, 2>;
+  type State<S2, V2> = NeutronNovaThreadState<S2, V2, <S2 as DelayedReduction<V2>>::UnreducedFieldInt, 2>;
 
-  let fold_results: Vec<State<S>> = (0..right)
+  let fold_results: Vec<State<S, V>> = (0..right)
     .into_par_iter()
     .fold(
-      || State::<S>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<S>, x_r| {
+      || State::<S, V>::new(l0, num_betas, prefix_size, ext_size),
+      |mut state: State<S, V>, x_r| {
         state.reset_partial_sums();
 
         for (x_l, &e_l) in e_left_slice.iter().enumerate() {
-          // Gather: collect Az_p(x_L, x_R) for each instance p (stays in i64)
+          // Gather: collect Az_p(x_L, x_R) for each instance p (stays in small value type)
           #[allow(clippy::needless_range_loop)]
           for p in 0..prefix_size {
             let idx = x_r * left + x_l;
@@ -351,15 +349,15 @@ where
           }
 
           // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
-          // Values stay in i64 throughout (safe due to bound check in vec_to_small_for_extension)
-          let az_size = LagrangeEvaluatedMultilinearPolynomial::<i64, 2>::extend_in_place(
+          // Values stay in small value type throughout (safe due to bound check in vec_to_small_for_extension)
+          let az_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
             &state.az_prefix_boolean_evals,
             &mut state.az_extended_evals,
             &mut state.az_extended_scratch,
           );
           let az_ext = &state.az_extended_evals[..az_size];
 
-          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<i64, 2>::extend_in_place(
+          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<V, 2>::extend_in_place(
             &state.bz_prefix_boolean_evals,
             &mut state.bz_extended_evals,
             &mut state.bz_extended_scratch,
@@ -367,7 +365,7 @@ where
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
           // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
-          // Uses i64 × i64 small-small product (not i128 intermediate)
+          // Uses small × small product with delayed reduction
           for &beta_idx in &betas_with_infty {
             S::accumulate_field_small_small_prod(
               &mut state.partial_sums[beta_idx],

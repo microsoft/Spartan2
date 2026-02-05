@@ -7,10 +7,7 @@
 //! DelayedReduction trait for accumulating unreduced products.
 
 use super::SmallValueField;
-use std::{
-  fmt::Debug,
-  ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
+use std::{fmt::Debug, ops::AddAssign};
 
 /// Extension trait for delayed modular reduction operations.
 ///
@@ -34,7 +31,7 @@ use std::{
 /// - **Total: N native muls + N Montgomery muls + N REDCs**
 ///
 /// **Delayed reduction** (1 Barrett reduction):
-/// - N native multiplies: `small_a × small_b → product` (64-bit for i32, 128-bit for i64)
+/// - N native multiplies: `small_a × small_b → product` (i32×i32→i64, i64×i64→i128)
 /// - N wide multiply-accumulates: `acc_wide += field_limbs × product` (no reduction)
 /// - 1 Barrett reduction at the end
 /// - **Total: N native muls + N wide mul-adds + 1 Barrett reduction**
@@ -65,22 +62,7 @@ use std::{
 ///   yields `(field × small_value) × R`. Barrett reduction preserves R-scaling.
 /// - `UnreducedFieldField`: Stores 2R-scaled values. Multiplying two 1R-scaled field elements
 ///   yields a 2R-scaled product. Montgomery REDC converts 2R → 1R.
-pub trait DelayedReduction<SmallValue>: SmallValueField<SmallValue>
-where
-  SmallValue: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = SmallValue>
-    + Sub<Output = SmallValue>
-    + Neg<Output = SmallValue>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
-{
+pub trait DelayedReduction<SmallValue>: SmallValueField<SmallValue> {
   /// Unreduced accumulator for field × small value products.
   ///
   /// Current implementations: `SignedWideLimbs<6>` (384 bits) for i32,
@@ -88,7 +70,7 @@ where
   ///
   /// Sized to safely sum many terms without overflow:
   /// `field_bits + product_bits + log2(num_terms) < 64×N`
-  /// where field_bits ≈ 254, product_bits = 64 (i32) or 128 (i64),
+  /// where field_bits ≈ 254, product_bits = 64 (i32×i32) or 128 (i64×i64),
   /// num_terms = max accumulation count, N = limb count.
   type UnreducedFieldInt: Copy
     + Clone

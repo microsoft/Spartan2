@@ -15,10 +15,7 @@ use super::accumulator::LagrangeAccumulators;
 use crate::small_field::DelayedReduction;
 use ff::PrimeField;
 use num_traits::Zero;
-use std::{
-  fmt::Debug,
-  ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
+use std::ops::{Add, Sub};
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
 ///
@@ -62,19 +59,7 @@ use std::{
 pub(crate) struct SpartanThreadState<S, V, const D: usize>
 where
   S: PrimeField + DelayedReduction<V> + Send + Sync,
-  V: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = V>
-    + Sub<Output = V>
-    + Neg<Output = V>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   /// Partial sums indexed by β, accumulated over the x_in loop.
   /// Uses unreduced wide-limb form for delayed modular reduction.
@@ -104,19 +89,7 @@ where
 impl<S, V, const D: usize> SpartanThreadState<S, V, D>
 where
   S: PrimeField + DelayedReduction<V> + Send + Sync,
-  V: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = V>
-    + Sub<Output = V>
-    + Neg<Output = V>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
@@ -145,20 +118,21 @@ where
 
 /// Thread-local scratch buffers for `build_accumulators_neutronnova`.
 ///
-/// Phase 1 MVP uses immediate reduction (field elements for partial_sums/scatter).
-/// Pref/extension buffers use i64 throughout - input values are validated by
-/// `vec_to_small_for_extension` to ensure they stay within i64 after Lagrange
-/// extension (which has 3^ℓ_b growth factor for D=2).
+/// Supports both immediate reduction (`PS = S`) and delayed reduction
+/// (`PS = S::UnreducedFieldInt`). Extension buffers use small values throughout,
+/// validated by `vec_to_small_for_extension` to stay within bounds after
+/// Lagrange extension (3^ℓ_b growth factor for D=2).
 ///
 /// # Type Parameters
 ///
 /// - `S`: Field type for partial sums and scatter accumulators
-/// - `V`: Value type for pref/extension buffers (i64 for NeutronNova NIFS)
+/// - `V`: Value type for pref/extension buffers (i32, i64, etc.)
 /// - `PS`: Partial sum type (UnreducedFieldInt for delayed reduction)
 /// - `D`: Polynomial degree bound
-pub(crate) struct NeutronNovaThreadState<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize>
+pub(crate) struct NeutronNovaThreadState<S, V, PS: Copy + Default + Zero, const D: usize>
 where
-  S: PrimeField + DelayedReduction<i64>,
+  S: PrimeField + DelayedReduction<V>,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   /// Partial sums indexed by β, accumulated over the x_L loop. Reset each x_R iteration.
   /// Type is `S` for immediate reduction, or `UnreducedFieldInt` for delayed reduction.
@@ -182,9 +156,10 @@ where
   pub beta_values: Vec<(usize, S)>,
 }
 
-impl<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize> NeutronNovaThreadState<S, V, PS, D>
+impl<S, V, PS: Copy + Default + Zero, const D: usize> NeutronNovaThreadState<S, V, PS, D>
 where
-  S: PrimeField + DelayedReduction<i64>,
+  S: PrimeField + DelayedReduction<V>,
+  V: Copy + Default + Add<Output = V> + Sub<Output = V> + Send + Sync,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {

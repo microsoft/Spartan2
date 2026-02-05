@@ -7,10 +7,6 @@
 //! SmallValueField trait for small-value optimization.
 
 use ff::PrimeField;
-use std::{
-  fmt::Debug,
-  ops::{Add, AddAssign, Neg, Sub, SubAssign},
-};
 
 /// Trait for fields that support small-value optimization.
 ///
@@ -18,28 +14,16 @@ use std::{
 /// evaluations fit in native integers. The key optimization is avoiding
 /// expensive field operations until absolutely necessary.
 ///
+/// See [`DelayedReduction`](super::DelayedReduction) for the accumulator optimization
+/// that builds on this trait, enabling sum-of-products with a single reduction.
+///
 /// # Type Parameters
 /// - `SmallValue`: Native type for witness values (i32 or i64)
 ///
 /// # Implementations
 /// - `Fp: SmallValueField<i32>`
 /// - `Fp: SmallValueField<i64>`
-pub trait SmallValueField<SmallValue>: PrimeField
-where
-  SmallValue: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = SmallValue>
-    + Sub<Output = SmallValue>
-    + Neg<Output = SmallValue>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
-{
+pub trait SmallValueField<SmallValue>: PrimeField {
   /// Convert SmallValue to field element.
   fn small_to_field(val: SmallValue) -> Self;
 

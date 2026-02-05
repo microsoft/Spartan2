@@ -11,15 +11,6 @@
 //! polynomial evaluations on the boolean hypercube are typically small integers
 //! (i32/i64 values), so we can perform many operations in native integers before
 //! converting to field elements.
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    SmallValueField Trait                     │
-//! │  (small_to_field, try_field_to_small)                       │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
 
 pub(crate) mod barrett;
 mod delayed_reduction;
@@ -44,8 +35,6 @@ pub(crate) trait SupportsSmallI64: MontgomeryLimbs {}
 use crate::errors::SpartanError;
 use ff::PrimeField;
 use rayon::prelude::*;
-use std::fmt::Debug;
-use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 // ============================================================================
 // Helper Functions
@@ -99,19 +88,7 @@ pub fn try_field_to_i64<F: PrimeField>(val: &F) -> Option<i64> {
 pub fn vec_to_small<F, SV>(v: &[F]) -> Result<Vec<SV>, SpartanError>
 where
   F: SmallValueField<SV> + Sync,
-  SV: Copy
-    + Clone
-    + Default
-    + Debug
-    + PartialEq
-    + Eq
-    + Add<Output = SV>
-    + Sub<Output = SV>
-    + Neg<Output = SV>
-    + AddAssign
-    + SubAssign
-    + Send
-    + Sync,
+  SV: Copy + Send + Sync,
 {
   v.par_iter()
     .enumerate()

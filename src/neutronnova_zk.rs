@@ -209,19 +209,7 @@ where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
   E::PCS: FoldingEngineTrait<E>,
-  SV: Copy
-    + Clone
-    + Default
-    + std::fmt::Debug
-    + PartialEq
-    + Eq
-    + std::ops::Add<Output = SV>
-    + std::ops::Sub<Output = SV>
-    + std::ops::Neg<Output = SV>
-    + std::ops::AddAssign
-    + std::ops::SubAssign
-    + Send
-    + Sync,
+  SV: Copy + Send + Sync,
 {
   use crate::r1cs::weights_from_r;
 
@@ -262,19 +250,7 @@ fn fold_instance_x_small<E, SV>(
 where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
-  SV: Copy
-    + Clone
-    + Default
-    + std::fmt::Debug
-    + PartialEq
-    + Eq
-    + std::ops::Add<Output = SV>
-    + std::ops::Sub<Output = SV>
-    + std::ops::Neg<Output = SV>
-    + std::ops::AddAssign
-    + std::ops::SubAssign
-    + Send
-    + Sync,
+  SV: Copy + Send + Sync,
 {
   use crate::r1cs::weights_from_r;
 
@@ -315,19 +291,7 @@ where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
   E::PCS: FoldingEngineTrait<E>,
-  SV: Copy
-    + Clone
-    + Default
-    + std::fmt::Debug
-    + PartialEq
-    + Eq
-    + std::ops::Add<Output = SV>
-    + std::ops::Sub<Output = SV>
-    + std::ops::Neg<Output = SV>
-    + std::ops::AddAssign
-    + std::ops::SubAssign
-    + Send
-    + Sync,
+  SV: Copy + Send + Sync,
 {
   use crate::r1cs::weights_from_r;
 
@@ -493,9 +457,9 @@ where
   /// * `rhos` - Instance-folding challenges
   ///
   /// Returns (polys, r_bs, T_cur, acc_eq).
-  pub fn prove_neutronnova_small_value_sumcheck(
-    a_layers: &[Vec<i64>],
-    b_layers: &[Vec<i64>],
+  pub fn prove_neutronnova_small_value_sumcheck<V>(
+    a_layers: &[Vec<V>],
+    b_layers: &[Vec<V>],
     e_eq: &[E::Scalar],
     left: usize,
     right: usize,
@@ -515,7 +479,8 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+    E::Scalar: DelayedReduction<V>,
+    V: Copy + Default + std::ops::Add<Output = V> + std::ops::Sub<Output = V> + Send + Sync,
   {
     let ell_b = rhos.len();
 
@@ -587,7 +552,7 @@ where
   /// Small-value optimized NIFS prove.
   ///
   /// Uses Lagrange accumulators and delayed modular reduction for better performance
-  /// when witness values fit in i64.
+  /// when witness values fit in a small value type (i32 or i64).
   ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
   pub fn prove_small_value(

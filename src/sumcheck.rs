@@ -135,20 +135,8 @@ fn bind_three_polys_batched_small_value<F, SV>(
   MultilinearPolynomial<F>,
 )
 where
-  SV: Copy
-    + Clone
-    + Default
-    + std::fmt::Debug
-    + PartialEq
-    + Eq
-    + std::ops::Add<Output = SV>
-    + std::ops::Sub<Output = SV>
-    + std::ops::Neg<Output = SV>
-    + std::ops::AddAssign
-    + std::ops::SubAssign
-    + Send
-    + Sync,
-  F: ff::PrimeField + SmallValueField<SV> + DelayedReduction<SV>,
+  SV: Copy + Send + Sync,
+  F: ff::PrimeField + DelayedReduction<SV>,
 {
   use crate::polys::eq::EqPolynomial;
 
@@ -685,19 +673,7 @@ impl<E: Engine> SumcheckProof<E> {
     transcript: &mut E::TE,
   ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    SmallValue: Copy
-      + Clone
-      + Default
-      + std::fmt::Debug
-      + PartialEq
-      + Eq
-      + std::ops::Add<Output = SmallValue>
-      + std::ops::Sub<Output = SmallValue>
-      + std::ops::Neg<Output = SmallValue>
-      + std::ops::AddAssign
-      + std::ops::SubAssign
-      + Send
-      + Sync,
+    SmallValue: Copy + Send + Sync,
     E::Scalar: DelayedReduction<SmallValue>,
   {
     let mut r: Vec<E::Scalar> = Vec::new();
@@ -785,16 +761,9 @@ impl<E: Engine> SumcheckProof<E> {
   ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
     SmallValue: Copy
-      + Clone
       + Default
-      + std::fmt::Debug
-      + PartialEq
-      + Eq
       + std::ops::Add<Output = SmallValue>
       + std::ops::Sub<Output = SmallValue>
-      + std::ops::Neg<Output = SmallValue>
-      + std::ops::AddAssign
-      + std::ops::SubAssign
       + Send
       + Sync,
     E::Scalar: SmallValueField<SmallValue> + DelayedReduction<SmallValue>,
@@ -1473,19 +1442,7 @@ pub(crate) mod eq_sumcheck {
       poly_C: &MultilinearPolynomial<E::Scalar>,
     ) -> (E::Scalar, E::Scalar, E::Scalar)
     where
-      Value: Copy
-        + Clone
-        + Default
-        + std::fmt::Debug
-        + PartialEq
-        + Eq
-        + std::ops::Add<Output = Value>
-        + std::ops::Sub<Output = Value>
-        + std::ops::Neg<Output = Value>
-        + std::ops::AddAssign
-        + std::ops::SubAssign
-        + Send
-        + Sync,
+      Value: Copy + Send + Sync,
       E::Scalar: DelayedReduction<Value>,
     {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
