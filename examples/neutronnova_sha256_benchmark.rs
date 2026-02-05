@@ -159,31 +159,18 @@ where
   let mut transcript = E::TE::new(b"neutronnova_prove");
   transcript.absorb(b"vk", &pk.vk_digest);
 
-  let (e_eq, az, bz, cz, folded_w, folded_u) = if is_small {
-    NeutronNovaNIFS::<E>::prove_small_value(
-      &pk.S_step,
-      instances,
-      witnesses,
-      &mut vc,
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &mut transcript,
-    )
-    .expect("NeutronNovaNIFS::prove_small_value failed")
-  } else {
-    NeutronNovaNIFS::<E>::prove(
-      &pk.S_step,
-      instances,
-      witnesses,
-      &mut vc,
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &mut transcript,
-    )
-    .expect("NeutronNovaNIFS::prove failed")
-  };
+  let (e_eq, az, bz, cz, folded_w, folded_u) = NeutronNovaNIFS::<E>::prove(
+    &pk.S_step,
+    instances,
+    witnesses,
+    &mut vc,
+    &mut vc_state,
+    &pk.vc_shape,
+    &pk.vc_ck,
+    &mut transcript,
+    is_small,
+  )
+  .expect("NeutronNovaNIFS::prove failed");
 
   (e_eq, az, bz, cz, folded_w, folded_u)
 }

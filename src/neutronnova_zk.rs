@@ -243,10 +243,7 @@ where
 
 /// Fold multiple instance X vectors using small-value optimization.
 /// Uses `accumulate_field_small_prod` for efficient field × small accumulation.
-fn fold_instance_x_small<E, SV>(
-  r_bs: &[E::Scalar],
-  xs_small: &[Vec<SV>],
-) -> Vec<E::Scalar>
+fn fold_instance_x_small<E, SV>(r_bs: &[E::Scalar], xs_small: &[Vec<SV>]) -> Vec<E::Scalar>
 where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
@@ -555,7 +552,7 @@ where
   /// when witness values fit in a small value type (i32 or i64).
   ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
-  pub fn prove_small_value(
+  fn prove_small_value(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
@@ -686,11 +683,10 @@ where
 
   /// Field-based NIFS prove (vanilla path).
   ///
-  /// Performs NIFS folding using standard field arithmetic. Use `prove_small_value`
-  /// instead when witness values fit in i64 for better performance.
+  /// Performs NIFS folding using standard field arithmetic.
   ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
-  pub fn prove(
+  fn prove_regular(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
@@ -867,6 +863,43 @@ where
     info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove_total");
 
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
+  }
+
+  /// NIFS prove with configurable small-value optimization.
+  ///
+  /// When `is_small` is true, uses small-value sumcheck optimization (requires witness
+  /// values to fit in i64). When false, uses standard field arithmetic.
+  ///
+  /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
+  pub fn prove(
+    S: &SplitR1CSShape<E>,
+    Us: &[R1CSInstance<E>],
+    Ws: &[R1CSWitness<E>],
+    vc: &mut NeutronNovaVerifierCircuit<E>,
+    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+    is_small: bool,
+  ) -> Result<
+    (
+      Vec<E::Scalar>,  // E_eq (split evals, length left+right)
+      Vec<E::Scalar>,  // Az layer 0
+      Vec<E::Scalar>,  // Bz layer 0
+      Vec<E::Scalar>,  // Cz layer 0
+      R1CSWitness<E>,  // final folded witness
+      R1CSInstance<E>, // final folded instance
+    ),
+    SpartanError,
+  >
+  where
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    if is_small {
+      Self::prove_small_value(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+    } else {
+      Self::prove_regular(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+    }
   }
 }
 
@@ -1216,29 +1249,17 @@ where
 
     // Perform ZK NIFS prove and collect outputs
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = if is_small {
-      NeutronNovaNIFS::<E>::prove_small_value(
-        &pk.S_step,
-        &step_instances_regular,
-        &step_witnesses,
-        &mut vc,
-        &mut vc_state,
-        &pk.vc_shape,
-        &pk.vc_ck,
-        &mut transcript,
-      )?
-    } else {
-      NeutronNovaNIFS::<E>::prove(
-        &pk.S_step,
-        &step_instances_regular,
-        &step_witnesses,
-        &mut vc,
-        &mut vc_state,
-        &pk.vc_shape,
-        &pk.vc_ck,
-        &mut transcript,
-      )?
-    };
+    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
+      &pk.S_step,
+      &step_instances_regular,
+      &step_witnesses,
+      &mut vc,
+      &mut vc_state,
+      &pk.vc_shape,
+      &pk.vc_ck,
+      &mut transcript,
+      is_small,
+    )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
     let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
@@ -1761,7 +1782,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::provider::T256HyraxEngine;
+  use crate::{gadgets::CubicChainCircuit, provider::T256HyraxEngine};
   use bellpepper::gadgets::{
     boolean::{AllocatedBit, Boolean},
     num::AllocatedNum,
@@ -2008,10 +2029,12 @@ mod tests {
       })
       .collect();
 
+    // Prep once with is_small=true (can be shared between both prove paths)
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+
     // Verify vanilla path works
     {
-      let ps_v = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
-      let snark_v = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps_v, false)
+      let snark_v = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, false)
         .expect("vanilla prove should succeed");
       let res_v = snark_v.verify(&vk, circuits.len());
       assert!(
@@ -2023,8 +2046,7 @@ mod tests {
 
     // Verify small-value path works
     {
-      let ps_s = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
-      let snark_s = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps_s, true)
+      let snark_s = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, true)
         .expect("small-value prove should succeed");
       let res_s = snark_s.verify(&vk, circuits.len());
       assert!(
@@ -2033,5 +2055,72 @@ mod tests {
         res_s.err()
       );
     }
+  }
+
+  /// Test NeutronNovaZkSNARK equivalence (and implicitly NIFS equivalence) with varying circuit counts.
+  ///
+  /// This tests both the regular field path (is_small=false) and the small-value optimized
+  /// path (is_small=true) across different numbers of folded circuits to ensure both produce valid proofs.
+  #[test]
+  fn test_neutronnova_equivalence_varying_num_circuits() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+      .try_init();
+
+    type E = T256HyraxEngine;
+
+    // Test with different numbers of circuits being folded
+    for num_circuits in [2, 4, 8, 16] {
+      test_neutronnova_equivalence_for_num_circuits::<E>(num_circuits);
+    }
+  }
+
+  fn test_neutronnova_equivalence_for_num_circuits<E: Engine>(num_circuits: usize)
+  where
+    E::PCS: FoldingEngineTrait<E>,
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    const NUM_ROUNDS: usize = 6; // Fixed circuit size with ~64 constraints
+    let circuit = CubicChainCircuit::for_rounds(NUM_ROUNDS);
+    let expected_output = circuit.expected_output::<E::Scalar>();
+
+    // Setup with template circuit
+    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
+
+    // Create circuit instances (all identical for this test)
+    let circuits: Vec<_> = (0..num_circuits).map(|_| circuit.clone()).collect();
+
+    // Prep once with is_small=true (can be shared between both prove paths)
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+
+    // Helper to test prove and verify
+    let assert_prove_and_verify = |is_small: bool, path_name: &str| {
+      let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, is_small)
+        .expect(&format!("{path_name} prove should succeed for num_circuits={num_circuits}"));
+      let res = snark.verify(&vk, circuits.len());
+      assert!(
+        res.is_ok(),
+        "{path_name} proof should verify for num_circuits={num_circuits}: {:?}",
+        res.err()
+      );
+      let (public_values, _) = res.unwrap();
+      assert_eq!(
+        public_values.len(),
+        num_circuits,
+        "should have {num_circuits} public values"
+      );
+      for (i, pv) in public_values.iter().enumerate() {
+        assert_eq!(
+          pv,
+          &[expected_output],
+          "{path_name} path: circuit {i} output mismatch for num_circuits={num_circuits}"
+        );
+      }
+    };
+
+    assert_prove_and_verify(false, "regular");
+    assert_prove_and_verify(true, "small-value");
   }
 }

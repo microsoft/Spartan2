@@ -710,6 +710,7 @@ impl<E: Engine> SpartanSNARK<E> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::gadgets::CubicChainCircuit;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
 
@@ -884,10 +885,12 @@ mod tests {
     let prep_snark_regular = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), false).unwrap();
 
     // Run prove with is_small=false (field path)
-    let snark_prove = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_regular, false).unwrap();
+    let snark_prove =
+      SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_regular, false).unwrap();
 
     // Run prove with is_small=true (small-value path)
-    let snark_small = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_small, true).unwrap();
+    let snark_small =
+      SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark_small, true).unwrap();
 
     // Note: We cannot compare claims_outer or eval_W directly because each prove call
     // generates fresh random blinding factors (via PCS::blind), which affects the
@@ -902,5 +905,67 @@ mod tests {
     let res_small = snark_small.verify(&vk);
     assert!(res_small.is_ok(), "prove_small should verify");
     assert_eq!(res_small.unwrap(), [E::Scalar::from(15u64)]);
+  }
+
+  #[test]
+  fn test_prove_equivalence_varying_rounds() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+
+    type E = crate::provider::PallasHyraxEngine;
+
+    // Test with different round counts:
+    // - 2 rounds (< lb=3): all small-value sumcheck rounds
+    // - 4 rounds (> lb=3): mix of small-value and field rounds
+    // - 6 rounds (> lb=3): more field rounds
+    // - 10 rounds: larger circuit
+    for num_rounds in [2, 4, 6, 10] {
+      test_prove_equivalence_for_rounds::<E>(num_rounds);
+    }
+  }
+
+  fn test_prove_equivalence_for_rounds<E: Engine>(num_rounds: usize)
+  where
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
+  {
+    let circuit = CubicChainCircuit::for_rounds(num_rounds);
+    let expected_output = circuit.expected_output::<E::Scalar>();
+
+    // Verify circuit has expected constraint count for num_rounds sumcheck rounds
+    // After padding to power of 2: 2^(num_rounds-1) < num_constraints <= 2^num_rounds
+    let num_constraints = circuit.num_constraints();
+    let lower_bound_constraints = 1usize << (num_rounds - 1);
+    let upper_bound_constraints = 1usize << num_rounds;
+    assert!(
+      lower_bound_constraints < num_constraints && num_constraints <= upper_bound_constraints,
+      "Circuit should have {lower_bound_constraints} < constraints <= {upper_bound_constraints}, got {num_constraints}"
+    );
+
+    // produce keys
+    let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+
+    // Prep once with is_small=true (can be shared between both prove paths)
+    let prep_snark = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+
+    // Helper to test prove and verify
+    let assert_prove_and_verify = |is_small: bool, path_name: &str| {
+      let snark = SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, is_small).unwrap();
+      let res = snark.verify(&vk);
+      assert!(
+        res.is_ok(),
+        "{path_name} should verify for num_rounds={num_rounds}"
+      );
+      assert_eq!(
+        res.unwrap(),
+        [expected_output],
+        "{path_name} output mismatch for num_rounds={num_rounds}"
+      );
+    };
+
+    assert_prove_and_verify(false, "prove_regular");
+    assert_prove_and_verify(true, "prove_small");
   }
 }
