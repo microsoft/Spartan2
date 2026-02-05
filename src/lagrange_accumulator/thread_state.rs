@@ -146,13 +146,15 @@ where
 /// Thread-local scratch buffers for `build_accumulators_neutronnova`.
 ///
 /// Phase 1 MVP uses immediate reduction (field elements for partial_sums/scatter).
-/// Pref/extension buffers use `IntermediateSmallValue` (i64/i128) to avoid overflow
-/// during ExtendToU₂ which adds up to ℓ_b bits of growth.
+/// Pref/extension buffers use i64 throughout - input values are validated by
+/// `vec_to_small_for_extension` to ensure they stay within i64 after Lagrange
+/// extension (which has 3^ℓ_b growth factor for D=2).
 ///
 /// # Type Parameters
 ///
 /// - `S`: Field type for partial sums and scatter accumulators
-/// - `V`: Intermediate value type for pref/extension buffers (i64 for i32 path, i128 for i64 path)
+/// - `V`: Value type for pref/extension buffers (i64 for NeutronNova NIFS)
+/// - `PS`: Partial sum type (UnreducedFieldInt for delayed reduction)
 /// - `D`: Polynomial degree bound
 pub(crate) struct NeutronNovaThreadState<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize>
 where

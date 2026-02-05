@@ -245,15 +245,16 @@ where
     let mut transcript2 = <E as Engine>::TE::new(b"sha256_chain_bench");
 
     let t0 = Instant::now();
-    let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-      &claim,
-      tau,
-      &az_small,
-      &bz_small,
-      &cz_small,
-      &mut transcript2,
-    )
-    .expect("prove_cubic_with_three_inputs_small_value failed");
+    let (proof2, r2, evals2) =
+      SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+        &claim,
+        tau,
+        &az_small,
+        &bz_small,
+        &cz_small,
+        &mut transcript2,
+      )
+      .expect("prove_cubic_with_three_inputs_small_value failed");
     let elapsed = t0.elapsed().as_millis();
     info!(small_sumcheck_ms = elapsed, "small-value sumcheck");
     (proof2, r2, evals2, elapsed)

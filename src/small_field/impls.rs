@@ -9,7 +9,7 @@
 use super::{
   DelayedReduction, SmallValueField, SupportsSmallI32, SupportsSmallI64, barrett, montgomery,
   i64_to_field, i128_to_field, mul_by_i64,
-  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, mul_and_accumulate_6_by_2, sub_mag},
+  limbs::{SignedWideLimbs, SubMagResult, WideLimbs, mac, mul_4_by_2_ext, mul_4_by_4_ext, sub_mag},
   try_field_to_i64,
 };
 use ff::PrimeField;
@@ -214,21 +214,6 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
       carry = sum >> 64;
     }
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
-  }
-
-  #[inline(always)]
-  fn accumulate_field_ext_ext_prod(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    ext_a: i64,
-    ext_b: i64,
-  ) {
-    let is_neg = (ext_a < 0) ^ (ext_b < 0);
-    let mag_a = ext_a.unsigned_abs() as u128;
-    let mag_b = ext_b.unsigned_abs() as u128;
-    let tmp6 = mul_4_by_2_ext(field.to_limbs(), mag_a);
-    let target = if is_neg { &mut acc.neg } else { &mut acc.pos };
-    mul_and_accumulate_6_by_2::<6>(&mut target.0, &tmp6, mag_b);
   }
 
   #[inline(always)]
@@ -469,21 +454,6 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
       carry = sum >> 64;
     }
     acc.0[8] = acc.0[8].wrapping_add(carry as u64);
-  }
-
-  #[inline(always)]
-  fn accumulate_field_ext_ext_prod(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    ext_a: i128,
-    ext_b: i128,
-  ) {
-    let is_neg = (ext_a < 0) ^ (ext_b < 0);
-    let mag_a = ext_a.unsigned_abs();
-    let mag_b = ext_b.unsigned_abs();
-    let tmp6 = mul_4_by_2_ext(field.to_limbs(), mag_a);
-    let target = if is_neg { &mut acc.neg } else { &mut acc.pos };
-    mul_and_accumulate_6_by_2::<7>(&mut target.0, &tmp6, mag_b);
   }
 
   #[inline(always)]

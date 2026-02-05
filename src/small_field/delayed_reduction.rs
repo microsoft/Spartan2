@@ -127,22 +127,6 @@ where
   /// - i64 witnesses (SmallValue = i64): ext values use at most 64 + l_b bits
   ///   (e.g., l_b = 4 → 68 bits, fits in i128)
   ///
-  /// The product `field(256b) × ext_a × ext_b` per term is at most:
-  /// - i32: 256 + 2*(32 + l_b) = 320 + 2*l_b bits
-  /// - i64: 256 + 2*(64 + l_b) = 384 + 2*l_b bits
-  ///
-  /// Accumulating N = 2^(l/2) terms (where l = log2(num_constraints)) adds l/2 bits:
-  /// - i32: 320 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<6> (384b) → l_b ≤ 20, l ≤ 128
-  /// - i64: 384 + 2*l_b + l/2 bits, must fit in SignedWideLimbs<7> (448b) → l_b ≤ 20, l ≤ 128
-  ///
-  /// For practical NeutronNova (l_b ≤ 8, l ≤ 26): well within bounds.
-  fn accumulate_field_ext_ext_prod(
-    acc: &mut Self::UnreducedFieldInt,
-    field: &Self,
-    ext_a: Self::IntermediateSmallValue,
-    ext_b: Self::IntermediateSmallValue,
-  );
-
   /// Reduce an unreduced field×integer accumulator to a field element.
   fn reduce_field_int(acc: &Self::UnreducedFieldInt) -> Self;
 

@@ -34,7 +34,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness,
     SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
-  small_field::{DelayedReduction, SmallValueField, vec_to_small},
+  small_field::{DelayedReduction, SmallValueField, vec_to_small_for_extension},
   start_span,
   sumcheck::{SumcheckProof, lagrange_sumcheck},
   traits::{
@@ -366,18 +366,17 @@ where
   Ok((folded_W, folded_U))
 }
 
-/// Eq-weighted fold with field×int delayed modular reduction.
+/// Eq-weighted fold with field×small delayed modular reduction.
 ///
 /// Computes `folded[k] = Σ_i eq_evals[i] * layers[i][k]` for each coordinate k,
-/// using unreduced_field_int_mul_add to delay modular reduction until the end.
+/// using accumulate_field_small_prod to delay modular reduction until the end.
 fn small_value_eq_weighted_fold<E: Engine>(
   eq_evals: &[E::Scalar],
   layers: &[Vec<i64>],
   num_cons: usize,
 ) -> Vec<E::Scalar>
 where
-  E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-    + DelayedReduction<i64, IntermediateSmallValue = i128>,
+  E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
 {
   let n_inst = eq_evals.len();
   (0..num_cons)
@@ -385,8 +384,8 @@ where
     .map(|k| {
       let mut acc = <E::Scalar as DelayedReduction<i64>>::UnreducedFieldInt::zero();
       for i in 0..n_inst {
-        // Single-value accumulation (layers[i][k] is already i64)
-        E::Scalar::accumulate_field_intermediate_val(&mut acc, &eq_evals[i], layers[i][k] as i128);
+        // Single-value accumulation (field × small with delayed reduction)
+        E::Scalar::accumulate_field_small_prod(&mut acc, &eq_evals[i], layers[i][k]);
       }
       E::Scalar::reduce_field_int(&acc)
     })
@@ -516,8 +515,7 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-      + DelayedReduction<i64, IntermediateSmallValue = i128>,
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
   {
     let ell_b = rhos.len();
 
@@ -613,8 +611,7 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-      + DelayedReduction<i64, IntermediateSmallValue = i128>,
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
   {
     let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
 
@@ -623,15 +620,15 @@ where
     let n_padded = Us.len();
 
     // === EXTRACT SMALL VECTORS EARLY ===
-    // Convert all W and X to small values once at the start (parallel over instances)
+    // Convert all W and X to small values with Lagrange extension bound check
     let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
     let ws_small: Vec<Vec<i64>> = Ws
       .par_iter()
-      .map(|w| vec_to_small::<E::Scalar, i64>(&w.W))
+      .map(|w| vec_to_small_for_extension::<E::Scalar, 2>(&w.W, ell_b))
       .collect::<Result<_, _>>()?;
     let xs_small: Vec<Vec<i64>> = Us
       .par_iter()
-      .map(|u| vec_to_small::<E::Scalar, i64>(&u.X))
+      .map(|u| vec_to_small_for_extension::<E::Scalar, 2>(&u.X, ell_b))
       .collect::<Result<_, _>>()?;
     info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
 
@@ -649,9 +646,9 @@ where
       .into_par_iter()
       .map(|i| {
         let z_small = build_z_small(&ws_small[i], &xs_small[i]);
-        let Az = S.A.multiply_vec_small(&z_small)?;
-        let Bz = S.B.multiply_vec_small(&z_small)?;
-        let Cz = S.C.multiply_vec_small(&z_small)?;
+        let Az = S.A.multiply_vec_small::<2>(&z_small, ell_b)?;
+        let Bz = S.B.multiply_vec_small::<2>(&z_small, ell_b)?;
+        let Cz = S.C.multiply_vec_small::<2>(&z_small, ell_b)?;
         Ok((Az, Bz, Cz))
       })
       .collect::<Result<Vec<_>, SpartanError>>()?;
@@ -1125,8 +1122,7 @@ where
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self, SpartanError>
   where
-    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-      + DelayedReduction<i64, IntermediateSmallValue = i128>,
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
   {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
@@ -1909,8 +1905,7 @@ mod tests {
     is_small: bool,
   ) where
     E::PCS: FoldingEngineTrait<E>,
-    E::Scalar: SmallValueField<i64, IntermediateSmallValue = i128>
-      + DelayedReduction<i64, IntermediateSmallValue = i128>,
+    E::Scalar: SmallValueField<i64> + DelayedReduction<i64>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}, is_small: {is_small}",

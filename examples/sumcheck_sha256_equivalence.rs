@@ -219,15 +219,16 @@ where
 
         info!("Running prove_cubic_with_three_inputs_small_value (Algorithm 6)...");
         let t0 = Instant::now();
-        let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-          &claim,
-          tau,
-          &az_small,
-          &bz_small,
-          &cz_small,
-          &mut transcript2,
-        )
-        .expect("prove_cubic_with_three_inputs_small_value failed");
+        let (proof2, r2, evals2) =
+          SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+            &claim,
+            tau,
+            &az_small,
+            &bz_small,
+            &cz_small,
+            &mut transcript2,
+          )
+          .expect("prove_cubic_with_three_inputs_small_value failed");
         let elapsed = t0.elapsed().as_micros();
         info!(
           elapsed_us = elapsed,

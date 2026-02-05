@@ -284,7 +284,7 @@ pub fn build_accumulators_neutronnova<S>(
   rhos: &[S],
 ) -> LagrangeAccumulators<S, 2>
 where
-  S: PrimeField + SmallValueField<i64, IntermediateSmallValue = i128> + DelayedReduction<i64, IntermediateSmallValue = i128> + Send + Sync,
+  S: PrimeField + SmallValueField<i64> + DelayedReduction<i64> + Send + Sync,
 {
   let n = a_layers.len();
   let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
@@ -333,7 +333,7 @@ where
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
 
-  type State<S> = NeutronNovaThreadState<S, i128, <S as DelayedReduction<i64>>::UnreducedFieldInt, 2>;
+  type State<S> = NeutronNovaThreadState<S, i64, <S as DelayedReduction<i64>>::UnreducedFieldInt, 2>;
 
   let fold_results: Vec<State<S>> = (0..right)
     .into_par_iter()
@@ -343,35 +343,35 @@ where
         state.reset_partial_sums();
 
         for (x_l, &e_l) in e_left_slice.iter().enumerate() {
-          // Gather: collect Az_p(x_L, x_R) for each instance p, widen to IntermediateSmallValue
+          // Gather: collect Az_p(x_L, x_R) for each instance p (stays in i64)
           #[allow(clippy::needless_range_loop)]
           for p in 0..prefix_size {
             let idx = x_r * left + x_l;
             let layer = bit_rev[p];
-            state.az_prefix_boolean_evals[p] = S::small_to_intermediate(a_layers[layer][idx]);
-            state.bz_prefix_boolean_evals[p] = S::small_to_intermediate(b_layers[layer][idx]);
+            state.az_prefix_boolean_evals[p] = a_layers[layer][idx];
+            state.bz_prefix_boolean_evals[p] = b_layers[layer][idx];
           }
 
           // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
-          let az_size =
-            LagrangeEvaluatedMultilinearPolynomial::<S::IntermediateSmallValue, 2>::extend_in_place(
-              &state.az_prefix_boolean_evals,
-              &mut state.az_extended_evals,
-              &mut state.az_extended_scratch,
-            );
+          // Values stay in i64 throughout (safe due to bound check in vec_to_small_for_extension)
+          let az_size = LagrangeEvaluatedMultilinearPolynomial::<i64, 2>::extend_in_place(
+            &state.az_prefix_boolean_evals,
+            &mut state.az_extended_evals,
+            &mut state.az_extended_scratch,
+          );
           let az_ext = &state.az_extended_evals[..az_size];
 
-          let bz_size =
-            LagrangeEvaluatedMultilinearPolynomial::<S::IntermediateSmallValue, 2>::extend_in_place(
-              &state.bz_prefix_boolean_evals,
-              &mut state.bz_extended_evals,
-              &mut state.bz_extended_scratch,
-            );
+          let bz_size = LagrangeEvaluatedMultilinearPolynomial::<i64, 2>::extend_in_place(
+            &state.bz_prefix_boolean_evals,
+            &mut state.bz_extended_evals,
+            &mut state.bz_extended_scratch,
+          );
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
           // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
+          // Uses i64 × i64 small-small product (not i128 intermediate)
           for &beta_idx in &betas_with_infty {
-            S::accumulate_field_ext_ext_prod(
+            S::accumulate_field_small_small_prod(
               &mut state.partial_sums[beta_idx],
               &e_l,
               az_ext[beta_idx],
@@ -675,8 +675,8 @@ mod tests {
     let l = 4;
 
     // Balanced split for eq tables (matches precompute_eq_tables)
-    let suffix_vars = l - l0; // 2
-    let in_vars = (suffix_vars + 1) / 2; // 1
+    let suffix_vars: usize = l - l0; // 2
+    let in_vars = suffix_vars.div_ceil(2); // 1
     let xout_vars = suffix_vars - in_vars; // 1
 
     // Define deterministic Az, Bz, Cz over {0,1}^4 using small values
@@ -808,8 +808,8 @@ mod tests {
     let l = 2;
 
     // Balanced split for eq tables
-    let suffix_vars = l - l0; // 1
-    let in_vars = (suffix_vars + 1) / 2; // 1
+    let suffix_vars: usize = l - l0; // 1
+    let in_vars = suffix_vars.div_ceil(2); // 1
 
     // Two constant polynomials: 1 and -1, product = -1
     let ones = MultilinearPolynomial::new(vec![Scalar::ONE; 1 << l]);
@@ -856,10 +856,7 @@ mod tests {
     // Az = Bz = top bit x0 (most significant of 2 bits)
     // For satisfying witness, Cz = Az * Bz = Az (since Az ∈ {0,1} and Az = Bz)
     let az_vals: Vec<i32> = (0..(1 << l))
-      .map(|bits| {
-        let x0 = (bits >> (l - 1)) & 1;
-        x0 as i32
-      })
+      .map(|bits| (bits >> (l - 1)) & 1)
       .collect();
     let bz_vals = az_vals.clone();
 
@@ -901,7 +898,7 @@ mod tests {
 
     // Balanced split for eq tables (matches precompute_eq_tables)
     let suffix_vars = L - L0; // 7
-    let in_vars = (suffix_vars + 1) / 2; // 4
+    let in_vars = suffix_vars.div_ceil(2); // 4
     let xout_vars = suffix_vars - in_vars; // 3
 
     let num_betas = (D + 1).pow(L0 as u32);
@@ -1052,8 +1049,8 @@ mod tests {
     let n = 1 << l;
 
     // Create polynomials with varying small values
-    let az_vals: Vec<i32> = (0..n).map(|i| ((i % 1000) + 1) as i32).collect();
-    let bz_vals: Vec<i32> = (0..n).map(|i| (((i * 7) % 1000) + 1) as i32).collect();
+    let az_vals: Vec<i32> = (0..n).map(|i| (i % 1000) + 1).collect();
+    let bz_vals: Vec<i32> = (0..n).map(|i| ((i * 7) % 1000) + 1).collect();
 
     let az = MultilinearPolynomial::new(az_vals);
     let bz = MultilinearPolynomial::new(bz_vals);
@@ -1097,7 +1094,7 @@ mod tests {
 
     // Balanced split for eq tables
     let suffix_vars = L - L0; // 8
-    let in_vars = (suffix_vars + 1) / 2; // 4
+    let in_vars = suffix_vars.div_ceil(2); // 4
     let xout_vars = suffix_vars - in_vars; // 4
 
     let num_betas = (D + 1).pow(L0 as u32);

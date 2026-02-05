@@ -759,10 +759,6 @@ impl<E: Engine> SumcheckProof<E> {
     ))
   }
 
-  /// Default number of small-value rounds (ℓ₀) for Algorithm 6.
-  /// Optimal value from paper analysis for Spartan with D=2.
-  const DEFAULT_SMALL_VALUE_ROUNDS: usize = 3;
-
   /// Prove poly_A * poly_B - poly_C using Algorithm 6 (EqPoly-SmallValueSC).
   ///
   /// This method combines small-value optimization (Algorithm 4) for the first ℓ₀ rounds
@@ -772,8 +768,14 @@ impl<E: Engine> SumcheckProof<E> {
   /// from the small-value inputs, eliminating the need for pre-allocated field polys.
   ///
   /// Generic over `SmallValue` to support both i32/i64 and i64/i128 configurations.
+  ///
+  /// # Type Parameters
+  ///
+  /// - `LB`: Number of small-value rounds (ℓ₀). The actual number of rounds used is
+  ///   `min(LB, num_rounds / 2)`. Caller should ensure input values are bounded by
+  ///   `i64::MAX / 3^LB` for safe Lagrange extension (see `vec_to_small_for_extension`).
   #[allow(dead_code)]
-  pub fn prove_cubic_with_three_inputs_small_value<SmallValue>(
+  pub fn prove_cubic_with_three_inputs_small_value<SmallValue, const LB: usize>(
     claim: &E::Scalar,
     taus: Vec<E::Scalar>,
     poly_A_small: &MultilinearPolynomial<SmallValue>,
@@ -802,8 +804,8 @@ impl<E: Engine> SumcheckProof<E> {
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::with_capacity(num_rounds);
     let mut claim_per_round = *claim;
 
-    // Determine ℓ₀: must satisfy l0 <= num_rounds / 2
-    let l0 = std::cmp::min(Self::DEFAULT_SMALL_VALUE_ROUNDS, num_rounds / 2);
+    // Determine ℓ₀: number of small-value rounds (at most LB, at most num_rounds)
+    let l0 = std::cmp::min(LB, num_rounds);
 
     // If l0 is 0, fall back to standard algorithm
     if l0 == 0 {
@@ -1996,15 +1998,16 @@ pub mod lagrange_sumcheck {
       .unwrap();
 
       // Run small-value method
-      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-        &claim,
-        taus,
-        &az_small,
-        &bz_small,
-        &cz_small,
-        &mut transcript2,
-      )
-      .unwrap();
+      let (proof2, r2, evals2) =
+        SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+          &claim,
+          taus,
+          &az_small,
+          &bz_small,
+          &cz_small,
+          &mut transcript2,
+        )
+        .unwrap();
 
       // Verify all outputs match
       assert_eq!(r1, r2, "challenges must match for num_vars={}", num_vars);
@@ -2163,15 +2166,16 @@ pub mod lagrange_sumcheck {
       .unwrap();
 
       // Run small-value method with i64 polynomials
-      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-        &claim,
-        taus,
-        &az_small,
-        &bz_small,
-        &cz_small,
-        &mut transcript2,
-      )
-      .unwrap();
+      let (proof2, r2, evals2) =
+        SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+          &claim,
+          taus,
+          &az_small,
+          &bz_small,
+          &cz_small,
+          &mut transcript2,
+        )
+        .unwrap();
 
       // Verify all outputs match
       assert_eq!(r1, r2, "challenges must match for i64 test");
@@ -2255,15 +2259,16 @@ pub mod lagrange_sumcheck {
       .unwrap();
 
       // Run small-value method with i64 polynomials
-      let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-        &claim,
-        taus,
-        &az_small,
-        &bz_small,
-        &cz_small,
-        &mut transcript2,
-      )
-      .unwrap();
+      let (proof2, r2, evals2) =
+        SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+          &claim,
+          taus,
+          &az_small,
+          &bz_small,
+          &cz_small,
+          &mut transcript2,
+        )
+        .unwrap();
 
       // Verify all outputs match
       assert_eq!(r1, r2, "challenges must match for large i64 test");

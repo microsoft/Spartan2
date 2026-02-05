@@ -292,15 +292,16 @@ where
     let setup_us = t_setup.elapsed().as_micros();
 
     let t_prove = Instant::now();
-    let (proof3, r3, evals3) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-      &claim,
-      taus,
-      &az_small_i64,
-      &bz_small_i64,
-      &cz_small_i64,
-      &mut transcript3,
-    )
-    .unwrap();
+    let (proof3, r3, evals3) =
+      SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+        &claim,
+        taus,
+        &az_small_i64,
+        &bz_small_i64,
+        &cz_small_i64,
+        &mut transcript3,
+      )
+      .unwrap();
 
     // Verify sumcheck proof
     {
@@ -392,15 +393,16 @@ where
   let taus_for_verify = taus.clone();
 
   let t_prove = Instant::now();
-  let (proof2, r2, evals2) = SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value(
-    &claim,
-    taus,
-    &az_small,
-    &bz_small,
-    &cz_small,
-    &mut transcript2,
-  )
-  .unwrap();
+  let (proof2, r2, evals2) =
+    SumcheckProof::<E>::prove_cubic_with_three_inputs_small_value::<_, 3>(
+      &claim,
+      taus,
+      &az_small,
+      &bz_small,
+      &cz_small,
+      &mut transcript2,
+    )
+    .unwrap();
   let prove_us = t_prove.elapsed().as_micros();
 
   // Verify sumcheck proof

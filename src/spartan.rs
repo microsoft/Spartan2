@@ -21,7 +21,7 @@ use crate::{
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
   r1cs::{R1CSWitness, SplitR1CSInstance, SplitR1CSShape},
-  small_field::{DelayedReduction, SmallValueField, vec_to_small},
+  small_field::{DelayedReduction, SmallValueField, vec_to_small_for_extension},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -164,7 +164,7 @@ where
     is_small: bool,
   ) -> Result<Self, SpartanError> {
     if is_small {
-      Self::prove_small(pk, circuit, prep_snark)
+      Self::prove_small::<_, 3>(pk, circuit, prep_snark)
     } else {
       Self::prove_regular(pk, circuit, prep_snark)
     }
@@ -530,10 +530,15 @@ impl<E: Engine> SpartanSNARK<E> {
   /// directly using small-value multiplication (avoiding field conversion overhead)
   /// and runs the small-value sumcheck path.
   ///
+  /// # Type Parameters
+  ///
+  /// - `LB`: Number of small-value sumcheck rounds (ℓ₀). Input values must be
+  ///   bounded by `i64::MAX / 3^LB` for safe Lagrange extension.
+  ///
   /// # Errors
   /// Returns `SpartanError::SmallValueOverflow` if any witness or public value
   /// doesn't fit in i64.
-  fn prove_small<C: SpartanCircuit<E>>(
+  fn prove_small<C: SpartanCircuit<E>, const LB: usize>(
     pk: &SpartanProverKey<E>,
     circuit: C,
     prep_snark: &SpartanPrepSNARK<E>,
@@ -557,20 +562,11 @@ impl<E: Engine> SpartanSNARK<E> {
     )?;
     info!(elapsed_ms = %sat_t.elapsed().as_millis(), "r1cs_instance_and_witness");
 
-    // Convert W, X, and challenges to small values early (fail if too large)
+    // Convert W, X, and challenges to small values with Lagrange extension bound check
     let (_conv_span, conv_t) = start_span!("convert_to_small");
-    let ((W_small, X_small), challenges_small) = rayon::join(
-      || {
-        rayon::join(
-          || vec_to_small::<E::Scalar, i64>(&W.W),
-          || vec_to_small::<E::Scalar, i64>(&U.public_values),
-        )
-      },
-      || vec_to_small::<E::Scalar, i64>(&U.challenges),
-    );
-    let W_small = W_small?;
-    let X_small = X_small?;
-    let challenges_small = challenges_small?;
+    let W_small = vec_to_small_for_extension::<E::Scalar, 2>(&W.W, LB)?;
+    let X_small = vec_to_small_for_extension::<E::Scalar, 2>(&U.public_values, LB)?;
+    let challenges_small = vec_to_small_for_extension::<E::Scalar, 2>(&U.challenges, LB)?;
     info!(elapsed_ms = %conv_t.elapsed().as_millis(), "convert_to_small");
 
     // Build z_small directly from small values
@@ -584,16 +580,16 @@ impl<E: Engine> SpartanSNARK<E> {
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<Vec<_>, SpartanError>>()?;
 
-    // Compute Az, Bz, Cz using multiply_vec_small
+    // Compute Az, Bz, Cz using multiply_vec_small with extension bound check
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let ((Az_small, Bz_small), Cz_small) = rayon::join(
       || {
         rayon::join(
-          || pk.S.A.multiply_vec_small(&z_small),
-          || pk.S.B.multiply_vec_small(&z_small),
+          || pk.S.A.multiply_vec_small::<2>(&z_small, LB),
+          || pk.S.B.multiply_vec_small::<2>(&z_small, LB),
         )
       },
-      || pk.S.C.multiply_vec_small(&z_small),
+      || pk.S.C.multiply_vec_small::<2>(&z_small, LB),
     );
     let Az_small = Az_small?;
     let Bz_small = Bz_small?;
@@ -608,7 +604,7 @@ impl<E: Engine> SpartanSNARK<E> {
     // outer sum-check with small-value polynomials
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
     let (sc_proof_outer, r_x, claims_outer) =
-      SumcheckProof::prove_cubic_with_three_inputs_small_value(
+      SumcheckProof::prove_cubic_with_three_inputs_small_value::<_, LB>(
         &E::Scalar::ZERO,
         tau,
         &MultilinearPolynomial::new(Az_small),

@@ -310,6 +310,12 @@ where
     self.evals.len()
   }
 
+  /// Returns true if this polynomial has no evaluations
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.evals.is_empty()
+  }
+
   /// Get evaluation by domain tuple (type-safe path)
   #[inline]
   pub fn get_by_domain(&self, tuple: &LagrangeIndex<D>) -> T {
@@ -596,7 +602,7 @@ mod tests {
     let num_vars = 3;
 
     // Create input as small values (i32 is identity)
-    let input_small: Vec<i32> = (0..(1 << num_vars)).map(|i| (i + 1) as i32).collect();
+    let input_small: Vec<i32> = (0..(1 << num_vars)).map(|i| i + 1).collect();
 
     // Create same input as field elements
     let input_field: Vec<Scalar> = (0..(1 << num_vars))
@@ -638,7 +644,7 @@ mod tests {
     const D: usize = 2;
     let num_vars = 3;
 
-    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| (i * 2 + 1) as i32).collect();
+    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| i * 2 + 1).collect();
 
     // Extend using allocating version
     let ext1 = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
@@ -667,7 +673,7 @@ mod tests {
     const D: usize = 2;
     let num_vars = 2;
 
-    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| (i + 1) as i32).collect();
+    let input: Vec<i32> = (0..(1 << num_vars)).map(|i| i + 1).collect();
 
     let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
     let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> =
