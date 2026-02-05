@@ -21,26 +21,33 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use spartan2::sha256_circuits::SmallSha256ChainCircuit;
 use clap::{Parser, Subcommand};
-use spartan2::timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings};
 use ff::Field;
 use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::Bn254Engine,
+  sha256_circuits::SmallSha256ChainCircuit,
   small_field::SmallValueField,
   small_sumcheck::prove_cubic_small_value,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
+  timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings},
   traits::{Engine, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait},
 };
 use std::{io::Write, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
-// Use PallasHyraxEngine which has Barrett-optimized SmallLargeMul for Fq
 type E = Bn254Engine;
 type F = <E as Engine>::Scalar;
+
+const TRANSCRIPT_LABEL: &[u8] = b"sha256_chain_bench";
+
+/// Time a closure and return (result, elapsed_ms).
+fn timed<T>(f: impl FnOnce() -> T) -> (T, u128) {
+  let t0 = Instant::now();
+  (f(), t0.elapsed().as_millis())
+}
 
 #[derive(Parser)]
 #[command(about = "SHA-256 chain benchmark: original vs small-value sumcheck")]
@@ -162,7 +169,7 @@ struct BenchmarkResult {
   small_sumcheck_ms: u128,
 }
 
-fn run_chain_benchmark(
+fn run_sumcheck_benchmark(
   input: [u8; 32],
   chain_length: usize,
   expected_num_vars: usize,
@@ -172,23 +179,20 @@ where
 {
   let small_circuit = SmallSha256ChainCircuit::<F>::new(input, chain_length);
 
-  let t0 = Instant::now();
-  let (pk, _vk) = SpartanSNARK::<E>::setup(small_circuit.clone()).expect("setup failed");
-  let setup_ms = t0.elapsed().as_millis();
+  let ((pk, _vk), setup_ms) =
+    timed(|| SpartanSNARK::<E>::setup(small_circuit.clone()).expect("setup failed"));
   let num_constraints = pk.sizes()[4];
   info!(setup_ms, num_constraints, "setup");
 
-  let t0 = Instant::now();
-  let prep_snark =
-    SpartanSNARK::<E>::prep_prove(&pk, small_circuit.clone(), true).expect("prep_prove failed");
-  let witness_ms = t0.elapsed().as_millis();
+  let (prep_snark, witness_ms) = timed(|| {
+    SpartanSNARK::<E>::prep_prove(&pk, small_circuit.clone(), true).expect("prep_prove failed")
+  });
   info!(witness_ms, "witness synthesis");
 
-  let t0 = Instant::now();
-  let (az, bz, cz, tau) =
+  let ((az, bz, cz, tau), extract_ms) = timed(|| {
     SpartanSNARK::<E>::extract_outer_sumcheck_inputs(&pk, small_circuit, &prep_snark)
-      .expect("extract_outer_sumcheck_inputs failed");
-  let extract_ms = t0.elapsed().as_millis();
+      .expect("extract_outer_sumcheck_inputs failed")
+  });
   info!(extract_ms, "extract inputs");
 
   let num_vars = tau.len();
@@ -203,29 +207,29 @@ where
   let tau_for_verify = tau.clone();
 
   // ===== ORIGINAL SUMCHECK =====
-  let (proof1, r1, evals1, orig_sumcheck_ms) = {
+  let ((proof1, r1, evals1), orig_sumcheck_ms) = {
     let mut az1 = MultilinearPolynomial::new(az.clone());
     let mut bz1 = MultilinearPolynomial::new(bz.clone());
     let mut cz1 = MultilinearPolynomial::new(cz);
-    let mut transcript1 = <E as Engine>::TE::new(b"sha256_chain_bench");
+    let mut transcript1 = <E as Engine>::TE::new(TRANSCRIPT_LABEL);
 
-    let t0 = Instant::now();
-    let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
-      &claim,
-      tau.clone(),
-      &mut az1,
-      &mut bz1,
-      &mut cz1,
-      &mut transcript1,
-    )
-    .expect("prove_cubic_with_three_inputs failed");
-    let elapsed = t0.elapsed().as_millis();
+    let (result, elapsed) = timed(|| {
+      SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &claim,
+        tau.clone(),
+        &mut az1,
+        &mut bz1,
+        &mut cz1,
+        &mut transcript1,
+      )
+      .expect("prove_cubic_with_three_inputs failed")
+    });
     info!(orig_sumcheck_ms = elapsed, "original sumcheck");
-    (proof1, r1, evals1, elapsed)
+    (result, elapsed)
   };
 
   // ===== SMALL-VALUE SUMCHECK =====
-  let (proof2, r2, evals2, small_sumcheck_ms) = {
+  let ((proof2, r2, evals2), small_sumcheck_ms) = {
     let az_small_vals: Vec<i64> = az
       .iter()
       .map(|v| <F as SmallValueField<i64>>::try_field_to_small(v).expect("Az too large for i64"))
@@ -243,21 +247,21 @@ where
     let bz_small = MultilinearPolynomial::new(bz_small_vals);
     let cz_small = MultilinearPolynomial::new(cz_small_vals);
 
-    let mut transcript2 = <E as Engine>::TE::new(b"sha256_chain_bench");
+    let mut transcript2 = <E as Engine>::TE::new(TRANSCRIPT_LABEL);
 
-    let t0 = Instant::now();
-    let (proof2, r2, evals2) = prove_cubic_small_value::<E, _, 3>(
-      &claim,
-      tau,
-      &az_small,
-      &bz_small,
-      &cz_small,
-      &mut transcript2,
-    )
-    .expect("prove_cubic_small_value failed");
-    let elapsed = t0.elapsed().as_millis();
+    let (result, elapsed) = timed(|| {
+      prove_cubic_small_value::<E, _, 3>(
+        &claim,
+        tau,
+        &az_small,
+        &bz_small,
+        &cz_small,
+        &mut transcript2,
+      )
+      .expect("prove_cubic_small_value failed")
+    });
     info!(small_sumcheck_ms = elapsed, "small-value sumcheck");
-    (proof2, r2, evals2, elapsed)
+    (result, elapsed)
   };
 
   assert_eq!(r1, r2, "Challenges must match!");
@@ -266,7 +270,7 @@ where
 
   // ===== VERIFY SUMCHECK PROOF =====
   {
-    let mut transcript_v = <E as Engine>::TE::new(b"sha256_chain_bench");
+    let mut transcript_v = <E as Engine>::TE::new(TRANSCRIPT_LABEL);
     let (final_claim, r_v) = proof1
       .verify(claim, num_vars, 3, &mut transcript_v)
       .expect("sumcheck verify failed");
@@ -359,7 +363,7 @@ fn main() {
       init_simple_tracing();
       let chain_length = num_vars_to_chain_length(num_vars);
       print_csv_header();
-      let result = run_chain_benchmark(input, chain_length, num_vars);
+      let result = run_sumcheck_benchmark(input, chain_length, num_vars);
       print_csv_row(&result);
     }
     Some(Command::RangeSumcheckSweep { min, max }) => {
@@ -367,7 +371,7 @@ fn main() {
       print_csv_header();
       for num_vars in min..=max {
         let chain_length = num_vars_to_chain_length(num_vars);
-        let result = run_chain_benchmark(input, chain_length, num_vars);
+        let result = run_sumcheck_benchmark(input, chain_length, num_vars);
         print_csv_row(&result);
       }
     }
@@ -376,7 +380,7 @@ fn main() {
       print_csv_header();
       for num_vars in 16..=26 {
         let chain_length = num_vars_to_chain_length(num_vars);
-        let result = run_chain_benchmark(input, chain_length, num_vars);
+        let result = run_sumcheck_benchmark(input, chain_length, num_vars);
         print_csv_row(&result);
       }
     }
