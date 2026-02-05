@@ -96,9 +96,9 @@ where
   /// Scratch buffer for Bz Lagrange extension. Used during iterative extension.
   pub bz_extended_scratch: Vec<V>,
   /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in accumulator building phase.
-  /// Values are non-R-scaled raw limbs from Barrett-reducing partial sums.
+  /// Values are field elements from reducing partial sums.
   /// Eliminates per-x_out allocation overhead.
-  pub beta_values: Vec<(usize, S::UnreducedField)>,
+  pub beta_values: Vec<(usize, S)>,
 }
 
 impl<S, V, const D: usize> SpartanThreadState<S, V, D>
@@ -178,8 +178,8 @@ where
   /// Scratch buffer for Bz Lagrange extension.
   pub bz_extended_scratch: Vec<V>,
   /// Reusable buffer for filtered (beta_idx, reduced_value) pairs in scatter phase.
-  /// Values are non-R-scaled raw limbs from Barrett-reducing partial sums.
-  pub beta_values: Vec<(usize, S::UnreducedField)>,
+  /// Values are field elements from reducing partial sums.
+  pub beta_values: Vec<(usize, S)>,
 }
 
 impl<S, V: Copy + Default, PS: Copy + Default + Zero, const D: usize> NeutronNovaThreadState<S, V, PS, D>

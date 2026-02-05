@@ -544,7 +544,7 @@ fn run_sumcheck_sweep_with_i32<E>(
   methods: &BenchMethods,
 ) where
   E: Engine,
-  E::Scalar: SmallValueField<i32> + DelayedReduction<i32>,
+  E::Scalar: SmallValueField<i32> + DelayedReduction<i32> + SmallValueField<i64> + DelayedReduction<i64>,
 {
   println!("{}", build_csv_header(methods));
   std::io::stdout().flush().ok();

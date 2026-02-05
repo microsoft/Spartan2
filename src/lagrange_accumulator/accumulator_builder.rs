@@ -118,22 +118,20 @@ where
 
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
-  // Build eq cache: precomputes ex * ey as non-R-scaled raw limbs for all combinations.
-  // This eliminates Montgomery multiplications from the scatter hot path.
-  let eq_cache: Vec<Vec<S::UnreducedField>> = eq_tables
+  // Build eq cache: precomputes ex * ey products for all combinations.
+  let eq_cache: Vec<Vec<S>> = eq_tables
     .e_y
     .iter()
     .map(|round_ey| {
       round_ey
         .iter()
-        .flat_map(|ey| eq_tables.e_xout.iter().map(|ex| (*ey * *ex).to_unreduced()))
+        .flat_map(|ey| eq_tables.e_xout.iter().map(|ex| *ey * *ex))
         .collect()
     })
     .collect();
 
-  // Precompute e_in cache as non-R-scaled raw limbs.
-  // This eliminates from_mont conversion in the inner loop reduction.
-  let e_in_cache: Vec<S::UnreducedField> = eq_tables.e_in.iter().map(|e| e.to_unreduced()).collect();
+  // Precompute e_in values.
+  let e_in_cache: Vec<S> = eq_tables.e_in.clone();
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
   type State<S, V> = SpartanThreadState<S, V, 2>;
@@ -181,7 +179,7 @@ where
           // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
           // Pass small values directly for raw limb accumulation (no pre-multiplication)
           for &beta_idx in &betas_with_infty {
-            S::accumulate_field_small_small_products(
+            S::accumulate_field_small_small_prod(
               &mut state.partial_sums[beta_idx],
               e_in_eval,
               az_ext[beta_idx],
@@ -197,20 +195,20 @@ where
           if state.partial_sums[beta_idx].is_zero() {
             continue;
           }
-          // Barrett-reduce to non-R-scaled raw limbs (accumulator is already non-R-scaled)
-          let val = S::reduce_raw_field_int_to_unreduced(&state.partial_sums[beta_idx]);
-          if val == S::UnreducedField::default() {
+          // Reduce partial sum to field element
+          let val = S::reduce_field_int(&state.partial_sums[beta_idx]);
+          if val == S::ZERO {
             continue;
           }
           state.beta_values.push((beta_idx, val));
         }
 
         // Distribute beta values → A_i(v,u) via idx4 using precomputed eq cache
-        // Raw limb multiply-accumulate (no Montgomery ops), final Barrett reduction after merge
+        // Multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
             let eq_eval = &eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
-            S::accumulate_raw_field_field_products(
+            S::accumulate_field_field_prod(
               &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               val,
               eq_eval,
@@ -234,13 +232,13 @@ where
     })
     .expect("num_x_out > 0 guarantees non-empty fold results");
 
-  // Finalize: Barrett-reduce each bucket from raw 9-limb to field element
+  // Finalize: reduce each bucket from wide 9-limb to field element
   let mut result: LagrangeAccumulators<S, 2> = LagrangeAccumulators::new(l0);
   for (round_idx, round) in merged.acc.rounds.iter().enumerate() {
     for (v_idx, row) in round.data().iter().enumerate() {
       for (u_idx, elem) in row.iter().enumerate() {
         if !elem.is_zero() {
-          result.rounds[round_idx].data_mut()[v_idx][u_idx] = S::reduce_unreduced_field_field(elem);
+          result.rounds[round_idx].data_mut()[v_idx][u_idx] = S::reduce_field_field(elem);
         }
       }
     }
@@ -270,9 +268,9 @@ where
 ///
 /// # Scatter optimization
 ///
-/// All values stay in Montgomery form throughout (no conversions to raw limbs):
+/// All values stay in Montgomery form throughout:
 /// 1. `e_rb_cache` is precomputed as Montgomery field elements: `e_right[x_r] * e_b[round][y]`
-/// 2. Partial sums are reduced to Montgomery field elements (`UnreducedField = Self`)
+/// 2. Partial sums are reduced to Montgomery field elements
 /// 3. Scatter accumulates Montgomery×Montgomery products into `WideLimbs<9>` (R²-scaled)
 /// 4. Final Montgomery REDC per bucket converts back to field elements
 pub fn build_accumulators_neutronnova<S>(
@@ -305,14 +303,14 @@ where
   let e_left_slice = &e_eq[..left];
   let e_right = &e_eq[left..];
 
-  // Precompute e_rb_cache: non-R-scaled raw limbs of e_right[x_r] * e_b[round][y].
-  // Layout: e_rb_cache[round][y * right + x_r] = from_mont(e_right[x_r] * e_b[round][y])
-  let e_rb_cache: Vec<Vec<S::UnreducedField>> = e_b
+  // Precompute e_rb_cache: e_right[x_r] * e_b[round][y] products.
+  // Layout: e_rb_cache[round][y * right + x_r] = e_right[x_r] * e_b[round][y]
+  let e_rb_cache: Vec<Vec<S>> = e_b
     .iter()
     .map(|round_ey| {
       round_ey
         .iter()
-        .flat_map(|ey| e_right.iter().map(|er| (*er * *ey).to_unreduced()))
+        .flat_map(|ey| e_right.iter().map(|er| *er * *ey))
         .collect()
     })
     .collect();
@@ -380,21 +378,20 @@ where
           }
         }
 
-        // Reduce partial sums to non-R-scaled raw limbs and filter non-zero
+        // Reduce partial sums to field elements and filter non-zero
         for &beta_idx in &betas_with_infty {
           let unreduced = &state.partial_sums[beta_idx];
           if !unreduced.is_zero() {
-            let val = S::reduce_field_int_to_unreduced(unreduced);
+            let val = S::reduce_field_int(unreduced);
             state.beta_values.push((beta_idx, val));
           }
         }
 
-        // Scatter: raw limb multiply-accumulate (no Montgomery multiplications)
-        // val is non-R-scaled, e_rb_cache is non-R-scaled → product is non-R-scaled
+        // Scatter: multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
             let e_rb = &e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
-            S::accumulate_raw_field_field_products(
+            S::accumulate_field_field_prod(
               &mut state.scatter_acc.rounds[pref.round_0].data[pref.v_idx][pref.u_idx],
               &val,
               e_rb,
@@ -416,8 +413,8 @@ where
     })
     .expect("right > 0 guarantees non-empty fold results");
 
-  // Barrett-reduce each bucket from raw 9-limb to field element
-  merged.scatter_acc.map(|acc| S::reduce_unreduced_field_field(acc))
+  // Reduce each bucket from wide 9-limb to field element
+  merged.scatter_acc.map(|acc| S::reduce_field_field(acc))
 }
 
 /// Generic Procedure 9: Build accumulators A_i(v, u) for Algorithm 6.

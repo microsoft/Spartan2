@@ -174,43 +174,6 @@ impl<F: SupportsSmallI32 + PrimeField> DelayedReduction<i32> for F {
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     F::from_limbs(montgomery::montgomery_reduce_9::<F>(&acc.0))
   }
-
-  type UnreducedField = Self;
-
-  #[inline(always)]
-  fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self {
-    Self::reduce_field_int(acc)
-  }
-
-  #[inline(always)]
-  fn to_unreduced(&self) -> Self {
-    *self
-  }
-
-  #[inline(always)]
-  fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &Self, b: &Self) {
-    Self::accumulate_field_field_prod(acc, a, b);
-  }
-
-  #[inline(always)]
-  fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self::reduce_field_field(acc)
-  }
-
-  #[inline(always)]
-  fn accumulate_field_small_small_products(
-    acc: &mut Self::UnreducedFieldInt,
-    e: &Self,
-    small_a: i32,
-    small_b: i32,
-  ) {
-    Self::accumulate_field_small_small_prod(acc, e, small_a, small_b);
-  }
-
-  #[inline(always)]
-  fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self {
-    Self::reduce_field_int(acc)
-  }
 }
 
 // ============================================================================
@@ -334,45 +297,7 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i64> for F {
   fn reduce_field_field(acc: &Self::UnreducedFieldField) -> Self {
     F::from_limbs(montgomery::montgomery_reduce_9::<F>(&acc.0))
   }
-
-  type UnreducedField = Self;
-
-  #[inline(always)]
-  fn reduce_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self {
-    Self::reduce_field_int(acc)
-  }
-
-  #[inline(always)]
-  fn to_unreduced(&self) -> Self {
-    *self
-  }
-
-  #[inline(always)]
-  fn accumulate_raw_field_field_products(acc: &mut Self::UnreducedFieldField, a: &Self, b: &Self) {
-    Self::accumulate_field_field_prod(acc, a, b);
-  }
-
-  #[inline(always)]
-  fn reduce_unreduced_field_field(acc: &Self::UnreducedFieldField) -> Self {
-    Self::reduce_field_field(acc)
-  }
-
-  #[inline(always)]
-  fn accumulate_field_small_small_products(
-    acc: &mut Self::UnreducedFieldInt,
-    e: &Self,
-    small_a: i64,
-    small_b: i64,
-  ) {
-    Self::accumulate_field_small_small_prod(acc, e, small_a, small_b);
-  }
-
-  #[inline(always)]
-  fn reduce_raw_field_int_to_unreduced(acc: &Self::UnreducedFieldInt) -> Self {
-    Self::reduce_field_int(acc)
-  }
 }
-
 
 // ============================================================================
 // Tests
