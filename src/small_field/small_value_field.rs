@@ -50,6 +50,7 @@ impl SupportsSmallI32 for halo2curves::pasta::Fq {}
 impl SupportsSmallI64 for halo2curves::pasta::Fp {}
 impl SupportsSmallI64 for halo2curves::pasta::Fq {}
 impl SupportsSmallI64 for Bn254Fr {}
+impl SupportsSmallI32 for Bn254Fr {}
 impl SupportsSmallI32 for T256Fq {}
 impl SupportsSmallI64 for T256Fq {}
 

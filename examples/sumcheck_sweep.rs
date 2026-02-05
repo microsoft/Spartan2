@@ -21,6 +21,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ff::Field;
 use spartan2::{
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{Bn254Engine, PallasHyraxEngine, VestaHyraxEngine},
@@ -29,225 +30,12 @@ use spartan2::{
   sumcheck::SumcheckProof,
   traits::{Engine, transcript::TranscriptEngineTrait},
 };
-use ff::Field;
 use std::{io::Write, ops::Mul, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::EnvFilter;
 
 // ============================================================================
-// Generic poly construction (uses closure for conversion, std Mul for products)
-// ============================================================================
-
-/// Generic poly construction using closure for conversion
-fn make_polys<T, F>(
-  az_i32: &[i32],
-  bz_i32: &[i32],
-  convert: F,
-) -> (
-  MultilinearPolynomial<T>,
-  MultilinearPolynomial<T>,
-  MultilinearPolynomial<T>,
-)
-where
-  T: Clone + Mul<Output = T>,
-  F: Fn(i32) -> T,
-{
-  let az: Vec<T> = az_i32.iter().map(|&v| convert(v)).collect();
-  let bz: Vec<T> = bz_i32.iter().map(|&v| convert(v)).collect();
-  let cz: Vec<T> = az
-    .iter()
-    .zip(&bz)
-    .map(|(a, b)| a.clone() * b.clone())
-    .collect();
-  (
-    MultilinearPolynomial::new(az),
-    MultilinearPolynomial::new(bz),
-    MultilinearPolynomial::new(cz),
-  )
-}
-
-// ============================================================================
-// SumcheckBenchmark Trait
-// ============================================================================
-
-/// Trait for benchmarkable sumcheck methods
-trait SumcheckBenchmark<E: Engine, T: Clone + Mul<Output = T>> {
-  /// Human-readable name for CSV output
-  fn name(&self) -> &'static str;
-
-  /// Conversion function for i32 -> T
-  fn convert(v: i32) -> T;
-
-  /// Run the prover with polynomials of type T
-  fn prove(
-    claim: &E::Scalar,
-    taus: Vec<E::Scalar>,
-    az: MultilinearPolynomial<T>,
-    bz: MultilinearPolynomial<T>,
-    cz: MultilinearPolynomial<T>,
-    transcript: &mut E::TE,
-  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>);
-}
-
-// ============================================================================
-// Shared Verification
-// ============================================================================
-
-/// Shared verification logic (not duplicated in each impl)
-fn verify_sumcheck_proof<E: Engine>(
-  proof: &SumcheckProof<E>,
-  claim: &E::Scalar,
-  num_vars: usize,
-  taus: &[E::Scalar],
-  expected_r: &[E::Scalar],
-  expected_evals: &[E::Scalar],
-) {
-  let mut transcript_v = E::TE::new(b"bench");
-  let (final_claim, r_v) = proof
-    .verify(*claim, num_vars, 3, &mut transcript_v)
-    .unwrap();
-  assert_eq!(r_v, expected_r, "Verify challenges must match prover");
-  let tau_eval = EqPolynomial::new(taus.to_vec()).evaluate(&r_v);
-  let expected = tau_eval * (expected_evals[0] * expected_evals[1] - expected_evals[2]);
-  assert_eq!(final_claim, expected, "Sumcheck final claim mismatch");
-}
-
-// ============================================================================
-// Benchmark Implementations
-// ============================================================================
-
-/// Baseline cubic sumcheck using prove_cubic_with_three_inputs
-struct BaseCubic;
-
-impl<E: Engine> SumcheckBenchmark<E, E::Scalar> for BaseCubic {
-  fn name(&self) -> &'static str {
-    "base"
-  }
-
-  fn convert(v: i32) -> E::Scalar {
-    E::Scalar::from(v as u64)
-  }
-
-  fn prove(
-    claim: &E::Scalar,
-    taus: Vec<E::Scalar>,
-    mut az: MultilinearPolynomial<E::Scalar>,
-    mut bz: MultilinearPolynomial<E::Scalar>,
-    mut cz: MultilinearPolynomial<E::Scalar>,
-    transcript: &mut E::TE,
-  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
-    SumcheckProof::<E>::prove_cubic_with_three_inputs(
-      claim,
-      taus,
-      &mut az,
-      &mut bz,
-      &mut cz,
-      transcript,
-    )
-    .unwrap()
-  }
-}
-
-/// Split-eq with delayed modular reduction
-struct SplitEqDmr;
-
-impl<E> SumcheckBenchmark<E, E::Scalar> for SplitEqDmr
-where
-  E: Engine,
-  E::Scalar: DelayedReduction<E::Scalar>,
-{
-  fn name(&self) -> &'static str {
-    "split_eq_dmr"
-  }
-
-  fn convert(v: i32) -> E::Scalar {
-    E::Scalar::from(v as u64)
-  }
-
-  fn prove(
-    claim: &E::Scalar,
-    taus: Vec<E::Scalar>,
-    mut az: MultilinearPolynomial<E::Scalar>,
-    mut bz: MultilinearPolynomial<E::Scalar>,
-    mut cz: MultilinearPolynomial<E::Scalar>,
-    transcript: &mut E::TE,
-  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
-    SumcheckProof::<E>::prove_cubic_with_three_inputs_split_eq_delayed(
-      claim,
-      taus,
-      &mut az,
-      &mut bz,
-      &mut cz,
-      transcript,
-    )
-    .unwrap()
-  }
-}
-
-/// Small-value i64 optimization
-struct SmallValueI64;
-
-impl<E> SumcheckBenchmark<E, i64> for SmallValueI64
-where
-  E: Engine,
-  E::Scalar: SmallValueField<i64>
-    + DelayedReduction<i64>
-    + DelayedReduction<i128>
-    + DelayedReduction<E::Scalar>,
-{
-  fn name(&self) -> &'static str {
-    "i64"
-  }
-
-  fn convert(v: i32) -> i64 {
-    v as i64
-  }
-
-  fn prove(
-    claim: &E::Scalar,
-    taus: Vec<E::Scalar>,
-    az: MultilinearPolynomial<i64>,
-    bz: MultilinearPolynomial<i64>,
-    cz: MultilinearPolynomial<i64>,
-    transcript: &mut E::TE,
-  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
-    prove_cubic_small_value::<E, _, 3>(claim, taus, &az, &bz, &cz, transcript).unwrap()
-  }
-}
-
-/// Small-value i32 optimization
-struct SmallValueI32;
-
-impl<E> SumcheckBenchmark<E, i32> for SmallValueI32
-where
-  E: Engine,
-  E::Scalar: SmallValueField<i32>
-    + DelayedReduction<i32>
-    + DelayedReduction<i64>
-    + DelayedReduction<E::Scalar>,
-{
-  fn name(&self) -> &'static str {
-    "i32"
-  }
-
-  fn convert(v: i32) -> i32 {
-    v
-  }
-
-  fn prove(
-    claim: &E::Scalar,
-    taus: Vec<E::Scalar>,
-    az: MultilinearPolynomial<i32>,
-    bz: MultilinearPolynomial<i32>,
-    cz: MultilinearPolynomial<i32>,
-    transcript: &mut E::TE,
-  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
-    prove_cubic_small_value::<E, _, 3>(claim, taus, &az, &bz, &cz, transcript).unwrap()
-  }
-}
-
-// ============================================================================
-// Generic Runner
+// SumcheckBenchmark Trait and BenchResult
 // ============================================================================
 
 /// Benchmark result with separate setup and prove times
@@ -257,9 +45,28 @@ struct BenchResult {
   prove_us: u128,
 }
 
-/// Run a single benchmark and return the result
-fn run_single<E, T, B>(
-  bench: &B,
+/// Trait for sumcheck benchmarks with associated Value type.
+trait SumcheckBenchmark<E: Engine> {
+  /// The value type for polynomial evaluations (E::Scalar, i64, or i32)
+  type Value: Clone + Mul<Output = Self::Value>;
+
+  /// Convert i32 witness value to Self::Value
+  fn convert(v: i32) -> Self::Value;
+
+  /// Run the sumcheck prover with given polynomials
+  fn prove(
+    claim: &E::Scalar,
+    taus: Vec<E::Scalar>,
+    az: MultilinearPolynomial<Self::Value>,
+    bz: MultilinearPolynomial<Self::Value>,
+    cz: MultilinearPolynomial<Self::Value>,
+    transcript: &mut E::TE,
+  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>);
+}
+
+/// Standalone benchmark runner - shared logic for all benchmark types
+fn run_benchmark<E, B>(
+  name: &'static str,
   num_vars: usize,
   az_i32: &[i32],
   bz_i32: &[i32],
@@ -268,90 +75,176 @@ fn run_single<E, T, B>(
 ) -> BenchResult
 where
   E: Engine,
-  T: Clone + Mul<Output = T>,
-  B: SumcheckBenchmark<E, T>,
+  B: SumcheckBenchmark<E>,
 {
-  // Setup: convert to polys using B::convert (timed)
+  let mut transcript = E::TE::new(b"bench");
+
   let t_setup = Instant::now();
   let (az, bz, cz) = make_polys(az_i32, bz_i32, B::convert);
-  let mut transcript = E::TE::new(b"bench");
   let setup_us = t_setup.elapsed().as_micros();
 
-  // Prove via trait (timed)
   let t_prove = Instant::now();
   let (proof, r, evals) = B::prove(claim, taus.to_vec(), az, bz, cz, &mut transcript);
   let prove_us = t_prove.elapsed().as_micros();
 
-  // Verify (shared, not timed)
   verify_sumcheck_proof::<E>(&proof, claim, num_vars, taus, &r, &evals);
-
-  info!(setup_us, prove_us, method = bench.name(), "benchmark");
+  info!(setup_us, prove_us, method = name, "benchmark");
   BenchResult { setup_us, prove_us }
 }
 
-/// Helper trait for running benchmarks with type erasure
-trait BenchmarkRunner<E: Engine> {
-  fn name(&self) -> &'static str;
-  fn run(
-    &self,
-    num_vars: usize,
-    az_i32: &[i32],
-    bz_i32: &[i32],
-    taus: &[E::Scalar],
+// ============================================================================
+// Benchmark Implementations
+// ============================================================================
+
+/// Baseline cubic sumcheck using prove_cubic_with_three_inputs
+struct BaseCubic;
+
+impl<E: Engine> SumcheckBenchmark<E> for BaseCubic {
+  type Value = E::Scalar;
+
+  fn convert(v: i32) -> Self::Value {
+    E::Scalar::from(v as u64)
+  }
+
+  fn prove(
     claim: &E::Scalar,
-  ) -> BenchResult;
-}
-
-/// Wrapper to implement BenchmarkRunner for any SumcheckBenchmark
-struct BenchWrapper<B, T>(B, std::marker::PhantomData<T>);
-
-impl<B, T> BenchWrapper<B, T> {
-  fn new(bench: B) -> Self {
-    Self(bench, std::marker::PhantomData)
+    taus: Vec<E::Scalar>,
+    mut az: MultilinearPolynomial<Self::Value>,
+    mut bz: MultilinearPolynomial<Self::Value>,
+    mut cz: MultilinearPolynomial<Self::Value>,
+    transcript: &mut E::TE,
+  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    SumcheckProof::<E>::prove_cubic_with_three_inputs(claim, taus, &mut az, &mut bz, &mut cz, transcript)
+      .unwrap()
   }
 }
 
-impl<E, T, B> BenchmarkRunner<E> for BenchWrapper<B, T>
+/// Split-eq with delayed modular reduction
+struct SplitEqDmr;
+
+impl<E> SumcheckBenchmark<E> for SplitEqDmr
 where
   E: Engine,
-  T: Clone + Mul<Output = T>,
-  B: SumcheckBenchmark<E, T>,
+  E::Scalar: DelayedReduction<E::Scalar>,
 {
-  fn name(&self) -> &'static str {
-    self.0.name()
+  type Value = E::Scalar;
+
+  fn convert(v: i32) -> Self::Value {
+    E::Scalar::from(v as u64)
   }
 
-  fn run(
-    &self,
-    num_vars: usize,
-    az_i32: &[i32],
-    bz_i32: &[i32],
-    taus: &[E::Scalar],
+  fn prove(
     claim: &E::Scalar,
-  ) -> BenchResult {
-    run_single::<E, T, B>(&self.0, num_vars, az_i32, bz_i32, taus, claim)
+    taus: Vec<E::Scalar>,
+    mut az: MultilinearPolynomial<Self::Value>,
+    mut bz: MultilinearPolynomial<Self::Value>,
+    mut cz: MultilinearPolynomial<Self::Value>,
+    transcript: &mut E::TE,
+  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    SumcheckProof::<E>::prove_cubic_with_three_inputs_split_eq_delayed(
+      claim, taus, &mut az, &mut bz, &mut cz, transcript,
+    )
+    .unwrap()
+  }
+}
+
+/// Small-value i64 optimization
+struct SmallValueI64;
+
+impl<E> SumcheckBenchmark<E> for SmallValueI64
+where
+  E: Engine,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
+{
+  type Value = i64;
+
+  fn convert(v: i32) -> Self::Value {
+    v as i64
+  }
+
+  fn prove(
+    claim: &E::Scalar,
+    taus: Vec<E::Scalar>,
+    az: MultilinearPolynomial<Self::Value>,
+    bz: MultilinearPolynomial<Self::Value>,
+    cz: MultilinearPolynomial<Self::Value>,
+    transcript: &mut E::TE,
+  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    prove_cubic_small_value::<E, _, 3>(claim, taus, &az, &bz, &cz, transcript).unwrap()
+  }
+}
+
+/// Small-value i32 optimization
+struct SmallValueI32;
+
+impl<E> SumcheckBenchmark<E> for SmallValueI32
+where
+  E: Engine,
+  E::Scalar: SmallValueField<i32>
+    + DelayedReduction<i32>
+    + DelayedReduction<i64>
+    + DelayedReduction<E::Scalar>,
+{
+  type Value = i32;
+
+  fn convert(v: i32) -> Self::Value {
+    v
+  }
+
+  fn prove(
+    claim: &E::Scalar,
+    taus: Vec<E::Scalar>,
+    az: MultilinearPolynomial<Self::Value>,
+    bz: MultilinearPolynomial<Self::Value>,
+    cz: MultilinearPolynomial<Self::Value>,
+    transcript: &mut E::TE,
+  ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    prove_cubic_small_value::<E, _, 3>(claim, taus, &az, &bz, &cz, transcript).unwrap()
+  }
+}
+
+/// Get method name for CSV output
+fn method_name(method: &SumcheckMethod) -> &'static str {
+  match method {
+    SumcheckMethod::Base => "base",
+    SumcheckMethod::SplitEqDmr => "split_eq_dmr",
+    SumcheckMethod::I64 => "i64",
+    SumcheckMethod::I32 => "i32",
   }
 }
 
 /// Run sweep with multiple methods, outputting combined CSV rows
-fn run_sweep_multi<E: Engine>(
-  benchmarks: Vec<Box<dyn BenchmarkRunner<E>>>,
+fn run_sweep_multi<E>(
+  methods: &[SumcheckMethod],
   min_vars: usize,
   max_vars: usize,
   num_trials: usize,
-) {
+) where
+  E: Engine,
+  E::Scalar: SmallValueField<i64>
+    + SmallValueField<i32>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<i32>
+    + DelayedReduction<E::Scalar>,
+{
   // Build header
   let mut header = vec!["num_vars".to_string(), "n".to_string(), "trial".to_string()];
-  for bench in &benchmarks {
-    header.push(format!("{}_setup_us", bench.name()));
-    header.push(format!("{}_prove_us", bench.name()));
+  for method in methods {
+    let name = method_name(method);
+    header.push(format!("{}_setup_us", name));
+    header.push(format!("{}_prove_us", name));
   }
   // Add speedup columns if base is included
-  let has_base = benchmarks.iter().any(|b| b.name() == "base");
+  let has_base = methods.contains(&SumcheckMethod::Base);
   if has_base {
-    for bench in &benchmarks {
-      if bench.name() != "base" {
-        header.push(format!("prove_speedup_{}", bench.name()));
+    for method in methods {
+      let name = method_name(method);
+      if name != "base" {
+        header.push(format!("prove_speedup_{}", name));
       }
     }
   }
@@ -371,10 +264,27 @@ fn run_sweep_multi<E: Engine>(
     let claim = E::Scalar::ZERO;
 
     for trial in 1..=num_trials {
-      // Run each benchmark
-      let results: Vec<(&str, BenchResult)> = benchmarks
+      // Run each benchmark via direct dispatch
+      let results: Vec<(&str, BenchResult)> = methods
         .iter()
-        .map(|b| (b.name(), b.run(num_vars, &az_i32, &bz_i32, &taus, &claim)))
+        .map(|method| {
+          let name = method_name(method);
+          let result = match method {
+            SumcheckMethod::Base => {
+              run_benchmark::<E, BaseCubic>(name, num_vars, &az_i32, &bz_i32, &taus, &claim)
+            }
+            SumcheckMethod::SplitEqDmr => {
+              run_benchmark::<E, SplitEqDmr>(name, num_vars, &az_i32, &bz_i32, &taus, &claim)
+            }
+            SumcheckMethod::I64 => {
+              run_benchmark::<E, SmallValueI64>(name, num_vars, &az_i32, &bz_i32, &taus, &claim)
+            }
+            SumcheckMethod::I32 => {
+              run_benchmark::<E, SmallValueI32>(name, num_vars, &az_i32, &bz_i32, &taus, &claim)
+            }
+          };
+          (name, result)
+        })
         .collect();
 
       // Build row
@@ -446,12 +356,7 @@ struct Args {
   field: FieldChoice,
 
   /// Methods to benchmark (comma-separated)
-  #[arg(
-    long,
-    value_enum,
-    default_value = "base,i64",
-    value_delimiter = ','
-  )]
+  #[arg(long, value_enum, default_value = "base,i64", value_delimiter = ',')]
   methods: Vec<SumcheckMethod>,
 
   /// Number of trials per num_vars (each recorded separately)
@@ -479,56 +384,6 @@ enum Command {
 // Main
 // ============================================================================
 
-/// Build benchmark runners for Pallas field
-fn build_pallas_benchmarks(
-  methods: &[SumcheckMethod],
-) -> Vec<Box<dyn BenchmarkRunner<PallasHyraxEngine>>> {
-  let mut benchmarks: Vec<Box<dyn BenchmarkRunner<PallasHyraxEngine>>> = Vec::new();
-  for method in methods {
-    match method {
-      SumcheckMethod::Base => benchmarks.push(Box::new(BenchWrapper::new(BaseCubic))),
-      SumcheckMethod::SplitEqDmr => benchmarks.push(Box::new(BenchWrapper::new(SplitEqDmr))),
-      SumcheckMethod::I64 => benchmarks.push(Box::new(BenchWrapper::new(SmallValueI64))),
-      SumcheckMethod::I32 => benchmarks.push(Box::new(BenchWrapper::new(SmallValueI32))),
-    }
-  }
-  benchmarks
-}
-
-/// Build benchmark runners for Vesta field
-fn build_vesta_benchmarks(
-  methods: &[SumcheckMethod],
-) -> Vec<Box<dyn BenchmarkRunner<VestaHyraxEngine>>> {
-  let mut benchmarks: Vec<Box<dyn BenchmarkRunner<VestaHyraxEngine>>> = Vec::new();
-  for method in methods {
-    match method {
-      SumcheckMethod::Base => benchmarks.push(Box::new(BenchWrapper::new(BaseCubic))),
-      SumcheckMethod::SplitEqDmr => benchmarks.push(Box::new(BenchWrapper::new(SplitEqDmr))),
-      SumcheckMethod::I64 => benchmarks.push(Box::new(BenchWrapper::new(SmallValueI64))),
-      SumcheckMethod::I32 => benchmarks.push(Box::new(BenchWrapper::new(SmallValueI32))),
-    }
-  }
-  benchmarks
-}
-
-/// Build benchmark runners for BN254 field (no i32 support)
-fn build_bn254_benchmarks(
-  methods: &[SumcheckMethod],
-) -> Vec<Box<dyn BenchmarkRunner<Bn254Engine>>> {
-  let mut benchmarks: Vec<Box<dyn BenchmarkRunner<Bn254Engine>>> = Vec::new();
-  for method in methods {
-    match method {
-      SumcheckMethod::Base => benchmarks.push(Box::new(BenchWrapper::new(BaseCubic))),
-      SumcheckMethod::SplitEqDmr => benchmarks.push(Box::new(BenchWrapper::new(SplitEqDmr))),
-      SumcheckMethod::I64 => benchmarks.push(Box::new(BenchWrapper::new(SmallValueI64))),
-      SumcheckMethod::I32 => {
-        eprintln!("Warning: i32 method not supported for BN254 field, skipping");
-      }
-    }
-  }
-  benchmarks
-}
-
 fn main() {
   // Initialize tracing (logs to stderr so CSV can go to stdout)
   tracing_subscriber::fmt()
@@ -554,16 +409,68 @@ fn main() {
   // Dispatch based on field
   match args.field {
     FieldChoice::PallasFq => {
-      let benchmarks = build_pallas_benchmarks(&args.methods);
-      run_sweep_multi::<PallasHyraxEngine>(benchmarks, min_vars, max_vars, args.trials);
+      run_sweep_multi::<PallasHyraxEngine>(&args.methods, min_vars, max_vars, args.trials);
     }
     FieldChoice::VestaFp => {
-      let benchmarks = build_vesta_benchmarks(&args.methods);
-      run_sweep_multi::<VestaHyraxEngine>(benchmarks, min_vars, max_vars, args.trials);
+      run_sweep_multi::<VestaHyraxEngine>(&args.methods, min_vars, max_vars, args.trials);
     }
     FieldChoice::Bn254Fr => {
-      let benchmarks = build_bn254_benchmarks(&args.methods);
-      run_sweep_multi::<Bn254Engine>(benchmarks, min_vars, max_vars, args.trials);
+      run_sweep_multi::<Bn254Engine>(&args.methods, min_vars, max_vars, args.trials);
     }
   }
+}
+
+// ============================================================================
+// Generic poly construction (uses closure for conversion, std Mul for products)
+// ============================================================================
+
+/// Generic poly construction using closure for conversion
+fn make_polys<T, F>(
+  az_i32: &[i32],
+  bz_i32: &[i32],
+  convert: F,
+) -> (
+  MultilinearPolynomial<T>,
+  MultilinearPolynomial<T>,
+  MultilinearPolynomial<T>,
+)
+where
+  T: Clone + Mul<Output = T>,
+  F: Fn(i32) -> T,
+{
+  let az: Vec<T> = az_i32.iter().map(|&v| convert(v)).collect();
+  let bz: Vec<T> = bz_i32.iter().map(|&v| convert(v)).collect();
+  let cz: Vec<T> = az
+    .iter()
+    .zip(&bz)
+    .map(|(a, b)| a.clone() * b.clone())
+    .collect();
+  (
+    MultilinearPolynomial::new(az),
+    MultilinearPolynomial::new(bz),
+    MultilinearPolynomial::new(cz),
+  )
+}
+
+// ============================================================================
+// Shared Verification
+// ============================================================================
+
+/// Shared verification logic
+fn verify_sumcheck_proof<E: Engine>(
+  proof: &SumcheckProof<E>,
+  claim: &E::Scalar,
+  num_vars: usize,
+  taus: &[E::Scalar],
+  expected_r: &[E::Scalar],
+  expected_evals: &[E::Scalar],
+) {
+  let mut transcript_v = E::TE::new(b"bench");
+  let (final_claim, r_v) = proof
+    .verify(*claim, num_vars, 3, &mut transcript_v)
+    .unwrap();
+  assert_eq!(r_v, expected_r, "Verify challenges must match prover");
+  let tau_eval = EqPolynomial::new(taus.to_vec()).evaluate(&r_v);
+  let expected = tau_eval * (expected_evals[0] * expected_evals[1] - expected_evals[2]);
+  assert_eq!(final_claim, expected, "Sumcheck final claim mismatch");
 }

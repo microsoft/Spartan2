@@ -126,7 +126,7 @@ where
   let base = (D + 1) as i128;
   let max_value: i128 = SmallValue::max_value().into();
   let max_safe = max_value / base.pow(lb as u32);
-  let abs_small = (small.into() as i128).abs();
+  let abs_small: i128 = small.into().abs();
   if abs_small <= max_safe {
     Some(small)
   } else {
