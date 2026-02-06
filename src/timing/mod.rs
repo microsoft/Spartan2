@@ -5,10 +5,14 @@
 //! - Phase constants for Spartan and NeutronNova prove phases
 //! - Helper functions for collecting and displaying timing data
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tracing::field::{Field, Visit};
-use tracing::Subscriber;
+use std::{
+  collections::HashMap,
+  sync::{Arc, Mutex},
+};
+use tracing::{
+  Subscriber,
+  field::{Field, Visit},
+};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 /// Shared timing data storage (phase name -> elapsed milliseconds).
@@ -107,9 +111,16 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for TimingLayer {
 }
 
 /// Extract timing values for the given phases from collected data.
-pub fn snapshot_timings(data: &TimingData, phases: &[&str]) -> Vec<u64> {
+/// Returns a map keyed by short_name for easier access.
+pub fn snapshot_timings(
+  data: &TimingData,
+  phases: &[(&str, &'static str)],
+) -> HashMap<&'static str, u64> {
   let map = data.lock().unwrap();
-  phases.iter().map(|k| map.get(*k).copied().unwrap_or(0)).collect()
+  phases
+    .iter()
+    .map(|(phase, short_name)| (*short_name, map.get(*phase).copied().unwrap_or(0)))
+    .collect()
 }
 
 /// Clear all collected timing data.
@@ -117,88 +128,101 @@ pub fn clear_timings(data: &TimingData) {
   data.lock().unwrap().clear();
 }
 
+/// Compute element-wise minimum across multiple timing snapshots.
+pub fn collect_timings(
+  timings_all: &[HashMap<&'static str, u64>],
+  phases: &[(&str, &'static str)],
+) -> HashMap<&'static str, u64> {
+  phases
+    .iter()
+    .map(|(_, short_name)| {
+      let min_val = timings_all
+        .iter()
+        .map(|t| t.get(short_name).copied().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+      (*short_name, min_val)
+    })
+    .collect()
+}
+
 // ============================================================================
 // Spartan prove-phase constants
 // ============================================================================
 
-/// Spartan prove phase names (for timing collection).
-pub const PHASES: &[&str] = &[
-  "precommitted_witness_synthesize",
-  "commit_witness_precommitted",
-  "r1cs_instance_and_witness",
-  "commit_witness_rest",
-  "matrix_vector_multiply",
-  "prepare_multilinear_polys",
-  "outer_sumcheck",
-  "compute_eval_rx",
-  "compute_eval_table_sparse",
-  "prepare_poly_ABC",
-  "prepare_poly_z",
-  "inner_sumcheck",
-  "pcs_prove",
-  "spartan_snark_prove",
-];
-
-/// Short names for Spartan phases (for table display).
-pub const SHORT_NAMES: &[&str] = &[
-  "synth_pre", "commit_pre", "r1cs_rest", "commit_rest",
-  "mat_vec", "prep_ml", "outer_sc", "eval_rx",
-  "eval_sparse", "poly_ABC", "poly_z", "inner_sc", "pcs", "total",
+/// Spartan prove phases: (tracing_name, short_display_name).
+pub const SPARTAN_PHASES: &[(&str, &str)] = &[
+  ("precommitted_witness_synthesize", "synth_pre"),
+  ("commit_witness_precommitted", "commit_pre"),
+  ("r1cs_instance_and_witness", "r1cs_rest"),
+  ("commit_witness_rest", "commit_rest"),
+  ("matrix_vector_multiply", "mat_vec"),
+  ("outer_sumcheck", "outer_sc"),
+  ("compute_eval_rx", "eval_rx"),
+  ("compute_eval_table_sparse", "eval_sparse"),
+  ("prepare_poly_ABC", "poly_ABC"),
+  ("prepare_poly_z", "poly_z"),
+  ("inner_sumcheck", "inner_sc"),
+  ("pcs_prove", "pcs"),
+  ("spartan_snark_prove", "prove_total"),
 ];
 
 // ============================================================================
 // NeutronNova NIFS prove-phase constants
 // ============================================================================
 
-/// NeutronNova NIFS prove phase names.
-pub const NEUTRONNOVA_PHASES: &[&str] = &[
-  "generate_shared_witness",
-  "generate_precommitted_witnesses",
-  "commit_witness_precommitted",
-  "matrix_vector_multiply_instances",
-  "nifs_folding_rounds",
-  "fold_witnesses",
-  "fold_instances",
-  "end_to_end_total",
-];
-
-/// Short names for NeutronNova phases.
-pub const NEUTRONNOVA_SHORT_NAMES: &[&str] = &[
-  "shared_syn", "precom_syn", "commit_pre",
-  "mat_vec", "nifs_fold",
-  "fold_W", "fold_U", "total",
+/// NeutronNova NIFS prove phases: (tracing_name, short_display_name).
+pub const NEUTRONNOVA_PHASES: &[(&str, &str)] = &[
+  ("generate_shared_witness", "shared_syn"),
+  ("generate_precommitted_witnesses", "precom_syn"),
+  ("commit_witness_precommitted", "commit_pre"),
+  ("matrix_vector_multiply_instances", "mat_vec"),
+  ("nifs_folding_rounds", "nifs_fold_sc"),
+  ("fold_witnesses", "fold_W"),
+  ("fold_instances", "fold_U"),
+  ("nifs_prove", "nifs_prove"),
+  ("end_to_end_total", "end_to_end"),
 ];
 
 /// Print a comparison table of timing data.
-pub fn print_table(header: &str, small: &[u64], large: &[u64]) {
+pub fn print_table(
+  header: &str,
+  phases: &[(&str, &str)],
+  small: &HashMap<&str, u64>,
+  large: &HashMap<&str, u64>,
+) {
   let col_w = 12;
 
   eprintln!("\n{}", header);
 
-  eprint!("{:<10}", "");
-  for name in SHORT_NAMES {
-    eprint!("{:>width$}", name, width = col_w);
+  eprint!("{:<14}", "");
+  for (_, short_name) in phases {
+    eprint!("{:>width$}", short_name, width = col_w);
   }
   eprintln!();
 
-  eprint!("{:<10}", "small");
-  for v in small {
+  eprint!("{:<14}", "small");
+  for (_, short_name) in phases {
+    let v = small.get(short_name).copied().unwrap_or(0);
     eprint!("{:>width$}", v, width = col_w);
   }
   eprintln!();
 
-  eprint!("{:<10}", "large");
-  for v in large {
+  eprint!("{:<14}", "large");
+  for (_, short_name) in phases {
+    let v = large.get(short_name).copied().unwrap_or(0);
     eprint!("{:>width$}", v, width = col_w);
   }
   eprintln!();
 
-  eprint!("{:<10}", "speedup");
-  for (s, l) in small.iter().zip(large.iter()) {
-    if *s == 0 {
+  eprint!("{:<14}", "speedup");
+  for (_, short_name) in phases {
+    let s = small.get(short_name).copied().unwrap_or(0);
+    let l = large.get(short_name).copied().unwrap_or(0);
+    if s == 0 {
       eprint!("{:>width$}", "-", width = col_w);
     } else {
-      eprint!("{:>width$.2}x", *l as f64 / *s as f64, width = col_w - 1);
+      eprint!("{:>width$.2}x", l as f64 / s as f64, width = col_w - 1);
     }
   }
   eprintln!();

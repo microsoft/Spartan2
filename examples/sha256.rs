@@ -14,36 +14,37 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use spartan2::sha256_circuits::SmallSha256Circuit;
-use spartan2::timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings};
+use clap::Parser;
 use spartan2::{
-  provider::Bn254Engine,
+  cli::FieldChoice,
+  provider::{Bn254Engine, PallasHyraxEngine, VestaHyraxEngine},
+  sha256_circuits::SmallSha256Circuit,
+  small_field::{DelayedReduction, SmallValueField},
   spartan::SpartanSNARK,
+  timing::{ConstraintsData, SPARTAN_PHASES, TimingData, TimingLayer, clear_timings, print_table, snapshot_timings},
   traits::{Engine, snark::R1CSSNARKTrait},
 };
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
-type E = Bn254Engine;
+#[derive(Parser)]
+#[command(about = "SHA-256 Spartan benchmark")]
+struct Args {
+  #[arg(long, value_enum, default_value = "bn254-fr")]
+  field: FieldChoice,
+}
 
-fn main() {
-  let (timing_layer, timing_data, constraints_data) = TimingLayer::new();
-
-  tracing_subscriber::registry()
-    .with(timing_layer)
-    .with(
-      tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_ansi(true)
-        .with_writer(std::io::stderr)
-        .with_filter(EnvFilter::from_default_env()),
-    )
-    .init();
-
+fn run_benchmark<E: Engine>(timing_data: &TimingData, constraints_data: &ConstraintsData)
+where
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
+{
   // Message lengths: 2^10 … 2^11 bytes.
   let circuits: Vec<_> = (10..=11)
-    .map(|k| SmallSha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k], true))
+    .map(|k| SmallSha256Circuit::<E::Scalar>::new(vec![0u8; 1 << k], true))
     .collect();
 
   for circuit in circuits {
@@ -57,8 +58,8 @@ fn main() {
     let setup_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = setup_ms, "setup");
 
-    let mut small_timings: Vec<u64> = Vec::new();
-    let mut large_timings: Vec<u64> = Vec::new();
+    let mut small_timings = HashMap::new();
+    let mut large_timings = HashMap::new();
 
     for is_small in [true, false] {
       let mode = if is_small { "small" } else { "large" };
@@ -66,7 +67,7 @@ fn main() {
       info!("--- is_small={} ---", is_small);
 
       // Clear timing data before prove
-      clear_timings(&timing_data);
+      clear_timings(timing_data);
 
       // PREPARE
       let t0 = Instant::now();
@@ -83,7 +84,7 @@ fn main() {
       info!(elapsed_ms = prove_ms, "prove");
 
       // Snapshot timings from prove
-      let timings = snapshot_timings(&timing_data, PHASES);
+      let timings = snapshot_timings(timing_data, SPARTAN_PHASES);
       if is_small {
         small_timings = timings;
       } else {
@@ -108,8 +109,31 @@ fn main() {
       Some(c) => format!("===== msg={}B, constraints={} =====", msg_len, c),
       None => format!("===== msg={}B =====", msg_len),
     };
-    print_table(&header, &small_timings, &large_timings);
+    print_table(&header, SPARTAN_PHASES, &small_timings, &large_timings);
 
     drop(root_span);
+  }
+}
+
+fn main() {
+  let args = Args::parse();
+
+  let (timing_layer, timing_data, constraints_data) = TimingLayer::new();
+
+  tracing_subscriber::registry()
+    .with(timing_layer)
+    .with(
+      tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(true)
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::from_default_env()),
+    )
+    .init();
+
+  match args.field {
+    FieldChoice::Bn254Fr => run_benchmark::<Bn254Engine>(&timing_data, &constraints_data),
+    FieldChoice::PallasFq => run_benchmark::<PallasHyraxEngine>(&timing_data, &constraints_data),
+    FieldChoice::VestaFp => run_benchmark::<VestaHyraxEngine>(&timing_data, &constraints_data),
   }
 }

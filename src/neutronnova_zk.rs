@@ -675,7 +675,7 @@ where
     ),
     SpartanError,
   > {
-    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove_total");
+    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
 
     // === SHARED SETUP ===
     let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
@@ -829,7 +829,7 @@ where
       &r_bs, T_cur, acc_eq, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck, transcript,
     )?;
 
-    info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove_total");
+    info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove");
 
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }

@@ -31,10 +31,10 @@ use spartan2::{
   small_sumcheck::prove_cubic_small_value,
   spartan::SpartanSNARK,
   sumcheck::SumcheckProof,
-  timing::{PHASES, TimingLayer, clear_timings, print_table, snapshot_timings},
+  timing::{SPARTAN_PHASES, TimingLayer, clear_timings, print_table, snapshot_timings},
   traits::{Engine, snark::R1CSSNARKTrait, transcript::TranscriptEngineTrait},
 };
-use std::{io::Write, time::Instant};
+use std::{collections::HashMap, io::Write, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -101,8 +101,8 @@ fn run_spartan_benchmark(
   let setup_ms = t0.elapsed().as_millis();
   info!(elapsed_ms = setup_ms, "setup");
 
-  let mut small_timings: Vec<u64> = Vec::new();
-  let mut large_timings: Vec<u64> = Vec::new();
+  let mut small_timings = HashMap::new();
+  let mut large_timings = HashMap::new();
 
   for is_small in [true, false] {
     let mode = if is_small { "small" } else { "large" };
@@ -125,7 +125,7 @@ fn run_spartan_benchmark(
     let prove_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prove_ms, "prove");
 
-    let timings = snapshot_timings(timing_data, PHASES);
+    let timings = snapshot_timings(timing_data, SPARTAN_PHASES);
     if is_small {
       small_timings = timings;
     } else {
@@ -139,7 +139,7 @@ fn run_spartan_benchmark(
     info!(elapsed_ms = verify_ms, "verify");
 
     info!(
-      "SUMMARY num_vars={}, chain={}, is_small={}, setup={} ms, prep={} ms, prove={} ms, verify={} ms",
+      "SUMMARY num_vars={}, num_hashes_in_chain={}, is_small={}, setup={} ms, prep={} ms, prove={} ms, verify={} ms",
       num_vars, chain_length, is_small, setup_ms, prep_ms, prove_ms, verify_ms
     );
   }
@@ -147,12 +147,12 @@ fn run_spartan_benchmark(
   let constraints = constraints_data.lock().unwrap().take();
   let header = match constraints {
     Some(c) => format!(
-      "===== chain={}, num_vars={}, constraints={} =====",
+      "===== num_hashes_in_chain={}, num_vars={}, constraints={} =====",
       chain_length, num_vars, c
     ),
-    None => format!("===== chain={}, num_vars={} =====", chain_length, num_vars),
+    None => format!("===== num_hashes_in_chain={}, num_vars={} =====", chain_length, num_vars),
   };
-  print_table(&header, &small_timings, &large_timings);
+  print_table(&header, SPARTAN_PHASES, &small_timings, &large_timings);
 
   drop(root_span);
 }

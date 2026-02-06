@@ -23,6 +23,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use clap::{Parser, Subcommand, ValueEnum};
 use ff::Field;
 use spartan2::{
+  cli::FieldChoice,
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   provider::{Bn254Engine, PallasHyraxEngine, VestaHyraxEngine},
   small_field::{DelayedReduction, SmallValueField},
@@ -322,18 +323,6 @@ fn run_sweep_multi<E>(
 // ============================================================================
 // CLI
 // ============================================================================
-
-/// Field choice for benchmarks
-#[derive(ValueEnum, Clone, Default, Debug)]
-enum FieldChoice {
-  /// Pallas curve scalar field (Fq)
-  #[default]
-  PallasFq,
-  /// Vesta curve scalar field (Fp)
-  VestaFp,
-  /// BN254 curve scalar field (Fr)
-  Bn254Fr,
-}
 
 /// Sumcheck method to benchmark
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]

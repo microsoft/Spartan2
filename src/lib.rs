@@ -61,6 +61,9 @@ pub mod spartan_zk; // Spartan with zero-knowledge
 /// Timing utilities for benchmarks (tracing layer, phase constants).
 pub mod timing;
 
+/// CLI utilities for examples and benchmarks.
+pub mod cli;
+
 /// SHA-256 circuits using small_sha256 gadget (small-value compatible).
 #[allow(missing_docs)]
 pub mod sha256_circuits;
