@@ -66,9 +66,8 @@ pub(crate) struct BetaPrefixCache {
 ///
 /// # Spartan-specific optimizations (D=2)
 ///
-/// - Skip cz_ext entirely: for binary betas, use cz_pref directly
-/// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so they contribute 0
-/// - Only process betas with ∞ (where Cz doesn't contribute anyway)
+/// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so Az·Bz - Cz = 0
+/// - Only process betas containing ∞ (non-binary evaluations where contributions are non-zero)
 pub fn build_accumulators_spartan<F, SmallValue>(
   az: &MultilinearPolynomial<SmallValue>,
   bz: &MultilinearPolynomial<SmallValue>,
@@ -422,7 +421,7 @@ where
           for pref in &beta_prefix_cache[beta_idx] {
             let e_rb = e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
             <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
-              &mut state.scatter_acc.rounds[pref.round_0].data[pref.v_idx][pref.u_idx],
+              &mut state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               &val,
               &e_rb,
             );

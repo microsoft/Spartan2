@@ -18,9 +18,9 @@ use super::domain::LagrangePoint;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LagrangeEvals<T, const D: usize> {
   /// Value at the infinity point
-  pub infinity: T,
+  pub(crate) infinity: T,
   /// Values at finite points 0, 1, ..., D-1
-  pub finite: [T; D],
+  pub(crate) finite: [T; D],
 }
 
 impl<T: Copy, const D: usize> LagrangeEvals<T, D> {

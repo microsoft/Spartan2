@@ -148,7 +148,7 @@ impl<Scalar: PrimeField, const D: usize> RoundAccumulator<Scalar, D> {
 /// Type parameter D is the degree bound for t_i(X) (D=2 for Spartan).
 pub struct LagrangeAccumulators<T, const D: usize> {
   /// rounds[i] contains A_{i+1} (the accumulator for 1-indexed round i+1)
-  pub rounds: Vec<RoundAccumulator<T, D>>,
+  pub(crate) rounds: Vec<RoundAccumulator<T, D>>,
 }
 
 impl<T: Copy + Default, const D: usize> LagrangeAccumulators<T, D> {
