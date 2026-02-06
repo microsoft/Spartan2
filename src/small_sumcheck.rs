@@ -219,7 +219,7 @@ where
 ///
 /// - `LB`: Number of small-value rounds (ℓ₀). The actual number of rounds used is
 ///   `min(LB, num_rounds / 2)`. Caller should ensure input values are bounded by
-///   `i64::MAX / 3^LB` for safe Lagrange extension (see `vec_to_small_for_extension`).
+///   `SmallValue::MAX / 3^LB` for safe Lagrange extension (see [`ExtensionBound`]).
 ///   Typical values are 3-4 for practical instances (3^4 = 81× growth factor).
 pub fn prove_cubic_small_value<E, SmallValue, const LB: usize>(
   claim: &E::Scalar,

@@ -9,13 +9,18 @@
 //! This module defines a custom implementation of CSR/CSC sparse matrices.
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
-use crate::errors::SpartanError;
-use crate::small_field::{DelayedReduction, SmallValueField, try_field_to_small_for_extension_generic};
+use crate::{
+  errors::SpartanError,
+  small_field::{DelayedReduction, ExtensionBound, SmallValueField, WideMul},
+};
 use ff::PrimeField;
-use num_traits::Zero;
+use num_traits::{Bounded, One, Signed, Zero};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
+use std::{
+  fmt::Debug,
+  ops::{Div, Mul},
+};
 
 /// CSR format sparse matrix, We follow the names used by scipy.
 /// Detailed explanation here: https://stackoverflow.com/questions/52299420/scipy-csr-matrix-understand-indptr
@@ -138,7 +143,7 @@ impl<F: PrimeField> SparseMatrix<F> {
   /// # Errors
   /// Returns `SpartanError::InvalidInputLength` if vector length doesn't match.
   /// Returns `SpartanError::SmallValueOverflow` if any result exceeds the safe bound
-  /// for Lagrange extension (see `try_field_to_small_for_extension_generic`).
+  /// for Lagrange extension (see [`ExtensionBound`](crate::small_field::ExtensionBound)).
   pub fn multiply_vec_small<const D: usize, SmallValue>(
     &self,
     z: &[SmallValue],
@@ -146,7 +151,14 @@ impl<F: PrimeField> SparseMatrix<F> {
   ) -> Result<Vec<SmallValue>, SpartanError>
   where
     F: DelayedReduction<SmallValue> + SmallValueField<SmallValue>,
-    SmallValue: num_traits::Bounded + Into<i128> + Copy + Send + Sync,
+    SmallValue: WideMul + Bounded + Copy + Send + Sync + Into<SmallValue::Product>,
+    SmallValue::Product: Copy
+      + Ord
+      + Signed
+      + Div<Output = SmallValue::Product>
+      + Mul<Output = SmallValue::Product>
+      + One
+      + From<i32>,
   {
     if self.cols != z.len() {
       return Err(SpartanError::InvalidInputLength {
@@ -157,6 +169,9 @@ impl<F: PrimeField> SparseMatrix<F> {
         ),
       });
     }
+
+    // Compute bound once, use for all rows
+    let bound = ExtensionBound::<SmallValue, D>::new(lb);
 
     self
       .indptr
@@ -171,20 +186,24 @@ impl<F: PrimeField> SparseMatrix<F> {
         for i in start..end {
           let matrix_val = &self.data[i];
           let col_idx = self.indices[i];
-          <F as DelayedReduction<SmallValue>>::unreduced_multiply_accumulate(&mut acc, matrix_val, &z[col_idx]);
+          <F as DelayedReduction<SmallValue>>::unreduced_multiply_accumulate(
+            &mut acc,
+            matrix_val,
+            &z[col_idx],
+          );
         }
 
         // Reduce to field element, then coerce to small value with extension bound check
         let field_result = <F as DelayedReduction<SmallValue>>::reduce(&acc);
-        try_field_to_small_for_extension_generic::<F, SmallValue, D>(&field_result, lb).ok_or_else(|| {
-          SpartanError::SmallValueOverflow {
+        bound
+          .try_to_small(&field_result)
+          .ok_or_else(|| SpartanError::SmallValueOverflow {
             value: format!("{:?}", field_result),
             context: format!(
-              "multiply_vec_small result at row {} exceeds safe bound for D={}, lb={}",
+              "multiply_vec_small: row {} exceeds bound for D={}, lb={}",
               row_idx, D, lb
             ),
-          }
-        })
+          })
       })
       .collect()
   }

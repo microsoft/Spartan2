@@ -192,7 +192,7 @@ impl MultilinearPolynomial<i64> {
       self
         .Z
         .iter()
-        .map(|&s| crate::small_field::i64_to_field(s))
+        .map(|&s| F::small_to_field(s))
         .collect(),
     )
   }

@@ -368,7 +368,7 @@ impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i64, D> {
       evals: self
         .evals
         .iter()
-        .map(|&v| crate::small_field::i64_to_field(v))
+        .map(|&v| F::small_to_field(v))
         .collect(),
       num_vars: self.num_vars,
     }

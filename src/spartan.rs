@@ -34,6 +34,7 @@ use crate::{
   },
 };
 use ff::Field;
+use num_traits::One;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -404,10 +405,10 @@ impl<E: Engine> SpartanSNARK<E> {
 
   /// Build witness vector z = [W | 1 | public_values | challenges] for matrix-vector multiplication (small values).
   #[inline]
-  fn build_z_small(w: &[i64], public_values: &[i64], challenges: &[i64]) -> Vec<i64> {
+  fn build_z_small<SV: Copy + One>(w: &[SV], public_values: &[SV], challenges: &[SV]) -> Vec<SV> {
     let mut z = Vec::with_capacity(w.len() + 1 + public_values.len() + challenges.len());
     z.extend_from_slice(w);
-    z.push(1i64);
+    z.push(SV::one());
     z.extend_from_slice(public_values);
     z.extend_from_slice(challenges);
     z
@@ -571,9 +572,9 @@ impl<E: Engine> SpartanSNARK<E> {
 
     // Convert W, X, and challenges to small values with Lagrange extension bound check
     let (_conv_span, conv_t) = start_span!("convert_to_small");
-    let W_small = vec_to_small_for_extension::<E::Scalar, 2>(&W.W, LB)?;
-    let X_small = vec_to_small_for_extension::<E::Scalar, 2>(&U.public_values, LB)?;
-    let challenges_small = vec_to_small_for_extension::<E::Scalar, 2>(&U.challenges, LB)?;
+    let W_small = vec_to_small_for_extension::<E::Scalar, i64, 2>(&W.W, LB)?;
+    let X_small = vec_to_small_for_extension::<E::Scalar, i64, 2>(&U.public_values, LB)?;
+    let challenges_small = vec_to_small_for_extension::<E::Scalar, i64, 2>(&U.challenges, LB)?;
     info!(elapsed_ms = %conv_t.elapsed().as_millis(), "convert_to_small");
 
     // Build z_small directly from small values
@@ -716,8 +717,10 @@ impl<E: Engine> SpartanSNARK<E> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::gadgets::CubicChainCircuit;
-  use crate::small_field::{DelayedReduction, SmallValueField};
+  use crate::{
+    gadgets::CubicChainCircuit,
+    small_field::{DelayedReduction, SmallValueField},
+  };
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
 

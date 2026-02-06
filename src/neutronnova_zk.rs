@@ -288,31 +288,32 @@ where
 ///
 /// Computes `folded[k] = Σ_i eq_evals[i] * layers[i][k]` for each coordinate k,
 /// using accumulate_field_small_prod to delay modular reduction until the end.
-fn small_value_eq_weighted_fold<E: Engine>(
+///
+/// Generic over `SV` to support different small value types (i32, i64).
+fn small_value_eq_weighted_fold<E, SV>(
   eq_evals: &[E::Scalar],
-  layers: &[Vec<i64>],
+  layers: &[Vec<SV>],
   num_cons: usize,
 ) -> Vec<E::Scalar>
 where
-  E::Scalar: SmallValueField<i64>
-    + DelayedReduction<i64>
-    + DelayedReduction<i128>
-    + DelayedReduction<E::Scalar>,
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  SV: Copy + Send + Sync,
 {
   let n_inst = eq_evals.len();
   (0..num_cons)
     .into_par_iter()
     .map(|k| {
-      let mut acc = <E::Scalar as DelayedReduction<i64>>::Accumulator::zero();
+      let mut acc = <E::Scalar as DelayedReduction<SV>>::Accumulator::zero();
       for i in 0..n_inst {
         // Single-value accumulation (field × small with delayed reduction)
-        <E::Scalar as DelayedReduction<i64>>::unreduced_multiply_accumulate(
+        <E::Scalar as DelayedReduction<SV>>::unreduced_multiply_accumulate(
           &mut acc,
           &eq_evals[i],
           &layers[i][k],
         );
       }
-      <E::Scalar as DelayedReduction<i64>>::reduce(&acc)
+      <E::Scalar as DelayedReduction<SV>>::reduce(&acc)
     })
     .collect()
 }
@@ -517,8 +518,10 @@ where
   /// Uses Lagrange accumulators and delayed modular reduction for better performance
   /// when witness values fit in a small value type (i32 or i64).
   ///
+  /// Generic over `SV` to support different small value types.
+  ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
-  fn prove_small_value(
+  fn prove_small_value<SV>(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
@@ -539,9 +542,27 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64>
-      + DelayedReduction<i64>
-      + DelayedReduction<i128>
+    SV: WideMul
+      + Copy
+      + Default
+      + num_traits::Zero
+      + num_traits::One
+      + std::ops::Add<Output = SV>
+      + std::ops::Sub<Output = SV>
+      + num_traits::Bounded
+      + Into<SV::Product>
+      + Send
+      + Sync,
+    SV::Product: Copy
+      + Ord
+      + num_traits::Signed
+      + std::ops::Div<Output = SV::Product>
+      + std::ops::Mul<Output = SV::Product>
+      + num_traits::One
+      + From<i32>,
+    E::Scalar: SmallValueField<SV>
+      + DelayedReduction<SV>
+      + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
   {
     let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
@@ -553,13 +574,13 @@ where
     // === EXTRACT SMALL VECTORS EARLY ===
     // Convert all W and X to small values with Lagrange extension bound check
     let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
-    let ws_small: Vec<Vec<i64>> = Ws
+    let ws_small: Vec<Vec<SV>> = Ws
       .par_iter()
-      .map(|w| vec_to_small_for_extension::<E::Scalar, 2>(&w.W, ell_b))
+      .map(|w| vec_to_small_for_extension::<E::Scalar, SV, 2>(&w.W, ell_b))
       .collect::<Result<_, _>>()?;
-    let xs_small: Vec<Vec<i64>> = Us
+    let xs_small: Vec<Vec<SV>> = Us
       .par_iter()
-      .map(|u| vec_to_small_for_extension::<E::Scalar, 2>(&u.X, ell_b))
+      .map(|u| vec_to_small_for_extension::<E::Scalar, SV, 2>(&u.X, ell_b))
       .collect::<Result<_, _>>()?;
     info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
 
@@ -573,19 +594,19 @@ where
     let (_matrix_span, matrix_t) =
       start_span!("matrix_vector_multiply_instances", instances = n_padded);
 
-    let smalls: Vec<(Vec<i64>, Vec<i64>, Vec<i64>)> = (0..n_padded)
+    let smalls: Vec<(Vec<SV>, Vec<SV>, Vec<SV>)> = (0..n_padded)
       .into_par_iter()
       .map(|i| {
         let z_small = build_z_small(&ws_small[i], &xs_small[i]);
-        let Az = S.A.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
-        let Bz = S.B.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
-        let Cz = S.C.multiply_vec_small::<2, i64>(&z_small, ell_b)?;
+        let Az = S.A.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+        let Bz = S.B.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+        let Cz = S.C.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
         Ok((Az, Bz, Cz))
       })
       .collect::<Result<Vec<_>, SpartanError>>()?;
 
     // Unzip into separate layer vectors
-    let (a_small, b_small, c_small): (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<i64>>) =
+    let (a_small, b_small, c_small): (Vec<Vec<SV>>, Vec<Vec<SV>>, Vec<Vec<SV>>) =
       smalls.into_iter().fold(
         (
           Vec::with_capacity(n_padded),
@@ -626,18 +647,18 @@ where
     let num_cons = a_small[0].len();
 
     let (az_folded, (bz_folded, cz_folded)) = rayon::join(
-      || small_value_eq_weighted_fold::<E>(&eq_evals, &a_small, num_cons),
+      || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &a_small, num_cons),
       || {
         rayon::join(
-          || small_value_eq_weighted_fold::<E>(&eq_evals, &b_small, num_cons),
-          || small_value_eq_weighted_fold::<E>(&eq_evals, &c_small, num_cons),
+          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &b_small, num_cons),
+          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &c_small, num_cons),
         )
       },
     );
     info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
 
     // === FOLD WITNESSES/INSTANCES AND UPDATE VC (small-value optimized) ===
-    let (folded_W, folded_U) = fold_and_update_vc_small::<E, i64>(
+    let (folded_W, folded_U) = fold_and_update_vc_small::<E, SV>(
       &r_bs, T_cur, acc_eq, &ws_small, &xs_small, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck,
       transcript,
     )?;
@@ -868,7 +889,7 @@ where
       + DelayedReduction<E::Scalar>,
   {
     if is_small {
-      Self::prove_small_value(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+      Self::prove_small_value::<i64>(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
     } else {
       Self::prove_regular(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
     }
