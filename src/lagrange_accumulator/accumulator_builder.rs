@@ -120,19 +120,25 @@ where
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
   // Build eq cache: precomputes ex * ey products for all combinations.
+  // Layout: eq_cache[round][x_out * num_y + y] for cache-friendly access.
+  // Each parallel task (fixed x_out) accesses a contiguous block of size num_y.
   let eq_cache: Vec<Vec<F>> = eq_tables
     .e_y
     .iter()
     .map(|round_ey| {
-      round_ey
+      eq_tables
+        .e_xout
         .iter()
-        .flat_map(|ey| eq_tables.e_xout.iter().map(|ex| *ey * *ex))
+        .flat_map(|ex| round_ey.iter().map(|ey| *ex * *ey))
         .collect()
     })
     .collect();
 
-  // Precompute e_in values.
-  let e_in_cache: Vec<F> = eq_tables.e_in.clone();
+  // Precompute num_y per round for transposed access
+  let num_y_per_round: Vec<usize> = eq_tables.e_y.iter().map(|ey| ey.len()).collect();
+
+  // Borrow e_in directly (no clone needed)
+  let e_in = &eq_tables.e_in;
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
   type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
@@ -150,7 +156,7 @@ where
         // Safety bound for SignedWideLimbs<N> (N limbs, 64 bits per limb):
         //   field_bits + product_bits + (l/2) < 64*N
         // i32 path: N=5, product_bits<=62; i64 path: N=6, product_bits<=126.
-        for (x_in_bits, e_in_eval) in e_in_cache.iter().enumerate() {
+        for (x_in_bits, e_in_eval) in e_in.iter().enumerate() {
           let suffix = (x_in_bits << xout_vars) | x_out_bits;
 
           // Fill prefix buffers by index assignment (no allocation)
@@ -205,7 +211,9 @@ where
         // Multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            let eq_eval = eq_cache[pref.round_0][pref.y_idx * num_x_out + x_out_bits];
+            // Transposed layout: eq_cache[round][x_out * num_y + y] for contiguous y access
+            let num_y = num_y_per_round[pref.round_0];
+            let eq_eval = eq_cache[pref.round_0][x_out_bits * num_y + pref.y_idx];
             <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
               &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               val,
