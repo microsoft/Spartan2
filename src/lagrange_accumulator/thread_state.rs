@@ -7,7 +7,7 @@
 //! Thread-local scratch buffers for accumulator building.
 //!
 //! These structs eliminate per-iteration heap allocations in the parallel fold loops
-//! of `build_accumulators_spartan` and `build_accumulators`. By hoisting buffer
+//! of `build_accumulators_spartan` and `build_accumulators_neutronnova`. By hoisting buffer
 //! allocations to the fold identity closure (called once per Rayon thread subdivision),
 //! we reduce allocations from O(num_x_out) to O(num_threads).
 
@@ -206,52 +206,3 @@ where
   }
 }
 
-/// Thread-local scratch buffers for the generic `build_accumulators`.
-///
-/// Similar to `SpartanThreadState`, but handles a variable number of polynomials (d).
-/// Each polynomial needs its own buffer pair for Lagrange extension since all d
-/// extension results must be available simultaneously to compute ∏ p_k(β).
-///
-/// See `SpartanThreadState` documentation for the full motivation.
-pub(crate) struct GenericThreadState<S: PrimeField, const D: usize> {
-  /// Accumulator being built (the actual output)
-  pub acc: LagrangeAccumulators<S, D>,
-  /// Partial sums indexed by β. Reset each x_out iteration.
-  pub beta_partial_sums: Vec<S>,
-  /// Prefix evaluations for each of the d polynomials. Size: d × 2^l0
-  pub poly_prefs: Vec<Vec<S>>,
-  /// Buffer pairs for each polynomial's Lagrange extension: (result, scratch).
-  /// After `extend_in_place`, the result is always in the first element of each pair.
-  /// Size: d × 2 × (D+1)^l0
-  pub buf_pairs: Vec<(Vec<S>, Vec<S>)>,
-  /// On-the-fly computed ey*ex scratch buffer. Size per round: 2^{l0-1-round}.
-  /// Total size: 2^l0 - 1 (e.g., 7 for l0=3). Stays hot in L1 cache.
-  pub eyx: Vec<Vec<S>>,
-}
-
-impl<S: PrimeField, const D: usize> GenericThreadState<S, D> {
-  pub fn new(
-    l0: usize,
-    num_betas: usize,
-    prefix_size: usize,
-    ext_size: usize,
-    num_polys: usize,
-    e_y_sizes: &[usize],
-  ) -> Self {
-    Self {
-      acc: LagrangeAccumulators::new(l0),
-      beta_partial_sums: vec![S::ZERO; num_betas],
-      poly_prefs: (0..num_polys).map(|_| vec![S::ZERO; prefix_size]).collect(),
-      buf_pairs: (0..num_polys)
-        .map(|_| (vec![S::ZERO; ext_size], vec![S::ZERO; ext_size]))
-        .collect(),
-      eyx: e_y_sizes.iter().map(|&sz| vec![S::ZERO; sz]).collect(),
-    }
-  }
-
-  /// Zero out partial sums for the next x_out iteration.
-  #[inline]
-  pub fn reset_partial_sums(&mut self) {
-    self.beta_partial_sums.fill(S::ZERO);
-  }
-}

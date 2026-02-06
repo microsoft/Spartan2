@@ -117,6 +117,103 @@ fn extend_batch4<T, const D: usize>(
   }
 }
 
+/// Extend boolean hypercube evaluations to Lagrange domain in-place.
+///
+/// This is Procedure 6: extends polynomial evaluations from {0,1}^ℓ to U_D^ℓ.
+///
+/// Returns the number of valid elements in `buf_curr` (= (D+1)^num_vars).
+/// After this call, `buf_curr[..result]` contains the extended evaluations.
+///
+/// This is the zero-allocation version - caller reads results directly from `buf_curr`.
+///
+/// # Arguments
+/// * `input` - Boolean hypercube evaluations (read-only slice, length must be power of 2)
+/// * `buf_curr` - Result buffer, will contain extended evaluations after call
+/// * `buf_scratch` - Scratch buffer used during iterative extension
+///
+/// Both buffers will be resized if needed to (D+1)^num_vars.
+pub(crate) fn extend_to_lagrange_domain<T, const D: usize>(
+  input: &[T],
+  buf_curr: &mut Vec<T>,
+  buf_scratch: &mut Vec<T>,
+) -> usize
+where
+  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
+{
+  let base: usize = D + 1;
+  let num_vars = input.len().trailing_zeros() as usize;
+  debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
+
+  if num_vars == 0 {
+    // Single element: copy to buf_curr and return
+    if buf_curr.is_empty() {
+      buf_curr.push(T::default());
+    }
+    buf_curr[0] = input[0];
+    return 1;
+  }
+
+  let final_size = base.pow(num_vars as u32);
+
+  // Ensure buffers are large enough
+  if buf_curr.len() < final_size {
+    buf_curr.resize(final_size, T::default());
+  }
+  if buf_scratch.len() < final_size {
+    buf_scratch.resize(final_size, T::default());
+  }
+
+  // Copy input into buf_curr to start
+  buf_curr[..input.len()].copy_from_slice(input);
+
+  for j in 1..=num_vars {
+    // At step j:
+    // - prefix_count = (D+1)^{j-1} extended prefix combinations
+    // - suffix_count = 2^{num_vars-j} remaining boolean suffix combinations
+    let prefix_count = base.pow((j - 1) as u32);
+    let suffix_count = 1usize << (num_vars - j);
+    // Current layout: prefix_count rows × 2 boolean values × suffix_count elements
+    let current_stride = 2 * suffix_count;
+    // Next layout: prefix_count rows × (D+1) domain values × suffix_count elements
+    let next_stride = base * suffix_count;
+
+    // Alternate between buffers each iteration
+    let (src, dst) = if j % 2 == 1 {
+      (&buf_curr[..], &mut buf_scratch[..])
+    } else {
+      (&buf_scratch[..], &mut buf_curr[..])
+    };
+
+    for prefix_idx in 0..prefix_count {
+      let base_src = prefix_idx * current_stride;
+      let base_dst = prefix_idx * next_stride;
+      let mut s = 0;
+
+      // Process 4 suffix elements at a time for ILP
+      while s + 4 <= suffix_count {
+        extend_batch4::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
+        s += 4;
+      }
+
+      // Handle remainder (0-3 elements)
+      while s < suffix_count {
+        extend_single::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
+        s += 1;
+      }
+    }
+  }
+
+  // Ensure result ends up in buf_curr (swap if result is currently in buf_scratch)
+  if num_vars % 2 == 1 {
+    std::mem::swap(buf_curr, buf_scratch);
+  }
+  final_size
+}
+
+// ============================================================================
+// Test-only struct and helpers
+// ============================================================================
+
 #[cfg(test)]
 use crate::polys::multilinear::MultilinearPolynomial;
 #[cfg(test)]
@@ -124,117 +221,27 @@ use crate::small_field::SmallValueField;
 #[cfg(test)]
 use ff::PrimeField;
 
-/// Multilinear polynomial evaluations extended to the Lagrange domain U_D^ℓ.
+/// Test-only: Multilinear polynomial evaluations extended to the Lagrange domain U_D^ℓ.
 ///
 /// Stores evaluations at all (D+1)^num_vars points of the extended domain,
 /// indexed by `LagrangeIndex<D>`.
-pub struct LagrangeEvaluatedMultilinearPolynomial<T, const D: usize>
+#[cfg(test)]
+pub struct LagrangeExtendedEvals<T, const D: usize>
 where
   T: Copy + Default + Add<Output = T> + Sub<Output = T>,
 {
-  #[allow(dead_code)] // Used by test-only methods (get, get_by_domain, len)
   evals: Vec<T>, // size (D+1)^num_vars
-  #[allow(dead_code)] // Used by test-only num_vars() method
   num_vars: usize,
 }
 
-impl<T, const D: usize> LagrangeEvaluatedMultilinearPolynomial<T, D>
+#[cfg(test)]
+impl<T, const D: usize> LagrangeExtendedEvals<T, D>
 where
   T: Copy + Default + Add<Output = T> + Sub<Output = T>,
 {
   /// Base of the extended domain U_D (= D + 1)
   const BASE: usize = D + 1;
 
-  /// Extend boolean hypercube evaluations to Lagrange domain in-place.
-  ///
-  /// Returns the number of valid elements in `buf_curr` (= (D+1)^num_vars).
-  /// After this call, `buf_curr[..result]` contains the extended evaluations.
-  ///
-  /// This is the zero-allocation version - caller reads results directly from `buf_curr`.
-  ///
-  /// # Arguments
-  /// * `input` - Boolean hypercube evaluations (read-only slice, length must be power of 2)
-  /// * `buf_curr` - Result buffer, will contain extended evaluations after call
-  /// * `buf_scratch` - Scratch buffer used during iterative extension
-  ///
-  /// Both buffers will be resized if needed to (D+1)^num_vars.
-  pub fn extend_in_place(input: &[T], buf_curr: &mut Vec<T>, buf_scratch: &mut Vec<T>) -> usize {
-    let num_vars = input.len().trailing_zeros() as usize;
-    debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
-
-    if num_vars == 0 {
-      // Single element: copy to buf_curr and return
-      if buf_curr.is_empty() {
-        buf_curr.push(T::default());
-      }
-      buf_curr[0] = input[0];
-      return 1;
-    }
-
-    let final_size = Self::BASE.pow(num_vars as u32);
-
-    // Ensure buffers are large enough
-    if buf_curr.len() < final_size {
-      buf_curr.resize(final_size, T::default());
-    }
-    if buf_scratch.len() < final_size {
-      buf_scratch.resize(final_size, T::default());
-    }
-
-    // Copy input into buf_curr to start
-    buf_curr[..input.len()].copy_from_slice(input);
-
-    for j in 1..=num_vars {
-      // At step j:
-      // - prefix_count = (D+1)^{j-1} extended prefix combinations
-      // - suffix_count = 2^{num_vars-j} remaining boolean suffix combinations
-      let prefix_count = Self::BASE.pow((j - 1) as u32);
-      let suffix_count = 1usize << (num_vars - j);
-      // Current layout: prefix_count rows × 2 boolean values × suffix_count elements
-      let current_stride = 2 * suffix_count;
-      // Next layout: prefix_count rows × (D+1) domain values × suffix_count elements
-      let next_stride = Self::BASE * suffix_count;
-
-      // Alternate between buffers each iteration
-      let (src, dst) = if j % 2 == 1 {
-        (&buf_curr[..], &mut buf_scratch[..])
-      } else {
-        (&buf_scratch[..], &mut buf_curr[..])
-      };
-
-      for prefix_idx in 0..prefix_count {
-        let base_src = prefix_idx * current_stride;
-        let base_dst = prefix_idx * next_stride;
-        let mut s = 0;
-
-        // Process 4 suffix elements at a time for ILP
-        while s + 4 <= suffix_count {
-          extend_batch4::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
-          s += 4;
-        }
-
-        // Handle remainder (0-3 elements)
-        while s < suffix_count {
-          extend_single::<T, D>(src, dst, base_src, base_dst, suffix_count, s);
-          s += 1;
-        }
-      }
-    }
-
-    // Ensure result ends up in buf_curr (swap if result is currently in buf_scratch)
-    if num_vars % 2 == 1 {
-      std::mem::swap(buf_curr, buf_scratch);
-    }
-    final_size
-  }
-}
-
-/// Test-only helper methods for LagrangeEvaluatedMultilinearPolynomial.
-#[cfg(test)]
-impl<T, const D: usize> LagrangeEvaluatedMultilinearPolynomial<T, D>
-where
-  T: Copy + Default + Add<Output = T> + Sub<Output = T>,
-{
   /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_D^ℓ₀.
   pub fn from_boolean_evals(input: &[T]) -> Self {
     let num_vars = input.len().trailing_zeros() as usize;
@@ -243,46 +250,35 @@ where
     let mut current = input.to_vec();
 
     for j in 1..=num_vars {
-      // At step j:
-      // - prefix_count = (D+1)^{j-1} (number of extended prefix combinations)
-      // - suffix_count = 2^{num_vars-j} (number of remaining boolean suffix combinations)
-      // - current has size = prefix_count × 2 × suffix_count
-      // - next will have size = prefix_count × (D+1) × suffix_count
-
       let prefix_count = Self::BASE.pow((j - 1) as u32);
       let suffix_count = 1usize << (num_vars - j);
-      let current_stride = 2 * suffix_count; // stride between prefixes in current
-      let next_stride = Self::BASE * suffix_count; // stride between prefixes in next
+      let current_stride = 2 * suffix_count;
+      let next_stride = Self::BASE * suffix_count;
 
       let next_size = prefix_count * next_stride;
       let mut next = vec![T::default(); next_size];
 
       for prefix_idx in 0..prefix_count {
         for suffix_idx in 0..suffix_count {
-          // Read p(prefix, 0, suffix) and p(prefix, 1, suffix)
           let base_current = prefix_idx * current_stride;
           let p0 = current[base_current + suffix_idx];
           let p1 = current[base_current + suffix_count + suffix_idx];
 
-          // Extend using Procedure 5: compute p(prefix, γ, suffix) for γ ∈ U_D
           let diff = p1 - p0;
           let base_next = prefix_idx * next_stride;
 
-          // γ = ∞ (index 0): leading coefficient
+          // γ = ∞ (index 0)
           next[base_next + suffix_idx] = diff;
-
-          // γ = 0 (index 1): p(prefix, 0, suffix)
+          // γ = 0 (index 1)
           next[base_next + suffix_count + suffix_idx] = p0;
 
           if D >= 2 {
-            // γ = 1 (index 2): p(prefix, 1, suffix)
+            // γ = 1 (index 2)
             next[base_next + 2 * suffix_count + suffix_idx] = p1;
-
-            // γ = 2, 3, ..., D-1: extrapolate using accumulation (faster than multiplication)
-            // val starts at p1 = p0 + 1*diff, then we add diff each iteration
+            // γ = 2..D-1: extrapolate
             let mut val = p1;
             for k in 2..D {
-              val = val + diff; // val = p0 + k*diff
+              val = val + diff;
               next[base_next + (k + 1) * suffix_count + suffix_idx] = val;
             }
           }
@@ -298,7 +294,7 @@ where
     }
   }
 
-  /// Get evaluation by flat index (performance path)
+  /// Get evaluation by flat index
   #[inline]
   pub fn get(&self, idx: usize) -> T {
     self.evals[idx]
@@ -310,13 +306,13 @@ where
     self.evals.len()
   }
 
-  /// Returns true if this polynomial has no evaluations
+  /// Returns true if empty
   #[inline]
   pub fn is_empty(&self) -> bool {
     self.evals.is_empty()
   }
 
-  /// Get evaluation by domain tuple (type-safe path)
+  /// Get evaluation by domain tuple
   #[inline]
   pub fn get_by_domain(&self, tuple: &LagrangeIndex<D>) -> T {
     self.evals[tuple.to_flat_index()]
@@ -333,10 +329,8 @@ where
   }
 }
 
-/// Test-only: Create from a MultilinearPolynomial.
 #[cfg(test)]
-#[allow(missing_docs)]
-impl<F: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<F, D> {
+impl<F: PrimeField, const D: usize> LagrangeExtendedEvals<F, D> {
   pub fn from_multilinear(poly: &MultilinearPolynomial<F>) -> Self {
     Self::from_boolean_evals(&poly.Z)
   }
@@ -347,29 +341,11 @@ impl<F: PrimeField, const D: usize> LagrangeEvaluatedMultilinearPolynomial<F, D>
   }
 }
 
-/// Test-only: Convert i32 evaluations to field elements.
 #[cfg(test)]
-#[allow(missing_docs)]
-impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i32, D> {
-  pub fn to_field<F: SmallValueField<i32>>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
-    LagrangeEvaluatedMultilinearPolynomial {
+impl<const D: usize> LagrangeExtendedEvals<i32, D> {
+  pub fn to_field<F: SmallValueField<i32>>(&self) -> LagrangeExtendedEvals<F, D> {
+    LagrangeExtendedEvals {
       evals: self.evals.iter().map(|&v| F::small_to_field(v)).collect(),
-      num_vars: self.num_vars,
-    }
-  }
-}
-
-/// Test-only: Convert i64 evaluations to field elements.
-#[cfg(test)]
-#[allow(dead_code, missing_docs)]
-impl<const D: usize> LagrangeEvaluatedMultilinearPolynomial<i64, D> {
-  pub fn to_field<F: SmallValueField<i64>>(&self) -> LagrangeEvaluatedMultilinearPolynomial<F, D> {
-    LagrangeEvaluatedMultilinearPolynomial {
-      evals: self
-        .evals
-        .iter()
-        .map(|&v| F::small_to_field(v))
-        .collect(),
       num_vars: self.num_vars,
     }
   }
@@ -395,7 +371,7 @@ mod tests {
       let input: Vec<Scalar> = (0..input_size).map(|i| Scalar::from(i as u64)).collect();
       let poly = MultilinearPolynomial::new(input);
 
-      let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
+      let extended = LagrangeExtendedEvals::<Scalar, 3>::from_multilinear(&poly);
 
       let expected_size = 4usize.pow(num_vars as u32); // (D+1)^num_vars = 4^num_vars
       assert_eq!(extended.len(), expected_size);
@@ -414,7 +390,7 @@ mod tests {
       .collect();
     let poly = MultilinearPolynomial::new(input.clone());
 
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
 
     // In U_d indexing: 0 → index 1, 1 → index 2
     #[allow(clippy::needless_range_loop)]
@@ -436,7 +412,7 @@ mod tests {
     let p1 = Scalar::from(19u64);
 
     let poly = MultilinearPolynomial::new(vec![p0, p1]);
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, 3>::from_multilinear(&poly);
 
     // U_d = {∞, 0, 1, 2} with indices 0, 1, 2, 3
     assert_eq!(extended.get(0), p1 - p0, "p(∞) = leading coeff");
@@ -455,7 +431,7 @@ mod tests {
       .map(|_| Scalar::random(&mut rand_core::OsRng))
       .collect();
     let poly = MultilinearPolynomial::new(input.clone());
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
 
     // Check all finite points via direct multilinear evaluation
     for idx in 0..extended.len() {
@@ -488,7 +464,7 @@ mod tests {
       .map(|_| Scalar::random(&mut rand_core::OsRng))
       .collect();
     let poly = MultilinearPolynomial::new(input.clone());
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
 
     // p(∞, y₂, y₃) = p(1, y₂, y₃) - p(0, y₂, y₃)
     for y2 in 0..2usize {
@@ -521,7 +497,7 @@ mod tests {
     }
     let poly = MultilinearPolynomial::new(input);
 
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
 
     // Finite points: p(a,b,c) = a + 2b + 4c
     for a in 0..D {
@@ -559,7 +535,7 @@ mod tests {
     let p1 = Scalar::from(19u64);
 
     let poly = MultilinearPolynomial::new(vec![p0, p1]);
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, 3>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, 3>::from_multilinear(&poly);
 
     // Test type-safe access
     let tuple_inf = LagrangeIndex::<3>(vec![LagrangePoint::Infinity]);
@@ -583,9 +559,6 @@ mod tests {
   }
 
   /// Direct multilinear evaluation: p(r) = Σ_x p(x) · eq(x, r).
-  ///
-  /// This mirrors EqPolynomial::evals_from_points() so the bit ordering
-  /// matches the codebase's {0,1}^ℓ indexing.
   fn evaluate_multilinear(evals: &[Scalar], point: &[Scalar]) -> Scalar {
     let chis = crate::polys::eq::EqPolynomial::evals_from_points(point);
     evals
@@ -601,21 +574,15 @@ mod tests {
     const D: usize = 3;
     let num_vars = 3;
 
-    // Create input as small values (i32 is identity)
     let input_small: Vec<i32> = (0..(1 << num_vars)).map(|i| i + 1).collect();
-
-    // Create same input as field elements
     let input_field: Vec<Scalar> = (0..(1 << num_vars))
       .map(|i| Scalar::from((i + 1) as u64))
       .collect();
     let poly = MultilinearPolynomial::new(input_field);
 
-    // Extend using both methods
-    let small_ext =
-      LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input_small);
-    let field_ext = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let small_ext = LagrangeExtendedEvals::<i32, D>::from_boolean_evals(&input_small);
+    let field_ext = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
 
-    // Verify they match
     assert_eq!(small_ext.len(), field_ext.len());
     for i in 0..small_ext.len() {
       let small_as_field: Scalar = Scalar::small_to_field(small_ext.get(i));
@@ -629,39 +596,31 @@ mod tests {
     let p1: i32 = 19;
 
     let input = vec![p0, p1];
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 3>::from_boolean_evals(&input);
+    let extended = LagrangeExtendedEvals::<i32, 3>::from_boolean_evals(&input);
 
-    // U_d = {∞, 0, 1, 2} with indices 0, 1, 2, 3
     assert_eq!(extended.get(0), p1 - p0, "p(∞) = leading coeff");
     assert_eq!(extended.get(1), p0, "p(0)");
     assert_eq!(extended.get(2), p1, "p(1)");
-    // p(2) = p0 + 2 * (p1 - p0) = 2*p1 - p0 = 2*19 - 7 = 31
     assert_eq!(extended.get(3), 31i32, "p(2) = 2*p1 - p0");
   }
 
   #[test]
-  fn test_small_lagrange_extend_in_place() {
+  fn test_extend_in_place_matches_allocating() {
     const D: usize = 2;
     let num_vars = 3;
 
     let input: Vec<i32> = (0..(1 << num_vars)).map(|i| i * 2 + 1).collect();
 
     // Extend using allocating version
-    let ext1 = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
+    let ext1 = LagrangeExtendedEvals::<i32, D>::from_boolean_evals(&input);
 
     // Extend in-place (zero allocation after initial buffer setup)
     let mut buf_curr = Vec::new();
     let mut buf_scratch = Vec::new();
-    let final_size = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::extend_in_place(
-      &input,
-      &mut buf_curr,
-      &mut buf_scratch,
-    );
+    let final_size = extend_to_lagrange_domain::<i32, D>(&input, &mut buf_curr, &mut buf_scratch);
 
-    // Result is always in buf_curr after extend_in_place
     let ext2 = &buf_curr[..final_size];
 
-    // Verify they match
     assert_eq!(ext1.len(), final_size);
     for (i, &ext2_val) in ext2.iter().enumerate() {
       assert_eq!(ext1.get(i), ext2_val, "mismatch at index {i}");
@@ -675,11 +634,9 @@ mod tests {
 
     let input: Vec<i32> = (0..(1 << num_vars)).map(|i| i + 1).collect();
 
-    let small_ext = LagrangeEvaluatedMultilinearPolynomial::<i32, D>::from_boolean_evals(&input);
-    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, D> =
-      small_ext.to_field::<Scalar>();
+    let small_ext = LagrangeExtendedEvals::<i32, D>::from_boolean_evals(&input);
+    let field_ext: LagrangeExtendedEvals<Scalar, D> = small_ext.to_field::<Scalar>();
 
-    // Verify conversion
     for i in 0..small_ext.len() {
       let expected: Scalar = Scalar::small_to_field(small_ext.get(i));
       assert_eq!(field_ext.get(i), expected);
@@ -688,21 +645,17 @@ mod tests {
 
   #[test]
   fn test_small_lagrange_negative_values() {
-    // Test with negative differences (p0 > p1)
     let p0: i32 = 100;
     let p1: i32 = 50;
 
     let input = vec![p0, p1];
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<i32, 2>::from_boolean_evals(&input);
+    let extended = LagrangeExtendedEvals::<i32, 2>::from_boolean_evals(&input);
 
-    // p(∞) = p1 - p0 = -50
     assert_eq!(extended.get(0), -50i32);
     assert_eq!(extended.get(1), p0);
     assert_eq!(extended.get(2), p1);
 
-    // Verify field conversion handles negatives correctly
-    let field_ext: LagrangeEvaluatedMultilinearPolynomial<Scalar, 2> =
-      extended.to_field::<Scalar>();
+    let field_ext: LagrangeExtendedEvals<Scalar, 2> = extended.to_field::<Scalar>();
     assert_eq!(field_ext.get(0), -Scalar::from(50u64));
   }
 }

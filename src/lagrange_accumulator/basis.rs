@@ -10,7 +10,7 @@ use super::{domain::LagrangePoint, evals::LagrangeEvals};
 use ff::PrimeField;
 
 #[cfg(test)]
-use super::extension::LagrangeEvaluatedMultilinearPolynomial;
+use super::extension::LagrangeExtendedEvals;
 
 /// Evaluated Lagrange basis at a single r, stored in LagrangePoint order.
 pub type LagrangeBasisEval<F, const D: usize> = LagrangeEvals<F, D>;
@@ -176,7 +176,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   /// Evaluate an extended polynomial at r using the tensor-product Lagrange basis.
   pub fn eval_extended(
     &self,
-    extended: &LagrangeEvaluatedMultilinearPolynomial<F, D>,
+    extended: &LagrangeExtendedEvals<F, D>,
     r: &[F],
   ) -> F {
     assert_eq!(extended.num_vars(), r.len());
@@ -411,7 +411,7 @@ mod tests {
       .map(|_| Scalar::random(&mut rng))
       .collect();
     let poly = MultilinearPolynomial::new(evals.clone());
-    let extended = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&poly);
+    let extended = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&poly);
     let factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
 
     // Check the finite domain point in U_d^4 (only 0 when D=1).
@@ -455,9 +455,9 @@ mod tests {
     let p2 = MultilinearPolynomial::new(evals2.clone());
     let p3 = MultilinearPolynomial::new(evals3.clone());
 
-    let ext1 = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p1);
-    let ext2 = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p2);
-    let ext3 = LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_multilinear(&p3);
+    let ext1 = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&p1);
+    let ext2 = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&p2);
+    let ext3 = LagrangeExtendedEvals::<Scalar, D>::from_multilinear(&p3);
 
     let mut prod_evals = vec![Scalar::ZERO; ext1.len()];
     #[allow(clippy::needless_range_loop)]
@@ -466,7 +466,7 @@ mod tests {
     }
 
     let prod_extended =
-      LagrangeEvaluatedMultilinearPolynomial::<Scalar, D>::from_evals(prod_evals, num_vars);
+      LagrangeExtendedEvals::<Scalar, D>::from_evals(prod_evals, num_vars);
     let factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
 
     // Check all finite domain points in U_d^4.

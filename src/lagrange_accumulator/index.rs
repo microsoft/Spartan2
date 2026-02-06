@@ -24,7 +24,7 @@ use super::domain::{LagrangeHatPoint, LagrangeIndex, LagrangePoint};
 /// computed using the prefix β contributes. The y component will be summed
 /// over when computing the accumulators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AccumulatorPrefixIndex<const D: usize> {
+pub(crate) struct AccumulatorPrefixIndex<const D: usize> {
   /// Total number of small-value rounds (ℓ₀)
   pub l0: usize,
 
@@ -70,7 +70,7 @@ impl<const D: usize> AccumulatorPrefixIndex<D> {
 /// Derived from [`AccumulatorPrefixIndex`] with all type-safe conversions pre-applied.
 /// This avoids repeated method calls and enum matching in hot loops.
 #[derive(Clone, Copy)]
-pub struct CachedPrefixIndex {
+pub(crate) struct CachedPrefixIndex {
   /// Round as 0-indexed (for array access)
   pub round_0: usize,
   /// Prefix v as flat index
@@ -99,7 +99,7 @@ impl<const D: usize> From<&AccumulatorPrefixIndex<D>> for CachedPrefixIndex {
 /// 2. The coordinate u = β[i-1] is in Û_d (i.e., u ≠ 1)
 ///
 /// Returns contributions as `AccumulatorPrefixIndex`.
-pub fn compute_idx4<const D: usize>(beta: &LagrangeIndex<D>) -> Vec<AccumulatorPrefixIndex<D>> {
+pub(crate) fn compute_idx4<const D: usize>(beta: &LagrangeIndex<D>) -> Vec<AccumulatorPrefixIndex<D>> {
   let l0 = beta.len();
 
   let mut result = Vec::new();

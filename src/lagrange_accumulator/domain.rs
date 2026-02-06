@@ -200,7 +200,7 @@ impl<const D: usize> TryFrom<LagrangePoint<D>> for LagrangeHatPoint<D> {
 
 /// A tuple β ∈ U_d^k — an index into the extended domain.
 ///
-/// Used to index into LagrangeEvaluatedMultilinearPolynomial which stores evaluations over U_d^ℓ₀.
+/// Used to index into extended polynomial evaluations over U_d^ℓ₀.
 ///
 /// Type parameter `D` is the degree bound (U_D has D+1 points).
 #[derive(Clone, Debug, PartialEq, Eq)]

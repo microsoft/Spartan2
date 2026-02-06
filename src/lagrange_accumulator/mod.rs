@@ -27,7 +27,7 @@ mod basis;
 mod domain;
 mod eq_round;
 mod evals;
-mod extension;
+pub(crate) mod extension;
 mod index;
 mod thread_state;
 
@@ -40,20 +40,13 @@ pub use evals::{LagrangeEvals, LagrangeHatEvals};
 // Basis computation
 pub use basis::{LagrangeBasisFactory, LagrangeCoeff};
 
-// Extension
-pub use extension::LagrangeEvaluatedMultilinearPolynomial;
-
 // Accumulators
 pub use accumulator::{LagrangeAccumulators, RoundAccumulator};
 
 // Builder functions
 pub use accumulator_builder::{
-  SPARTAN_T_DEGREE, build_accumulators, build_accumulators_neutronnova,
-  build_accumulators_spartan,
+  SPARTAN_T_DEGREE, build_accumulators_neutronnova, build_accumulators_spartan,
 };
-
-// Index computation
-pub use index::{AccumulatorPrefixIndex, CachedPrefixIndex, compute_idx4};
 
 // Eq round factor and derivation
 pub use eq_round::{EqRoundFactor, derive_t1};

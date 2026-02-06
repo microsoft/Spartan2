@@ -208,21 +208,6 @@ impl<T: Copy + Default, const D: usize> LagrangeAccumulators<T, D> {
         .collect(),
     }
   }
-
-  /// Check if all elements are zero (equal to default).
-  #[allow(dead_code)]
-  pub fn is_all_zero(&self) -> bool
-  where
-    T: PartialEq,
-  {
-    let zero = T::default();
-    self.rounds.iter().all(|round| {
-      round
-        .data()
-        .iter()
-        .all(|row| row.iter().all(|elem| *elem == zero))
-    })
-  }
 }
 
 /// Sumcheck-specific methods for LagrangeAccumulator with field elements.
