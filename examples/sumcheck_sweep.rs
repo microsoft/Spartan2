@@ -341,7 +341,7 @@ enum SumcheckMethod {
 #[command(about = "Sumcheck benchmark sweep")]
 struct Args {
   /// Field to use for benchmarks
-  #[arg(long, value_enum, default_value = "pallas-fq")]
+  #[arg(long, value_enum, default_value = "bn254-fr")]
   field: FieldChoice,
 
   /// Methods to benchmark (comma-separated)
