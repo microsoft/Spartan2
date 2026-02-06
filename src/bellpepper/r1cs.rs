@@ -381,6 +381,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       &ps.cs.aux_assignment
         [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
     );
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
 
     // partial commitment to precommitted witness variables
     let (_commit_precommitted_span, commit_precommitted_t) =
@@ -403,7 +404,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     ps.comm_W_precommitted = comm_W_precommitted;
     ps.r_W_precommitted = r_W_precommitted;
     ps.precommitted = precommitted;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
 
     Ok(())
   }

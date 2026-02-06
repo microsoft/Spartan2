@@ -128,6 +128,25 @@ pub fn clear_timings(data: &TimingData) {
   data.lock().unwrap().clear();
 }
 
+/// Normalize parallel span timings by dividing by the parallelism factor.
+/// This converts summed CPU time to approximate wall-clock time.
+/// `parallel_spans` is a list of short_names to normalize.
+/// `divisor` should typically be `min(num_parallel_tasks, num_cores)`.
+pub fn normalize_parallel_timings(
+  timings: &mut HashMap<&'static str, u64>,
+  parallel_spans: &[&'static str],
+  divisor: usize,
+) {
+  if divisor == 0 {
+    return;
+  }
+  for span in parallel_spans {
+    if let Some(value) = timings.get_mut(span) {
+      *value /= divisor as u64;
+    }
+  }
+}
+
 /// Compute element-wise minimum across multiple timing snapshots.
 pub fn collect_timings(
   timings_all: &[HashMap<&'static str, u64>],
@@ -174,7 +193,7 @@ pub const SPARTAN_PHASES: &[(&str, &str)] = &[
 /// NeutronNova NIFS prove phases: (tracing_name, short_display_name).
 pub const NEUTRONNOVA_PHASES: &[(&str, &str)] = &[
   ("generate_shared_witness", "shared_syn"),
-  ("generate_precommitted_witnesses", "precom_syn"),
+  ("precommitted_witness_synthesize", "precom_syn"),
   ("commit_witness_precommitted", "commit_pre"),
   ("matrix_vector_multiply_instances", "mat_vec"),
   ("nifs_folding_rounds", "nifs_fold_sc"),
@@ -186,10 +205,15 @@ pub const NEUTRONNOVA_PHASES: &[(&str, &str)] = &[
 
 /// NeutronNova full ZkSNARK prove phases: (tracing_name, short_display_name).
 pub const NEUTRONNOVA_ZK_PROVE_PHASES: &[(&str, &str)] = &[
+  // Prep phase breakdown (witness synthesis and commitment)
   ("neutronnova_prep_prove", "prep"),
+  ("generate_shared_witness", "shared_syn"),
+  ("precommitted_witness_synthesize", "precom_syn"),
+  ("commit_witness_precommitted", "commit_pre"),
+  // Rerandomize for ZK
   ("rerandomize_prep_state", "rerand"),
+  // Instance generation
   ("generate_instances_witnesses", "gen_inst"),
-  ("convert_to_regular_instances", "to_reg"),
   // NIFS breakdown
   ("nifs_folding_rounds", "nifs_sc"),
   ("fold_witnesses", "fold_W"),
@@ -200,6 +224,8 @@ pub const NEUTRONNOVA_ZK_PROVE_PHASES: &[(&str, &str)] = &[
   ("inner_sumcheck_batched", "inner_sc"),
   ("pcs_prove", "pcs"),
   ("neutronnova_prove", "zk_prove"),
+  // Total end-to-end (prep + prove)
+  ("end_to_end_total", "end_to_end"),
 ];
 
 /// Print a comparison table of timing data.

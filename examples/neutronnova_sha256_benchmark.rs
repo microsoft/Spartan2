@@ -33,7 +33,7 @@ use spartan2::{
   small_field::{DelayedReduction, SmallValueField},
   timing::{
     NEUTRONNOVA_PHASES, NEUTRONNOVA_ZK_PROVE_PHASES, TimingData, TimingLayer, clear_timings,
-    print_table, snapshot_timings,
+    normalize_parallel_timings, print_table, snapshot_timings,
   },
   traits::{Engine, circuit::SpartanCircuit, pcs::FoldingEngineTrait, transcript::TranscriptEngineTrait},
   zk::NeutronNovaVerifierCircuit,
@@ -194,6 +194,10 @@ fn verify_snark<E: Engine>(
   eprintln!("  verified: yes ({})", mode);
 }
 
+/// Parallel spans that need to be normalized by dividing by parallelism factor.
+/// These spans are called once per circuit and run in parallel.
+const PARALLEL_SPANS: &[&str] = &["precom_syn", "commit_pre"];
+
 fn benchmark_nifs_prove<E: Engine>(
   num_instances: usize,
   chain_length: usize,
@@ -205,12 +209,16 @@ fn benchmark_nifs_prove<E: Engine>(
     + DelayedReduction<i128>
     + DelayedReduction<E::Scalar>,
 {
+  let num_cores = rayon::current_num_threads();
+  // +1 for core circuit which also runs precommitted_witness
+  let parallel_divisor = (num_instances + 1).min(num_cores);
+
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();
 
   eprintln!(
-    "Setting up NeutronNova for {} instances, chain_length={}...",
-    num_instances, chain_length
+    "Setting up NeutronNova for {} instances, chain_length={}, cores={}...",
+    num_instances, chain_length, num_cores
   );
   let t0 = Instant::now();
   let (pk, vk) =
@@ -243,7 +251,9 @@ fn benchmark_nifs_prove<E: Engine>(
     let total_ms = t_total.elapsed().as_millis();
     info!(elapsed_ms = total_ms as u64, "end_to_end_total");
 
-    let timings = snapshot_timings(timing_data, NEUTRONNOVA_PHASES);
+    let mut timings = snapshot_timings(timing_data, NEUTRONNOVA_PHASES);
+    // Normalize parallel spans to approximate wall-clock time
+    normalize_parallel_timings(&mut timings, PARALLEL_SPANS, parallel_divisor);
     if is_small {
       small_timings = timings;
     } else {
@@ -256,8 +266,8 @@ fn benchmark_nifs_prove<E: Engine>(
   verify_snark(&pk, &vk, &circuits, &core_circuit, num_instances, false);
 
   let header = format!(
-    "===== NeutronNova NIFS: instances={}, chain_length={}, constraints={} =====",
-    num_instances, chain_length, pk.S_step.num_cons,
+    "===== NeutronNova NIFS: instances={}, chain_length={}, constraints={}, cores={} =====",
+    num_instances, chain_length, pk.S_step.num_cons, num_cores,
   );
   print_table(&header, NEUTRONNOVA_PHASES, &small_timings, &large_timings);
 }
@@ -273,12 +283,16 @@ fn benchmark_zk_prove<E: Engine>(
     + DelayedReduction<i128>
     + DelayedReduction<E::Scalar>,
 {
+  let num_cores = rayon::current_num_threads();
+  // +1 for core circuit which also runs precommitted_witness
+  let parallel_divisor = (num_instances + 1).min(num_cores);
+
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();
 
   eprintln!(
-    "Setting up NeutronNova for {} instances, chain_length={}...",
-    num_instances, chain_length
+    "Setting up NeutronNova for {} instances, chain_length={}, cores={}...",
+    num_instances, chain_length, num_cores
   );
   let t0 = Instant::now();
   let (pk, vk) =
@@ -295,13 +309,20 @@ fn benchmark_zk_prove<E: Engine>(
 
     clear_timings(timing_data);
 
+    let t_total = Instant::now();
+
     // Full ZK prove
     let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, is_small)
       .expect("prep_prove");
     let snark = NeutronNovaZkSNARK::<E>::prove(&pk, &circuits, &core_circuit, &prep, is_small)
       .expect("prove");
 
-    let timings = snapshot_timings(timing_data, NEUTRONNOVA_ZK_PROVE_PHASES);
+    let total_ms = t_total.elapsed().as_millis();
+    info!(elapsed_ms = total_ms as u64, "end_to_end_total");
+
+    let mut timings = snapshot_timings(timing_data, NEUTRONNOVA_ZK_PROVE_PHASES);
+    // Normalize parallel spans to approximate wall-clock time
+    normalize_parallel_timings(&mut timings, PARALLEL_SPANS, parallel_divisor);
     if is_small {
       small_timings = timings;
     } else {
@@ -315,8 +336,8 @@ fn benchmark_zk_prove<E: Engine>(
   }
 
   let header = format!(
-    "===== NeutronNova ZkProve: instances={}, chain_length={}, constraints={} =====",
-    num_instances, chain_length, pk.S_step.num_cons,
+    "===== NeutronNova ZkProve: instances={}, chain_length={}, constraints={}, cores={} =====",
+    num_instances, chain_length, pk.S_step.num_cons, num_cores,
   );
   print_table(
     &header,
