@@ -15,7 +15,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use spartan2::{
   bellpepper::{
     r1cs::{MultiRoundSpartanWitness, SpartanWitness},
@@ -32,8 +32,8 @@ use spartan2::{
   sha256_circuits::SmallSha256ChainCircuit,
   small_field::{DelayedReduction, SmallValueField},
   timing::{
-    NEUTRONNOVA_PHASES, TimingData, TimingLayer, clear_timings, print_table,
-    snapshot_timings,
+    NEUTRONNOVA_PHASES, NEUTRONNOVA_ZK_PROVE_PHASES, TimingData, TimingLayer, clear_timings,
+    print_table, snapshot_timings,
   },
   traits::{Engine, circuit::SpartanCircuit, pcs::FoldingEngineTrait, transcript::TranscriptEngineTrait},
   zk::NeutronNovaVerifierCircuit,
@@ -42,8 +42,18 @@ use std::{collections::HashMap, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Benchmark mode
+#[derive(ValueEnum, Clone, Default, Debug)]
+enum BenchMode {
+  /// Benchmark NIFS folding only
+  #[default]
+  Nifs,
+  /// Benchmark full NeutronNovaZkSNARK::prove
+  ZkProve,
+}
+
 #[derive(Parser)]
-#[command(about = "NeutronNova NIFS folding benchmark: small vs large sumcheck")]
+#[command(about = "NeutronNova benchmark: small vs large sumcheck")]
 struct Args {
   #[arg(long, default_value = "4")]
   instances: usize,
@@ -51,6 +61,8 @@ struct Args {
   chain_length: usize,
   #[arg(long, value_enum, default_value = "bn254-fr")]
   field: FieldChoice,
+  #[arg(long, value_enum, default_value = "nifs")]
+  mode: BenchMode,
 }
 
 /// Generate step circuits with distinct inputs
@@ -250,6 +262,70 @@ fn benchmark_nifs_prove<E: Engine>(
   print_table(&header, NEUTRONNOVA_PHASES, &small_timings, &large_timings);
 }
 
+fn benchmark_zk_prove<E: Engine>(
+  num_instances: usize,
+  chain_length: usize,
+  timing_data: &TimingData,
+) where
+  E::PCS: FoldingEngineTrait<E>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
+{
+  let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
+  let core_circuit = circuits[0].clone();
+
+  eprintln!(
+    "Setting up NeutronNova for {} instances, chain_length={}...",
+    num_instances, chain_length
+  );
+  let t0 = Instant::now();
+  let (pk, vk) =
+    NeutronNovaZkSNARK::<E>::setup(&circuits[0], &core_circuit, num_instances).expect("setup");
+  let setup_ms = t0.elapsed().as_millis();
+  eprintln!("Setup done in {} ms", setup_ms);
+
+  let mut small_timings = HashMap::new();
+  let mut large_timings = HashMap::new();
+
+  for is_small in [true, false] {
+    let mode = if is_small { "small" } else { "large" };
+    let _mode_span = info_span!("mode", mode).entered();
+
+    clear_timings(timing_data);
+
+    // Full ZK prove
+    let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, is_small)
+      .expect("prep_prove");
+    let snark = NeutronNovaZkSNARK::<E>::prove(&pk, &circuits, &core_circuit, &prep, is_small)
+      .expect("prove");
+
+    let timings = snapshot_timings(timing_data, NEUTRONNOVA_ZK_PROVE_PHASES);
+    if is_small {
+      small_timings = timings;
+    } else {
+      large_timings = timings;
+    }
+
+    // Verify
+    let res = snark.verify(&vk, num_instances);
+    assert!(res.is_ok(), "Verification failed: {:?}", res.err());
+    eprintln!("  verified: yes ({})", mode);
+  }
+
+  let header = format!(
+    "===== NeutronNova ZkProve: instances={}, chain_length={}, constraints={} =====",
+    num_instances, chain_length, pk.S_step.num_cons,
+  );
+  print_table(
+    &header,
+    NEUTRONNOVA_ZK_PROVE_PHASES,
+    &small_timings,
+    &large_timings,
+  );
+}
+
 fn main() {
   let args = Args::parse();
 
@@ -266,15 +342,24 @@ fn main() {
     )
     .init();
 
-  match args.field {
-    FieldChoice::Bn254Fr => {
+  match (args.field, args.mode) {
+    (FieldChoice::Bn254Fr, BenchMode::Nifs) => {
       benchmark_nifs_prove::<Bn254Engine>(args.instances, args.chain_length, &timing_data)
     }
-    FieldChoice::PallasFq => {
+    (FieldChoice::Bn254Fr, BenchMode::ZkProve) => {
+      benchmark_zk_prove::<Bn254Engine>(args.instances, args.chain_length, &timing_data)
+    }
+    (FieldChoice::PallasFq, BenchMode::Nifs) => {
       benchmark_nifs_prove::<PallasHyraxEngine>(args.instances, args.chain_length, &timing_data)
     }
-    FieldChoice::VestaFp => {
+    (FieldChoice::PallasFq, BenchMode::ZkProve) => {
+      benchmark_zk_prove::<PallasHyraxEngine>(args.instances, args.chain_length, &timing_data)
+    }
+    (FieldChoice::VestaFp, BenchMode::Nifs) => {
       benchmark_nifs_prove::<VestaHyraxEngine>(args.instances, args.chain_length, &timing_data)
+    }
+    (FieldChoice::VestaFp, BenchMode::ZkProve) => {
+      benchmark_zk_prove::<VestaHyraxEngine>(args.instances, args.chain_length, &timing_data)
     }
   }
 }

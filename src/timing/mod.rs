@@ -184,6 +184,24 @@ pub const NEUTRONNOVA_PHASES: &[(&str, &str)] = &[
   ("end_to_end_total", "end_to_end"),
 ];
 
+/// NeutronNova full ZkSNARK prove phases: (tracing_name, short_display_name).
+pub const NEUTRONNOVA_ZK_PROVE_PHASES: &[(&str, &str)] = &[
+  ("neutronnova_prep_prove", "prep"),
+  ("rerandomize_prep_state", "rerand"),
+  ("generate_instances_witnesses", "gen_inst"),
+  ("convert_to_regular_instances", "to_reg"),
+  // NIFS breakdown
+  ("nifs_folding_rounds", "nifs_sc"),
+  ("fold_witnesses", "fold_W"),
+  ("fold_instances", "fold_U"),
+  ("nifs_prove", "nifs"),
+  // Post-NIFS
+  ("outer_sumcheck_batched", "outer_sc"),
+  ("inner_sumcheck_batched", "inner_sc"),
+  ("pcs_prove", "pcs"),
+  ("neutronnova_prove", "zk_prove"),
+];
+
 /// Print a comparison table of timing data.
 pub fn print_table(
   header: &str,
