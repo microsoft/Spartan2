@@ -374,6 +374,7 @@ mod tests {
   use crate::{
     gadgets::CubicChainCircuit,
     polys::multilinear::MultilinearPolynomial,
+    sha256_circuits::SmallSha256Circuit,
     provider::PallasHyraxEngine,
     small_field::{DelayedReduction, SmallValueField, WideMul},
     spartan::SpartanSNARK,
@@ -614,5 +615,101 @@ mod tests {
     for num_rounds in [4, 6, 10] {
       run_equivalence_test(num_rounds);
     }
+  }
+
+  /// Test that prove_cubic_small_value produces identical output to
+  /// prove_cubic_with_three_inputs using SmallSha256Circuit.
+  ///
+  /// Tests both NoBatchEq (use_batching=false) and BatchingEq<21> (use_batching=true) modes.
+  fn run_sha256_equivalence_test(preimage_len: usize, use_batching: bool) {
+    // 1. Create SmallSha256Circuit
+    let circuit = SmallSha256Circuit::<F>::new(vec![0u8; preimage_len], use_batching);
+
+    // 2. Setup and prep_prove
+    let (pk, _vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup");
+    let prep_snark = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove");
+
+    // 3. Extract Az, Bz, Cz, tau
+    let (az_vals, bz_vals, cz_vals, taus) =
+      SpartanSNARK::<E>::extract_outer_sumcheck_inputs(&pk, circuit, &prep_snark)
+        .expect("extract_outer_sumcheck_inputs");
+
+    // 4. Convert to small values (i64)
+    let az_small: Vec<i64> = az_vals
+      .iter()
+      .map(|v| F::try_field_to_small(v).expect("Az should fit in i64"))
+      .collect();
+    let bz_small: Vec<i64> = bz_vals
+      .iter()
+      .map(|v| F::try_field_to_small(v).expect("Bz should fit in i64"))
+      .collect();
+    let cz_small: Vec<i64> = az_small
+      .iter()
+      .zip(&bz_small)
+      .map(|(&a, &b)| a * b)
+      .collect();
+
+    // 5. Run both methods with fresh transcripts
+    let claim = F::ZERO;
+    let mut transcript1 = <E as Engine>::TE::new(b"test_sha256");
+    let mut transcript2 = <E as Engine>::TE::new(b"test_sha256");
+
+    let mut az1 = MultilinearPolynomial::new(az_vals);
+    let mut bz1 = MultilinearPolynomial::new(bz_vals);
+    let mut cz1 = MultilinearPolynomial::new(cz_vals);
+
+    let (proof1, r1, evals1) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+      &claim,
+      taus.clone(),
+      &mut az1,
+      &mut bz1,
+      &mut cz1,
+      &mut transcript1,
+    )
+    .expect("standard prove");
+
+    let az_small_poly = MultilinearPolynomial::new(az_small);
+    let bz_small_poly = MultilinearPolynomial::new(bz_small);
+    let cz_small_poly = MultilinearPolynomial::new(cz_small);
+
+    let (proof2, r2, evals2) = prove_cubic_small_value::<E, _, 3>(
+      &claim,
+      taus.clone(),
+      &az_small_poly,
+      &bz_small_poly,
+      &cz_small_poly,
+      &mut transcript2,
+    )
+    .expect("small-value prove");
+
+    // 6. Assert equivalence
+    assert_eq!(r1, r2, "challenges must match");
+    assert_eq!(proof1, proof2, "proofs must match");
+    assert_eq!(evals1, evals2, "final evals must match");
+
+    // 7. Verify the proof
+    let num_vars = taus.len();
+    let mut transcript_v = <E as Engine>::TE::new(b"test_sha256");
+    let (final_claim, r_v) = proof1
+      .verify(claim, num_vars, 3, &mut transcript_v)
+      .expect("verification");
+    assert_eq!(r_v, r1, "verify challenges must match prover");
+    let tau_eval = EqPolynomial::new(taus).evaluate(&r_v);
+    let expected = tau_eval * (evals1[0] * evals1[1] - evals1[2]);
+    assert_eq!(final_claim, expected, "final claim mismatch");
+  }
+
+  /// Test small-value sumcheck equivalence with SmallSha256Circuit.
+  /// Tests both NoBatchEq and BatchingEq<21> modes with a 64-byte message.
+  #[test]
+  fn test_sumcheck_equivalence_with_sha256_circuit() {
+    // Use 64 bytes (smaller than example's 1024 for faster tests)
+    let preimage_len = 64;
+
+    // Test NoBatchEq (i32 path)
+    run_sha256_equivalence_test(preimage_len, false);
+
+    // Test BatchingEq<21> (i64 path)
+    run_sha256_equivalence_test(preimage_len, true);
   }
 }
