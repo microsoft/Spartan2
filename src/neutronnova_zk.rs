@@ -2077,7 +2077,8 @@ mod tests {
     type E = T256HyraxEngine;
 
     // Test with different numbers of circuits being folded
-    for num_circuits in [2, 4, 8, 16] {
+    // Includes non-power-of-2 counts to test padding logic
+    for num_circuits in [2, 3, 4, 5, 7, 8, 16] {
       test_neutronnova_equivalence_for_num_circuits::<E>(num_circuits);
     }
   }
@@ -2132,5 +2133,257 @@ mod tests {
 
     assert_prove_and_verify(false, "regular");
     assert_prove_and_verify(true, "small-value");
+  }
+
+  /// Test that NIFS sumcheck polynomial generation produces identical results
+  /// between the regular (field) path and the small-value optimized path.
+  ///
+  /// Uses CubicChainCircuit to generate realistic R1CS data with small witness values.
+  fn run_nifs_sumcheck_polynomial_equivalence_test<E: Engine>(num_instances: usize)
+  where
+    E::PCS: FoldingEngineTrait<E>,
+    E::Scalar: SmallValueField<i64>
+      + DelayedReduction<i64>
+      + DelayedReduction<i128>
+      + DelayedReduction<E::Scalar>,
+  {
+    // 1. Setup using CubicChainCircuit (guarantees small witness values)
+    const NUM_ROUNDS: usize = 6; // ~64 constraints
+    let circuit = CubicChainCircuit::for_rounds(NUM_ROUNDS);
+    let (pk, _vk) = NeutronNovaZkSNARK::<E>::setup(&circuit, &circuit, num_instances).unwrap();
+    let circuits: Vec<_> = (0..num_instances).map(|_| circuit.clone()).collect();
+
+    // 2. Generate witnesses using prep_prove
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+
+    // 3. Synthesize full instances and witnesses
+    let mut instances_witnesses: Vec<(R1CSInstance<E>, R1CSWitness<E>)> = Vec::new();
+    for (i, circuit) in circuits.iter().enumerate() {
+      let mut ps_clone = ps.ps_step[i].clone();
+      let mut transcript = E::TE::new(b"test_transcript");
+      transcript.absorb(b"index", &E::Scalar::from(i as u64));
+      let (instance, witness) = SatisfyingAssignment::<E>::r1cs_instance_and_witness(
+        &mut ps_clone,
+        &pk.S_step,
+        &pk.ck,
+        circuit,
+        true,
+        &mut transcript,
+      )
+      .unwrap();
+      instances_witnesses.push((instance.to_regular_instance().unwrap(), witness));
+    }
+
+    // 4. Pad to power of 2
+    let n_padded = num_instances.next_power_of_two();
+    let ell_b = n_padded.log_2();
+    while instances_witnesses.len() < n_padded {
+      instances_witnesses.push(instances_witnesses[0].clone());
+    }
+
+    // 5. Generate deterministic tau, rhos, and challenges
+    let tau = E::Scalar::from(42u64);
+    let rhos: Vec<E::Scalar> = (0..ell_b)
+      .map(|i| E::Scalar::from((i + 3) as u64))
+      .collect();
+    let challenges: Vec<E::Scalar> = (0..ell_b)
+      .map(|i| E::Scalar::from((i + 7) as u64))
+      .collect();
+
+    // 6. Compute E_eq via tensor decomposition
+    let (ell_cons, left, right) = compute_tensor_decomp(pk.S_step.num_cons);
+    let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
+
+    // 7. Compute Az, Bz, Cz for all instances (field version)
+    let triples: Vec<_> = instances_witnesses
+      .iter()
+      .map(|(u, w)| {
+        let z = build_z::<E>(&w.W, &u.X);
+        pk.S_step.multiply_vec(&z).unwrap()
+      })
+      .collect();
+
+    let (mut A_layers, mut B_layers, mut C_layers): (
+      Vec<Vec<E::Scalar>>,
+      Vec<Vec<E::Scalar>>,
+      Vec<Vec<E::Scalar>>,
+    ) = triples.into_iter().fold(
+      (
+        Vec::with_capacity(n_padded),
+        Vec::with_capacity(n_padded),
+        Vec::with_capacity(n_padded),
+      ),
+      |(mut a, mut b, mut c), (az, bz, cz)| {
+        a.push(az);
+        b.push(bz);
+        c.push(cz);
+        (a, b, c)
+      },
+    );
+
+    // 8. Compute small-value versions
+    let smalls: Vec<_> = instances_witnesses
+      .iter()
+      .map(|(u, w)| {
+        let w_small: Vec<i64> = w
+          .W
+          .iter()
+          .map(|v| E::Scalar::try_field_to_small(v).unwrap())
+          .collect();
+        let x_small: Vec<i64> = u
+          .X
+          .iter()
+          .map(|v| E::Scalar::try_field_to_small(v).unwrap())
+          .collect();
+        let z_small = build_z_small(&w_small, &x_small);
+        let az = pk
+          .S_step
+          .A
+          .multiply_vec_small::<2, i64>(&z_small, ell_b)
+          .unwrap();
+        let bz = pk
+          .S_step
+          .B
+          .multiply_vec_small::<2, i64>(&z_small, ell_b)
+          .unwrap();
+        (az, bz)
+      })
+      .collect();
+
+    let (a_small, b_small): (Vec<Vec<i64>>, Vec<Vec<i64>>) = smalls.into_iter().unzip();
+
+    // Run REGULAR path sumcheck
+    let mut polys_regular: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO;
+    let mut acc_eq = E::Scalar::ONE;
+    let mut m = n_padded;
+
+    for t in 0..ell_b {
+      let rho_t = rhos[t];
+      let pairs = m / 2;
+
+      // Compute (e0, quad_coeff) via prove_helper for each pair
+      let (e0, quad_coeff) = A_layers
+        .chunks(2)
+        .zip(B_layers.chunks(2))
+        .zip(C_layers.chunks(2))
+        .enumerate()
+        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+          let (e0, quad_coeff) = NeutronNovaNIFS::<E>::prove_helper(
+            t,
+            (left, right),
+            &E_eq,
+            &pair_a[0],
+            &pair_b[0],
+            &pair_c[0],
+            &pair_a[1],
+            &pair_b[1],
+            &pair_c[1],
+          );
+          let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+          (e0 * w, quad_coeff * w)
+        })
+        .fold((E::Scalar::ZERO, E::Scalar::ZERO), |a, b| (a.0 + b.0, a.1 + b.1));
+
+      // Build polynomial (same formula as prove_regular)
+      let one_minus_rho = E::Scalar::ONE - rho_t;
+      let two_rho_minus_one = rho_t - one_minus_rho;
+      let c = e0 * acc_eq;
+      let a = quad_coeff * acc_eq;
+      let a_b_c = (T_cur - c * one_minus_rho) * rho_t.invert().unwrap();
+      let b = a_b_c - a - c;
+      let poly_t = UniPoly {
+        coeffs: vec![
+          c * one_minus_rho,                         // d
+          c * two_rho_minus_one + b * one_minus_rho, // c
+          b * two_rho_minus_one + a * one_minus_rho, // b
+          a * two_rho_minus_one,                     // a
+        ],
+      };
+      polys_regular.push(poly_t.clone());
+
+      // Use pre-determined challenge
+      let r_b = challenges[t];
+      acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rho_t) + r_b * rho_t;
+      T_cur = poly_t.evaluate(&r_b);
+
+      // Fold layers for next round
+      let mut next_A = vec![vec![]; m];
+      let mut next_B = vec![vec![]; m];
+      let mut next_C = vec![vec![]; m];
+      for i in 0..m {
+        let target = if i & 1 == 0 { i >> 1 } else { (i >> 1) + pairs };
+        next_A[target] = std::mem::take(&mut A_layers[i]);
+        next_B[target] = std::mem::take(&mut B_layers[i]);
+        next_C[target] = std::mem::take(&mut C_layers[i]);
+      }
+      A_layers = next_A;
+      B_layers = next_B;
+      C_layers = next_C;
+
+      for matrix_layer in [&mut A_layers, &mut B_layers, &mut C_layers] {
+        let (low, high) = matrix_layer.split_at_mut(pairs);
+        low.iter_mut().zip(high.iter()).for_each(|(lo, hi)| {
+          lo.iter_mut().zip(hi.iter()).for_each(|(l, h)| {
+            *l += mul_opt(&(*h - *l), &r_b);
+          });
+        });
+        matrix_layer.truncate(pairs);
+      }
+
+      m = pairs;
+    }
+
+    // Run SMALL-VALUE path sumcheck
+    let accumulators =
+      build_accumulators_neutronnova(&a_small, &b_small, &E_eq, left, right, &rhos);
+    let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+
+    let mut polys_small: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
+    let mut T_cur_small = E::Scalar::ZERO;
+
+    for (i, rho_i) in rhos.iter().enumerate() {
+      let t_all = small_value.eval_t_all_u(i);
+      let t0 = t_all.at_zero();
+      let t_inf = t_all.at_infinity();
+
+      let li = small_value.eq_round_values(*rho_i);
+      let t1 = derive_t1(li.at_zero(), li.at_one(), T_cur_small, t0).unwrap();
+
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+      polys_small.push(poly.clone());
+
+      let r_i = challenges[i]; // Same challenge as regular path
+      T_cur_small = poly.evaluate(&r_i);
+      small_value.advance(&li, r_i);
+    }
+
+    // Compare polynomial coefficients round-by-round
+    for (round, (p_reg, p_small)) in polys_regular.iter().zip(&polys_small).enumerate() {
+      assert_eq!(
+        p_reg.coeffs, p_small.coeffs,
+        "round {round} polynomial mismatch for num_instances={num_instances}\n\
+         regular: {:?}\n\
+         small:   {:?}",
+        p_reg.coeffs, p_small.coeffs
+      );
+    }
+  }
+
+  #[test]
+  fn test_nifs_sumcheck_polynomial_equivalence() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+      .try_init();
+
+    type E = T256HyraxEngine;
+
+    // Test with both power-of-2 and non-power-of-2 instance counts
+    // Non-power-of-2 tests the padding logic
+    for num_instances in [2, 3, 4, 5, 7, 8, 16] {
+      run_nifs_sumcheck_polynomial_equivalence_test::<E>(num_instances);
+    }
   }
 }
