@@ -25,7 +25,7 @@ fn eval_poly_horner<E: Engine, CS: ConstraintSystem<E::Scalar>>(
   x: &AllocatedNum<E::Scalar>,
 ) -> Result<AllocatedNum<E::Scalar>, SynthesisError> {
   // Start from highest coefficient.
-  let mut acc = coeffs.last().unwrap().clone(); // degree ≥ 1 in practice
+  let mut acc = coeffs.last().expect("coeffs is non-empty").clone(); // degree ≥ 1 in practice
   // We iterate from degree-1 down to 0 (excluding last which we already used).
   for (i, c_i) in coeffs.iter().rev().skip(1).enumerate() {
     // new_acc = acc * x + c_i
@@ -85,6 +85,9 @@ fn alloc_coeffs<E: Engine, CS: ConstraintSystem<E::Scalar>>(
 /// * `cs` - Constraint system for enforcing the constraint
 /// * `poly` - Polynomial coefficients as allocated numbers
 /// * `claim` - The claimed sum value
+///
+/// # Panics
+/// Panics if `poly` is empty.
 fn enforce_sc_claim<E: Engine, CS: ConstraintSystem<E::Scalar>>(
   mut cs: CS,
   poly: &[AllocatedNum<E::Scalar>],
@@ -213,7 +216,7 @@ fn enforce_inner_sc_final_check<E: Engine, CS: ConstraintSystem<E::Scalar>>(
     Ok(if se_v.is_zero().into() {
       E::Scalar::ZERO
     } else {
-      prev_claim_v * se_v.invert().unwrap()
+      prev_claim_v * se_v.invert().expect("se_v is non-zero (checked above)")
     })
   })?;
 

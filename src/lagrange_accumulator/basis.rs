@@ -158,7 +158,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
       prefix[i + 1] = prefix[i] * values[i];
     }
 
-    let inv_prod = prefix[D].invert().unwrap();
+    let inv_prod = prefix[D].invert().expect("batch inversion failed: input contains zero or duplicate points");
 
     let mut out = [F::ZERO; D];
     let mut suffix = F::ONE;

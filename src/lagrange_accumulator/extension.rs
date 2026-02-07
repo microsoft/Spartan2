@@ -142,7 +142,7 @@ where
 {
   let base: usize = D + 1;
   let num_vars = input.len().trailing_zeros() as usize;
-  debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
+  assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
 
   if num_vars == 0 {
     // Single element: copy to buf_curr and return
@@ -245,7 +245,7 @@ where
   /// Procedure 6: Extend polynomial evaluations from {0,1}^ℓ₀ to U_D^ℓ₀.
   pub fn from_boolean_evals(input: &[T]) -> Self {
     let num_vars = input.len().trailing_zeros() as usize;
-    debug_assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
+    assert_eq!(input.len(), 1 << num_vars, "Input size must be power of 2");
 
     let mut current = input.to_vec();
 
@@ -336,7 +336,7 @@ impl<F: PrimeField, const D: usize> LagrangeExtendedEvals<F, D> {
   }
 
   pub fn from_evals(evals: Vec<F>, num_vars: usize) -> Self {
-    debug_assert_eq!(evals.len(), (D + 1).pow(num_vars as u32));
+    assert_eq!(evals.len(), (D + 1).pow(num_vars as u32), "evals length must match domain size");
     Self { evals, num_vars }
   }
 }

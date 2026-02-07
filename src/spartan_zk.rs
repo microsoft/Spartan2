@@ -355,7 +355,7 @@ where
     };
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
 
     // Process the inner-final equality round
     // Set verifier circuit public values before processing inner-final round

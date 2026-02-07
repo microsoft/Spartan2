@@ -187,7 +187,9 @@ where
   E::PCS: FoldingEngineTrait<E>,
 {
   // T_out = poly_last(r_last) / eq(r_b, rho)
-  let T_out = T_cur * acc_eq.invert().unwrap();
+  let T_out = T_cur * acc_eq.invert().into_option().ok_or(SpartanError::ProofVerifyError {
+    reason: "acc_eq is zero".to_string(),
+  })?;
   vc.t_out_step = T_out;
   vc.eq_rho_at_rb = acc_eq;
   SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
@@ -248,7 +250,9 @@ where
   use crate::r1cs::weights_from_r;
 
   // T_out = poly_last(r_last) / eq(r_b, rho)
-  let T_out = T_cur * acc_eq.invert().unwrap();
+  let T_out = T_cur * acc_eq.invert().into_option().ok_or(SpartanError::ProofVerifyError {
+    reason: "acc_eq is zero".to_string(),
+  })?;
   vc.t_out_step = T_out;
   vc.eq_rho_at_rb = acc_eq;
   SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
@@ -782,7 +786,9 @@ where
       let two_rho_minus_one = rho_t - one_minus_rho;
       let c = e0 * acc_eq;
       let a = quad_coeff * acc_eq;
-      let a_b_c = (T_cur - c * one_minus_rho) * rho_t.invert().unwrap();
+      let a_b_c = (T_cur - c * one_minus_rho) * rho_t.invert().into_option().ok_or(SpartanError::ProofVerifyError {
+        reason: "rho_t is zero".to_string(),
+      })?;
       let b = a_b_c - a - c;
       let new_a = a * two_rho_minus_one;
       let new_b = b * two_rho_minus_one + a * one_minus_rho;
@@ -1019,8 +1025,8 @@ where
     let num_rounds_b = num_steps.next_power_of_two().log_2();
 
     let num_vars = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
-    let num_rounds_x = usize::try_from(S_step.num_cons.ilog2()).unwrap();
-    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+    let num_rounds_x = usize::try_from(S_step.num_cons.ilog2()).expect("constraint count log2 fits in usize");
+    let num_rounds_y = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize") + 1;
     let vc = NeutronNovaVerifierCircuit::<E>::default(num_rounds_b, num_rounds_x, num_rounds_y);
     let (vc_shape, vc_ck, _vk_mr) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
@@ -1409,7 +1415,7 @@ where
         .into_iter()
         .chain(folded_U.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize");
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
     let eval_X_core = {
@@ -1417,13 +1423,13 @@ where
         .into_iter()
         .chain(core_instance_regular.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize");
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
     let eval_W_step =
-      (eval_Z_step - r_y[0] * eval_X_step) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+      (eval_Z_step - r_y[0] * eval_X_step) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
     let eval_W_core =
-      (eval_Z_core - r_y[0] * eval_X_core) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+      (eval_Z_core - r_y[0] * eval_X_core) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
 
     vc.eval_W_step = eval_W_step;
     vc.eval_W_core = eval_W_core;
@@ -1699,7 +1705,7 @@ where
         .into_iter()
         .chain(folded_U.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize");
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
     let eval_X_core = {
@@ -1707,7 +1713,7 @@ where
         .into_iter()
         .chain(core_instance_regular.X.iter().cloned())
         .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
+      let num_vars_log2 = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize");
       SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
     };
 

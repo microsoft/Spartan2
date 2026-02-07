@@ -102,6 +102,14 @@ pub trait DelayedReduction<Value>: Sized {
 // ============================================================================
 
 impl<F: MontgomeryLimbs + PrimeField> DelayedReduction<i32> for F {
+  /// Accumulator for field × i32 products.
+  ///
+  /// # Overflow Bounds
+  /// - Field element: 254 bits (BN254 Fr)
+  /// - i32 magnitude: 32 bits
+  /// - Product size: 286 bits (5 limbs)
+  /// - SignedWideLimbs<6>: 384 bits capacity
+  /// - Headroom: 98 bits → supports up to 2^98 accumulations
   type Accumulator = SignedWideLimbs<6>;
 
   #[inline(always)]
@@ -141,6 +149,14 @@ impl<F: MontgomeryLimbs + PrimeField> DelayedReduction<i32> for F {
 // ============================================================================
 
 impl<F: MontgomeryLimbs + PrimeField> DelayedReduction<i64> for F {
+  /// Accumulator for field × i64 products.
+  ///
+  /// # Overflow Bounds
+  /// - Field element: 254 bits (BN254 Fr)
+  /// - i64 magnitude: 64 bits
+  /// - Product size: 318 bits (5 limbs)
+  /// - SignedWideLimbs<6>: 384 bits capacity
+  /// - Headroom: 66 bits → supports up to 2^66 accumulations
   type Accumulator = SignedWideLimbs<6>;
 
   #[inline(always)]
@@ -182,6 +198,14 @@ impl<F: MontgomeryLimbs + PrimeField> DelayedReduction<i64> for F {
 // ============================================================================
 
 impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i128> for F {
+  /// Accumulator for field × i128 products (from i64 × i64).
+  ///
+  /// # Overflow Bounds
+  /// - Field element: 254 bits (BN254 Fr)
+  /// - i128 magnitude: 128 bits
+  /// - Product size: 382 bits (6 limbs)
+  /// - SignedWideLimbs<7>: 448 bits capacity
+  /// - Headroom: 66 bits → supports up to 2^66 accumulations
   type Accumulator = SignedWideLimbs<7>;
 
   #[inline(always)]
@@ -237,6 +261,13 @@ impl<F: SupportsSmallI64 + PrimeField> DelayedReduction<i128> for F {
 // ============================================================================
 
 impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
+  /// Accumulator for field × field products.
+  ///
+  /// # Overflow Bounds
+  /// - Field element: 254 bits (BN254 Fr)
+  /// - Product size: 508 bits (8 limbs)
+  /// - WideLimbs<9>: 576 bits capacity
+  /// - Headroom: 68 bits → supports up to 2^68 accumulations
   type Accumulator = WideLimbs<9>;
 
   #[inline(always)]

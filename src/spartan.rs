@@ -191,8 +191,8 @@ where
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 
     let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(vk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+      usize::try_from(vk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize"),
+      (usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize") + 1),
     );
 
     info!(
@@ -307,7 +307,7 @@ impl<E: Engine> SpartanSNARK<E> {
     let (claim_Az, claim_Bz, claim_Cz) = claims_outer;
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+    let num_rounds_y = usize::try_from(num_vars.ilog2()).expect("num_vars log2 fits in usize") + 1;
 
     // inner sum-check preparation
     let (_r_span, r_t) = start_span!("prepare_inner_claims");
@@ -374,7 +374,7 @@ impl<E: Engine> SpartanSNARK<E> {
     };
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
@@ -470,7 +470,7 @@ impl<E: Engine> SpartanSNARK<E> {
     .concat();
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // outer sum-check preparation
     let tau = (0..num_rounds_x)
@@ -581,7 +581,7 @@ impl<E: Engine> SpartanSNARK<E> {
     let z_small = Self::build_z_small(&W_small, &X_small, &challenges_small);
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // outer sum-check preparation
     let tau = (0..num_rounds_x)
@@ -700,7 +700,7 @@ impl<E: Engine> SpartanSNARK<E> {
     ]
     .concat();
 
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).unwrap();
+    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // Generate tau challenges
     let tau = (0..num_rounds_x)
