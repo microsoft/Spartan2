@@ -25,9 +25,10 @@
 mod digest;
 mod math;
 mod nifs;
-mod polys;
+pub mod polys;
 mod r1cs;
-mod sumcheck;
+pub mod big_num;
+pub mod sumcheck;
 mod zk;
 
 #[macro_use]
@@ -42,7 +43,7 @@ pub mod traits;
 // public modules for different proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
-pub mod spartan_zk; // Spartan with zero-knowledge 
+pub mod spartan_zk; // Spartan with zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

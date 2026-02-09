@@ -109,7 +109,10 @@ pub struct SpartanSNARK<E: Engine> {
   eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
-impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
+impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E>
+where
+  E::Scalar: crate::big_num::DelayedReduction<E::Scalar>,
+{
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
   type PrepSNARK = SpartanPrepSNARK<E>;
