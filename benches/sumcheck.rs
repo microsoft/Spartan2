@@ -81,6 +81,31 @@ where
   for num_vars in sizes {
     let len = 1 << num_vars;
 
+    // Sanity check: generate and verify one proof before benchmarking
+    {
+      let mut poly_az = MultilinearPolynomial::new(az[..len].to_vec());
+      let mut poly_bz = MultilinearPolynomial::new(bz[..len].to_vec());
+      let mut poly_cz = MultilinearPolynomial::new(cz[..len].to_vec());
+      let tau_vec = taus[..num_vars].to_vec();
+      let mut prover_transcript = E::TE::new(b"bench");
+
+      let (proof, _r, _evals) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &E::Scalar::ZERO,
+        tau_vec,
+        &mut poly_az,
+        &mut poly_bz,
+        &mut poly_cz,
+        &mut prover_transcript,
+      )
+      .expect("proof generation should succeed");
+
+      // Verify with fresh transcript
+      let mut verifier_transcript = E::TE::new(b"bench");
+      proof
+        .verify(E::Scalar::ZERO, num_vars, 3, &mut verifier_transcript)
+        .expect("proof verification should succeed");
+    }
+
     group.throughput(Throughput::Elements(len as u64));
 
     group.bench_with_input(
