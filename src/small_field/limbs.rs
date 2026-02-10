@@ -263,6 +263,24 @@ pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
   result
 }
 
+/// Multiply 3-limb by 5-limb, producing an 8-limb result.
+///
+/// Used in Barrett reduction: q2 = q1 × μ where q1 is 3 limbs and μ is 5 limbs.
+#[inline(always)]
+pub(super) fn mul_3x5_to_8(a: &[u64; 3], b: &[u64; 5]) -> [u64; 8] {
+  let mut result = [0u64; 8];
+  for i in 0..3 {
+    let mut carry = 0u128;
+    for j in 0..5 {
+      let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
+      result[i + j] = prod as u64;
+      carry = prod >> 64;
+    }
+    result[i + 5] = carry as u64;
+  }
+  result
+}
+
 // ============================================================================
 // Limb subtraction operations
 // ============================================================================

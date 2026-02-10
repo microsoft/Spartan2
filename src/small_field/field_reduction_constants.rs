@@ -30,49 +30,21 @@ use halo2curves::{
 ///
 /// | Constant | Value | Used When |
 /// |----------|-------|-----------|
-/// | `R256_MOD` | 2^256 mod p | Reducing 5th limb (bits 256-319) |
-/// | `R320_MOD` | 2^320 mod p | Reducing 6th limb (bits 320-383) |
-/// | `R384_MOD` | 2^384 mod p | Reducing 7th limb (bits 384-447) |
-/// | `R512_MOD` | 2^512 mod p | Reducing 9th limb (bits 512-575) |
+/// | `R384_MOD` | 2^384 mod p | Folding 7th limb in Barrett reduction |
+/// | `R512_MOD` | 2^512 mod p | Folding 9th limb in Montgomery REDC |
+/// | `R_MOD` | 2^256 mod p | Montgomery carry correction |
+/// | `BARRETT_MU` | ⌊2^512/p⌋ | True Barrett quotient estimate |
 ///
-/// # Example: 6-limb Reduction
+/// # Barrett Reduction
 ///
-/// For a 6-limb value `c = [c0, c1, c2, c3, c4, c5]` representing:
-/// ```text
-/// c = c0 + c1*2^64 + c2*2^128 + c3*2^192 + c4*2^256 + c5*2^320
-/// ```
+/// For a 6-limb value x, Barrett reduction computes:
+/// 1. q ≈ ⌊x × μ / 2^512⌋ (quotient estimate via reciprocal)
+/// 2. r = x - q × p (remainder, at most one correction needed)
 ///
-/// We reduce by computing:
-/// ```text
-/// c mod p = (c0 + c1*2^64 + c2*2^128 + c3*2^192)
-///         + c4*(2^256 mod p)
-///         + c5*(2^320 mod p)
-/// ```
-///
-/// Since `R256_MOD` and `R320_MOD` are 4-limb values (< 2^256), multiplying
-/// by a single limb produces at most a 5-limb result, which can then be
-/// reduced further if needed.
-///
-/// # Why This Works
-///
-/// By the properties of modular arithmetic:
-/// `a = b (mod p) => c*a = c*b (mod p)`
-///
-/// So `c5*2^320 = c5*R320_MOD (mod p)`, and the right side is much smaller.
-///
-/// # Performance
-///
-/// Much faster than naive division: avoids division entirely, uses only
-/// 4-5 64-bit multiplications with precomputed constants.
+/// This replaces iterative folding with O(1) operations.
 pub trait FieldReductionConstants {
   /// The 4-limb prime modulus p (little-endian, 256 bits)
   const MODULUS: [u64; 4];
-
-  /// 2^256 mod p - reduces the 5th limb (index 4) of a wide integer
-  const R256_MOD: [u64; 4];
-
-  /// 2^320 mod p - reduces the 6th limb (index 5) of a wide integer
-  const R320_MOD: [u64; 4];
 
   /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
   const R384_MOD: [u64; 4];
@@ -94,12 +66,12 @@ pub trait FieldReductionConstants {
   /// Used in `montgomery_reduce_8` after the 5th-limb check brings the value below R.
   const MAX_CANONICALIZE_SUBS: usize;
 
-  /// Maximum iterations needed for Barrett folding to converge.
+  /// Barrett reciprocal μ = ⌊2^512 / p⌋ (5 limbs).
   ///
-  /// Each fold reduces limbs 4-5 by a factor of approximately `2^64 / r3` where
-  /// r3 is the high limb of R256_MOD. Starting from 64-bit limbs, we need
-  /// `ceil(64 / log2(2^64 / r3))` iterations to reduce to zero.
-  const MAX_BARRETT_FOLDS: usize;
+  /// Used in true Barrett reduction to compute the quotient estimate:
+  /// q ≈ x × μ / 2^512. This allows reducing a 6-limb value to 4 limbs
+  /// with exactly one conditional subtract.
+  const BARRETT_MU: [u64; 5];
 }
 
 // ==========================================================================
@@ -113,22 +85,6 @@ impl FieldReductionConstants for Fp {
     0x224698fc094cf91b,
     0x0000000000000000,
     0x4000000000000000,
-  ];
-
-  // 2^256 mod p = 0x3fffffffffffffff992c350be41914ad34786d38fffffffd
-  const R256_MOD: [u64; 4] = [
-    0x34786d38fffffffd,
-    0x992c350be41914ad,
-    0xffffffffffffffff,
-    0x3fffffffffffffff,
-  ];
-
-  // 2^320 mod p = 0x3fffffffffffffff76e59c0fdacc1b91bd91d548094cf917992d30ed00000001
-  const R320_MOD: [u64; 4] = [
-    0x992d30ed00000001,
-    0xbd91d548094cf917,
-    0x76e59c0fdacc1b91,
-    0x3fffffffffffffff,
   ];
 
   // 2^384 mod p
@@ -161,8 +117,14 @@ impl FieldReductionConstants for Fp {
   // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
   const MAX_CANONICALIZE_SUBS: usize = 3;
 
-  // r3 ≈ 2^62, reduction factor ≈ 1/4, need ceil(64/2) = 32 iterations + margin
-  const MAX_BARRETT_FOLDS: usize = 35;
+  // μ = ⌊2^512 / p⌋ for true Barrett reduction
+  const BARRETT_MU: [u64; 5] = [
+    0x6d2cf12ffffffff1,
+    0xdb96703f6b306e46,
+    0xfffffffffffffffd,
+    0xffffffffffffffff,
+    0x0000000000000003,
+  ];
 }
 
 // ==========================================================================
@@ -176,22 +138,6 @@ impl FieldReductionConstants for Fq {
     0x224698fc0994a8dd,
     0x0000000000000000,
     0x4000000000000000,
-  ];
-
-  // 2^256 mod q
-  const R256_MOD: [u64; 4] = [
-    0x5b2b3e9cfffffffd,
-    0x992c350be3420567,
-    0xffffffffffffffff,
-    0x3fffffffffffffff,
-  ];
-
-  // 2^320 mod q
-  const R320_MOD: [u64; 4] = [
-    0x8c46eb2100000001,
-    0xf12aec780994a8d9,
-    0x76e59c0fd9ad5c89,
-    0x3fffffffffffffff,
   ];
 
   // 2^384 mod q
@@ -224,8 +170,14 @@ impl FieldReductionConstants for Fq {
   // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
   const MAX_CANONICALIZE_SUBS: usize = 3;
 
-  // r3 ≈ 2^62, reduction factor ≈ 1/4, need ceil(64/2) = 32 iterations + margin
-  const MAX_BARRETT_FOLDS: usize = 35;
+  // μ = ⌊2^512 / p⌋ for true Barrett reduction
+  const BARRETT_MU: [u64; 5] = [
+    0x3b914deffffffff1,
+    0xdb96703f66b57227,
+    0xfffffffffffffffd,
+    0xffffffffffffffff,
+    0x0000000000000003,
+  ];
 }
 
 // ==========================================================================
@@ -239,22 +191,6 @@ impl FieldReductionConstants for Bn254Fr {
     0x2833e84879b97091,
     0xb85045b68181585d,
     0x30644e72e131a029,
-  ];
-
-  // 2^256 mod r
-  const R256_MOD: [u64; 4] = [
-    0xac96341c4ffffffb,
-    0x36fc76959f60cd29,
-    0x666ea36f7879462e,
-    0x0e0a77c19a07df2f,
-  ];
-
-  // 2^320 mod r
-  const R320_MOD: [u64; 4] = [
-    0xb4c6edf97c5fb586,
-    0x708c8d50bfeb93be,
-    0x9ffd1de404f7e0ef,
-    0x215b02ac9a392866,
   ];
 
   // 2^384 mod r
@@ -287,8 +223,14 @@ impl FieldReductionConstants for Bn254Fr {
   // Q = ⌊R/p⌋ = 5 (p ≈ 0.76 * 2^254, so R/p ≈ 5.26)
   const MAX_CANONICALIZE_SUBS: usize = 5;
 
-  // r3 ≈ 2^59.8, reduction factor ≈ 1/18, need ceil(64/4.2) ≈ 16 iterations
-  const MAX_BARRETT_FOLDS: usize = 18;
+  // μ = ⌊2^512 / p⌋ for true Barrett reduction
+  const BARRETT_MU: [u64; 5] = [
+    0x20703a6be1de9259,
+    0x144852009e880ae6,
+    0xb074a58680730147,
+    0x4a47462623a04a7a,
+    0x0000000000000005,
+  ];
 }
 
 // ==========================================================================
@@ -302,22 +244,6 @@ impl FieldReductionConstants for T256Fq {
     0x00000000ffffffff,
     0x0000000000000000,
     0xffffffff00000001,
-  ];
-
-  // 2^256 mod p
-  const R256_MOD: [u64; 4] = [
-    0x0000000000000001,
-    0xffffffff00000000,
-    0xffffffffffffffff,
-    0x00000000fffffffe,
-  ];
-
-  // 2^320 mod p
-  const R320_MOD: [u64; 4] = [
-    0x00000000ffffffff,
-    0x0000000100000001,
-    0xfffffffeffffffff,
-    0xfffffffe00000000,
   ];
 
   // 2^384 mod p
@@ -350,6 +276,12 @@ impl FieldReductionConstants for T256Fq {
   // Q = ⌊R/p⌋ = 1 (p ≈ 2^256 - 2^224, so R/p ≈ 1.000...)
   const MAX_CANONICALIZE_SUBS: usize = 1;
 
-  // r3 ≈ 2^32, reduction factor ≈ 1/2^32, need ceil(64/32) = 2 iterations + margin
-  const MAX_BARRETT_FOLDS: usize = 4;
+  // μ = ⌊2^512 / p⌋ for true Barrett reduction
+  const BARRETT_MU: [u64; 5] = [
+    0x0000000000000003,
+    0xfffffffeffffffff,
+    0xfffffffefffffffe,
+    0x00000000ffffffff,
+    0x0000000000000001,
+  ];
 }
