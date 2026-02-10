@@ -267,6 +267,19 @@ pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
 // Limb subtraction operations
 // ============================================================================
 
+/// Add two 4-limb values, returning 4 limbs + carry (0 or 1).
+#[inline(always)]
+pub(super) fn add_4_4(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], u64) {
+  let mut result = [0u64; 4];
+  let mut carry = 0u128;
+  for i in 0..4 {
+    let sum = (a[i] as u128) + (b[i] as u128) + carry;
+    result[i] = sum as u64;
+    carry = sum >> 64;
+  }
+  (result, carry as u64)
+}
+
 /// Subtract two 4-limb values: a - b.
 #[inline(always)]
 pub(super) fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {

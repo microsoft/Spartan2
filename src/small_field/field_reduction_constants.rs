@@ -83,6 +83,16 @@ pub trait FieldReductionConstants {
   /// Montgomery inverse: -p^(-1) mod 2^64
   /// Used in Montgomery REDC to eliminate low limbs
   const MONT_INV: u64;
+
+  /// R mod p = 2^256 mod p (Montgomery representation of 1)
+  /// Used for carry correction after folding: if carry c=1, add R_MOD.
+  const R_MOD: [u64; 4];
+
+  /// Q = ⌊R/p⌋, the number of conditional subtracts needed to canonicalize
+  /// a value in [0, R) to [0, p).
+  ///
+  /// Used in `montgomery_reduce_8` after the 5th-limb check brings the value below R.
+  const MAX_CANONICALIZE_SUBS: usize;
 }
 
 // ==========================================================================
@@ -132,6 +142,17 @@ impl FieldReductionConstants for Fp {
 
   // -p^(-1) mod 2^64
   const MONT_INV: u64 = 0x992d30ecffffffff;
+
+  // R mod p = 2^256 mod p (extracted from Fp::ONE.0)
+  const R_MOD: [u64; 4] = [
+    0x34786d38fffffffd,
+    0x992c350be41914ad,
+    0xffffffffffffffff,
+    0x3fffffffffffffff,
+  ];
+
+  // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
+  const MAX_CANONICALIZE_SUBS: usize = 3;
 }
 
 // ==========================================================================
@@ -181,6 +202,17 @@ impl FieldReductionConstants for Fq {
 
   // -q^(-1) mod 2^64
   const MONT_INV: u64 = 0x8c46eb20ffffffff;
+
+  // R mod p = 2^256 mod p (extracted from Fq::ONE.0)
+  const R_MOD: [u64; 4] = [
+    0x5b2b3e9cfffffffd,
+    0x992c350be3420567,
+    0xffffffffffffffff,
+    0x3fffffffffffffff,
+  ];
+
+  // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
+  const MAX_CANONICALIZE_SUBS: usize = 3;
 }
 
 // ==========================================================================
@@ -230,6 +262,17 @@ impl FieldReductionConstants for Bn254Fr {
 
   // -r^(-1) mod 2^64
   const MONT_INV: u64 = 0xc2e1f593efffffff;
+
+  // R mod p = 2^256 mod p (extracted from Bn254Fr::ONE.0)
+  const R_MOD: [u64; 4] = [
+    0xac96341c4ffffffb,
+    0x36fc76959f60cd29,
+    0x666ea36f7879462e,
+    0x0e0a77c19a07df2f,
+  ];
+
+  // Q = ⌊R/p⌋ = 5 (p ≈ 0.76 * 2^254, so R/p ≈ 5.26)
+  const MAX_CANONICALIZE_SUBS: usize = 5;
 }
 
 // ==========================================================================
@@ -279,4 +322,15 @@ impl FieldReductionConstants for T256Fq {
 
   // -p^(-1) mod 2^64
   const MONT_INV: u64 = 0x0000000000000001;
+
+  // R mod p = 2^256 mod p (extracted from T256Fq::ONE.0)
+  const R_MOD: [u64; 4] = [
+    0x0000000000000001,
+    0xffffffff00000000,
+    0xffffffffffffffff,
+    0x00000000fffffffe,
+  ];
+
+  // Q = ⌊R/p⌋ = 1 (p ≈ 2^256 - 2^224, so R/p ≈ 1.000...)
+  const MAX_CANONICALIZE_SUBS: usize = 1;
 }
