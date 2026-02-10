@@ -7,7 +7,7 @@
 //! Barrett reduction for wide limb values.
 
 use super::field_reduction_constants::FieldReductionConstants;
-use super::limbs::{gte_4_4, mul_3x5_to_8, mul_4_by_1, sub_5_4};
+use super::limbs::{gte_4_4, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, sub_4_4, sub_5_4};
 
 // ==========================================================================
 // 6-limb Barrett reduction (for SignedWideLimbs<6>, i.e. DelayedReduction<i64>::Accumulator)
@@ -18,21 +18,27 @@ use super::limbs::{gte_4_4, mul_3x5_to_8, mul_4_by_1, sub_5_4};
 /// Reduces a 6-limb value (up to 384 bits) modulo p with exactly one conditional
 /// subtract, using the true Barrett reduction algorithm.
 ///
-/// # Algorithm (HAC Algorithm 14.42 adapted for our parameters)
+/// # Algorithm
 ///
 /// For input x = c[0..6] (6 limbs, up to 384 bits), with k=4 (256 bits):
 /// 1. q1 = ⌊x / b³⌋ = [c[3], c[4], c[5]]  (3 limbs)
 /// 2. q2 = q1 × μ                          (8 limbs)
 /// 3. q3 = ⌊q2 / b⁵⌋ = [q2[5], q2[6], q2[7]] (3 limbs, quotient estimate)
-/// 4. r1 = x mod b⁵ = [c[0], c[1], c[2], c[3], c[4]] (5 limbs)
-/// 5. r2 = (q3 × p) mod b⁵                 (low 5 limbs)
-/// 6. r = r1 - r2                          (5-limb subtraction)
-/// 7. while r ≥ p: r -= p                  (at most 2 times)
+/// 4. t = q3 × p (low 4 or 5 limbs)
+/// 5. r = (x mod b⁴ or b⁵) - t
+/// 6. if r ≥ p: r -= p (exactly once, proven tight)
 ///
-/// # Why At Most 2 Subtracts
+/// # Tight Bound: Exactly 1 Subtract
 ///
-/// The quotient estimate q3 can be off by at most 2 from the true quotient,
-/// so r ∈ [0, 3p). At most 2 conditional subtracts bring it to [0, p).
+/// For p ≥ 2^253 and x < b^7 (448 bits):
+/// - δ = x/b⁸ + b³/p < 2^-64 + 2^-61 < 1
+/// - Therefore q3 ∈ {⌊x/p⌋, ⌊x/p⌋ - 1}
+/// - So r ∈ [0, 2p), requiring exactly 1 conditional subtract
+///
+/// # Fast Path for Pasta/BN254
+///
+/// When USE_4_LIMB_BARRETT is true (p < 2^255), r ∈ [0, 2p) < b⁴,
+/// so we use 4-limb arithmetic (saves 3 multiplications + carries).
 #[inline]
 pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
   // Step 1: q1 = floor(x / b³) = [c[3], c[4], c[5]]
@@ -44,30 +50,44 @@ pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64
   // Step 3: q3 = floor(q2 / b⁵) = [q2[5], q2[6], q2[7]]
   let q3 = [q2[5], q2[6], q2[7]];
 
-  // Step 4: r1 = x mod b⁵ = [c[0], c[1], c[2], c[3], c[4]]
-  let r1 = [c[0], c[1], c[2], c[3], c[4]];
+  if F::USE_4_LIMB_BARRETT {
+    // Fast path: 4-limb arithmetic for Pasta/BN254 (where 2p < b⁴)
+    // t = q3 × p (low 4 limbs only)
+    let t = mul_3x4_lo4(&q3, &F::MODULUS);
 
-  // Step 5: r2 = (q3 × p) mod b⁵ (low 5 limbs of 3×4 multiply)
-  let r2 = mul_3x4_lo5(&q3, &F::MODULUS);
+    // r = (x mod b⁴) - t (wrapping subtraction in 4 limbs)
+    let x_lo4 = [c[0], c[1], c[2], c[3]];
+    let mut r = sub_4_4(&x_lo4, &t);
 
-  // Step 6: r = r1 - r2 (5-limb subtraction with possible borrow)
-  let mut r = sub_5_5(&r1, &r2);
+    // One conditional subtract (proven tight)
+    if gte_4_4(&r, &F::MODULUS) {
+      r = sub_4_4(&r, &F::MODULUS);
+    }
 
-  // Step 7: Reduce to [0, p) with at most 2 conditional subtracts
-  // If high limb is non-zero or r >= p, subtract p
-  if r[4] != 0 || gte_4_4(&[r[0], r[1], r[2], r[3]], &F::MODULUS) {
-    r = sub_5_4(&r, &F::MODULUS);
+    debug_assert!(
+      !gte_4_4(&r, &F::MODULUS),
+      "Barrett reduction produced non-canonical result"
+    );
+
+    r
+  } else {
+    // 5-limb path for T256 (where 2p can exceed b⁴)
+    let r1 = [c[0], c[1], c[2], c[3], c[4]];
+    let r2 = mul_3x4_lo5(&q3, &F::MODULUS);
+    let mut r = sub_5_5(&r1, &r2);
+
+    // One conditional subtract
+    if r[4] != 0 || gte_4_4(&[r[0], r[1], r[2], r[3]], &F::MODULUS) {
+      r = sub_5_4(&r, &F::MODULUS);
+    }
+
+    debug_assert!(
+      r[4] == 0 && !gte_4_4(&[r[0], r[1], r[2], r[3]], &F::MODULUS),
+      "Barrett reduction produced non-canonical result"
+    );
+
+    [r[0], r[1], r[2], r[3]]
   }
-  if r[4] != 0 || gte_4_4(&[r[0], r[1], r[2], r[3]], &F::MODULUS) {
-    r = sub_5_4(&r, &F::MODULUS);
-  }
-
-  debug_assert!(
-    r[4] == 0 && !gte_4_4(&[r[0], r[1], r[2], r[3]], &F::MODULUS),
-    "Barrett reduction produced non-canonical result"
-  );
-
-  [r[0], r[1], r[2], r[3]]
 }
 
 /// Multiply 3-limb by 4-limb, returning low 5 limbs.

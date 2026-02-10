@@ -281,6 +281,46 @@ pub(super) fn mul_3x5_to_8(a: &[u64; 3], b: &[u64; 5]) -> [u64; 8] {
   result
 }
 
+/// Multiply 3-limb by 4-limb, returning only low 4 limbs.
+///
+/// Used in Barrett reduction for Pasta/BN254 where 2p < b⁴.
+/// Only computes contributions to limbs 0-3, skipping higher limbs.
+///
+/// This saves ~3 multiplications compared to `mul_3x4_lo5`.
+#[inline(always)]
+pub(super) fn mul_3x4_lo4(a: &[u64; 3], b: &[u64; 4]) -> [u64; 4] {
+  let mut result = [0u64; 4];
+
+  // a[0] * b[0..4] → contributes to limbs 0-3 (carry into 4 is discarded)
+  let mut carry = 0u128;
+  for j in 0..4 {
+    let prod = (a[0] as u128) * (b[j] as u128) + carry;
+    result[j] = prod as u64;
+    carry = prod >> 64;
+  }
+  // carry into limb 4 is discarded
+
+  // a[1] * b[0..3] → contributes to limbs 1-3
+  carry = 0;
+  for j in 0..3 {
+    let prod = (a[1] as u128) * (b[j] as u128) + (result[1 + j] as u128) + carry;
+    result[1 + j] = prod as u64;
+    carry = prod >> 64;
+  }
+  // a[1] * b[3] would go to limb 4, discarded
+
+  // a[2] * b[0..2] → contributes to limbs 2-3
+  carry = 0;
+  for j in 0..2 {
+    let prod = (a[2] as u128) * (b[j] as u128) + (result[2 + j] as u128) + carry;
+    result[2 + j] = prod as u64;
+    carry = prod >> 64;
+  }
+  // a[2] * b[2..3] would go to limbs 4+, discarded
+
+  result
+}
+
 // ============================================================================
 // Limb subtraction operations
 // ============================================================================

@@ -72,6 +72,16 @@ pub trait FieldReductionConstants {
   /// q ≈ x × μ / 2^512. This allows reducing a 6-limb value to 4 limbs
   /// with exactly one conditional subtract.
   const BARRETT_MU: [u64; 5];
+
+  /// Whether 2p < 2^256, enabling the 4-limb Barrett fast path.
+  ///
+  /// When true, Barrett remainder r ∈ [0, 2p) fits in 4 limbs, so we can:
+  /// - Use `mul_3x4_lo4` instead of `mul_3x4_lo5` (saves 3 multiplications)
+  /// - Skip the 5th limb check entirely
+  ///
+  /// True for Pasta Fp/Fq and BN254Fr (p < 2^255).
+  /// False for T256Fq (p ≈ 2^256).
+  const USE_4_LIMB_BARRETT: bool;
 }
 
 // ==========================================================================
@@ -125,6 +135,9 @@ impl FieldReductionConstants for Fp {
     0xffffffffffffffff,
     0x0000000000000003,
   ];
+
+  // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
+  const USE_4_LIMB_BARRETT: bool = true;
 }
 
 // ==========================================================================
@@ -178,6 +191,9 @@ impl FieldReductionConstants for Fq {
     0xffffffffffffffff,
     0x0000000000000003,
   ];
+
+  // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
+  const USE_4_LIMB_BARRETT: bool = true;
 }
 
 // ==========================================================================
@@ -231,6 +247,9 @@ impl FieldReductionConstants for Bn254Fr {
     0x4a47462623a04a7a,
     0x0000000000000005,
   ];
+
+  // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
+  const USE_4_LIMB_BARRETT: bool = true;
 }
 
 // ==========================================================================
@@ -284,4 +303,7 @@ impl FieldReductionConstants for T256Fq {
     0x00000000ffffffff,
     0x0000000000000001,
   ];
+
+  // p ≈ 2^256, so 2p > 2^256 = b⁴, need 5-limb Barrett path
+  const USE_4_LIMB_BARRETT: bool = false;
 }
