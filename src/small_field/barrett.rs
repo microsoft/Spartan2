@@ -20,43 +20,60 @@ use super::limbs::{gte_4_4, mul_4_by_1, sub_4_4};
 ///
 /// Input is already in Montgomery form (R-scaled). This function reduces
 /// the 6-limb value mod p while preserving the Montgomery scaling.
+///
+/// # Algorithm
+///
+/// 1. Bounded folding loop: fold limbs 4-5 using R256_MOD and R320_MOD
+/// 2. Each fold reduces the magnitude by a factor of ~2^64/r3 (field-dependent)
+/// 3. After MAX_BARRETT_FOLDS iterations, limbs 4-5 are guaranteed to be zero
+/// 4. Bounded canonicalization: subtract p up to MAX_CANONICALIZE_SUBS times
 #[inline]
 pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
-  // Reduce c[5] * 2^320 = c[5] * R320 (mod p), then reduce c[4] * 2^256, etc.
-  // R320 = 2^320 mod p, R256 = 2^256 mod p
-  //
-  // We do: result = c[0..4] + c[4] * R256 + c[5] * R320 (mod p)
+  let mut limbs = *c;
 
-  // c[4] * R256_MOD (4x1 -> 5 limbs)
-  let c4_contrib = mul_4_by_1(&F::R256_MOD, c[4]);
-  // c[5] * R320_MOD (4x1 -> 5 limbs)
-  let c5_contrib = mul_4_by_1(&F::R320_MOD, c[5]);
+  // Bounded folding loop - eliminates recursion
+  for _ in 0..F::MAX_BARRETT_FOLDS {
+    if limbs[4] == 0 && limbs[5] == 0 {
+      break;
+    }
 
-  // Sum: c[0..4] + c4_contrib + c5_contrib (could be up to 6 limbs)
-  let mut sum = [0u64; 6];
-  let mut carry = 0u128;
-  for i in 0..4 {
-    let s = (c[i] as u128) + (c4_contrib[i] as u128) + (c5_contrib[i] as u128) + carry;
-    sum[i] = s as u64;
-    carry = s >> 64;
+    // Fold limbs[4] and limbs[5] using R256_MOD and R320_MOD
+    let c4_contrib = mul_4_by_1(&F::R256_MOD, limbs[4]);
+    let c5_contrib = mul_4_by_1(&F::R320_MOD, limbs[5]);
+
+    // Sum: limbs[0..4] + c4_contrib + c5_contrib
+    let mut carry = 0u128;
+    for i in 0..4 {
+      let s = (limbs[i] as u128) + (c4_contrib[i] as u128) + (c5_contrib[i] as u128) + carry;
+      limbs[i] = s as u64;
+      carry = s >> 64;
+    }
+    let s = (c4_contrib[4] as u128) + (c5_contrib[4] as u128) + carry;
+    limbs[4] = s as u64;
+    limbs[5] = (s >> 64) as u64;
   }
-  // Limb 4: c4_contrib[4] + c5_contrib[4] + carry
-  let s = (c4_contrib[4] as u128) + (c5_contrib[4] as u128) + carry;
-  sum[4] = s as u64;
-  sum[5] = (s >> 64) as u64;
 
-  // Now reduce the 6-limb sum. If sum[5] or sum[4] is non-zero, recurse (limited depth)
-  if sum[5] == 0 && sum[4] == 0 {
-    // Result fits in 4 limbs, just do final reduction
-    let mut r = [sum[0], sum[1], sum[2], sum[3]];
-    while gte_4_4(&r, &F::MODULUS) {
+  debug_assert!(
+    limbs[4] == 0 && limbs[5] == 0,
+    "Barrett folding did not converge after {} iterations",
+    F::MAX_BARRETT_FOLDS
+  );
+
+  // Bounded canonicalization
+  let mut r = [limbs[0], limbs[1], limbs[2], limbs[3]];
+  for _ in 0..F::MAX_CANONICALIZE_SUBS {
+    if gte_4_4(&r, &F::MODULUS) {
       r = sub_4_4(&r, &F::MODULUS);
     }
-    return r;
   }
 
-  // Recurse (this will terminate because sum < c in most cases)
-  barrett_reduce_6::<F>(&sum)
+  debug_assert!(
+    !gte_4_4(&r, &F::MODULUS),
+    "Barrett canonicalization failed after {} subtractions",
+    F::MAX_CANONICALIZE_SUBS
+  );
+
+  r
 }
 
 // ==========================================================================
@@ -66,7 +83,10 @@ pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64
 /// Generic 7-limb Barrett reduction using trait constants.
 ///
 /// Reduces a 7-limb value (up to 448 bits) modulo p by folding limb 6
-/// using R384 = 2^384 mod p, then delegating to 6-limb reduction.
+/// using R384 = 2^384 mod p, then delegating to the bounded 6-limb reduction.
+///
+/// This function is non-recursive: limb 6 is folded once, then `barrett_reduce_6`
+/// handles the remaining 6 limbs with its bounded loop.
 #[inline]
 pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
   let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);

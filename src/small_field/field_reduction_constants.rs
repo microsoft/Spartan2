@@ -93,6 +93,13 @@ pub trait FieldReductionConstants {
   ///
   /// Used in `montgomery_reduce_8` after the 5th-limb check brings the value below R.
   const MAX_CANONICALIZE_SUBS: usize;
+
+  /// Maximum iterations needed for Barrett folding to converge.
+  ///
+  /// Each fold reduces limbs 4-5 by a factor of approximately `2^64 / r3` where
+  /// r3 is the high limb of R256_MOD. Starting from 64-bit limbs, we need
+  /// `ceil(64 / log2(2^64 / r3))` iterations to reduce to zero.
+  const MAX_BARRETT_FOLDS: usize;
 }
 
 // ==========================================================================
@@ -153,6 +160,9 @@ impl FieldReductionConstants for Fp {
 
   // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
   const MAX_CANONICALIZE_SUBS: usize = 3;
+
+  // r3 ≈ 2^62, reduction factor ≈ 1/4, need ceil(64/2) = 32 iterations + margin
+  const MAX_BARRETT_FOLDS: usize = 35;
 }
 
 // ==========================================================================
@@ -213,6 +223,9 @@ impl FieldReductionConstants for Fq {
 
   // Q = ⌊R/p⌋ = 3 (p ≈ 2^254, so R/p ≈ 4, floor is 3)
   const MAX_CANONICALIZE_SUBS: usize = 3;
+
+  // r3 ≈ 2^62, reduction factor ≈ 1/4, need ceil(64/2) = 32 iterations + margin
+  const MAX_BARRETT_FOLDS: usize = 35;
 }
 
 // ==========================================================================
@@ -273,6 +286,9 @@ impl FieldReductionConstants for Bn254Fr {
 
   // Q = ⌊R/p⌋ = 5 (p ≈ 0.76 * 2^254, so R/p ≈ 5.26)
   const MAX_CANONICALIZE_SUBS: usize = 5;
+
+  // r3 ≈ 2^59.8, reduction factor ≈ 1/18, need ceil(64/4.2) ≈ 16 iterations
+  const MAX_BARRETT_FOLDS: usize = 18;
 }
 
 // ==========================================================================
@@ -333,4 +349,7 @@ impl FieldReductionConstants for T256Fq {
 
   // Q = ⌊R/p⌋ = 1 (p ≈ 2^256 - 2^224, so R/p ≈ 1.000...)
   const MAX_CANONICALIZE_SUBS: usize = 1;
+
+  // r3 ≈ 2^32, reduction factor ≈ 1/2^32, need ceil(64/32) = 2 iterations + margin
+  const MAX_BARRETT_FOLDS: usize = 4;
 }
