@@ -8,7 +8,7 @@
 
 use super::{
   field_reduction_constants::FieldReductionConstants,
-  limbs::{add_4_4, gte_4_4, sub_4_4, sub_5_4},
+  limbs::{add_4_4, gte_4_4, select_4, sub_4_4, sub_4_4_with_borrow, sub_5_4},
 };
 use halo2curves::{
   bn256::Fr as Bn254Fr,
@@ -164,17 +164,26 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
 /// Input: T[8] limbs representing an integer in [0, R²)
 /// Output: canonical 4-limb result in [0, p)
 ///
+/// Dispatches to Pasta-specialized or generic implementation based on field type.
+#[inline]
+fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
+  if F::PASTA_STYLE_MODULUS {
+    montgomery_reduce_8_pasta::<F>(t)
+  } else {
+    montgomery_reduce_8_generic::<F>(t)
+  }
+}
+
+/// Generic Montgomery REDC for 8-limb input (used for BN254, T256).
+///
 /// # Algorithm
 ///
 /// 1. 4 Montgomery elimination rounds with fused multiply+add
 /// 2. Extract 5-limb result x5 = [r[4]..r[8]] in [0, R+p)
 /// 3. If x5[4] == 1: subtract p once → value now in [0, R)
-/// 4. Canonicalize from [0, R) → [0, p) via Q = ⌊R/p⌋ conditional subtracts
-///
-/// **Key insight**: Standard REDC produces a value in [0, R), NOT [0, p).
-/// Since R > p for 256-bit primes, we need Q subtractions to canonicalize.
+/// 4. Canonicalize from [0, R) → [0, p) via branchless conditional subtracts
 #[inline]
-fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
+fn montgomery_reduce_8_generic<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
   let mut r = [t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], 0u64];
 
   // Montgomery reduction: eliminate low 4 limbs (exactly 4 iterations)
@@ -190,18 +199,30 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
       carry = prod >> 64;
     }
 
-    // Add carry into r[i+4], then propagate through remaining limbs
+    // Add carry into r[i+4], then propagate through remaining limbs with fixed chain
     let sum = (r[i + 4] as u128) + carry;
     r[i + 4] = sum as u64;
-    carry = sum >> 64;
+    let mut c = (sum >> 64) as u64;
 
-    // Propagate remaining carry (bounded, rarely needed)
-    let mut k = i + 5;
-    while carry != 0 && k < 9 {
-      let sum = (r[k] as u128) + carry;
-      r[k] = sum as u64;
-      carry = sum >> 64;
-      k += 1;
+    // Fixed carry propagation (no while loop - always execute up to 4 steps)
+    let (v, overflow) = r[i + 5].overflowing_add(c);
+    r[i + 5] = v;
+    c = overflow as u64;
+
+    if i + 6 < 9 {
+      let (v, overflow) = r[i + 6].overflowing_add(c);
+      r[i + 6] = v;
+      c = overflow as u64;
+    }
+
+    if i + 7 < 9 {
+      let (v, overflow) = r[i + 7].overflowing_add(c);
+      r[i + 7] = v;
+      c = overflow as u64;
+    }
+
+    if i + 8 < 9 {
+      r[i + 8] = r[i + 8].wrapping_add(c);
     }
   }
 
@@ -214,12 +235,113 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
     debug_assert!(x5[4] == 0, "after 5th-limb subtract, x5[4] should be 0");
   }
 
-  // Now x5[0..4] < R, canonicalize to [0, p) with Q conditional subtracts
+  // Now x5[0..4] < R, canonicalize to [0, p) with branchless conditional subtracts
   let mut out = [x5[0], x5[1], x5[2], x5[3]];
   for _ in 0..F::MAX_CANONICALIZE_SUBS {
-    if gte_4_4(&out, &F::MODULUS) {
-      out = sub_4_4(&out, &F::MODULUS);
+    let (sub, borrow) = sub_4_4_with_borrow(&out, &F::MODULUS);
+    out = select_4(borrow == 0, &sub, &out);
+  }
+
+  debug_assert!(
+    !gte_4_4(&out, &F::MODULUS),
+    "canonicalization failed after {} subtractions",
+    F::MAX_CANONICALIZE_SUBS
+  );
+
+  out
+}
+
+/// Pasta-specialized Montgomery REDC for 8-limb input.
+///
+/// Exploits Pasta modulus structure: MODULUS[2] = 0, MODULUS[3] = 2^62.
+/// This reduces from 4 multiplies per round to 2 multiplies per round.
+///
+/// # Algorithm
+///
+/// For Pasta primes, q × MODULUS has special structure:
+/// - q × MODULUS[0]: full multiply
+/// - q × MODULUS[1]: full multiply
+/// - q × MODULUS[2] = 0: skip (free!)
+/// - q × MODULUS[3] = q × 2^62: shift only (no multiply!)
+#[inline]
+fn montgomery_reduce_8_pasta<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
+  let mut r = [t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], 0u64];
+
+  // Montgomery reduction: 4 rounds, each with only 2 multiplies
+  for i in 0..4 {
+    // Compute multiplier q that zeros out r[i]: q ≡ r[i] * (-p⁻¹) mod 2^64
+    let q = r[i].wrapping_mul(F::MONT_INV);
+
+    // r[i..i+2] += q * MODULUS[0..2] (only 2 multiplies!)
+    // MODULUS[0] multiply
+    let prod0 = (q as u128) * (F::MODULUS[0] as u128) + (r[i] as u128);
+    r[i] = prod0 as u64;
+    let c0 = prod0 >> 64;
+
+    // MODULUS[1] multiply
+    let prod1 = (q as u128) * (F::MODULUS[1] as u128) + (r[i + 1] as u128) + c0;
+    r[i + 1] = prod1 as u64;
+    let c1 = (prod1 >> 64) as u64;
+
+    // MODULUS[2] = 0, so just add carry
+    let (v2, of2) = r[i + 2].overflowing_add(c1);
+    r[i + 2] = v2;
+    let c2 = of2 as u64;
+
+    // MODULUS[3] = 2^62, so q * MODULUS[3] = q << 62
+    // Split: q_lo = q << 62 (low 64 bits), q_hi = q >> 2 (high bits)
+    let q_lo = q << 62;
+    let q_hi = q >> 2;
+
+    // Add q_lo + c2 to r[i+3]
+    let sum3 = (r[i + 3] as u128) + (q_lo as u128) + (c2 as u128);
+    r[i + 3] = sum3 as u64;
+    let c3 = (sum3 >> 64) as u64;
+
+    // Add q_hi + c3 to r[i+4]
+    let sum4 = (r[i + 4] as u128) + (q_hi as u128) + (c3 as u128);
+    r[i + 4] = sum4 as u64;
+    let mut c = (sum4 >> 64) as u64;
+
+    // Fixed carry propagation through remaining limbs
+    if i + 5 < 9 {
+      let (v, overflow) = r[i + 5].overflowing_add(c);
+      r[i + 5] = v;
+      c = overflow as u64;
     }
+
+    if i + 6 < 9 {
+      let (v, overflow) = r[i + 6].overflowing_add(c);
+      r[i + 6] = v;
+      c = overflow as u64;
+    }
+
+    if i + 7 < 9 {
+      let (v, overflow) = r[i + 7].overflowing_add(c);
+      r[i + 7] = v;
+      c = overflow as u64;
+    }
+
+    if i + 8 < 9 {
+      r[i + 8] = r[i + 8].wrapping_add(c);
+    }
+  }
+
+  // Result is in r[4..9] (5 limbs), in range [0, R+p)
+  let mut x5 = [r[4], r[5], r[6], r[7], r[8]];
+
+  // If 5th limb is 1, subtract p once to bring below R
+  if x5[4] == 1 {
+    x5 = sub_5_4(&x5, &F::MODULUS);
+    debug_assert!(x5[4] == 0, "after 5th-limb subtract, x5[4] should be 0");
+  }
+
+  // Now x5[0..4] < R, canonicalize to [0, p) with branchless conditional subtracts
+  // For Pasta, MAX_CANONICALIZE_SUBS = 3
+  let mut out = [x5[0], x5[1], x5[2], x5[3]];
+  for _ in 0..F::MAX_CANONICALIZE_SUBS {
+    let (sub, borrow) = sub_4_4_with_borrow(&out, &F::MODULUS);
+    out = select_4(borrow == 0, &sub, &out);
   }
 
   debug_assert!(

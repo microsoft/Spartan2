@@ -82,6 +82,22 @@ pub trait FieldReductionConstants {
   /// True for Pasta Fp/Fq and BN254Fr (p < 2^255).
   /// False for T256Fq (p ≈ 2^256).
   const USE_4_LIMB_BARRETT: bool;
+
+  /// Whether this field has Pasta-style modulus structure.
+  ///
+  /// True when MODULUS[2] = 0 and MODULUS[3] = 2^62.
+  /// This enables specialized Montgomery REDC (2 muls/round instead of 4)
+  /// and 2-fold Barrett reduction (using p = 2^254 + c identity).
+  ///
+  /// True for Pasta Fp/Fq. False for BN254Fr and T256Fq.
+  const PASTA_STYLE_MODULUS: bool;
+
+  /// The "c" constant for Pasta primes: p = 2^254 + c where c fits in 2 limbs.
+  ///
+  /// Used in Pasta 2-fold Barrett reduction: 2^254 ≡ -c (mod p).
+  /// Only meaningful when `PASTA_STYLE_MODULUS` is true.
+  /// For non-Pasta fields, this is set to [0, 0] and unused.
+  const PASTA_C: [u64; 2];
 }
 
 // ==========================================================================
@@ -138,6 +154,12 @@ impl FieldReductionConstants for Fp {
 
   // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
   const USE_4_LIMB_BARRETT: bool = true;
+
+  // Pasta-style: MODULUS[2] = 0, MODULUS[3] = 2^62
+  const PASTA_STYLE_MODULUS: bool = true;
+
+  // c = MODULUS[0..2] for p = 2^254 + c
+  const PASTA_C: [u64; 2] = [0x992d30ed00000001, 0x224698fc094cf91b];
 }
 
 // ==========================================================================
@@ -194,6 +216,12 @@ impl FieldReductionConstants for Fq {
 
   // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
   const USE_4_LIMB_BARRETT: bool = true;
+
+  // Pasta-style: MODULUS[2] = 0, MODULUS[3] = 2^62
+  const PASTA_STYLE_MODULUS: bool = true;
+
+  // c = MODULUS[0..2] for p = 2^254 + c
+  const PASTA_C: [u64; 2] = [0x8c46eb2100000001, 0x224698fc0994a8dd];
 }
 
 // ==========================================================================
@@ -250,6 +278,12 @@ impl FieldReductionConstants for Bn254Fr {
 
   // p < 2^255, so 2p < 2^256 = b⁴, enabling 4-limb Barrett fast path
   const USE_4_LIMB_BARRETT: bool = true;
+
+  // Not Pasta-style (dense modulus)
+  const PASTA_STYLE_MODULUS: bool = false;
+
+  // Unused for non-Pasta fields
+  const PASTA_C: [u64; 2] = [0, 0];
 }
 
 // ==========================================================================
@@ -306,4 +340,10 @@ impl FieldReductionConstants for T256Fq {
 
   // p ≈ 2^256, so 2p > 2^256 = b⁴, need 5-limb Barrett path
   const USE_4_LIMB_BARRETT: bool = false;
+
+  // Not Pasta-style (different modulus structure)
+  const PASTA_STYLE_MODULUS: bool = false;
+
+  // Unused for non-Pasta fields
+  const PASTA_C: [u64; 2] = [0, 0];
 }

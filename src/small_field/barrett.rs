@@ -7,16 +7,196 @@
 //! Barrett reduction for wide limb values.
 
 use super::field_reduction_constants::FieldReductionConstants;
-use super::limbs::{gte_4_4, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, sub_4_4, sub_5_4};
+use super::limbs::{
+  add_4_4, gte_4_4, mul_2_by_1, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, select_4, sub_4_4,
+  sub_4_4_with_borrow, sub_5_4,
+};
 
 // ==========================================================================
 // 6-limb Barrett reduction (for SignedWideLimbs<6>, i.e. DelayedReduction<i64>::Accumulator)
 // ==========================================================================
 
-/// Barrett reduction for 6-limb input using precomputed μ = ⌊2^512 / p⌋.
+/// Barrett reduction for 6-limb input.
 ///
-/// Reduces a 6-limb value (up to 384 bits) modulo p with exactly one conditional
-/// subtract, using the true Barrett reduction algorithm.
+/// Dispatches to Pasta 2-fold or generic μ-Barrett based on field type.
+#[inline]
+pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
+  if F::PASTA_STYLE_MODULUS {
+    barrett_reduce_6_pasta::<F>(c)
+  } else {
+    barrett_reduce_6_generic::<F>(c)
+  }
+}
+
+/// Pasta 2-fold Barrett reduction for 6-limb input.
+///
+/// For Pasta primes p = 2^254 + c where c fits in 2 limbs:
+/// - Key identity: 2^254 ≡ -c (mod p)
+/// - Split x at bit 254: x = x_lo + x_hi × 2^254
+/// - Reduce: x ≡ x_lo - x_hi × c (mod p)
+/// - If negative: add p
+/// - Repeat fold, then final canonicalization
+///
+/// This uses only ~4-8 multiplies vs ~24 for μ-Barrett.
+#[inline]
+fn barrett_reduce_6_pasta<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
+  // For 6 limbs (384 bits), split at bit 254:
+  // - x_lo: bits 0-253 (4 limbs, with limb[3] masked to 62 bits)
+  // - x_hi: bits 254-383 (up to 130 bits, 3 limbs)
+
+  // Extract x_lo (low 254 bits)
+  let x_lo = [c[0], c[1], c[2], c[3] & 0x3FFF_FFFF_FFFF_FFFF]; // mask to 62 bits
+
+  // Extract x_hi (bits 254+): (c[3] >> 62) | (c[4] << 2) | (c[5] << 66)
+  // This gives up to 130 bits in 3 limbs
+  let x_hi_0 = (c[3] >> 62) | (c[4] << 2);
+  let x_hi_1 = (c[4] >> 62) | (c[5] << 2);
+  let x_hi_2 = c[5] >> 62;
+
+  // Compute x_hi × c where c = PASTA_C (2 limbs)
+  // Result is up to 130 + 128 = 258 bits (5 limbs)
+  let prod = mul_limbs_by_pasta_c::<F>(x_hi_0, x_hi_1, x_hi_2);
+
+  // Compute x_lo - prod
+  // Since prod can be larger than x_lo, we may get a negative result
+  // If negative, add p to make positive
+  let (result, neg) = sub_wide_4_5(&x_lo, &prod);
+
+  // If negative, add p
+  let result = if neg {
+    let (sum, _) = add_4_4(&result, &F::MODULUS);
+    sum
+  } else {
+    result
+  };
+
+  // Result is now in [0, 2p) or so, need one more fold if still >= 2^254
+  // Check if result >= 2^254 (i.e., bit 254 is set)
+  if result[3] >= 0x4000_0000_0000_0000 {
+    // Need another fold
+    let x_lo2 = [
+      result[0],
+      result[1],
+      result[2],
+      result[3] & 0x3FFF_FFFF_FFFF_FFFF,
+    ];
+    let x_hi2 = result[3] >> 62; // at most 2 bits
+
+    // x_hi2 × c (very small multiply)
+    let prod2 = mul_1_by_pasta_c::<F>(x_hi2);
+
+    // x_lo2 - prod2
+    let (result2, neg2) = sub_4_4_check_neg(&x_lo2, &prod2);
+    let result2 = if neg2 {
+      let (sum, _) = add_4_4(&result2, &F::MODULUS);
+      sum
+    } else {
+      result2
+    };
+
+    // Final canonicalization (branchless)
+    let (sub, borrow) = sub_4_4_with_borrow(&result2, &F::MODULUS);
+    let out = select_4(borrow == 0, &sub, &result2);
+
+    debug_assert!(
+      !gte_4_4(&out, &F::MODULUS),
+      "Pasta Barrett reduction produced non-canonical result"
+    );
+
+    out
+  } else {
+    // Final canonicalization (branchless)
+    let (sub, borrow) = sub_4_4_with_borrow(&result, &F::MODULUS);
+    let out = select_4(borrow == 0, &sub, &result);
+
+    debug_assert!(
+      !gte_4_4(&out, &F::MODULUS),
+      "Pasta Barrett reduction produced non-canonical result"
+    );
+
+    out
+  }
+}
+
+/// Multiply 3-limb x_hi by PASTA_C (2 limbs), producing 5-limb result.
+#[inline(always)]
+fn mul_limbs_by_pasta_c<F: FieldReductionConstants>(
+  x_hi_0: u64,
+  x_hi_1: u64,
+  x_hi_2: u64,
+) -> [u64; 5] {
+  let c = F::PASTA_C;
+  let mut result = [0u64; 5];
+
+  // x_hi_0 × c
+  let prod0 = mul_2_by_1(&c, x_hi_0);
+  result[0] = prod0[0];
+  result[1] = prod0[1];
+  result[2] = prod0[2];
+
+  // x_hi_1 × c (add at offset 1)
+  let prod1 = mul_2_by_1(&c, x_hi_1);
+  let mut carry = 0u128;
+  let sum = (result[1] as u128) + (prod1[0] as u128) + carry;
+  result[1] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[2] as u128) + (prod1[1] as u128) + carry;
+  result[2] = sum as u64;
+  carry = sum >> 64;
+  let sum = (prod1[2] as u128) + carry;
+  result[3] = sum as u64;
+  carry = sum >> 64;
+  result[4] = carry as u64;
+
+  // x_hi_2 × c (add at offset 2)
+  let prod2 = mul_2_by_1(&c, x_hi_2);
+  carry = 0;
+  let sum = (result[2] as u128) + (prod2[0] as u128) + carry;
+  result[2] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[3] as u128) + (prod2[1] as u128) + carry;
+  result[3] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[4] as u128) + (prod2[2] as u128) + carry;
+  result[4] = sum as u64;
+
+  result
+}
+
+/// Multiply 1-limb x_hi by PASTA_C, producing 4-limb result.
+#[inline(always)]
+fn mul_1_by_pasta_c<F: FieldReductionConstants>(x_hi: u64) -> [u64; 4] {
+  let c = F::PASTA_C;
+  let prod = mul_2_by_1(&c, x_hi);
+  [prod[0], prod[1], prod[2], 0]
+}
+
+/// Subtract 5-limb from 4-limb: a - b, return (result, is_negative).
+#[inline(always)]
+fn sub_wide_4_5(a: &[u64; 4], b: &[u64; 5]) -> ([u64; 4], bool) {
+  let mut result = [0u64; 4];
+  let mut borrow = 0u64;
+
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+
+  // Check if b[4] > 0 or there's remaining borrow
+  let is_negative = borrow > 0 || b[4] > 0;
+  (result, is_negative)
+}
+
+/// Subtract two 4-limb values, return (result, is_negative).
+#[inline(always)]
+fn sub_4_4_check_neg(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], bool) {
+  let (result, borrow) = sub_4_4_with_borrow(a, b);
+  (result, borrow > 0)
+}
+
+/// Generic μ-Barrett reduction for 6-limb input (used for BN254, T256).
 ///
 /// # Algorithm
 ///
@@ -27,20 +207,8 @@ use super::limbs::{gte_4_4, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, sub_4_4, sub_
 /// 4. t = q3 × p (low 4 or 5 limbs)
 /// 5. r = (x mod b⁴ or b⁵) - t
 /// 6. if r ≥ p: r -= p (exactly once, proven tight)
-///
-/// # Tight Bound: Exactly 1 Subtract
-///
-/// For p ≥ 2^253 and x < b^7 (448 bits):
-/// - δ = x/b⁸ + b³/p < 2^-64 + 2^-61 < 1
-/// - Therefore q3 ∈ {⌊x/p⌋, ⌊x/p⌋ - 1}
-/// - So r ∈ [0, 2p), requiring exactly 1 conditional subtract
-///
-/// # Fast Path for Pasta/BN254
-///
-/// When USE_4_LIMB_BARRETT is true (p < 2^255), r ∈ [0, 2p) < b⁴,
-/// so we use 4-limb arithmetic (saves 3 multiplications + carries).
 #[inline]
-pub(crate) fn barrett_reduce_6<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
+fn barrett_reduce_6_generic<F: FieldReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
   // Step 1: q1 = floor(x / b³) = [c[3], c[4], c[5]]
   let q1 = [c[3], c[4], c[5]];
 
@@ -134,15 +302,134 @@ fn sub_5_5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
 // 7-limb Barrett reduction (for SignedWideLimbs<7>, i.e. DelayedReduction<i128>::Accumulator)
 // ==========================================================================
 
-/// Generic 7-limb Barrett reduction using trait constants.
+/// Barrett reduction for 7-limb input.
+///
+/// Dispatches to Pasta 2-fold or generic fold+μ-Barrett based on field type.
+#[inline]
+pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
+  if F::PASTA_STYLE_MODULUS {
+    barrett_reduce_7_pasta::<F>(c)
+  } else {
+    barrett_reduce_7_generic::<F>(c)
+  }
+}
+
+/// Pasta 2-fold Barrett reduction for 7-limb input.
+///
+/// Similar to 6-limb version but handles larger input.
+#[inline]
+fn barrett_reduce_7_pasta<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
+  // For 7 limbs (448 bits), split at bit 254:
+  // - x_lo: bits 0-253 (4 limbs, with limb[3] masked to 62 bits)
+  // - x_hi: bits 254-447 (up to 194 bits, 4 limbs)
+
+  // Extract x_lo (low 254 bits)
+  let x_lo = [c[0], c[1], c[2], c[3] & 0x3FFF_FFFF_FFFF_FFFF];
+
+  // Extract x_hi (bits 254+)
+  let x_hi_0 = (c[3] >> 62) | (c[4] << 2);
+  let x_hi_1 = (c[4] >> 62) | (c[5] << 2);
+  let x_hi_2 = (c[5] >> 62) | (c[6] << 2);
+  let x_hi_3 = c[6] >> 62;
+
+  // Compute x_hi × c where c = PASTA_C (2 limbs)
+  // Result is up to 194 + 128 = 322 bits (6 limbs)
+  let prod = mul_4limbs_by_pasta_c::<F>(x_hi_0, x_hi_1, x_hi_2, x_hi_3);
+
+  // Compute x_lo - prod (prod can be up to 6 limbs)
+  let (result, neg) = sub_wide_4_6(&x_lo, &prod);
+
+  // If negative, add p
+  let result = if neg {
+    let (sum, _) = add_4_4(&result, &F::MODULUS);
+    sum
+  } else {
+    result
+  };
+
+  // Result might still be >= 2^254, need more folds
+  // Use the 6-limb pasta reducer which handles this
+  let as_6 = [result[0], result[1], result[2], result[3], 0, 0];
+  barrett_reduce_6_pasta::<F>(&as_6)
+}
+
+/// Multiply 4-limb x_hi by PASTA_C (2 limbs), producing 6-limb result.
+#[inline(always)]
+fn mul_4limbs_by_pasta_c<F: FieldReductionConstants>(
+  x_hi_0: u64,
+  x_hi_1: u64,
+  x_hi_2: u64,
+  x_hi_3: u64,
+) -> [u64; 6] {
+  let c = F::PASTA_C;
+  let mut result = [0u64; 6];
+
+  // x_hi_0 × c
+  let prod0 = mul_2_by_1(&c, x_hi_0);
+  result[0] = prod0[0];
+  result[1] = prod0[1];
+  result[2] = prod0[2];
+
+  // x_hi_1 × c (add at offset 1)
+  let prod1 = mul_2_by_1(&c, x_hi_1);
+  let mut carry = 0u128;
+  let sum = (result[1] as u128) + (prod1[0] as u128) + carry;
+  result[1] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[2] as u128) + (prod1[1] as u128) + carry;
+  result[2] = sum as u64;
+  carry = sum >> 64;
+  result[3] = prod1[2].wrapping_add(carry as u64);
+
+  // x_hi_2 × c (add at offset 2)
+  let prod2 = mul_2_by_1(&c, x_hi_2);
+  carry = 0;
+  let sum = (result[2] as u128) + (prod2[0] as u128) + carry;
+  result[2] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[3] as u128) + (prod2[1] as u128) + carry;
+  result[3] = sum as u64;
+  carry = sum >> 64;
+  result[4] = prod2[2].wrapping_add(carry as u64);
+
+  // x_hi_3 × c (add at offset 3)
+  let prod3 = mul_2_by_1(&c, x_hi_3);
+  carry = 0;
+  let sum = (result[3] as u128) + (prod3[0] as u128) + carry;
+  result[3] = sum as u64;
+  carry = sum >> 64;
+  let sum = (result[4] as u128) + (prod3[1] as u128) + carry;
+  result[4] = sum as u64;
+  carry = sum >> 64;
+  result[5] = prod3[2].wrapping_add(carry as u64);
+
+  result
+}
+
+/// Subtract 6-limb from 4-limb: a - b, return (result, is_negative).
+#[inline(always)]
+fn sub_wide_4_6(a: &[u64; 4], b: &[u64; 6]) -> ([u64; 4], bool) {
+  let mut result = [0u64; 4];
+  let mut borrow = 0u64;
+
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+
+  // Check if b[4], b[5] > 0 or there's remaining borrow
+  let is_negative = borrow > 0 || b[4] > 0 || b[5] > 0;
+  (result, is_negative)
+}
+
+/// Generic 7-limb Barrett reduction (used for BN254, T256).
 ///
 /// Reduces a 7-limb value (up to 448 bits) modulo p by folding limb 6
 /// using R384 = 2^384 mod p, then delegating to the bounded 6-limb reduction.
-///
-/// This function is non-recursive: limb 6 is folded once, then `barrett_reduce_6`
-/// handles the remaining 6 limbs with its bounded loop.
 #[inline]
-pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
+fn barrett_reduce_7_generic<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
   let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);
 
   let mut sum = [0u64; 6];
@@ -158,7 +445,7 @@ pub(crate) fn barrett_reduce_7<F: FieldReductionConstants>(c: &[u64; 7]) -> [u64
   let s = (c[5] as u128) + carry;
   sum[5] = s as u64;
 
-  barrett_reduce_6::<F>(&sum)
+  barrett_reduce_6_generic::<F>(&sum)
 }
 
 // ==========================================================================

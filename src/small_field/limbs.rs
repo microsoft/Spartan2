@@ -368,6 +368,52 @@ pub(super) fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
   result
 }
 
+/// Subtract two 4-limb values with borrow output: a - b → (result, borrow).
+///
+/// Used for branchless canonicalization patterns.
+#[inline(always)]
+pub(super) fn sub_4_4_with_borrow(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], u64) {
+  let mut result = [0u64; 4];
+  let mut borrow = 0u64;
+  for i in 0..4 {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  (result, borrow)
+}
+
+/// Constant-time select: if cond { a } else { b }
+///
+/// Used for branchless canonicalization to avoid data-dependent branches.
+#[inline(always)]
+pub(super) fn select_4(cond: bool, a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+  let mask = (cond as u64).wrapping_neg(); // 0xFFFF...FFFF if true, 0 if false
+  [
+    (a[0] & mask) | (b[0] & !mask),
+    (a[1] & mask) | (b[1] & !mask),
+    (a[2] & mask) | (b[2] & !mask),
+    (a[3] & mask) | (b[3] & !mask),
+  ]
+}
+
+/// Multiply 2-limb by 1-limb, producing a 3-limb result.
+///
+/// Used in Pasta 2-fold Barrett reduction for x_hi × c where c is 2 limbs.
+#[inline(always)]
+pub(super) fn mul_2_by_1(a: &[u64; 2], b: u64) -> [u64; 3] {
+  let mut result = [0u64; 3];
+  let mut carry = 0u128;
+  for i in 0..2 {
+    let prod = (a[i] as u128) * (b as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[2] = carry as u64;
+  result
+}
+
 // ============================================================================
 // Limb comparison operations
 // ============================================================================
