@@ -22,7 +22,6 @@ use crate::{
     univariate::{CompressedUniPoly, UniPoly},
   },
   r1cs::SplitMultiRoundR1CSShape,
-  big_num::DelayedReduction,
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},

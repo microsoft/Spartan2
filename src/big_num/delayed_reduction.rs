@@ -82,11 +82,12 @@ mod tests {
   use halo2curves::{
     bn256::Fr as Bn254Fr,
     pasta::{Fp, Fq},
+    secp256r1::Fq as P256Fq,
     t256::Fq as T256Fq,
   };
 
   /// Test accumulating multiple products and reducing once.
-  fn test_delayed_reduction_sum<F: MontgomeryLimbs + PrimeField + Copy>() {
+  fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + Copy>() {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -112,23 +113,23 @@ mod tests {
     );
   }
 
-  #[test]
-  fn test_fp_delayed_reduction_sum() {
-    test_delayed_reduction_sum::<Fp>();
+  /// Generate a test module for a field type's DelayedReduction.
+  macro_rules! test_delayed_reduction {
+    ($mod_name:ident, $field:ty) => {
+      mod $mod_name {
+        use super::*;
+
+        #[test]
+        fn delayed_reduction_sum() {
+          test_delayed_reduction_sum_impl::<$field>();
+        }
+      }
+    };
   }
 
-  #[test]
-  fn test_fq_delayed_reduction_sum() {
-    test_delayed_reduction_sum::<Fq>();
-  }
-
-  #[test]
-  fn test_bn254fr_delayed_reduction_sum() {
-    test_delayed_reduction_sum::<Bn254Fr>();
-  }
-
-  #[test]
-  fn test_t256fq_delayed_reduction_sum() {
-    test_delayed_reduction_sum::<T256Fq>();
-  }
+  test_delayed_reduction!(fp_tests, Fp);
+  test_delayed_reduction!(fq_tests, Fq);
+  test_delayed_reduction!(bn254fr_tests, Bn254Fr);
+  test_delayed_reduction!(t256fq_tests, T256Fq);
+  test_delayed_reduction!(p256fq_tests, P256Fq);
 }

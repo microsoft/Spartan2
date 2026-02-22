@@ -12,6 +12,7 @@ use super::{
 use halo2curves::{
   bn256::Fr as Bn254Fr,
   pasta::{Fp, Fq},
+  secp256r1::Fq as P256Fq,
   t256::Fq as T256Fq,
 };
 
@@ -23,53 +24,12 @@ pub(crate) trait MontgomeryLimbs: FieldReductionConstants {
   fn to_limbs(&self) -> &[u64; 4];
 }
 
-impl MontgomeryLimbs for Fp {
-  #[inline]
-  fn from_limbs(limbs: [u64; 4]) -> Self {
-    Fp(limbs)
-  }
-
-  #[inline]
-  fn to_limbs(&self) -> &[u64; 4] {
-    &self.0
-  }
-}
-
-impl MontgomeryLimbs for Fq {
-  #[inline]
-  fn from_limbs(limbs: [u64; 4]) -> Self {
-    Fq(limbs)
-  }
-
-  #[inline]
-  fn to_limbs(&self) -> &[u64; 4] {
-    &self.0
-  }
-}
-
-impl MontgomeryLimbs for Bn254Fr {
-  #[inline]
-  fn from_limbs(limbs: [u64; 4]) -> Self {
-    Bn254Fr(limbs)
-  }
-
-  #[inline]
-  fn to_limbs(&self) -> &[u64; 4] {
-    &self.0
-  }
-}
-
-impl MontgomeryLimbs for T256Fq {
-  #[inline]
-  fn from_limbs(limbs: [u64; 4]) -> Self {
-    T256Fq(limbs)
-  }
-
-  #[inline]
-  fn to_limbs(&self) -> &[u64; 4] {
-    &self.0
-  }
-}
+// Use macro to implement MontgomeryLimbs for all supported fields.
+crate::impl_montgomery_limbs!(Fp);
+crate::impl_montgomery_limbs!(Fq);
+crate::impl_montgomery_limbs!(Bn254Fr);
+crate::impl_montgomery_limbs!(T256Fq);
+crate::impl_montgomery_limbs!(P256Fq);
 
 /// Montgomery REDC for 9-limb input (optimized single-fold algorithm).
 ///
@@ -201,9 +161,9 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
     debug_assert!(x5[4] == 0, "after 5th-limb subtract, x5[4] should be 0");
   }
 
-  // Now x5[0..4] < R, canonicalize to [0, p) with Q conditional subtracts
+  // Now x5[0..4] < R, reduce to [0, p) with final correction subtractions
   let mut out = [x5[0], x5[1], x5[2], x5[3]];
-  for _ in 0..F::MAX_CANONICALIZE_SUBS {
+  for _ in 0..F::MAX_REDC_SUB_CORRECTIONS {
     if gte_4_4(&out, &F::MODULUS) {
       out = sub_4_4(&out, &F::MODULUS);
     }
@@ -211,8 +171,8 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
 
   debug_assert!(
     !gte_4_4(&out, &F::MODULUS),
-    "canonicalization failed after {} subtractions",
-    F::MAX_CANONICALIZE_SUBS
+    "REDC final reduction failed after {} subtractions",
+    F::MAX_REDC_SUB_CORRECTIONS
   );
 
   out
@@ -225,21 +185,14 @@ mod tests {
   use ff::PrimeField;
 
   /// Verify R512_MOD ≡ 2^512 (mod p) by checking Montgomery reduction consistency.
-  /// We verify that reducing a value using R512_MOD gives correct results.
-  fn test_r512_mod<F: FieldReductionConstants + MontgomeryLimbs + PrimeField + Copy>() {
-    // Test: reduce a 9-limb value where limb[8] = 1 (i.e., 2^512)
-    // The result should be equivalent to R512_MOD in Montgomery form
+  fn test_r512_mod_impl<F: FieldReductionConstants + MontgomeryLimbs + PrimeField + Copy>() {
     let mut wide_512 = [0u64; 9];
     wide_512[8] = 1; // This represents 2^512
 
     let reduced = montgomery_reduce_9::<F>(&wide_512);
-
-    // Montgomery reduce of 2^512 should give us R512_MOD * R^{-1} mod p
-    // which equals R512_MOD / R mod p
-    // Verify by doing field arithmetic: reduced * R should equal R512_MOD
     let reduced_field = F::from_limbs(reduced);
 
-    // Simpler test: verify R512_MOD < MODULUS
+    // Verify R512_MOD < MODULUS
     let modulus = <F as FieldReductionConstants>::MODULUS;
     let r512 = <F as FieldReductionConstants>::R512_MOD;
     let mut less_than = false;
@@ -262,8 +215,9 @@ mod tests {
   }
 
   /// Round-trip test: Montgomery reduce a field product and verify correctness.
-  fn test_montgomery_round_trip<F: FieldReductionConstants + MontgomeryLimbs + PrimeField + Copy>()
-  {
+  fn test_montgomery_round_trip_impl<
+    F: FieldReductionConstants + MontgomeryLimbs + PrimeField + Copy,
+  >() {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -273,15 +227,12 @@ mod tests {
       let a = F::random(&mut rng);
       let b = F::random(&mut rng);
 
-      // Compute a * b using field multiplication (the reference)
       let expected = a * b;
 
-      // Compute using our Montgomery reduction
       let a_limbs = a.to_limbs();
       let b_limbs = b.to_limbs();
       let product_wide = mul_4_by_4(a_limbs, b_limbs);
 
-      // Montgomery reduce the 8-limb product
       let mut wide_9 = [0u64; 9];
       wide_9[..8].copy_from_slice(&product_wide);
       let reduced_limbs = montgomery_reduce_9::<F>(&wide_9);
@@ -295,8 +246,9 @@ mod tests {
   }
 
   /// Verify the folding identity: reducing [0;8, h] equals h × (reduced [0;8, 1]).
-  fn test_r512_mod_folding_identity<F: FieldReductionConstants + MontgomeryLimbs + PrimeField>() {
-    // Base case: reduce([0, 0, 0, 0, 0, 0, 0, 0, 1]) represents 2^512 in Montgomery reduction
+  fn test_r512_mod_folding_identity_impl<
+    F: FieldReductionConstants + MontgomeryLimbs + PrimeField,
+  >() {
     let base_input: [u64; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 1];
     let base_reduced = F::from_limbs(montgomery_reduce_9::<F>(&base_input));
 
@@ -313,75 +265,33 @@ mod tests {
     }
   }
 
-  // =========================================================================
-  // R512_MOD consistency: Verify reduction of 2^512 produces valid results
-  // =========================================================================
+  /// Generate a test module for a field type's Montgomery reduction.
+  macro_rules! test_montgomery {
+    ($mod_name:ident, $field:ty) => {
+      mod $mod_name {
+        use super::*;
 
-  #[test]
-  fn test_fp_r512_mod() {
-    test_r512_mod::<Fp>();
+        #[test]
+        fn r512_mod() {
+          test_r512_mod_impl::<$field>();
+        }
+
+        #[test]
+        fn r512_folding_identity() {
+          test_r512_mod_folding_identity_impl::<$field>();
+        }
+
+        #[test]
+        fn montgomery_round_trip() {
+          test_montgomery_round_trip_impl::<$field>();
+        }
+      }
+    };
   }
 
-  #[test]
-  fn test_fq_r512_mod() {
-    test_r512_mod::<Fq>();
-  }
-
-  #[test]
-  fn test_bn254fr_r512_mod() {
-    test_r512_mod::<Bn254Fr>();
-  }
-
-  #[test]
-  fn test_t256fq_r512_mod() {
-    test_r512_mod::<T256Fq>();
-  }
-
-  // =========================================================================
-  // R512 folding identity: reduce([0;8, h]) == h × reduce([0;8, 1])
-  // =========================================================================
-
-  #[test]
-  fn test_fp_r512_folding_identity() {
-    test_r512_mod_folding_identity::<Fp>();
-  }
-
-  #[test]
-  fn test_fq_r512_folding_identity() {
-    test_r512_mod_folding_identity::<Fq>();
-  }
-
-  #[test]
-  fn test_bn254fr_r512_folding_identity() {
-    test_r512_mod_folding_identity::<Bn254Fr>();
-  }
-
-  #[test]
-  fn test_t256fq_r512_folding_identity() {
-    test_r512_mod_folding_identity::<T256Fq>();
-  }
-
-  // =========================================================================
-  // Montgomery round-trip: reduce(a × b as wide) == a × b (integration test)
-  // =========================================================================
-
-  #[test]
-  fn test_fp_montgomery_round_trip() {
-    test_montgomery_round_trip::<Fp>();
-  }
-
-  #[test]
-  fn test_fq_montgomery_round_trip() {
-    test_montgomery_round_trip::<Fq>();
-  }
-
-  #[test]
-  fn test_bn254fr_montgomery_round_trip() {
-    test_montgomery_round_trip::<Bn254Fr>();
-  }
-
-  #[test]
-  fn test_t256fq_montgomery_round_trip() {
-    test_montgomery_round_trip::<T256Fq>();
-  }
+  test_montgomery!(fp_tests, Fp);
+  test_montgomery!(fq_tests, Fq);
+  test_montgomery!(bn254fr_tests, Bn254Fr);
+  test_montgomery!(t256fq_tests, T256Fq);
+  test_montgomery!(p256fq_tests, P256Fq);
 }

@@ -10,6 +10,7 @@
 mod delayed_reduction;
 pub mod field_reduction_constants;
 pub mod limbs;
+pub mod macros;
 pub mod montgomery;
 
 pub use delayed_reduction::DelayedReduction;
