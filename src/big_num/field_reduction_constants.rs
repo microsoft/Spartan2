@@ -24,7 +24,12 @@ pub trait FieldReductionConstants {
   /// the 9th limb h represents h·2^512, which we replace with h·R512_MOD ≡ h·2^512 (mod p).
   const R512_MOD: [u64; 4];
 
-  /// Montgomery inverse: -p^(-1) mod 2^64
+  /// Montgomery inverse: -p[0]^(-1) mod 2^64
+  ///
+  /// Only a 64-bit inverse (not 256-bit) because we use limb-by-limb Montgomery
+  /// reduction. Each iteration computes `m = t_low * MONT_INV mod 2^64` to zero
+  /// out the lowest limb—this only depends on `p mod 2^64` (i.e., `p[0]`).
+  /// See [`compute_mont_inv`](crate::big_num::macros::compute_mont_inv) for details.
   const MONT_INV: u64;
 
   /// R mod p = 2^256 mod p (Montgomery representation of 1)

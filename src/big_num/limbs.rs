@@ -293,8 +293,11 @@ pub(super) const fn clz_8(a: &[u64; 8]) -> u32 {
   count
 }
 
-/// Reduce an 8-limb value modulo a 4-limb prime using binary long division.
-/// Returns a 4-limb result in [0, p).
+/// Reduce an 8-limb value modulo a 4-limb prime using old-school binary long division.
+///
+/// Aligns p with x's MSB, then iteratively trial-subtracts at each bit position.
+/// Slow (O(n²) in bits) but works in `const fn` context where Montgomery reduction
+/// isn't available. Result fits in 4 limbs because `x mod p < p`.
 #[inline(always)]
 pub(super) const fn reduce_8_mod_4(x: &[u64; 8], p: &[u64; 4]) -> [u64; 4] {
   // Extend p to 8 limbs for comparison

@@ -120,13 +120,30 @@ pub const fn parse_hex_to_limbs(s: &str) -> [u64; 4] {
   limbs
 }
 
-/// Compute -p[0]^(-1) mod 2^64 using Newton iteration.
+/// Compute -p[0]^(-1) mod 2^64 using a bit-doubling iteration.
 ///
-/// This is the Montgomery inverse used in REDC. We use 6 iterations of Newton's
-/// method to compute the inverse, which is sufficient for 64-bit precision.
+/// **Why a 64-bit inverse, not 256-bit?**
+/// We use limb-by-limb Montgomery reduction, zeroing one 64-bit limb per iteration.
+/// Each step computes `m = t_low * mont_inv mod 2^64`, which only depends on
+/// `p mod 2^64` (i.e., `p[0]`). This approach maps efficiently to 64-bit CPU
+/// registers and avoids full 256×256-bit multiplications that a single-step
+/// reduction with `-p^(-1) mod 2^256` would require.
+///
+/// **The iteration:** `inv' = inv * (2 - p0 * inv)` doubles correct bits.
+///
+/// Why? If `p0 * inv = 1 + e·2^k` (correct mod 2^k), then:
+///   p0 * inv' = (1 + e·2^k)(1 - e·2^k) = 1 - e²·2^(2k) ≡ 1 (mod 2^(2k))
+///
+/// **Convergence:**
+/// ```text
+/// Start: p0 is odd, so p0·1 ≡ 1 (mod 2) →  1 bit
+/// ×2 each iteration: 1 → 2 → 4 → 8 → 16 → 32 → 64 bits (6 iterations)
+/// ```
+///
+/// Returns `-inv` for use in REDC.
 pub const fn compute_mont_inv(p0: u64) -> u64 {
-  // Newton iteration: inv = inv * (2 - p0 * inv)
-  // Converges quadratically, 6 iterations gives 64-bit precision
+  // Bit-doubling iteration: inv = inv * (2 - p0 * inv)
+  // Each iteration doubles correct bits: 1 → 2 → 4 → 8 → 16 → 32 → 64
   let mut inv = 1u64;
   inv = inv.wrapping_mul(2u64.wrapping_sub(p0.wrapping_mul(inv)));
   inv = inv.wrapping_mul(2u64.wrapping_sub(p0.wrapping_mul(inv)));
