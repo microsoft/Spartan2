@@ -16,6 +16,7 @@ use crate::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
+  big_num::DelayedReduction,
   errors::SpartanError,
   polys::{
     multilinear::MultilinearPolynomial,
@@ -27,6 +28,7 @@ use crate::{
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
 };
 use ff::Field;
+use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -269,80 +271,98 @@ impl<E: Engine> SumcheckProof<E> {
     ))
   }
 
-  #[inline]
-  /// Computes evaluation points for a cubic polynomial with additive term.
+  /// Computes evaluation points for a cubic polynomial: a * (b * c - d)
   ///
-  /// This function computes three evaluation points (at 0, 2, and 3) for a univariate
-  /// polynomial that represents the sum over a hypercube edge in the sum-check protocol
-  /// for a cubic combination of four multilinear polynomials.
+  /// Uses delayed modular reduction for improved performance.
   ///
   /// # Arguments
-  /// * `poly_A` - First multilinear polynomial
+  /// * `poly_A` - First multilinear polynomial (multiplier)
   /// * `poly_B` - Second multilinear polynomial
   /// * `poly_C` - Third multilinear polynomial
-  /// * `poly_D` - Fourth multilinear polynomial
-  /// * `comb_func` - Function that combines evaluations of the four polynomials
+  /// * `poly_D` - Fourth multilinear polynomial (subtracted term)
   ///
   /// # Returns
   /// A tuple containing the evaluations at points 0, 2, and 3.
-  fn compute_eval_points_cubic_with_additive_term<F>(
+  #[inline]
+  fn compute_eval_points_cubic_with_additive_term(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
     poly_C: &MultilinearPolynomial<E::Scalar>,
     poly_D: &MultilinearPolynomial<E::Scalar>,
-    comb_func: &F,
-  ) -> (E::Scalar, E::Scalar, E::Scalar)
-  where
-    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
+  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
     let len = poly_B.Z.len() / 2;
-    par_for(
-      len,
-      |i| {
-        let a_low = poly_A[i];
-        let a_high = poly_A[i + len];
-        let b_low = poly_B[i];
-        let b_high = poly_B[i + len];
-        let c_low = poly_C[i];
-        let c_high = poly_C[i + len];
-        let d_low = poly_D[i];
-        let d_high = poly_D[i + len];
 
-        // eval 0: bound_func is A(low)
-        let eval_point_0 = comb_func(&a_low, &b_low, &c_low, &d_low);
+    let (acc_0, acc_2, acc_3) = (0..len)
+      .into_par_iter()
+      .fold(
+        || {
+          (
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+          )
+        },
+        |mut acc, i| {
+          let a_low = &poly_A[i];
+          let a_high = &poly_A[i + len];
+          let b_low = &poly_B[i];
+          let b_high = &poly_B[i + len];
+          let c_low = &poly_C[i];
+          let c_high = &poly_C[i + len];
+          let d_low = &poly_D[i];
+          let d_high = &poly_D[i + len];
 
-        // eval 2: bound_func is -A(low) + 2*A(high)
-        let poly_A_bound_point = a_high + a_high - a_low;
-        let poly_B_bound_point = b_high + b_high - b_low;
-        let poly_C_bound_point = c_high + c_high - c_low;
-        let poly_D_bound_point = d_high + d_high - d_low;
-        let eval_point_2 = comb_func(
-          &poly_A_bound_point,
-          &poly_B_bound_point,
-          &poly_C_bound_point,
-          &poly_D_bound_point,
-        );
+          // eval 0: a * (b * c - d)
+          let inner_0 = *b_low * *c_low - *d_low;
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.0, a_low, &inner_0,
+          );
 
-        // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-        let poly_A_bound_point = poly_A_bound_point + a_high - a_low;
-        let poly_B_bound_point = poly_B_bound_point + b_high - b_low;
-        let poly_C_bound_point = poly_C_bound_point + c_high - c_low;
-        let poly_D_bound_point = poly_D_bound_point + d_high - d_low;
-        let eval_point_3 = comb_func(
-          &poly_A_bound_point,
-          &poly_B_bound_point,
-          &poly_C_bound_point,
-          &poly_D_bound_point,
-        );
-        (eval_point_0, eval_point_2, eval_point_3)
-      },
-      |mut acc, val| {
-        acc.0 += val.0;
-        acc.1 += val.1;
-        acc.2 += val.2;
-        acc
-      },
-      || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+          // eval 2: bound values at point 2
+          let a_bound = *a_high + *a_high - *a_low;
+          let b_bound = *b_high + *b_high - *b_low;
+          let c_bound = *c_high + *c_high - *c_low;
+          let d_bound = *d_high + *d_high - *d_low;
+          let inner_2 = b_bound * c_bound - d_bound;
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.1, &a_bound, &inner_2,
+          );
+
+          // eval 3: bound values at point 3 (incremental)
+          let a_bound = a_bound + *a_high - *a_low;
+          let b_bound = b_bound + *b_high - *b_low;
+          let c_bound = c_bound + *c_high - *c_low;
+          let d_bound = d_bound + *d_high - *d_low;
+          let inner_3 = b_bound * c_bound - d_bound;
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.2, &a_bound, &inner_3,
+          );
+
+          acc
+        },
+      )
+      .reduce(
+        || {
+          (
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+          )
+        },
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a.2 += b.2;
+          a
+        },
+      );
+
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
     )
   }
 
@@ -364,17 +384,19 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Returns
   /// A tuple containing the evaluations at points 0, 2, and 3.
-  fn compute_eval_points_cubic_with_additive_term_with_outer_pow<F>(
+  ///
+  /// Uses two-level delayed reduction: inner loop accumulates in wide limbs,
+  /// reduces once per outer iteration, outer loop accumulates reduced values
+  /// in wide limbs, final reduction at the end.
+  fn compute_eval_points_cubic_with_additive_term_with_outer_pow(
     pow_tau_left: &MultilinearPolynomial<E::Scalar>,
     pow_tau_right: &MultilinearPolynomial<E::Scalar>,
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
     poly_C: &MultilinearPolynomial<E::Scalar>,
-    comb_func: &F,
-  ) -> (E::Scalar, E::Scalar, E::Scalar)
-  where
-    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
+  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
     let len = poly_A.Z.len() / 2;
     let left = pow_tau_left.Z.len();
 
@@ -384,76 +406,119 @@ impl<E: Engine> SumcheckProof<E> {
         poly_A,
         poly_B,
         poly_C,
-        comb_func,
       );
     }
 
     let right = len / left;
 
-    par_for(
-      left,
-      |i| {
-        let pow_left = pow_tau_left[i];
+    let (acc_0, acc_2, acc_3) = (0..left)
+      .into_par_iter()
+      .fold(
+        || {
+          (
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+          )
+        },
+        |mut outer_acc, i| {
+          let pow_left = &pow_tau_left[i];
 
-        let mut acc_0 = E::Scalar::ZERO;
-        let mut acc_2 = E::Scalar::ZERO;
-        let mut acc_3 = E::Scalar::ZERO;
+          // Inner loop: accumulate in wide limbs
+          let mut inner_0 = Acc::<E::Scalar>::zero();
+          let mut inner_2 = Acc::<E::Scalar>::zero();
+          let mut inner_3 = Acc::<E::Scalar>::zero();
 
-        for j in 0..right {
-          let low = i + j * left;
-          let high = low + len;
+          for j in 0..right {
+            let low = i + j * left;
+            let high = low + len;
 
-          let tau_low_right = pow_tau_right[j];
-          let tau_high_right = pow_tau_right[j + right];
+            let tau_low = &pow_tau_right[j];
+            let tau_high = &pow_tau_right[j + right];
+            let a_low = &poly_A[low];
+            let a_high = &poly_A[high];
+            let b_low = &poly_B[low];
+            let b_high = &poly_B[high];
+            let c_low = &poly_C[low];
+            let c_high = &poly_C[high];
 
-          let a_low = poly_A[low];
-          let a_high = poly_A[high];
-          let b_low = poly_B[low];
-          let b_high = poly_B[high];
-          let c_low = poly_C[low];
-          let c_high = poly_C[high];
+            // eval 0: tau * (a * b - c)
+            let prod_0 = *a_low * *b_low - *c_low;
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut inner_0,
+              tau_low,
+              &prod_0,
+            );
 
-          // eval 0: bound_func is A(low)
-          let eval_point_0 = comb_func(&tau_low_right, &a_low, &b_low, &c_low);
+            // eval 2: bound_func is -A(low) + 2*A(high)
+            let tau_bound = *tau_high + *tau_high - *tau_low;
+            let a_bound = *a_high + *a_high - *a_low;
+            let b_bound = *b_high + *b_high - *b_low;
+            let c_bound = *c_high + *c_high - *c_low;
+            let prod_2 = a_bound * b_bound - c_bound;
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut inner_2,
+              &tau_bound,
+              &prod_2,
+            );
 
-          // eval 2: bound_func is -A(low) + 2*A(high)
-          let poly_tau_bound_point = tau_high_right + tau_high_right - tau_low_right;
-          let poly_A_bound_point = a_high + a_high - a_low;
-          let poly_B_bound_point = b_high + b_high - b_low;
-          let poly_C_bound_point = c_high + c_high - c_low;
-          let eval_point_2 = comb_func(
-            &poly_tau_bound_point,
-            &poly_A_bound_point,
-            &poly_B_bound_point,
-            &poly_C_bound_point,
+            // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally
+            let tau_bound = tau_bound + *tau_high - *tau_low;
+            let a_bound = a_bound + *a_high - *a_low;
+            let b_bound = b_bound + *b_high - *b_low;
+            let c_bound = c_bound + *c_high - *c_low;
+            let prod_3 = a_bound * b_bound - c_bound;
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut inner_3,
+              &tau_bound,
+              &prod_3,
+            );
+          }
+
+          // Reduce inner sums, accumulate into outer accumulators
+          let inner_0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_0);
+          let inner_2_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_2);
+          let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
+
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut outer_acc.0,
+            pow_left,
+            &inner_0_red,
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut outer_acc.1,
+            pow_left,
+            &inner_2_red,
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut outer_acc.2,
+            pow_left,
+            &inner_3_red,
           );
 
-          // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally with bound_func applied to eval(2)
-          let poly_tau_bound_point = poly_tau_bound_point + tau_high_right - tau_low_right;
-          let poly_A_bound_point = poly_A_bound_point + a_high - a_low;
-          let poly_B_bound_point = poly_B_bound_point + b_high - b_low;
-          let poly_C_bound_point = poly_C_bound_point + c_high - c_low;
-          let eval_point_3 = comb_func(
-            &poly_tau_bound_point,
-            &poly_A_bound_point,
-            &poly_B_bound_point,
-            &poly_C_bound_point,
-          );
+          outer_acc
+        },
+      )
+      .reduce(
+        || {
+          (
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::zero(),
+          )
+        },
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a.2 += b.2;
+          a
+        },
+      );
 
-          acc_0 += eval_point_0;
-          acc_2 += eval_point_2;
-          acc_3 += eval_point_3;
-        }
-
-        (acc_0 * pow_left, acc_2 * pow_left, acc_3 * pow_left)
-      },
-      |mut acc, val| {
-        acc.0 += val.0;
-        acc.1 += val.1;
-        acc.2 += val.2;
-        acc
-      },
-      || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
     )
   }
 
@@ -751,10 +816,6 @@ impl<E: Engine> SumcheckProof<E> {
     let mut claim_core = E::Scalar::ZERO;
 
     for i in 0..num_rounds {
-      let comb = |a: &E::Scalar, b: &E::Scalar, c: &E::Scalar, d: &E::Scalar| -> E::Scalar {
-        *a * (*b * *c - *d)
-      };
-
       // step branch
       let ((mut eval0_s, mut eval2_s, mut eval3_s), (mut eval0_c, mut eval2_c, mut eval3_c)) =
         rayon::join(
@@ -765,7 +826,6 @@ impl<E: Engine> SumcheckProof<E> {
               poly_A_step,
               poly_B_step,
               poly_C_step,
-              &comb,
             )
           },
           || {
@@ -775,7 +835,6 @@ impl<E: Engine> SumcheckProof<E> {
               poly_A_core,
               poly_B_core,
               poly_C_core,
-              &comb,
             )
           },
         );
