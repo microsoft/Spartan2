@@ -303,7 +303,10 @@ impl<E: Engine> SpartanSNARK<E> {
     claims_outer: (E::Scalar, E::Scalar, E::Scalar),
     sc_proof_outer: SumcheckProof<E>,
     transcript: &mut E::TE,
-  ) -> Result<Self, SpartanError> {
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let (claim_Az, claim_Bz, claim_Cz) = claims_outer;
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
@@ -349,15 +352,11 @@ impl<E: Engine> SpartanSNARK<E> {
       poly_ABC.len(),
       poly_z.len()
     );
-    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
-      *poly_A_comp * *poly_B_comp
-    };
     let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
       &claim_inner_joint,
       num_rounds_y,
       &mut MultilinearPolynomial::new(poly_ABC),
       &mut MultilinearPolynomial::new(poly_z),
-      comb_func,
       transcript,
     )?;
     let eval_Z = claims_inner[1]; // evaluation of Z at r_y
@@ -374,7 +373,10 @@ impl<E: Engine> SpartanSNARK<E> {
     };
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
+    let eval_W = (eval_Z - r_y[0] * eval_X)
+      * (E::Scalar::ONE - r_y[0])
+        .invert()
+        .expect("1 - r_y[0] is non-zero");
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
@@ -443,7 +445,10 @@ impl<E: Engine> SpartanSNARK<E> {
     pk: &SpartanProverKey<E>,
     circuit: C,
     prep_snark: &SpartanPrepSNARK<E>,
-  ) -> Result<Self, SpartanError> {
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
     let mut prep_snark = prep_snark.clone();
 
@@ -470,7 +475,8 @@ impl<E: Engine> SpartanSNARK<E> {
     .concat();
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
+    let num_rounds_x =
+      usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // outer sum-check preparation
     let tau = (0..num_rounds_x)
@@ -581,7 +587,8 @@ impl<E: Engine> SpartanSNARK<E> {
     let z_small = Self::build_z_small(&W_small, &X_small, &challenges_small);
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
+    let num_rounds_x =
+      usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // outer sum-check preparation
     let tau = (0..num_rounds_x)
@@ -700,7 +707,8 @@ impl<E: Engine> SpartanSNARK<E> {
     ]
     .concat();
 
-    let num_rounds_x = usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
+    let num_rounds_x =
+      usize::try_from(pk.S.num_cons.ilog2()).expect("constraint count log2 fits in usize");
 
     // Generate tau challenges
     let tau = (0..num_rounds_x)
@@ -807,7 +815,10 @@ mod tests {
     test_snark_with::<E2, S2>();
   }
 
-  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
+  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>()
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let circuit = CubicCircuit::default();
 
     // produce keys

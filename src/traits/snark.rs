@@ -7,6 +7,7 @@
 //! This module defines a collection of traits that define the behavior of a zkSNARK for RelaxedR1CS
 use crate::{
   errors::SpartanError,
+  small_field::DelayedReduction,
   traits::{Engine, Group, TranscriptReprTrait, circuit::SpartanCircuit},
 };
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,9 @@ pub trait R1CSSNARKTrait<E: Engine>:
     circuit: C,
     prep_snark: &Self::PrepSNARK,
     is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<Self, SpartanError>;
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>;
 
   /// Verifies a SNARK for a relaxed R1CS and returns the public IO
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError>;

@@ -16,7 +16,6 @@ use crate::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
-  big_num::DelayedReduction,
   errors::SpartanError,
   polys::{
     multilinear::MultilinearPolynomial,
@@ -36,43 +35,6 @@ use tracing::info;
 
 /// 4 k elements is a good cut-off on a 16-core machine.
 pub(crate) const PAR_THRESHOLD: usize = 4 << 10; // 4096
-
-/// Adaptive parallel-for helper.
-/// Falls back to a plain `for` loop when the slice is small **or**
-/// we are already inside a Rayon worker, avoiding nested pools.
-/// `par_for` – run `map(i)` for `i = 0..len` and fold the
-/// results with `reduce`, starting from `identity()`.
-///
-/// When `len` is small or we’re already on a Rayon thread it executes
-/// serially; otherwise it uses `into_par_iter`.
-fn par_for<R, Map, Red, Id>(len: usize, map: Map, reduce: Red, identity: Id) -> R
-where
-  R: Send, // result must cross Rayon threads
-  Map: Fn(usize) -> R + Sync + Send,
-  Red: Fn(R, R) -> R + Sync + Send,
-  Id: Fn() -> R + Sync + Send,
-{
-  // Fast-path for empty ranges
-  if len == 0 {
-    return identity();
-  }
-
-  // Are we *already* running inside a Rayon worker thread?
-  let in_rayon_ctx = rayon::current_thread_index().is_some();
-
-  if len < PAR_THRESHOLD || in_rayon_ctx {
-    // ---------- serial fallback ----------
-    let mut acc = identity();
-    for i in 0..len {
-      let v = map(i);
-      acc = reduce(acc, v);
-    }
-    acc
-  } else {
-    // ---------- true parallel path ----------
-    (0..len).into_par_iter().map(map).reduce(identity, reduce)
-  }
-}
 
 /// Bind three polynomials to the same challenge in one pass.
 /// More efficient than three separate bind calls - reduces Rayon dispatches
@@ -195,84 +157,92 @@ impl<E: Engine> SumcheckProof<E> {
     Ok((e, r))
   }
 
-  /// Computes evaluation points for a quadratic polynomial in the sum-check protocol.
+  /// Computes evaluation points for a quadratic polynomial using delayed modular reduction.
   ///
-  /// Given two multilinear polynomials A and B, computes evaluations at points 0 and 2
-  /// of the univariate polynomial formed by binding one variable using a combination function.
+  /// Accumulates a·b products in wide limbs (no intermediate reductions),
+  /// reducing only once at the end. This saves N-1 Montgomery reductions per round.
   ///
   /// # Arguments
   /// * `poly_A` - First multilinear polynomial
   /// * `poly_B` - Second multilinear polynomial
-  /// * `comb_func` - Function combining evaluations of A and B
   ///
   /// # Returns
   /// A tuple `(eval_0, eval_2)` containing evaluations at points 0 and 2.
   #[inline]
-  fn compute_eval_points_quad<F>(
+  fn compute_eval_points_quad(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
-    comb_func: &F,
   ) -> (E::Scalar, E::Scalar)
   where
-    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+    E::Scalar: DelayedReduction<E::Scalar>,
   {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
     let len = poly_A.Z.len() / 2;
 
-    // Using `par_for` keeps the map-reduce logic identical
-    // but avoids Rayon overhead on tiny slices.
-    par_for(
-      len,
-      // map-closure (returned pair is the per-index contribution)
-      |i| {
-        let a_low = poly_A[i];
-        let a_high = poly_A[len + i];
-        let b_low = poly_B[i];
-        let b_high = poly_B[len + i];
+    let (acc_0, acc_2) = (0..len)
+      .into_par_iter()
+      .fold(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut acc, i| {
+          let a_low = &poly_A[i];
+          let a_high = &poly_A[len + i];
+          let b_low = &poly_B[i];
+          let b_high = &poly_B[len + i];
 
-        // eval 0:   A(low)
-        let eval0 = comb_func(&a_low, &b_low);
+          // eval 0: a_low × b_low
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.0, a_low, b_low,
+          );
 
-        // eval 2:  −A(low) + 2·A(high)   (same for B)
-        let a_bound = a_high + a_high - a_low;
-        let b_bound = b_high + b_high - b_low;
-        let eval2 = comb_func(&a_bound, &b_bound);
+          // eval 2: (2·a_high - a_low) × (2·b_high - b_low)
+          let a_bound = *a_high + *a_high - *a_low;
+          let b_bound = *b_high + *b_high - *b_low;
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.1, &a_bound, &b_bound,
+          );
 
-        (eval0, eval2)
-      },
-      // reduce-closure (pairwise accumulation)
-      |mut acc, val| {
-        acc.0 += val.0;
-        acc.1 += val.1;
-        acc
-      },
-      // identity value
-      || (E::Scalar::ZERO, E::Scalar::ZERO),
+          acc
+        },
+      )
+      .reduce(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a
+        },
+      );
+
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
     )
   }
 
   /// Generates a sum-check proof for a quadratic combination of two multilinear polynomials.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   ///
   /// # Arguments
   /// * `claim` - The claimed sum over the hypercube
   /// * `num_rounds` - The number of variables/rounds in the sum-check
   /// * `poly_A` - First multilinear polynomial (mutable, will be bound during protocol)
   /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)
-  /// * `comb_func` - Function that combines evaluations of the two polynomials
   /// * `transcript` - The transcript for generating randomness
   ///
   /// # Returns
   /// A tuple containing the sum-check proof, the sequence of verifier challenges,
   /// and the final evaluations of the polynomials.
-  pub fn prove_quad<F>(
+  pub fn prove_quad(
     claim: &E::Scalar,
     num_rounds: usize,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,
     poly_B: &mut MultilinearPolynomial<E::Scalar>,
-    comb_func: F,
     transcript: &mut E::TE,
   ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
+    E::Scalar: DelayedReduction<E::Scalar>,
   {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
@@ -282,8 +252,7 @@ impl<E: Engine> SumcheckProof<E> {
 
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
-        let (eval_point_0, eval_point_2) =
-          Self::compute_eval_points_quad(poly_A, poly_B, &comb_func);
+        let (eval_point_0, eval_point_2) = Self::compute_eval_points_quad(poly_A, poly_B);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
         }
@@ -340,7 +309,10 @@ impl<E: Engine> SumcheckProof<E> {
     poly_B: &MultilinearPolynomial<E::Scalar>,
     poly_C: &MultilinearPolynomial<E::Scalar>,
     poly_D: &MultilinearPolynomial<E::Scalar>,
-  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+  ) -> (E::Scalar, E::Scalar, E::Scalar)
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
     let len = poly_B.Z.len() / 2;
@@ -445,7 +417,10 @@ impl<E: Engine> SumcheckProof<E> {
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
     poly_C: &MultilinearPolynomial<E::Scalar>,
-  ) -> (E::Scalar, E::Scalar, E::Scalar) {
+  ) -> (E::Scalar, E::Scalar, E::Scalar)
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
     let len = poly_A.Z.len() / 2;
@@ -676,8 +651,8 @@ impl<E: Engine> SumcheckProof<E> {
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         // Use delayed modular reduction version
-        let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs_delayed(round, poly_A, poly_B, poly_C);
+        let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
+          .evaluation_points_cubic_with_three_inputs_delayed(round, poly_A, poly_B, poly_C);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -782,6 +757,8 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** sum-check in zero-knowledge mode and returns the
   /// Zero-knowledge quadratic sum-check used for the inner round.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   pub fn prove_quad_zk(
     claim: &E::Scalar,
     num_rounds: usize,
@@ -793,14 +770,16 @@ impl<E: Engine> SumcheckProof<E> {
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
-  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_current_round = *claim;
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z, &comb);
+      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z);
       let evals = vec![eval0, claim_current_round - eval0, eval2];
       let poly = UniPoly::from_evals(&evals)?;
 
@@ -832,6 +811,8 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** batched sum-check in zero-knowledge mode and returns the
   /// sequence of verifier challenges used for the inner round.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   pub fn prove_quad_batched_zk(
     claims: &[E::Scalar; 2],
     num_rounds: usize,
@@ -845,7 +826,10 @@ impl<E: Engine> SumcheckProof<E> {
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
-  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     // Maintain separate claims for step and core branches
     let mut claim_step_round = claims[0];
@@ -853,11 +837,9 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-
       let ((eval0_s, eval2_s), (eval0_c, eval2_c)) = rayon::join(
-        || Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb),
-        || Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb),
+        || Self::compute_eval_points_quad(poly_A_0, poly_B_0),
+        || Self::compute_eval_points_quad(poly_A_1, poly_B_1),
       );
 
       // step branch
@@ -930,7 +912,10 @@ impl<E: Engine> SumcheckProof<E> {
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
-  ) -> Result<Vec<E::Scalar>, SpartanError> {
+  ) -> Result<Vec<E::Scalar>, SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let mut base_tau = E::Scalar::ONE;
     let mut len_pow_tau = pow_tau_left.Z.len() * pow_tau_right.Z.len();
 
@@ -1284,9 +1269,21 @@ pub(crate) mod eq_sumcheck {
                 );
 
                 // Accumulate E_in * q_k in wide limbs (NO REDUCTION)
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_0, e_in, &q0);
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_2, e_in, &q2);
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_3, e_in, &q3);
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_0,
+                  e_in,
+                  &q0,
+                );
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_2,
+                  e_in,
+                  &q2,
+                );
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_3,
+                  e_in,
+                  &q3,
+                );
               }
 
               // Phase 2: Reduce inner sums ONCE, then multiply by E_out
@@ -1295,9 +1292,21 @@ pub(crate) mod eq_sumcheck {
               let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
 
               // Accumulate E_out * inner_reduced in wide limbs (NO REDUCTION)
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.0, e_out, &inner_0_red);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.1, e_out, &inner_2_red);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.2, e_out, &inner_3_red);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.0,
+                e_out,
+                &inner_0_red,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.1,
+                e_out,
+                &inner_2_red,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.2,
+                e_out,
+                &inner_3_red,
+              );
 
               outer_acc
             },
@@ -1354,9 +1363,15 @@ pub(crate) mod eq_sumcheck {
               );
 
               // Accumulate E * q_k in wide limbs (NO REDUCTION)
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.0, e, &q0);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.1, e, &q2);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.2, e, &q3);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.0, e, &q0,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.1, e, &q2,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.2, e, &q3,
+              );
 
               acc
             },

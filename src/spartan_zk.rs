@@ -28,6 +28,7 @@ use crate::{
     R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
   },
+  small_field::DelayedReduction,
   start_span,
   sumcheck::SumcheckProof,
   traits::{
@@ -204,7 +205,10 @@ where
     circuit: C,
     prep_snark: &Self::PrepSNARK,
     is_small: bool,
-  ) -> Result<Self, SpartanError> {
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let (_prove_span, prove_t) = start_span!("spartan_zk_prove");
 
     // rerandomize the prep state
@@ -355,7 +359,10 @@ where
     };
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().expect("1 - r_y[0] is non-zero");
+    let eval_W = (eval_Z - r_y[0] * eval_X)
+      * (E::Scalar::ONE - r_y[0])
+        .invert()
+        .expect("1 - r_y[0] is non-zero");
 
     // Process the inner-final equality round
     // Set verifier circuit public values before processing inner-final round
@@ -637,7 +644,10 @@ mod tests {
     test_zksnark_with::<E2, S2>();
   }
 
-  fn test_zksnark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
+  fn test_zksnark_with<E: Engine, S: R1CSSNARKTrait<E>>()
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
     let circuit = CubicCircuit::default();
 
     // produce keys
