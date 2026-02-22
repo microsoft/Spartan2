@@ -467,10 +467,7 @@ impl<E: Engine> SumcheckProof<E> {
     poly_B: &mut MultilinearPolynomial<E::Scalar>,
     poly_C: &mut MultilinearPolynomial<E::Scalar>,
     transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
-  where
-    E::Scalar: DelayedReduction<E::Scalar>,
-  {
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
     let mut claim_per_round = *claim;
@@ -547,10 +544,7 @@ impl<E: Engine> SumcheckProof<E> {
     vc_shape: &SplitMultiRoundR1CSShape<E>,
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
-  ) -> Result<Vec<E::Scalar>, SpartanError>
-  where
-    E::Scalar: DelayedReduction<E::Scalar>,
-  {
+  ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_outer_round = E::Scalar::ZERO;
     let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.to_vec());
@@ -971,10 +965,7 @@ pub(crate) mod eq_sumcheck {
       poly_A: &MultilinearPolynomial<E::Scalar>,
       poly_B: &MultilinearPolynomial<E::Scalar>,
       poly_C: &MultilinearPolynomial<E::Scalar>,
-    ) -> (E::Scalar, E::Scalar, E::Scalar)
-    where
-      E::Scalar: DelayedReduction<E::Scalar>,
-    {
+    ) -> (E::Scalar, E::Scalar, E::Scalar) {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
 
       type Acc<S> = <S as DelayedReduction<S>>::Accumulator;

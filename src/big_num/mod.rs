@@ -13,3 +13,4 @@ pub mod limbs;
 pub mod montgomery;
 
 pub use delayed_reduction::DelayedReduction;
+pub use field_reduction_constants::FieldReductionConstants;

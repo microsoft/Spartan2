@@ -136,7 +136,6 @@ pub struct SpartanZkSNARK<E: Engine> {
 impl<E: Engine> R1CSSNARKTrait<E> for SpartanZkSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: crate::big_num::DelayedReduction<E::Scalar>,
 {
   type ProverKey = SpartanProverKey<E>;
   type VerifierKey = SpartanVerifierKey<E>;
