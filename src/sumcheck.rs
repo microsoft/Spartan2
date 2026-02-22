@@ -16,6 +16,7 @@ use crate::{
     r1cs::{MultiRoundSpartanWitness, MultiRoundState},
     solver::SatisfyingAssignment,
   },
+  big_num::DelayedReduction,
   errors::SpartanError,
   polys::{
     multilinear::MultilinearPolynomial,
@@ -27,6 +28,7 @@ use crate::{
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
 };
 use ff::Field;
+use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -142,85 +144,87 @@ impl<E: Engine> SumcheckProof<E> {
     Ok((e, r))
   }
 
-  /// Computes evaluation points for a quadratic polynomial in the sum-check protocol.
+  /// Computes evaluation points for a quadratic polynomial using delayed modular reduction.
   ///
-  /// Given two multilinear polynomials A and B, computes evaluations at points 0 and 2
-  /// of the univariate polynomial formed by binding one variable using a combination function.
+  /// Accumulates a·b products in wide limbs (no intermediate reductions),
+  /// reducing only once at the end. This saves N-1 Montgomery reductions per round.
   ///
   /// # Arguments
   /// * `poly_A` - First multilinear polynomial
   /// * `poly_B` - Second multilinear polynomial
-  /// * `comb_func` - Function combining evaluations of A and B
   ///
   /// # Returns
   /// A tuple `(eval_0, eval_2)` containing evaluations at points 0 and 2.
   #[inline]
-  fn compute_eval_points_quad<F>(
+  fn compute_eval_points_quad(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
-    comb_func: &F,
-  ) -> (E::Scalar, E::Scalar)
-  where
-    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
+  ) -> (E::Scalar, E::Scalar) {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
     let len = poly_A.Z.len() / 2;
 
-    // Using `par_for` keeps the map-reduce logic identical
-    // but avoids Rayon overhead on tiny slices.
-    par_for(
-      len,
-      // map-closure (returned pair is the per-index contribution)
-      |i| {
-        let a_low = poly_A[i];
-        let a_high = poly_A[len + i];
-        let b_low = poly_B[i];
-        let b_high = poly_B[len + i];
+    let (acc_0, acc_2) = (0..len)
+      .into_par_iter()
+      .fold(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut acc, i| {
+          let a_low = &poly_A[i];
+          let a_high = &poly_A[len + i];
+          let b_low = &poly_B[i];
+          let b_high = &poly_B[len + i];
 
-        // eval 0:   A(low)
-        let eval0 = comb_func(&a_low, &b_low);
+          // eval 0: a_low × b_low
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.0, a_low, b_low,
+          );
 
-        // eval 2:  −A(low) + 2·A(high)   (same for B)
-        let a_bound = a_high + a_high - a_low;
-        let b_bound = b_high + b_high - b_low;
-        let eval2 = comb_func(&a_bound, &b_bound);
+          // eval 2: (2·a_high - a_low) × (2·b_high - b_low)
+          let a_bound = *a_high + *a_high - *a_low;
+          let b_bound = *b_high + *b_high - *b_low;
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc.1, &a_bound, &b_bound,
+          );
 
-        (eval0, eval2)
-      },
-      // reduce-closure (pairwise accumulation)
-      |mut acc, val| {
-        acc.0 += val.0;
-        acc.1 += val.1;
-        acc
-      },
-      // identity value
-      || (E::Scalar::ZERO, E::Scalar::ZERO),
+          acc
+        },
+      )
+      .reduce(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a
+        },
+      );
+
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
     )
   }
 
   /// Generates a sum-check proof for a quadratic combination of two multilinear polynomials.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   ///
   /// # Arguments
   /// * `claim` - The claimed sum over the hypercube
   /// * `num_rounds` - The number of variables/rounds in the sum-check
   /// * `poly_A` - First multilinear polynomial (mutable, will be bound during protocol)
   /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)
-  /// * `comb_func` - Function that combines evaluations of the two polynomials
   /// * `transcript` - The transcript for generating randomness
   ///
   /// # Returns
   /// A tuple containing the sum-check proof, the sequence of verifier challenges,
   /// and the final evaluations of the polynomials.
-  pub fn prove_quad<F>(
+  pub fn prove_quad(
     claim: &E::Scalar,
     num_rounds: usize,
     poly_A: &mut MultilinearPolynomial<E::Scalar>,
     poly_B: &mut MultilinearPolynomial<E::Scalar>,
-    comb_func: F,
     transcript: &mut E::TE,
-  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
-  where
-    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
-  {
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let mut r: Vec<E::Scalar> = Vec::new();
     let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
     let mut claim_per_round = *claim;
@@ -229,8 +233,7 @@ impl<E: Engine> SumcheckProof<E> {
 
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
-        let (eval_point_0, eval_point_2) =
-          Self::compute_eval_points_quad(poly_A, poly_B, &comb_func);
+        let (eval_point_0, eval_point_2) = Self::compute_eval_points_quad(poly_A, poly_B);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
         }
@@ -593,6 +596,8 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** sum-check in zero-knowledge mode and returns the
   /// Zero-knowledge quadratic sum-check used for the inner round.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   pub fn prove_quad_zk(
     claim: &E::Scalar,
     num_rounds: usize,
@@ -610,8 +615,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z, &comb);
+      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z);
       let evals = vec![eval0, claim_current_round - eval0, eval2];
       let poly = UniPoly::from_evals(&evals)?;
 
@@ -643,6 +647,8 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Executes a **quadratic** batched sum-check in zero-knowledge mode and returns the
   /// sequence of verifier challenges used for the inner round.
+  ///
+  /// Uses delayed modular reduction for improved performance.
   pub fn prove_quad_batched_zk(
     claims: &[E::Scalar; 2],
     num_rounds: usize,
@@ -664,11 +670,9 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let comb = |a: &E::Scalar, b: &E::Scalar| -> E::Scalar { *a * *b };
-
       let ((eval0_s, eval2_s), (eval0_c, eval2_c)) = rayon::join(
-        || Self::compute_eval_points_quad(poly_A_0, poly_B_0, &comb),
-        || Self::compute_eval_points_quad(poly_A_1, poly_B_1, &comb),
+        || Self::compute_eval_points_quad(poly_A_0, poly_B_0),
+        || Self::compute_eval_points_quad(poly_A_1, poly_B_1),
       );
 
       // step branch
