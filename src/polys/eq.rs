@@ -5,7 +5,6 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! `EqPolynomial`: Represents multilinear extension of equality polynomials, evaluated based on binary input values.
-use crate::zip_with_for_each;
 use ff::PrimeField;
 use rayon::prelude::*;
 

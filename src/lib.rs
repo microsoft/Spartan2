@@ -25,10 +25,7 @@
 mod digest;
 mod math;
 mod nifs;
-pub mod polys;
 mod r1cs;
-pub mod big_num;
-pub mod sumcheck;
 mod zk;
 
 #[macro_use]
@@ -40,7 +37,12 @@ pub mod errors;
 pub mod provider;
 pub mod traits;
 
-// public modules for different proof systems
+// internal modules
+mod big_num;
+mod polys;
+mod sumcheck;
+
+// public modules for proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_zk; // Spartan with zero-knowledge

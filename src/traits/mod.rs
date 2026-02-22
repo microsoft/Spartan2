@@ -18,7 +18,7 @@ pub mod transcript;
 use pcs::PCSEngineTrait;
 use transcript::{TranscriptEngineTrait, TranscriptReprTrait};
 
-use crate::big_num::{DelayedReduction, FieldReductionConstants};
+pub use crate::big_num::{DelayedReduction, FieldReductionConstants};
 
 /// Represents an element of a group
 /// This is currently tailored for an elliptic curve group

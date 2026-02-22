@@ -203,7 +203,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `claim` - The claimed sum over the hypercube
   /// * `num_rounds` - The number of variables/rounds in the sum-check
   /// * `poly_A` - First multilinear polynomial (mutable, will be bound during protocol)
-  /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)  
+  /// * `poly_B` - Second multilinear polynomial (mutable, will be bound during protocol)
   /// * `comb_func` - Function that combines evaluations of the two polynomials
   /// * `transcript` - The transcript for generating randomness
   ///
@@ -278,7 +278,7 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Arguments
   /// * `poly_A` - First multilinear polynomial
-  /// * `poly_B` - Second multilinear polynomial  
+  /// * `poly_B` - Second multilinear polynomial
   /// * `poly_C` - Third multilinear polynomial
   /// * `poly_D` - Fourth multilinear polynomial
   /// * `comb_func` - Function that combines evaluations of the four polynomials
@@ -358,7 +358,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `pow_tau_left` - The left part of the power of tau
   /// * `pow_tau_right` - The right part of the power of tau
   /// * `poly_A` - First multilinear polynomial
-  /// * `poly_B` - Second multilinear polynomial  
+  /// * `poly_B` - Second multilinear polynomial
   /// * `poly_C` - Third multilinear polynomial
   /// * `comb_func` - Function that combines evaluations of the four polynomials
   ///
@@ -868,7 +868,9 @@ impl<E: Engine> SumcheckProof<E> {
 pub(crate) mod eq_sumcheck {
   //! This module implements the sumcheck optimization for equality polynomials.
   //! The optimization is described in Section 5 of <https://eprint.iacr.org/2025/1117> algorithm 5.
-  use crate::{polys::multilinear::MultilinearPolynomial, big_num::DelayedReduction, traits::Engine};
+  use crate::{
+    big_num::DelayedReduction, polys::multilinear::MultilinearPolynomial, traits::Engine,
+  };
   use ff::{Field, PrimeField};
   use num_traits::Zero;
   use rayon::prelude::*;
@@ -985,7 +987,13 @@ pub(crate) mod eq_sumcheck {
         let (acc_0, acc_2, acc_3) = (0..eq_out_len)
           .into_par_iter()
           .fold(
-            || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+            || {
+              (
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+              )
+            },
             |mut outer_acc, x_out| {
               let e_out = &poly_eq_left[x_out];
 
@@ -1006,9 +1014,21 @@ pub(crate) mod eq_sumcheck {
                   round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
                 );
 
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_0, e_in, &q0);
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_2, e_in, &q2);
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut inner_3, e_in, &q3);
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_0,
+                  e_in,
+                  &q0,
+                );
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_2,
+                  e_in,
+                  &q2,
+                );
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_3,
+                  e_in,
+                  &q3,
+                );
               }
 
               // Reduce inner sums, then accumulate E_out × (reduced inner) into outer
@@ -1016,15 +1036,33 @@ pub(crate) mod eq_sumcheck {
               let inner_2_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_2);
               let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
 
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.0, e_out, &inner_0_red);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.1, e_out, &inner_2_red);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut outer_acc.2, e_out, &inner_3_red);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.0,
+                e_out,
+                &inner_0_red,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.1,
+                e_out,
+                &inner_2_red,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc.2,
+                e_out,
+                &inner_3_red,
+              );
 
               outer_acc
             },
           )
           .reduce(
-            || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+            || {
+              (
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+              )
+            },
             |mut a, b| {
               a.0 += b.0;
               a.1 += b.1;
@@ -1049,7 +1087,13 @@ pub(crate) mod eq_sumcheck {
         let (acc_0, acc_2, acc_3) = (0..half_p)
           .into_par_iter()
           .fold(
-            || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+            || {
+              (
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+              )
+            },
             |mut acc, id| {
               let e = &poly_eq_right[id];
 
@@ -1061,15 +1105,27 @@ pub(crate) mod eq_sumcheck {
                 round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
               );
 
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.0, e, &q0);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.1, e, &q2);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(&mut acc.2, e, &q3);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.0, e, &q0,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.1, e, &q2,
+              );
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc.2, e, &q3,
+              );
 
               acc
             },
           )
           .reduce(
-            || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+            || {
+              (
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+                Acc::<E::Scalar>::zero(),
+              )
+            },
             |mut a, b| {
               a.0 += b.0;
               a.1 += b.1;
@@ -1196,5 +1252,78 @@ pub(crate) mod eq_sumcheck {
     };
 
     (eval_0, eval_2, eval_3)
+  }
+}
+
+#[cfg(test)]
+mod perf_tests {
+  use super::*;
+  use crate::{
+    big_num::DelayedReduction, polys::multilinear::MultilinearPolynomial, start_span,
+    traits::Engine,
+  };
+  use ff::Field;
+  use rand::{SeedableRng, rngs::StdRng};
+  use tracing::info;
+  use tracing_subscriber::EnvFilter;
+
+  fn test_first_round_spartan_sumcheck_with<E: Engine>()
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
+    const SEED: u64 = 0xDEADBEEF;
+    let field_name = std::any::type_name::<E::Scalar>()
+      .split("::")
+      .last()
+      .unwrap_or("unknown");
+
+    for num_vars in [16, 18, 20, 22, 24] {
+      let len = 1 << num_vars;
+      let mut rng = StdRng::seed_from_u64(SEED);
+
+      let az: Vec<E::Scalar> = (0..len).map(|_| E::Scalar::random(&mut rng)).collect();
+      let bz: Vec<E::Scalar> = (0..len).map(|_| E::Scalar::random(&mut rng)).collect();
+      let cz: Vec<E::Scalar> = (0..len).map(|_| E::Scalar::random(&mut rng)).collect();
+      let taus: Vec<E::Scalar> = (0..num_vars).map(|_| E::Scalar::random(&mut rng)).collect();
+
+      let mut poly_az = MultilinearPolynomial::new(az);
+      let mut poly_bz = MultilinearPolynomial::new(bz);
+      let mut poly_cz = MultilinearPolynomial::new(cz);
+      let mut transcript = E::TE::new(b"perf_test");
+
+      let (_span, t) = start_span!("sumcheck_prove", field = field_name, num_vars = num_vars);
+
+      let (proof, _r, _evals) = SumcheckProof::<E>::prove_cubic_with_three_inputs(
+        &E::Scalar::ZERO,
+        taus,
+        &mut poly_az,
+        &mut poly_bz,
+        &mut poly_cz,
+        &mut transcript,
+      )
+      .expect("proof generation should succeed");
+
+      info!(field = field_name, num_vars, n = len, ms = ?t.elapsed().as_millis(), "completed");
+
+      // Verify proof with fresh transcript
+      let mut verifier_transcript = E::TE::new(b"perf_test");
+      proof
+        .verify(E::Scalar::ZERO, num_vars, 3, &mut verifier_transcript)
+        .expect("proof verification should succeed");
+    }
+  }
+
+  #[test]
+  fn test_first_round_spartan_sumcheck() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+
+    use crate::provider::{Bn254Engine, PallasHyraxEngine};
+
+    test_first_round_spartan_sumcheck_with::<Bn254Engine>();
+    test_first_round_spartan_sumcheck_with::<PallasHyraxEngine>();
   }
 }

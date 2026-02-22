@@ -8,7 +8,7 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial, zip_with_for_each};
+use crate::{math::Math, polys::eq::EqPolynomial};
 use core::ops::Index;
 use ff::PrimeField;
 use rayon::prelude::*;
@@ -136,7 +136,7 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{provider::pasta::pallas, zip_with};
+  use crate::provider::pasta::pallas;
   use rand_core::{CryptoRng, OsRng, RngCore};
 
   /// Evaluates the polynomial at the given point.
