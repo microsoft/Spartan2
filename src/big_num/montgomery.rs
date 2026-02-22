@@ -8,7 +8,6 @@ use super::{
   limbs::{add_4_4, gte_4_4, sub_4_4, sub_5_4},
 };
 
-
 use halo2curves::{
   bn256::Fr as Bn254Fr,
   pasta::{Fp, Fq},
@@ -218,8 +217,7 @@ mod tests {
   fn test_montgomery_round_trip_impl<
     F: FieldReductionConstants + MontgomeryLimbs + PrimeField + Copy,
   >() {
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     let mut rng = StdRng::seed_from_u64(12345);
 

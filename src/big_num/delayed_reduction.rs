@@ -88,8 +88,7 @@ mod tests {
 
   /// Test accumulating multiple products and reducing once.
   fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + Copy>() {
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     let mut rng = StdRng::seed_from_u64(54321);
 
