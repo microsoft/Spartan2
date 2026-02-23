@@ -431,8 +431,8 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     if valid {
       Ok(())
     } else {
-      Err(SpartanError::InvalidInputLength {
-        reason: "Dory proof verification failed".to_string(),
+      Err(SpartanError::ProofVerifyError {
+        reason: "Dory PCS evaluation proof verification failed".to_string(),
       })
     }
   }
