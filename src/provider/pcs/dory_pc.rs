@@ -320,13 +320,37 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
         reason: "No commitments to combine".to_string(),
       });
     }
-    // Concatenate bytes for multiple commitments
-    let mut combined = Vec::new();
-    for c in comms {
-      combined.extend_from_slice(&c.commitment_bytes);
+    // Dory commitments are single GT elements. Unlike Hyrax (which stores
+    // a Vec<GE> per commitment and can flatten them), Dory has no native
+    // multi-commitment concatenation. For single-part witnesses (no
+    // shared/precommitted rounds) this is a direct pass-through.
+    if comms.len() == 1 {
+      return Ok(comms[0].clone());
     }
+    // Multiple commitments: multiply GT elements together.
+    // This produces a combined commitment C = C_1 * C_2 * ... in GT,
+    // which is the standard homomorphic combination for pairing-based PCS.
+    let mut combined = DoryPCSCommitment::deserialize_compressed(&comms[0].commitment_bytes[..])
+      .map_err(|e| SpartanError::InvalidPCS {
+        reason: format!("Failed to deserialize commitment 0: {:?}", e),
+      })?;
+    for (i, c) in comms.iter().enumerate().skip(1) {
+      let ci = DoryPCSCommitment::deserialize_compressed(&c.commitment_bytes[..]).map_err(|e| {
+        SpartanError::InvalidPCS {
+          reason: format!("Failed to deserialize commitment {}: {:?}", i, e),
+        }
+      })?;
+      // Multiply in GT: combined.tier2 *= ci.tier2
+      combined.tier2 += ci.tier2;
+    }
+    let mut bytes = Vec::new();
+    combined
+      .serialize_compressed(&mut bytes)
+      .map_err(|e| SpartanError::InvalidPCS {
+        reason: format!("Failed to serialize combined commitment: {:?}", e),
+      })?;
     Ok(DoryCommitment {
-      commitment_bytes: combined,
+      commitment_bytes: bytes,
     })
   }
 
