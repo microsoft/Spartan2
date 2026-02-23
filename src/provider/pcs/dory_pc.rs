@@ -229,12 +229,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     _r: &Self::Blind,
     _is_small: bool,
   ) -> Result<Self::Commitment, SpartanError> {
-    use rand_chacha::ChaCha20Rng;
-    use rand_core::SeedableRng;
-
-    // Setup params
-    let mut rng = ChaCha20Rng::seed_from_u64(0);
-    let params = QuarksDoryPCS::setup(ck.num_vars, &mut rng);
+    let params = get_dory_params(ck.num_vars);
 
     // Convert scalars
     let ark_evals: Vec<ArkFr> = v.iter().map(|s| halo2_to_ark::<E>(s)).collect();
