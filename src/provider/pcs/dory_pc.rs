@@ -156,13 +156,16 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
-    // Calculate num_vars from n
-    let num_vars = if n == 0 {
+    // Calculate num_vars as ceil(log2(n)), using integer arithmetic
+    // to avoid floating point imprecision at power-of-two boundaries
+    let num_vars = if n <= 1 {
       2
     } else {
-      (n as f64).log2().ceil() as usize
-    }
-    .max(2);
+      // ceil(log2(n)) = bit_width - leading_zeros for non-power-of-two,
+      // or bit_width - leading_zeros - 1 for exact powers of two
+      let bits = usize::BITS - (n - 1).leading_zeros();
+      (bits as usize).max(2)
+    };
     // Ensure even for Dory
     let num_vars = if num_vars % 2 == 0 {
       num_vars
