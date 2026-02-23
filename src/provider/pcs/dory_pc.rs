@@ -382,15 +382,10 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     _comm_eval: &Self::Commitment,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError> {
-    use rand_chacha::ChaCha20Rng;
-    use rand_core::SeedableRng;
-
     // Absorb commitment
     transcript.absorb(b"dory_comm", comm);
 
-    // Setup params (must match prove)
-    let mut rng = ChaCha20Rng::seed_from_u64(0);
-    let params = QuarksDoryPCS::setup(vk.num_vars, &mut rng);
+    let params = get_dory_params(vk.num_vars);
 
     // Deserialize commitment to polynomial (native object)
     let commitment = DoryPCSCommitment::deserialize_compressed(&comm.commitment_bytes[..])
