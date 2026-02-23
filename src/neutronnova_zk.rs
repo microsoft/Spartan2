@@ -102,6 +102,7 @@ where
 {
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   /// Uses two-level delayed modular reduction (inner + middle levels).
+  /// Note: Outer level (over pairs) uses regular field arithmetic since there are few pairs.
   #[inline]
   fn prove_helper(
     round: usize,
@@ -155,7 +156,7 @@ where
             // quad_coeff
             let az_diff = Az2[k] - Az1[k];
             let bz_diff = Bz2[k] - Bz1[k];
-            let quad_val = mul_opt(&az_diff, &bz_diff);
+            let quad_val = az_diff * bz_diff;
             <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
               &mut inner_quad,
               e_j,
@@ -290,6 +291,7 @@ where
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
     let (_nifs_rounds_span, nifs_rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
+
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // the current target value, starts at 0
@@ -301,55 +303,30 @@ where
       // Round polynomial: use rho_t inside prove_helper (this multiplies by eq(b_t; rho_t))
       let pairs = m / 2;
 
-      // Outer level DMR: accumulate w[pair_idx] × prove_helper_result
-      type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-
-      let (acc_e0, acc_quad) = A_layers
+      let (e0, quad_coeff) = A_layers
         .par_chunks(2)
         .zip(B_layers.par_chunks(2))
         .zip(C_layers.par_chunks(2))
         .enumerate()
-        .fold(
-          || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
-          |mut outer_acc, (pair_idx, ((pair_a, pair_b), pair_c))| {
-            let (e0, quad_coeff) = Self::prove_helper(
-              t,
-              (left, right),
-              &E_eq,
-              &pair_a[0],
-              &pair_b[0],
-              &pair_c[0],
-              &pair_a[1],
-              &pair_b[1],
-              &pair_c[1],
-            );
-            let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
-
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut outer_acc.0,
-              &w,
-              &e0,
-            );
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut outer_acc.1,
-              &w,
-              &quad_coeff,
-            );
-
-            outer_acc
-          },
-        )
+        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+          let (e0, quad_coeff) = Self::prove_helper(
+            t,
+            (left, right),
+            &E_eq,
+            &pair_a[0],
+            &pair_b[0],
+            &pair_c[0],
+            &pair_a[1],
+            &pair_b[1],
+            &pair_c[1],
+          );
+          let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+          (e0 * w, quad_coeff * w)
+        })
         .reduce(
-          || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
-          |mut a, b| {
-            a.0 += b.0;
-            a.1 += b.1;
-            a
-          },
+          || (E::Scalar::ZERO, E::Scalar::ZERO),
+          |a, b| (a.0 + b.0, a.1 + b.1),
         );
-
-      let e0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0);
-      let quad_coeff = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad);
 
       // recover cubic polynomial coefficients from eval_at_zero and cubic_term_coeff
       let one_minus_rho = E::Scalar::ONE - rho_t;
