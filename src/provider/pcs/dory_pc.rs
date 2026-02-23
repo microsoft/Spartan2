@@ -341,8 +341,8 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
           reason: format!("Failed to deserialize commitment {}: {:?}", i, e),
         }
       })?;
-      // Multiply in GT: combined.tier2 *= ci.tier2
-      combined.tier2 += ci.tier2;
+      // GT group operation: addition in quarks-zk wraps Fq12 multiplication
+      combined.tier2 = combined.tier2 + ci.tier2;
     }
     let mut bytes = Vec::new();
     combined
