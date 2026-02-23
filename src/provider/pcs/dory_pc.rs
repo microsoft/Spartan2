@@ -278,13 +278,13 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
 
     // Deserialize current commitment
     let current_comm = DoryPCSCommitment::deserialize_compressed(&comm.commitment_bytes[..])
-      .map_err(|e| SpartanError::InvalidInputLength {
+      .map_err(|e| SpartanError::InvalidPCS {
         reason: format!("Failed to deserialize commitment: {:?}", e),
       })?;
 
     // Deserialize h_gt generator
     let h_gt = Bls381GT::deserialize_compressed(&ck.h_gt_bytes[..]).map_err(|e| {
-      SpartanError::InvalidInputLength {
+      SpartanError::InvalidPCS {
         reason: format!("Failed to deserialize h_gt: {:?}", e),
       }
     })?;
@@ -306,7 +306,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     let mut bytes = Vec::new();
     rerandomized_comm
       .serialize_compressed(&mut bytes)
-      .map_err(|e| SpartanError::InvalidInputLength {
+      .map_err(|e| SpartanError::InternalError {
         reason: format!("Failed to serialize rerandomized commitment: {:?}", e),
       })?;
 
