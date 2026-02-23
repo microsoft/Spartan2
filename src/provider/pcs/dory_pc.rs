@@ -356,9 +356,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     // Absorb commitment
     transcript.absorb(b"dory_comm", comm);
 
-    // Setup params
-    let mut rng = ChaCha20Rng::seed_from_u64(0);
-    let params = QuarksDoryPCS::setup(ck.num_vars, &mut rng);
+    let params = get_dory_params(ck.num_vars);
 
     // Convert scalars
     let ark_evals: Vec<ArkFr> = poly.iter().map(|s| halo2_to_ark::<E>(s)).collect();
