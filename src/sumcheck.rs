@@ -980,6 +980,9 @@ pub(crate) mod eq_sumcheck {
         //
         // We compute: Σ_id E[id] × q_k(A[id], B[id], C[id])
         //           = Σ_{x_out} E_out[x_out] × (Σ_{x_in} E_in[x_in] × q_k(...))
+        //
+        // The inner sum over x_in is computed in a loop with delayed reduction,
+        // then reduced once before accumulating into the outer sum.
         let (poly_eq_left, poly_eq_right, second_half) = self.poly_eqs_first_half();
         let eq_out_len = poly_eq_left.len();
 
@@ -1267,6 +1270,13 @@ mod perf_tests {
   use tracing::info;
   use tracing_subscriber::EnvFilter;
 
+  // Test sizes: smaller for debug builds, full range for release
+  #[cfg(debug_assertions)]
+  const TEST_SIZES: &[usize] = &[16, 18];
+
+  #[cfg(not(debug_assertions))]
+  const TEST_SIZES: &[usize] = &[16, 18, 20, 22, 24];
+
   fn test_first_round_spartan_sumcheck_with<E: Engine>()
   where
     E::Scalar: DelayedReduction<E::Scalar>,
@@ -1277,7 +1287,7 @@ mod perf_tests {
       .last()
       .unwrap_or("unknown");
 
-    for num_vars in [16, 18, 20, 22, 24] {
+    for &num_vars in TEST_SIZES {
       let len = 1 << num_vars;
       let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -1321,9 +1331,17 @@ mod perf_tests {
       .with_env_filter(EnvFilter::from_default_env())
       .try_init();
 
-    use crate::provider::{Bn254Engine, PallasHyraxEngine};
+    use crate::provider::Bn254Engine;
 
+    // Always test with BN254
     test_first_round_spartan_sumcheck_with::<Bn254Engine>();
-    test_first_round_spartan_sumcheck_with::<PallasHyraxEngine>();
+
+    // Additional engines only in release builds
+    #[cfg(not(debug_assertions))]
+    {
+      use crate::provider::{PallasHyraxEngine, T256HyraxEngine};
+      test_first_round_spartan_sumcheck_with::<PallasHyraxEngine>();
+      test_first_round_spartan_sumcheck_with::<T256HyraxEngine>();
+    }
   }
 }

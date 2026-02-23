@@ -39,7 +39,7 @@ pub trait DelayedReduction<Value>: Sized {
 /// The 9th limb (index 8) accumulates carries from the lower 8 limbs. Each
 /// field×field product contributes at most 1 to the carry chain into limb 8.
 /// With a u64 limb, we can accumulate up to 2^64 products before overflow.
-/// In practice, sumcheck rounds are bounded by polynomial size (≤ 2^30),
+/// In practice, sumcheck rounds are bounded by polynomial size (≤ 2^40),
 /// so this limit is never approached. The debug_assert below catches misuse.
 impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
   type Accumulator = WideLimbs<9>;

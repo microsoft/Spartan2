@@ -111,6 +111,87 @@ impl<const N: usize> Zero for WideLimbs<N> {
 }
 
 // =============================================================================
+// Generic N-limb operations
+// =============================================================================
+
+/// Check if N-limb value a >= N-limb value b.
+#[inline(always)]
+pub(super) const fn gte<const N: usize>(a: &[u64; N], b: &[u64; N]) -> bool {
+  let mut i = N;
+  while i > 0 {
+    i -= 1;
+    if a[i] > b[i] {
+      return true;
+    }
+    if a[i] < b[i] {
+      return false;
+    }
+  }
+  true // equal
+}
+
+/// Add two N-limb values, returning N limbs + carry (0 or 1).
+#[inline(always)]
+pub(super) const fn add<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], u64) {
+  let mut result = [0u64; N];
+  let mut carry = 0u128;
+  let mut i = 0;
+  while i < N {
+    let sum = (a[i] as u128) + (b[i] as u128) + carry;
+    result[i] = sum as u64;
+    carry = sum >> 64;
+    i += 1;
+  }
+  (result, carry as u64)
+}
+
+/// Subtract N-limb b from N-limb a: a - b (assumes a >= b).
+#[inline(always)]
+pub(super) const fn sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+  let mut result = [0u64; N];
+  let mut borrow = 0u64;
+  let mut i = 0;
+  while i < N {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+    i += 1;
+  }
+  result
+}
+
+/// Shift an N-limb value left by one bit.
+#[inline(always)]
+pub(super) const fn shl<const N: usize>(a: &[u64; N]) -> [u64; N] {
+  let mut result = [0u64; N];
+  let mut carry = 0u64;
+  let mut i = 0;
+  while i < N {
+    let new_carry = a[i] >> 63;
+    result[i] = (a[i] << 1) | carry;
+    carry = new_carry;
+    i += 1;
+  }
+  result
+}
+
+/// Count leading zeros in N-limb value.
+#[inline(always)]
+pub(super) const fn clz<const N: usize>(a: &[u64; N]) -> u32 {
+  let mut i = N;
+  let mut count = 0u32;
+  while i > 0 {
+    i -= 1;
+    if a[i] != 0 {
+      return count + a[i].leading_zeros();
+    }
+    count += 64;
+  }
+  count
+}
+
+// =============================================================================
 // 4-limb (256-bit) operations
 // =============================================================================
 
@@ -129,53 +210,6 @@ pub const fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
       j += 1;
     }
     result[i + 4] = carry as u64;
-    i += 1;
-  }
-  result
-}
-
-/// Check if 4-limb value a >= 4-limb value b.
-#[inline(always)]
-pub(super) const fn gte_4_4(a: &[u64; 4], b: &[u64; 4]) -> bool {
-  let mut i = 4;
-  while i > 0 {
-    i -= 1;
-    if a[i] > b[i] {
-      return true;
-    }
-    if a[i] < b[i] {
-      return false;
-    }
-  }
-  true // equal
-}
-
-/// Add two 4-limb values, returning 4 limbs + carry (0 or 1).
-#[inline(always)]
-pub(super) const fn add_4_4(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], u64) {
-  let mut result = [0u64; 4];
-  let mut carry = 0u128;
-  let mut i = 0;
-  while i < 4 {
-    let sum = (a[i] as u128) + (b[i] as u128) + carry;
-    result[i] = sum as u64;
-    carry = sum >> 64;
-    i += 1;
-  }
-  (result, carry as u64)
-}
-
-/// Subtract 4-limb from 4-limb: a - b (assumes a >= b).
-#[inline(always)]
-pub(super) const fn sub_4_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
-  let mut result = [0u64; 4];
-  let mut borrow = 0u64;
-  let mut i = 0;
-  while i < 4 {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
     i += 1;
   }
   result
@@ -228,71 +262,6 @@ pub(super) const fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
 // 8-limb (512-bit) operations
 // =============================================================================
 
-/// Shift an 8-limb value left by one bit.
-#[inline(always)]
-pub(super) const fn shl_8(a: &[u64; 8]) -> [u64; 8] {
-  let mut result = [0u64; 8];
-  let mut carry = 0u64;
-  let mut i = 0;
-  while i < 8 {
-    let new_carry = a[i] >> 63;
-    result[i] = (a[i] << 1) | carry;
-    carry = new_carry;
-    i += 1;
-  }
-  result
-}
-
-/// Check if 8-limb value a >= 8-limb value b.
-#[inline(always)]
-pub(super) const fn gte_8_8(a: &[u64; 8], b: &[u64; 8]) -> bool {
-  let mut i = 8;
-  while i > 0 {
-    i -= 1;
-    if a[i] > b[i] {
-      return true;
-    }
-    if a[i] < b[i] {
-      return false;
-    }
-  }
-  true // equal
-}
-
-/// Subtract 8-limb b from 8-limb a (assumes a >= b).
-#[inline(always)]
-pub(super) const fn sub_8_8(a: &[u64; 8], b: &[u64; 8]) -> [u64; 8] {
-  let mut result = [0u64; 8];
-  let mut borrow = 0u64;
-  let mut i = 0;
-  while i < 8 {
-    let (diff1, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff1.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-    i += 1;
-  }
-  result
-}
-
-/// Count leading zeros in 8-limb value.
-#[inline(always)]
-pub(super) const fn clz_8(a: &[u64; 8]) -> u32 {
-  let mut i = 7;
-  let mut count = 0u32;
-  loop {
-    if a[i] != 0 {
-      return count + a[i].leading_zeros();
-    }
-    count += 64;
-    if i == 0 {
-      break;
-    }
-    i -= 1;
-  }
-  count
-}
-
 /// Reduce an 8-limb value modulo a 4-limb prime using old-school binary long division.
 ///
 /// Aligns p with x's MSB, then iteratively trial-subtracts at each bit position.
@@ -304,19 +273,19 @@ pub(super) const fn reduce_8_mod_4(x: &[u64; 8], p: &[u64; 4]) -> [u64; 4] {
   let p8: [u64; 8] = [p[0], p[1], p[2], p[3], 0, 0, 0, 0];
 
   // If x < p, we're done
-  if !gte_8_8(x, &p8) {
+  if !gte::<8>(x, &p8) {
     return [x[0], x[1], x[2], x[3]];
   }
 
   // Binary long division: shift p left until it's just <= x, then subtract
-  let x_clz = clz_8(x);
-  let p_clz = clz_8(&p8);
+  let x_clz = clz::<8>(x);
+  let p_clz = clz::<8>(&p8);
 
   // p needs to shift left by (p_clz - x_clz) bits to align with x
   if p_clz <= x_clz {
     // p is already larger than x in leading position, but we know x >= p
     // so just do final subtraction
-    let result = sub_8_8(x, &p8);
+    let result = sub::<8>(x, &p8);
     return [result[0], result[1], result[2], result[3]];
   }
 
@@ -327,15 +296,15 @@ pub(super) const fn reduce_8_mod_4(x: &[u64; 8], p: &[u64; 4]) -> [u64; 4] {
   let mut shifted_p = p8;
   let mut bits_to_shift = shift_bits;
   while bits_to_shift > 0 {
-    shifted_p = shl_8(&shifted_p);
+    shifted_p = shl::<8>(&shifted_p);
     bits_to_shift -= 1;
   }
 
   // Do shift_bits + 1 iterations of trial subtraction
   let mut iterations = shift_bits + 1;
   while iterations > 0 {
-    if gte_8_8(&remainder, &shifted_p) {
-      remainder = sub_8_8(&remainder, &shifted_p);
+    if gte::<8>(&remainder, &shifted_p) {
+      remainder = sub::<8>(&remainder, &shifted_p);
     }
     // Shift p right by 1 (for next iteration)
     if iterations > 1 {

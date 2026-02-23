@@ -38,6 +38,14 @@ macro_rules! impl_field_reduction_constants {
       const MAX_REDC_SUB_CORRECTIONS: usize =
         $crate::big_num::macros::compute_max_redc_sub_corrections(Self::MODULUS);
     }
+
+    // Enforce small MAX_REDC_SUB_CORRECTIONS for performance.
+    // The final reduction loop in montgomery_reduce_8 iterates this many times.
+    // For 254-256 bit primes, this should be 1-4. Values > 8 indicate a problem.
+    const _: () = assert!(
+      <$field as $crate::big_num::FieldReductionConstants>::MAX_REDC_SUB_CORRECTIONS <= 8,
+      "MAX_REDC_SUB_CORRECTIONS too large for efficient reduction"
+    );
   };
 }
 

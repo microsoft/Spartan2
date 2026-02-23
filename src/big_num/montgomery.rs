@@ -5,7 +5,7 @@
 
 use super::{
   field_reduction_constants::FieldReductionConstants,
-  limbs::{add_4_4, gte_4_4, sub_4_4, sub_5_4},
+  limbs::{add, gte, sub, sub_5_4},
 };
 
 use halo2curves::{
@@ -46,11 +46,19 @@ crate::impl_montgomery_limbs!(P256Fq);
 /// 3. **Carry correction**: If c=1, add R_MOD and do one conditional subtract.
 #[inline]
 pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
-  // STEP 1: Fold - reduce 9 limbs to 8 limbs + carry bit
+  // STEP 1: Fold 9 limbs to 8 limbs + carry bit
   //
-  // We have: C = L + h*R² where L = c[0..8], h = c[8]
-  // Compute: low8 = L + h*R512_MOD (where R512_MOD = R² mod p)
-  // The fold_carry c ∈ {0,1} is provably bounded (see proof in comments below).
+  // Input: C = c[0..8] + c[8]·2^512  (9 limbs representing a value up to ~2^576)
+  // Goal:  Compute C mod p, but first reduce to 8 limbs for montgomery_reduce_8.
+  //
+  // Key insight: 2^512 ≡ R512_MOD (mod p), where R512_MOD = 2^512 mod p < p < 2^256.
+  // So: C ≡ c[0..8] + c[8]·R512_MOD (mod p)
+  //
+  // Since R512_MOD has only 4 limbs, h·R512_MOD has at most 5 limbs.
+  // We add this 5-limb value to c[0..8]:
+  //   - First 4 limbs: low8[0..4] += h * R512_MOD[0..4] (with carry chain)
+  //   - 5th limb (carry from above): propagate through low8[4..8]
+  //   - Final carry: fold_carry ∈ {0,1} (bounded because h < 2^64, R512_MOD < 2^256)
 
   let mut low8 = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]];
   let h = c[8];
@@ -65,7 +73,7 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
       carry = prod >> 64;
     }
 
-    // The 5th limb of h*R512_MOD is `carry`; add it into low8[4..7]
+    // The 5th limb of h*R512_MOD is `carry`; propagate it through low8[4..8]
     for limb in &mut low8[4..] {
       let sum = (*limb as u128) + carry;
       *limb = sum as u64;
@@ -92,13 +100,13 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
   // If fold_carry == 1, we have an extra R² term that REDC turns into R.
   // In Montgomery form, R mod p = R_MOD. So: out += R_MOD, then canonicalize.
   if fold_carry == 1 {
-    let (sum, carry) = add_4_4(&out, &F::R_MOD);
+    let (sum, carry) = add::<4>(&out, &F::R_MOD);
     out = sum;
 
     // out is now in [0, 2p) (since out was in [0,p) and R_MOD < p).
     // At most one subtract needed.
-    if carry == 1 || gte_4_4(&out, &F::MODULUS) {
-      out = sub_4_4(&out, &F::MODULUS);
+    if carry == 1 || gte::<4>(&out, &F::MODULUS) {
+      out = sub::<4>(&out, &F::MODULUS);
     }
   }
 
@@ -163,13 +171,13 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
   // Now x5[0..4] < R, reduce to [0, p) with final correction subtractions
   let mut out = [x5[0], x5[1], x5[2], x5[3]];
   for _ in 0..F::MAX_REDC_SUB_CORRECTIONS {
-    if gte_4_4(&out, &F::MODULUS) {
-      out = sub_4_4(&out, &F::MODULUS);
+    if gte::<4>(&out, &F::MODULUS) {
+      out = sub::<4>(&out, &F::MODULUS);
     }
   }
 
   debug_assert!(
-    !gte_4_4(&out, &F::MODULUS),
+    !gte::<4>(&out, &F::MODULUS),
     "REDC final reduction failed after {} subtractions",
     F::MAX_REDC_SUB_CORRECTIONS
   );

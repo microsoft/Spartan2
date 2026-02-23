@@ -98,6 +98,9 @@ mod tests {
     modulus_minus_one[0] = new_val;
     assert!(!borrow, "MODULUS should be > 1");
 
+    // Convert limbs to little-endian bytes for comparison with PrimeField repr.
+    // This is how we verify MODULUS matches the field's actual modulus:
+    // modulus_minus_one as bytes should equal (-1).to_repr() (i.e., p-1).
     let mut modulus_bytes = [0u8; 32];
     for (i, limb) in modulus_minus_one.iter().enumerate() {
       modulus_bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
