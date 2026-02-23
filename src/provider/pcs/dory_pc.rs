@@ -255,11 +255,12 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     _n: usize,
     _width: usize,
   ) -> Result<(), SpartanError> {
-    if comm.commitment_bytes.is_empty() {
-      return Err(SpartanError::InvalidCommitmentLength {
-        reason: "Empty Dory commitment".to_string(),
-      });
-    }
+    // Validate that bytes represent a well-formed GT element, not just non-empty
+    DoryPCSCommitment::deserialize_compressed(&comm.commitment_bytes[..]).map_err(|e| {
+      SpartanError::InvalidCommitmentLength {
+        reason: format!("Invalid Dory commitment: {:?}", e),
+      }
+    })?;
     Ok(())
   }
 
