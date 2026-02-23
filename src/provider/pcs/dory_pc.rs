@@ -702,7 +702,24 @@ mod tests {
   }
 
   #[test]
-  fn test_dory_combine_commitments() {
+  fn test_dory_combine_single_commitment() {
+    // Single commitment: combine is a pass-through clone
+    let (ck, _vk) = DoryPCS::<E>::setup(b"test", 16, 4);
+    let blind = DoryPCS::<E>::blind(&ck, 16);
+    let poly = make_poly(16);
+
+    let comm = DoryPCS::<E>::commit(&ck, &poly, &blind, false).unwrap();
+    let combined = DoryPCS::<E>::combine_commitments(&[comm.clone()]).unwrap();
+
+    assert_eq!(
+      comm.commitment_bytes, combined.commitment_bytes,
+      "Single-element combine must be identity"
+    );
+  }
+
+  #[test]
+  fn test_dory_combine_multiple_commitments() {
+    // Multiple commitments: GT multiplication produces valid single commitment
     let (ck, _vk) = DoryPCS::<E>::setup(b"test", 16, 4);
     let blind = DoryPCS::<E>::blind(&ck, 16);
 
@@ -717,10 +734,22 @@ mod tests {
     let combined = DoryPCS::<E>::combine_commitments(&[comm1.clone(), comm2.clone()]);
     assert!(combined.is_ok(), "Combining commitments should succeed");
 
+    // Combined commitment must be a valid deserializable GT element
     let combined = combined.unwrap();
+    let deserialized = DoryPCSCommitment::deserialize_compressed(&combined.commitment_bytes[..]);
     assert!(
-      combined.commitment_bytes.len() > comm1.commitment_bytes.len(),
-      "Combined commitment should be larger"
+      deserialized.is_ok(),
+      "Combined commitment must be a valid GT element"
+    );
+
+    // Combined must differ from both inputs (GT multiplication is non-trivial)
+    assert_ne!(
+      combined.commitment_bytes, comm1.commitment_bytes,
+      "Combined must differ from first input"
+    );
+    assert_ne!(
+      combined.commitment_bytes, comm2.commitment_bytes,
+      "Combined must differ from second input"
     );
   }
 
