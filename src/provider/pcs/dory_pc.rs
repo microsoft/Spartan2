@@ -16,9 +16,13 @@ use crate::{
 use core::marker::PhantomData;
 use ff::PrimeField;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 // Use quarks-zk
-use quarks_zk::dory_pc::{DoryPCS as QuarksDoryPCS, DoryPCSCommitment, DoryPCSEvaluationProof};
+use quarks_zk::dory_pc::{
+  DoryPCS as QuarksDoryPCS, DoryPCSCommitment, DoryPCSEvaluationProof, DoryPCSParams,
+};
 use quarks_zk::traits::PolynomialCommitmentScheme;
 
 // Use ark crates directly
@@ -30,6 +34,28 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 fn halo2_to_ark<E: Engine>(s: &E::Scalar) -> ArkFr {
   let bytes = s.to_repr();
   ArkFr::from_le_bytes_mod_order(bytes.as_ref())
+}
+
+/// Thread-safe cache for DoryPCS params keyed by num_vars.
+///
+/// Since setup uses a fixed seed (ChaCha20Rng::seed_from_u64(0)),
+/// params for a given num_vars are always identical. We compute them
+/// once and reuse, avoiding redundant pairing-heavy SRS generation
+/// on every commit/prove/verify call.
+fn get_dory_params(num_vars: usize) -> DoryPCSParams {
+  use rand_chacha::ChaCha20Rng;
+  use rand_core::SeedableRng;
+
+  static CACHE: OnceLock<Mutex<HashMap<usize, DoryPCSParams>>> = OnceLock::new();
+  let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+  let mut map = cache.lock().expect("dory params cache lock poisoned");
+  map
+    .entry(num_vars)
+    .or_insert_with(|| {
+      let mut rng = ChaCha20Rng::seed_from_u64(0);
+      QuarksDoryPCS::setup(num_vars, &mut rng)
+    })
+    .clone()
 }
 
 /// Dory commitment key
