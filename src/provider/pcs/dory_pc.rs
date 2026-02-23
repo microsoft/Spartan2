@@ -382,6 +382,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     transcript.absorb(b"dory_comm", comm);
 
     let params = get_dory_params(ck.num_vars);
+    let mut rng = ChaCha20Rng::seed_from_u64(0);
 
     // Convert scalars
     let ark_evals: Vec<ArkFr> = poly.iter().map(|s| halo2_to_ark::<E>(s)).collect();
