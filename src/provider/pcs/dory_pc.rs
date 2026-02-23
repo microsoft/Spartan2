@@ -241,7 +241,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
     let mut bytes = Vec::new();
     commitment
       .serialize_compressed(&mut bytes)
-      .map_err(|e| SpartanError::InvalidInputLength {
+      .map_err(|e| SpartanError::InternalError {
         reason: format!("Failed to serialize commitment: {:?}", e),
       })?;
 
