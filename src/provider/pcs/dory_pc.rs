@@ -703,6 +703,18 @@ mod tests {
   }
 
   #[test]
+  fn test_dory_check_commitment_rejects_garbage() {
+    let garbage_comm = DoryCommitment {
+      commitment_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    };
+    let result = DoryPCS::<E>::check_commitment(&garbage_comm, 16, 4);
+    assert!(
+      result.is_err(),
+      "Garbage bytes must not pass commitment validation"
+    );
+  }
+
+  #[test]
   fn test_dory_combine_single_commitment() {
     // Single commitment: combine is a pass-through clone
     let (ck, _vk) = DoryPCS::<E>::setup(b"test", 16, 4);
