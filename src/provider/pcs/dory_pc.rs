@@ -414,7 +414,7 @@ impl<E: Engine> PCSEngineTrait<E> for DoryPCS<E> {
 
     // Deserialize commitment to polynomial (native object)
     let commitment = DoryPCSCommitment::deserialize_compressed(&comm.commitment_bytes[..])
-      .map_err(|e| SpartanError::InvalidInputLength {
+      .map_err(|e| SpartanError::InvalidPCS {
         reason: format!("Failed to deserialize commitment: {:?}", e),
       })?;
 
