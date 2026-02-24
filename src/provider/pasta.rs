@@ -53,6 +53,13 @@ impl_traits!(
   "40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001"
 );
 
+// Implement big_num traits for Pasta scalar fields
+// Pallas scalar = Fq, Vesta scalar = Fp
+crate::impl_field_reduction_constants!(pallas::Scalar);
+crate::impl_montgomery_limbs!(pallas::Scalar);
+crate::impl_field_reduction_constants!(vesta::Scalar);
+crate::impl_montgomery_limbs!(vesta::Scalar);
+
 #[cfg(test)]
 mod tests {
   use crate::provider::{pasta::pallas, traits::DlogGroup};
@@ -94,4 +101,14 @@ mod tests {
   fn test_pallas_from_label() {
     impl_cycle_pair_test!(pallas);
   }
+}
+
+#[cfg(test)]
+mod big_num_tests {
+  crate::test_field_reduction_constants!(pallas_frc, crate::provider::pasta::pallas::Scalar);
+  crate::test_montgomery!(pallas_mont, crate::provider::pasta::pallas::Scalar);
+  crate::test_delayed_reduction!(pallas_dr, crate::provider::pasta::pallas::Scalar);
+  crate::test_field_reduction_constants!(vesta_frc, crate::provider::pasta::vesta::Scalar);
+  crate::test_montgomery!(vesta_mont, crate::provider::pasta::vesta::Scalar);
+  crate::test_delayed_reduction!(vesta_dr, crate::provider::pasta::vesta::Scalar);
 }

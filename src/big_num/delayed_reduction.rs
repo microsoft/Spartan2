@@ -76,59 +76,46 @@ impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
   }
 }
 
+// =============================================================================
+// Test helpers (exported for use by provider test modules)
+// =============================================================================
+
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use halo2curves::{
-    bn256::Fr as Bn254Fr,
-    pasta::{Fp, Fq},
-    secp256r1::Fq as P256Fq,
-    t256::Fq as T256Fq,
-  };
+pub(crate) fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + Copy>() {
+  use rand::{SeedableRng, rngs::StdRng};
 
-  /// Test accumulating multiple products and reducing once.
-  fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + Copy>() {
-    use rand::{SeedableRng, rngs::StdRng};
+  let mut rng = StdRng::seed_from_u64(54321);
 
-    let mut rng = StdRng::seed_from_u64(54321);
+  let n = 1000;
+  let a_vec: Vec<F> = (0..n).map(|_| F::random(&mut rng)).collect();
+  let b_vec: Vec<F> = (0..n).map(|_| F::random(&mut rng)).collect();
 
-    let n = 1000;
-    let a_vec: Vec<F> = (0..n).map(|_| F::random(&mut rng)).collect();
-    let b_vec: Vec<F> = (0..n).map(|_| F::random(&mut rng)).collect();
+  // Compute sum using standard field arithmetic
+  let expected: F = a_vec.iter().zip(b_vec.iter()).map(|(a, b)| *a * *b).sum();
 
-    // Compute sum using standard field arithmetic
-    let expected: F = a_vec.iter().zip(b_vec.iter()).map(|(a, b)| *a * *b).sum();
-
-    // Compute using delayed reduction
-    let mut acc = WideLimbs::<9>::default();
-    for (a, b) in a_vec.iter().zip(b_vec.iter()) {
-      <F as DelayedReduction<F>>::unreduced_multiply_accumulate(&mut acc, a, b);
-    }
-    let result = <F as DelayedReduction<F>>::reduce(&acc);
-
-    assert_eq!(
-      result, expected,
-      "Delayed reduction sum failed: accumulated result != direct sum"
-    );
+  // Compute using delayed reduction
+  let mut acc = WideLimbs::<9>::default();
+  for (a, b) in a_vec.iter().zip(b_vec.iter()) {
+    <F as DelayedReduction<F>>::unreduced_multiply_accumulate(&mut acc, a, b);
   }
+  let result = <F as DelayedReduction<F>>::reduce(&acc);
 
-  /// Generate a test module for a field type's DelayedReduction.
-  macro_rules! test_delayed_reduction {
-    ($mod_name:ident, $field:ty) => {
-      mod $mod_name {
-        use super::*;
+  assert_eq!(
+    result, expected,
+    "Delayed reduction sum failed: accumulated result != direct sum"
+  );
+}
 
-        #[test]
-        fn delayed_reduction_sum() {
-          test_delayed_reduction_sum_impl::<$field>();
-        }
+/// Generate tests for `DelayedReduction` implementation.
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_delayed_reduction {
+  ($mod_name:ident, $field:ty) => {
+    mod $mod_name {
+      #[test]
+      fn delayed_reduction_sum() {
+        $crate::big_num::delayed_reduction::test_delayed_reduction_sum_impl::<$field>();
       }
-    };
-  }
-
-  test_delayed_reduction!(fp_tests, Fp);
-  test_delayed_reduction!(fq_tests, Fq);
-  test_delayed_reduction!(bn254fr_tests, Bn254Fr);
-  test_delayed_reduction!(t256fq_tests, T256Fq);
-  test_delayed_reduction!(p256fq_tests, P256Fq);
+    }
+  };
 }

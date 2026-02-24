@@ -56,8 +56,24 @@ impl_traits!(
   "ffffffff0000000100000000000000017e72b42b30e7317793135661b1c4b117"
 );
 
+// Implement big_num traits for P256/T256 scalar fields
+crate::impl_field_reduction_constants!(p256::Scalar);
+crate::impl_montgomery_limbs!(p256::Scalar);
+crate::impl_field_reduction_constants!(t256::Scalar);
+crate::impl_montgomery_limbs!(t256::Scalar);
+
 impl<G: Group> TranscriptReprTrait<G> for t256::Base {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     self.to_bytes().into_iter().rev().collect()
   }
+}
+
+#[cfg(test)]
+mod big_num_tests {
+  crate::test_field_reduction_constants!(p256_frc, crate::provider::pt256::p256::Scalar);
+  crate::test_montgomery!(p256_mont, crate::provider::pt256::p256::Scalar);
+  crate::test_delayed_reduction!(p256_dr, crate::provider::pt256::p256::Scalar);
+  crate::test_field_reduction_constants!(t256_frc, crate::provider::pt256::t256::Scalar);
+  crate::test_montgomery!(t256_mont, crate::provider::pt256::t256::Scalar);
+  crate::test_delayed_reduction!(t256_dr, crate::provider::pt256::t256::Scalar);
 }

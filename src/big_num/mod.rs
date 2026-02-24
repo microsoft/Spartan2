@@ -7,11 +7,12 @@
 //! for field × field products, enabling faster sumcheck by batching Montgomery
 //! reduction operations.
 
-mod delayed_reduction;
-pub mod field_reduction_constants;
-pub mod limbs;
-pub mod macros;
-pub mod montgomery;
+pub(crate) mod delayed_reduction;
+pub(crate) mod field_reduction_constants;
+pub(crate) mod macros;
+pub(crate) mod montgomery;
+
+mod limbs;
 
 pub use delayed_reduction::DelayedReduction;
 pub use field_reduction_constants::FieldReductionConstants;

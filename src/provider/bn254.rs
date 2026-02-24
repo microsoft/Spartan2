@@ -42,9 +42,20 @@ impl_traits!(
   "30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47"
 );
 
+// Implement big_num traits for BN254 scalar field (Fr)
+crate::impl_field_reduction_constants!(types::Scalar);
+crate::impl_montgomery_limbs!(types::Scalar);
+
 // BN254 is not a cycle pair, so we need to manually implement TranscriptReprTrait for the Base field
 impl<G: Group> TranscriptReprTrait<G> for types::Base {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     self.to_bytes().into_iter().rev().collect()
   }
+}
+
+#[cfg(test)]
+mod big_num_tests {
+  crate::test_field_reduction_constants!(scalar_frc, crate::provider::bn254::types::Scalar);
+  crate::test_montgomery!(scalar_mont, crate::provider::bn254::types::Scalar);
+  crate::test_delayed_reduction!(scalar_dr, crate::provider::bn254::types::Scalar);
 }
