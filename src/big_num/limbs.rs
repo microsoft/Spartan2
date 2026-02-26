@@ -63,6 +63,108 @@
 use num_traits::Zero;
 use std::ops::{Add, AddAssign};
 
+// ============================================================================
+// SignedWideLimbs - for accumulating signed products
+// ============================================================================
+
+/// Pair of wide integers for accumulating signed products.
+///
+/// Since `WideLimbs` only supports unsigned addition, we track positive and
+/// negative contributions separately, then subtract at the end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignedWideLimbs<const N: usize> {
+  /// Accumulator for positive contributions
+  pub pos: WideLimbs<N>,
+  /// Accumulator for negative contributions (stored as positive magnitude)
+  pub neg: WideLimbs<N>,
+}
+
+impl<const N: usize> AddAssign for SignedWideLimbs<N> {
+  /// Merge two signed accumulators by adding their respective parts.
+  #[inline]
+  fn add_assign(&mut self, other: Self) {
+    self.pos += other.pos;
+    self.neg += other.neg;
+  }
+}
+
+impl<const N: usize> AddAssign<&Self> for SignedWideLimbs<N> {
+  #[inline]
+  fn add_assign(&mut self, other: &Self) {
+    self.pos += &other.pos;
+    self.neg += &other.neg;
+  }
+}
+
+impl<const N: usize> Add for SignedWideLimbs<N> {
+  type Output = Self;
+
+  #[inline]
+  fn add(mut self, other: Self) -> Self {
+    self.pos += other.pos;
+    self.neg += other.neg;
+    self
+  }
+}
+
+impl<const N: usize> Zero for SignedWideLimbs<N> {
+  #[inline]
+  fn zero() -> Self {
+    Self {
+      pos: WideLimbs::zero(),
+      neg: WideLimbs::zero(),
+    }
+  }
+
+  #[inline]
+  fn is_zero(&self) -> bool {
+    self.pos.is_zero() && self.neg.is_zero()
+  }
+}
+
+// ============================================================================
+// SubMagResult - magnitude subtraction result
+// ============================================================================
+
+/// Result of magnitude subtraction |a - b|.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubMagResult<const N: usize> {
+  /// a >= b, contains a - b
+  Positive([u64; N]),
+  /// a < b, contains b - a
+  Negative([u64; N]),
+}
+
+/// Compute |a - b| and return the magnitude with sign information.
+///
+/// Used to reduce two wide integers to one before Barrett reduction,
+/// saving one expensive reduction operation.
+#[inline(always)]
+pub fn sub_mag<const N: usize>(a: &[u64; N], b: &[u64; N]) -> SubMagResult<N> {
+  let mut out = [0u64; N];
+  let mut borrow = 0u64;
+  for i in 0..N {
+    let (d1, b1) = a[i].overflowing_sub(b[i]);
+    let (d2, b2) = d1.overflowing_sub(borrow);
+    out[i] = d2;
+    borrow = (b1 as u64) + (b2 as u64);
+  }
+  if borrow == 0 {
+    SubMagResult::Positive(out)
+  } else {
+    // a < b, compute b - a instead
+    let mut out2 = [0u64; N];
+    borrow = 0;
+    for i in 0..N {
+      let (d1, b1) = b[i].overflowing_sub(a[i]);
+      let (d2, b2) = d1.overflowing_sub(borrow);
+      out2[i] = d2;
+      borrow = (b1 as u64) + (b2 as u64);
+    }
+    SubMagResult::Negative(out2)
+  }
+}
+
 /// Stack-allocated wide integer with N 64-bit limbs.
 ///
 /// Limbs are stored in little-endian order: `limbs[0]` is the least significant.
@@ -88,11 +190,34 @@ impl<const N: usize> AddAssign for WideLimbs<N> {
   }
 }
 
+impl<const N: usize> AddAssign<&Self> for WideLimbs<N> {
+  #[inline]
+  fn add_assign(&mut self, other: &Self) {
+    let mut carry = 0u64;
+    for i in 0..N {
+      let (sum, c1) = self.0[i].overflowing_add(other.0[i]);
+      let (sum, c2) = sum.overflowing_add(carry);
+      self.0[i] = sum;
+      carry = (c1 as u64) + (c2 as u64);
+    }
+  }
+}
+
 impl<const N: usize> Add for WideLimbs<N> {
   type Output = Self;
 
   #[inline]
   fn add(mut self, other: Self) -> Self {
+    self += other;
+    self
+  }
+}
+
+impl<const N: usize> Add<&Self> for WideLimbs<N> {
+  type Output = Self;
+
+  #[inline]
+  fn add(mut self, other: &Self) -> Self {
     self += other;
     self
   }
@@ -161,6 +286,41 @@ pub(super) const fn sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] 
   result
 }
 
+/// Subtract N-limb b from N-limb a with borrow output: a - b → (result, borrow).
+///
+/// Used for branchless canonicalization patterns.
+#[inline(always)]
+#[allow(dead_code)]
+pub(super) const fn sub_with_borrow<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], u64) {
+  let mut result = [0u64; N];
+  let mut borrow = 0u64;
+  let mut i = 0;
+  while i < N {
+    let (diff, b1) = a[i].overflowing_sub(b[i]);
+    let (diff2, b2) = diff.overflowing_sub(borrow);
+    result[i] = diff2;
+    borrow = (b1 as u64) + (b2 as u64);
+    i += 1;
+  }
+  (result, borrow)
+}
+
+/// Constant-time select: if cond { a } else { b }
+///
+/// Used for branchless canonicalization to avoid data-dependent branches.
+#[inline(always)]
+#[allow(dead_code)]
+pub(super) const fn select<const N: usize>(cond: bool, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+  let mask = (cond as u64).wrapping_neg(); // 0xFFFF...FFFF if true, 0 if false
+  let mut result = [0u64; N];
+  let mut i = 0;
+  while i < N {
+    result[i] = (a[i] & mask) | (b[i] & !mask);
+    i += 1;
+  }
+  result
+}
+
 /// Shift an N-limb value left by one bit.
 #[inline(always)]
 pub(super) const fn shl<const N: usize>(a: &[u64; N]) -> [u64; N] {
@@ -172,6 +332,22 @@ pub(super) const fn shl<const N: usize>(a: &[u64; N]) -> [u64; N] {
     result[i] = (a[i] << 1) | carry;
     carry = new_carry;
     i += 1;
+  }
+  result
+}
+
+/// Shift an N-limb value right by one bit.
+#[inline(always)]
+#[allow(dead_code)]
+pub(super) const fn shr<const N: usize>(a: &[u64; N]) -> [u64; N] {
+  let mut result = [0u64; N];
+  let mut carry = 0u64;
+  let mut i = N;
+  while i > 0 {
+    i -= 1;
+    let new_carry = a[i] << 63;
+    result[i] = (a[i] >> 1) | carry;
+    carry = new_carry;
   }
   result
 }
@@ -189,6 +365,20 @@ pub(super) const fn clz<const N: usize>(a: &[u64; N]) -> u32 {
     count += 64;
   }
   count
+}
+
+// =============================================================================
+// Limb multiply-accumulate
+// =============================================================================
+
+/// Multiply-accumulate: acc + a * b + carry → (low, high)
+///
+/// Fused operation that computes one limb of a multiply-accumulate in a single step,
+/// avoiding materialization of intermediate arrays.
+#[inline(always)]
+pub(super) fn mac(acc: u64, a: u64, b: u64, carry: u64) -> (u64, u64) {
+  let prod = (a as u128) * (b as u128) + (acc as u128) + (carry as u128);
+  (prod as u64, (prod >> 64) as u64)
 }
 
 // =============================================================================
@@ -212,6 +402,113 @@ pub const fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
     result[i + 4] = carry as u64;
     i += 1;
   }
+  result
+}
+
+/// Multiply 4-limb by 1-limb, producing a 5-limb result.
+#[inline(always)]
+pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
+  let mut result = [0u64; 5];
+  let mut carry = 0u128;
+  for i in 0..4 {
+    let prod = (a[i] as u128) * (b as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[4] = carry as u64;
+  result
+}
+
+/// Multiply 2-limb by 1-limb, producing a 3-limb result.
+#[inline(always)]
+#[allow(dead_code)]
+pub(super) fn mul_2_by_1(a: &[u64; 2], b: u64) -> [u64; 3] {
+  let mut result = [0u64; 3];
+  let mut carry = 0u128;
+  for i in 0..2 {
+    let prod = (a[i] as u128) * (b as u128) + carry;
+    result[i] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[2] = carry as u64;
+  result
+}
+
+/// Multiply 3-limb by 5-limb, producing an 8-limb result.
+///
+/// Used in Barrett reduction: q2 = q1 × μ where q1 is 3 limbs and μ is 5 limbs.
+#[inline(always)]
+pub(super) fn mul_3x5_to_8(a: &[u64; 3], b: &[u64; 5]) -> [u64; 8] {
+  let mut result = [0u64; 8];
+  for i in 0..3 {
+    let mut carry = 0u128;
+    for j in 0..5 {
+      let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
+      result[i + j] = prod as u64;
+      carry = prod >> 64;
+    }
+    result[i + 5] = carry as u64;
+  }
+  result
+}
+
+/// Multiply 3-limb by 4-limb, returning only low 4 limbs.
+///
+/// Used in Barrett reduction for Pasta/BN254 where 2p < b⁴.
+/// Only computes contributions to limbs 0-3, skipping higher limbs.
+#[inline(always)]
+pub(super) fn mul_3x4_lo4(a: &[u64; 3], b: &[u64; 4]) -> [u64; 4] {
+  let mut result = [0u64; 4];
+
+  // a[0] * b[0..4] → contributes to limbs 0-3 (carry into 4 is discarded)
+  let mut carry = 0u128;
+  for j in 0..4 {
+    let prod = (a[0] as u128) * (b[j] as u128) + carry;
+    result[j] = prod as u64;
+    carry = prod >> 64;
+  }
+
+  // a[1] * b[0..3] → contributes to limbs 1-3
+  carry = 0;
+  for j in 0..3 {
+    let prod = (a[1] as u128) * (b[j] as u128) + (result[1 + j] as u128) + carry;
+    result[1 + j] = prod as u64;
+    carry = prod >> 64;
+  }
+
+  // a[2] * b[0..2] → contributes to limbs 2-3
+  carry = 0;
+  for j in 0..2 {
+    let prod = (a[2] as u128) * (b[j] as u128) + (result[2 + j] as u128) + carry;
+    result[2 + j] = prod as u64;
+    carry = prod >> 64;
+  }
+
+  result
+}
+
+/// Multiply 3-limb by 4-limb, returning low 5 limbs.
+///
+/// Full 3×4 multiply keeping only the low 5 limbs of the 7-limb result.
+#[inline(always)]
+pub(super) fn mul_3x4_lo5(a: &[u64; 3], b: &[u64; 4]) -> [u64; 5] {
+  let mut result = [0u64; 5];
+
+  for i in 0..3 {
+    let mut carry = 0u128;
+    for j in 0..4 {
+      if i + j < 5 {
+        let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
+        result[i + j] = prod as u64;
+        carry = prod >> 64;
+      }
+    }
+    // Handle the final carry for position i+4 if it's within bounds
+    if i + 4 < 5 {
+      result[i + 4] = carry as u64;
+    }
+  }
+
   result
 }
 
