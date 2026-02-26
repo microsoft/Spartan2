@@ -1270,7 +1270,7 @@ mod perf_tests {
     traits::Engine,
   };
   use ff::Field;
-  use rand::{SeedableRng, rngs::StdRng};
+  use rand::{rngs::StdRng, SeedableRng};
   use tracing::info;
   use tracing_subscriber::EnvFilter;
 
@@ -1346,6 +1346,67 @@ mod perf_tests {
       use crate::provider::{PallasHyraxEngine, T256HyraxEngine};
       test_first_round_spartan_sumcheck_with::<PallasHyraxEngine>();
       test_first_round_spartan_sumcheck_with::<T256HyraxEngine>();
+    }
+  }
+
+  fn test_inner_sumcheck_with<E: Engine>()
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
+    const SEED: u64 = 0xDEADBEEF;
+    let field_name = std::any::type_name::<E::Scalar>()
+      .split("::")
+      .last()
+      .unwrap_or("unknown");
+
+    for &num_vars in TEST_SIZES {
+      let len = 1 << num_vars;
+      let mut rng = StdRng::seed_from_u64(SEED);
+
+      let poly_a: Vec<E::Scalar> = (0..len).map(|_| E::Scalar::random(&mut rng)).collect();
+      let poly_b: Vec<E::Scalar> = (0..len).map(|_| E::Scalar::random(&mut rng)).collect();
+      let claim: E::Scalar = poly_a.par_iter().zip(&poly_b).map(|(a, b)| *a * *b).sum();
+
+      let mut poly_a = MultilinearPolynomial::new(poly_a);
+      let mut poly_b = MultilinearPolynomial::new(poly_b);
+      let mut transcript = E::TE::new(b"test_inner_sumcheck");
+
+      let (_span, t) = start_span!("prove_quad", field = field_name, num_vars = num_vars);
+
+      let (proof, _r, _evals) = SumcheckProof::<E>::prove_quad(
+        &claim,
+        num_vars,
+        &mut poly_a,
+        &mut poly_b,
+        &mut transcript,
+      )
+      .expect("proof generation should succeed");
+
+      info!(field = field_name, num_vars, n = len, ms = ?t.elapsed().as_millis(), "completed");
+
+      let mut verifier_transcript = E::TE::new(b"test_inner_sumcheck");
+      proof
+        .verify(claim, num_vars, 2, &mut verifier_transcript)
+        .expect("proof verification should succeed");
+    }
+  }
+
+  #[test]
+  fn test_inner_sumcheck() {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+
+    use crate::provider::Bn254Engine;
+    test_inner_sumcheck_with::<Bn254Engine>();
+
+    #[cfg(not(debug_assertions))]
+    {
+      use crate::provider::{PallasHyraxEngine, T256HyraxEngine};
+      test_inner_sumcheck_with::<PallasHyraxEngine>();
+      test_inner_sumcheck_with::<T256HyraxEngine>();
     }
   }
 }
