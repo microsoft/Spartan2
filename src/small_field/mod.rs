@@ -189,13 +189,15 @@ where
   v.par_iter()
     .enumerate()
     .map(|(i, f)| {
-      bound.try_to_small(f).ok_or_else(|| SpartanError::SmallValueOverflow {
-        value: format!("{:?}", f),
-        context: format!(
-          "vec_to_small_for_extension: value at index {} exceeds bound for D={}, lb={}",
-          i, D, lb
-        ),
-      })
+      bound
+        .try_to_small(f)
+        .ok_or_else(|| SpartanError::SmallValueOverflow {
+          value: format!("{:?}", f),
+          context: format!(
+            "vec_to_small_for_extension: value at index {} exceeds bound for D={}, lb={}",
+            i, D, lb
+          ),
+        })
     })
     .collect()
 }

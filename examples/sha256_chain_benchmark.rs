@@ -150,7 +150,10 @@ fn run_spartan_benchmark(
       "===== num_hashes_in_chain={}, num_vars={}, constraints={} =====",
       chain_length, num_vars, c
     ),
-    None => format!("===== num_hashes_in_chain={}, num_vars={} =====", chain_length, num_vars),
+    None => format!(
+      "===== num_hashes_in_chain={}, num_vars={} =====",
+      chain_length, num_vars
+    ),
   };
   print_table(&header, SPARTAN_PHASES, &small_timings, &large_timings);
 

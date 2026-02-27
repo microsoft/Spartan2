@@ -21,7 +21,10 @@ use spartan2::{
   sha256_circuits::SmallSha256Circuit,
   small_field::{DelayedReduction, SmallValueField},
   spartan::SpartanSNARK,
-  timing::{ConstraintsData, SPARTAN_PHASES, TimingData, TimingLayer, clear_timings, print_table, snapshot_timings},
+  timing::{
+    ConstraintsData, SPARTAN_PHASES, TimingData, TimingLayer, clear_timings, print_table,
+    snapshot_timings,
+  },
   traits::{Engine, snark::R1CSSNARKTrait},
 };
 use std::{collections::HashMap, time::Instant};

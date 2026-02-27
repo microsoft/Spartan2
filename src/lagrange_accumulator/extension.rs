@@ -336,7 +336,11 @@ impl<F: PrimeField, const D: usize> LagrangeExtendedEvals<F, D> {
   }
 
   pub fn from_evals(evals: Vec<F>, num_vars: usize) -> Self {
-    assert_eq!(evals.len(), (D + 1).pow(num_vars as u32), "evals length must match domain size");
+    assert_eq!(
+      evals.len(),
+      (D + 1).pow(num_vars as u32),
+      "evals length must match domain size"
+    );
     Self { evals, num_vars }
   }
 }

@@ -64,7 +64,14 @@ where
     + DelayedReduction<F>
     + Send
     + Sync,
-  SmallValue: WideMul + Copy + Default + num_traits::Zero + Add<Output = SmallValue> + Sub<Output = SmallValue> + Send + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + num_traits::Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   /// Partial sums indexed by β, accumulated over the x_in loop.
   /// Uses unreduced wide-limb form for delayed modular reduction.
@@ -100,11 +107,21 @@ where
     + DelayedReduction<F>
     + Send
     + Sync,
-  SmallValue: WideMul + Copy + Default + num_traits::Zero + Add<Output = SmallValue> + Sub<Output = SmallValue> + Send + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + num_traits::Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![<F as DelayedReduction<SmallValue::Product>>::Accumulator::zero(); num_betas],
+      partial_sums: vec![
+        <F as DelayedReduction<SmallValue::Product>>::Accumulator::zero();
+        num_betas
+      ],
       acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![SmallValue::zero(); prefix_size],
       bz_prefix_boolean_evals: vec![SmallValue::zero(); prefix_size],
@@ -149,7 +166,14 @@ where
     + DelayedReduction<F>
     + Send
     + Sync,
-  SmallValue: WideMul + Copy + Default + num_traits::Zero + Add<Output = SmallValue> + Sub<Output = SmallValue> + Send + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + num_traits::Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   /// Partial sums indexed by β, accumulated over the x_L loop. Reset each x_R iteration.
   /// Type is `F` for immediate reduction, or `Accumulator` for delayed reduction.
@@ -173,7 +197,8 @@ where
   pub beta_values: Vec<(usize, F)>,
 }
 
-impl<F, SmallValue, PS: Copy + Default + Zero, const D: usize> NeutronNovaThreadState<F, SmallValue, PS, D>
+impl<F, SmallValue, PS: Copy + Default + Zero, const D: usize>
+  NeutronNovaThreadState<F, SmallValue, PS, D>
 where
   F: PrimeField
     + SmallValueField<SmallValue>
@@ -182,7 +207,14 @@ where
     + DelayedReduction<F>
     + Send
     + Sync,
-  SmallValue: WideMul + Copy + Default + num_traits::Zero + Add<Output = SmallValue> + Sub<Output = SmallValue> + Send + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + num_traits::Zero
+    + Add<Output = SmallValue>
+    + Sub<Output = SmallValue>
+    + Send
+    + Sync,
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
@@ -205,4 +237,3 @@ where
     self.beta_values.clear();
   }
 }
-

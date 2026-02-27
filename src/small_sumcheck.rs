@@ -176,11 +176,7 @@ where
       F::unreduced_multiply_accumulate(&mut acc_c, eq_p, &poly_c_small.Z[idx]);
     }
 
-    (
-      F::reduce(&acc_a),
-      F::reduce(&acc_b),
-      F::reduce(&acc_c),
-    )
+    (F::reduce(&acc_a), F::reduce(&acc_b), F::reduce(&acc_c))
   };
 
   let results: Vec<(F, F, F)> = if stride >= PAR_THRESHOLD {
@@ -231,7 +227,14 @@ pub fn prove_cubic_small_value<E, SmallValue, const LB: usize>(
 ) -> Result<(SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
 where
   E: Engine,
-  SmallValue: WideMul + Copy + Default + num_traits::Zero + std::ops::Add<Output = SmallValue> + std::ops::Sub<Output = SmallValue> + Send + Sync,
+  SmallValue: WideMul
+    + Copy
+    + Default
+    + num_traits::Zero
+    + std::ops::Add<Output = SmallValue>
+    + std::ops::Sub<Output = SmallValue>
+    + Send
+    + Sync,
   E::Scalar: SmallValueField<SmallValue>
     + DelayedReduction<SmallValue>
     + DelayedReduction<SmallValue::Product>
@@ -249,10 +252,7 @@ where
 
   // If l0 is 0, the small-value optimization is not applicable
   if l0 == 0 {
-    return Err(SpartanError::SmallValueRoundsZero {
-      num_rounds,
-      lb: LB,
-    });
+    return Err(SpartanError::SmallValueRoundsZero { num_rounds, lb: LB });
   }
 
   // ===== Pre-computation Phase =====
@@ -374,8 +374,8 @@ mod tests {
   use crate::{
     gadgets::CubicChainCircuit,
     polys::multilinear::MultilinearPolynomial,
-    sha256_circuits::SmallSha256Circuit,
     provider::PallasHyraxEngine,
+    sha256_circuits::SmallSha256Circuit,
     small_field::{DelayedReduction, SmallValueField, WideMul},
     spartan::SpartanSNARK,
     sumcheck::eq_sumcheck::EqSumCheckInstance,
@@ -391,9 +391,19 @@ mod tests {
   /// evaluations as EqSumCheckInstance across multiple rounds.
   fn run_smallvalue_round_test<V>()
   where
-    V: WideMul + Copy + Default + num_traits::Zero + Add<Output = V> + Sub<Output = V> + Mul<Output = V> + Send + Sync + TryFrom<usize>,
+    V: WideMul
+      + Copy
+      + Default
+      + num_traits::Zero
+      + Add<Output = V>
+      + Sub<Output = V>
+      + Mul<Output = V>
+      + Send
+      + Sync
+      + TryFrom<usize>,
     <V as TryFrom<usize>>::Error: std::fmt::Debug,
-    F: SmallValueField<V> + DelayedReduction<V> + DelayedReduction<V::Product> + DelayedReduction<F>,
+    F:
+      SmallValueField<V> + DelayedReduction<V> + DelayedReduction<V::Product> + DelayedReduction<F>,
   {
     const NUM_VARS: usize = 6;
     const SMALL_VALUE_ROUNDS: usize = 3;

@@ -13,8 +13,8 @@
 mod small;
 mod small_chain;
 
-pub use small_chain::SmallSha256ChainCircuit;
 pub use small::SmallSha256Circuit;
+pub use small_chain::SmallSha256ChainCircuit;
 
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,

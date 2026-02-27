@@ -99,7 +99,9 @@ impl<const D: usize> From<&AccumulatorPrefixIndex<D>> for CachedPrefixIndex {
 /// 2. The coordinate u = β[i-1] is in Û_d (i.e., u ≠ 1)
 ///
 /// Returns contributions as `AccumulatorPrefixIndex`.
-pub(crate) fn compute_idx4<const D: usize>(beta: &LagrangeIndex<D>) -> Vec<AccumulatorPrefixIndex<D>> {
+pub(crate) fn compute_idx4<const D: usize>(
+  beta: &LagrangeIndex<D>,
+) -> Vec<AccumulatorPrefixIndex<D>> {
   let l0 = beta.len();
 
   let mut result = Vec::new();

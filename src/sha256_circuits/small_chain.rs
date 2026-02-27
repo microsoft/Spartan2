@@ -7,8 +7,7 @@
 //! SHA-256 chain circuit using small_sha256 (small-value compatible).
 
 use super::{
-  alloc_preimage_bits, assert_bits_match_bytes, bytes_to_public_scalars,
-  expose_hash_bits_as_public,
+  alloc_preimage_bits, assert_bits_match_bytes, bytes_to_public_scalars, expose_hash_bits_as_public,
 };
 use bellpepper_core::{Circuit, ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::{PrimeField, PrimeFieldBits};

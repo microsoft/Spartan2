@@ -6,10 +6,12 @@
 
 //! Barrett reduction for wide limb values.
 
-use super::field_reduction_constants::FieldReductionConstants;
-use super::limbs::{
-  add_4_4, gte_4_4, mul_2_by_1, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, select_4, sub_4_4,
-  sub_4_4_with_borrow, sub_5_4,
+use super::{
+  field_reduction_constants::FieldReductionConstants,
+  limbs::{
+    add_4_4, gte_4_4, mul_2_by_1, mul_3x4_lo4, mul_3x5_to_8, mul_4_by_1, select_4, sub_4_4,
+    sub_4_4_with_borrow, sub_5_4,
+  },
 };
 
 // ==========================================================================

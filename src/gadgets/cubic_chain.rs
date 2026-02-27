@@ -47,7 +47,9 @@ impl CubicChainCircuit {
   ///
   /// Total constraints = 3 * num_ops + 1
   pub fn new(num_ops: usize) -> Self {
-    Self { num_ops: num_ops.max(1) }
+    Self {
+      num_ops: num_ops.max(1),
+    }
   }
 
   /// Create a circuit targeting approximately `2^num_rounds` constraints.

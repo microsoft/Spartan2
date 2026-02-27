@@ -115,8 +115,10 @@ impl<E: Engine> SumcheckBenchmark<E> for BaseCubic {
     mut cz: MultilinearPolynomial<Self::Value>,
     transcript: &mut E::TE,
   ) -> (SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>) {
-    SumcheckProof::<E>::prove_cubic_with_three_inputs(claim, taus, &mut az, &mut bz, &mut cz, transcript)
-      .unwrap()
+    SumcheckProof::<E>::prove_cubic_with_three_inputs(
+      claim, taus, &mut az, &mut bz, &mut cz, transcript,
+    )
+    .unwrap()
   }
 }
 

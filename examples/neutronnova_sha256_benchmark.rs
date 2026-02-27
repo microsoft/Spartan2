@@ -35,7 +35,9 @@ use spartan2::{
     NEUTRONNOVA_PHASES, NEUTRONNOVA_ZK_PROVE_PHASES, TimingData, TimingLayer, clear_timings,
     normalize_parallel_timings, print_table, snapshot_timings,
   },
-  traits::{Engine, circuit::SpartanCircuit, pcs::FoldingEngineTrait, transcript::TranscriptEngineTrait},
+  traits::{
+    Engine, circuit::SpartanCircuit, pcs::FoldingEngineTrait, transcript::TranscriptEngineTrait,
+  },
   zk::NeutronNovaVerifierCircuit,
 };
 use std::{collections::HashMap, time::Instant};
@@ -184,7 +186,11 @@ fn verify_snark<E: Engine>(
     + DelayedReduction<i128>
     + DelayedReduction<E::Scalar>,
 {
-  let mode = if is_small { "small-value" } else { "large-value" };
+  let mode = if is_small {
+    "small-value"
+  } else {
+    "large-value"
+  };
   let prep =
     NeutronNovaZkSNARK::<E>::prep_prove(pk, circuits, core_circuit, is_small).expect("prep_prove");
   let snark =
@@ -242,8 +248,7 @@ fn benchmark_nifs_prove<E: Engine>(
       .expect("prep_prove");
 
     // Witness generation: synthesize instances
-    let (instances, witnesses) =
-      generate_instances_and_witnesses(&pk, &prep, &circuits, is_small);
+    let (instances, witnesses) = generate_instances_and_witnesses(&pk, &prep, &circuits, is_small);
 
     // NIFS prove
     nifs_prove_single(&pk, &instances, &witnesses, is_small);

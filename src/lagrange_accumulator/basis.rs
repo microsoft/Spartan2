@@ -158,7 +158,9 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
       prefix[i + 1] = prefix[i] * values[i];
     }
 
-    let inv_prod = prefix[D].invert().expect("batch inversion failed: input contains zero or duplicate points");
+    let inv_prod = prefix[D]
+      .invert()
+      .expect("batch inversion failed: input contains zero or duplicate points");
 
     let mut out = [F::ZERO; D];
     let mut suffix = F::ONE;
@@ -174,11 +176,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
 #[cfg(test)]
 impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   /// Evaluate an extended polynomial at r using the tensor-product Lagrange basis.
-  pub fn eval_extended(
-    &self,
-    extended: &LagrangeExtendedEvals<F, D>,
-    r: &[F],
-  ) -> F {
+  pub fn eval_extended(&self, extended: &LagrangeExtendedEvals<F, D>, r: &[F]) -> F {
     assert_eq!(extended.num_vars(), r.len());
 
     let mut coeff = LagrangeCoeff::<F, D>::new();
@@ -465,8 +463,7 @@ mod tests {
       prod_evals[i] = ext1.get(i) * ext2.get(i) * ext3.get(i);
     }
 
-    let prod_extended =
-      LagrangeExtendedEvals::<Scalar, D>::from_evals(prod_evals, num_vars);
+    let prod_extended = LagrangeExtendedEvals::<Scalar, D>::from_evals(prod_evals, num_vars);
     let factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
 
     // Check all finite domain points in U_d^4.
