@@ -351,17 +351,35 @@ where
   let e_left_slice = &e_eq[..left];
   let e_right = &e_eq[left..];
 
-  // Precompute e_rb_cache: e_right[x_r] * e_b[round][y] products.
-  // Layout: e_rb_cache[round][y * right + x_r] = e_right[x_r] * e_b[round][y]
-  let e_rb_cache: Vec<Vec<F>> = e_b
+  // Determine loop ordering: outer parallel should be SMALLER dimension
+  // This maximizes work per thread while keeping the inner loop tight
+  let swap_loops = left > right;
+  let (outer_dim, _inner_dim) = if swap_loops {
+    (left, right)
+  } else {
+    (right, left)
+  };
+  let (e_outer, e_inner) = if swap_loops {
+    (e_left_slice, e_right)
+  } else {
+    (e_right, e_left_slice)
+  };
+
+  // Precompute e_cache: e_outer[x_outer] * e_b[round][y] products.
+  // Layout: e_cache[round][x_outer * num_y + y] for contiguous y access per x_outer
+  // (Transposed from original layout for better cache locality in scatter phase)
+  let e_cache: Vec<Vec<F>> = e_b
     .iter()
     .map(|round_ey| {
-      round_ey
+      e_outer
         .iter()
-        .flat_map(|ey| e_right.iter().map(|er| *er * *ey))
+        .flat_map(|eo| round_ey.iter().map(|ey| *eo * *ey))
         .collect()
     })
     .collect();
+
+  // Precompute num_y per round for transposed access
+  let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
 
   // Build bit-reversal permutation
   let bit_rev: Vec<usize> = (0..prefix_size)
@@ -391,21 +409,58 @@ where
     2,
   >;
 
-  let fold_results: Vec<State<F, SmallValue>> = (0..right)
+  let fold_results: Vec<State<F, SmallValue>> = (0..outer_dim)
     .into_par_iter()
     .fold(
       || State::<F, SmallValue>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<F, SmallValue>, x_r| {
+      |mut state: State<F, SmallValue>, x_outer| {
         state.reset_partial_sums();
 
-        for (x_l, &e_l) in e_left_slice.iter().enumerate() {
+        // Precompute slice references for this outer iteration (outside inner loop).
+        // Eliminates bit_rev lookup and bounds checks from hot loop.
+        // When not swapped (x_r outer): slices are contiguous in memory.
+        // When swapped (x_l outer): slices are strided but we still eliminate bit_rev lookups.
+        let az_slices: Vec<&[SmallValue]> = if swap_loops {
+          // x_outer = x_l, inner will iterate x_r; base varies with x_r
+          // Can't precompute contiguous slices, but precompute layer pointers
+          (0..prefix_size)
+            .map(|p| &a_layers[bit_rev[p]][..])
+            .collect()
+        } else {
+          // x_outer = x_r, inner will iterate x_l; contiguous slices
+          let base = x_outer * left;
+          (0..prefix_size)
+            .map(|p| &a_layers[bit_rev[p]][base..base + left])
+            .collect()
+        };
+        let bz_slices: Vec<&[SmallValue]> = if swap_loops {
+          (0..prefix_size)
+            .map(|p| &b_layers[bit_rev[p]][..])
+            .collect()
+        } else {
+          let base = x_outer * left;
+          (0..prefix_size)
+            .map(|p| &b_layers[bit_rev[p]][base..base + left])
+            .collect()
+        };
+
+        for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
           // Gather: collect Az_p(x_L, x_R) for each instance p (stays in small value type)
+          // Index computation depends on swap_loops:
+          // - not swapped: x_outer=x_r, x_inner=x_l, idx = x_r * left + x_l
+          // - swapped: x_outer=x_l, x_inner=x_r, idx = x_r * left + x_l = x_inner * left + x_outer
           #[allow(clippy::needless_range_loop)]
           for p in 0..prefix_size {
-            let idx = x_r * left + x_l;
-            let layer = bit_rev[p];
-            state.az_prefix_boolean_evals[p] = a_layers[layer][idx];
-            state.bz_prefix_boolean_evals[p] = b_layers[layer][idx];
+            if swap_loops {
+              // x_inner = x_r, x_outer = x_l
+              let idx = x_inner * left + x_outer;
+              state.az_prefix_boolean_evals[p] = az_slices[p][idx];
+              state.bz_prefix_boolean_evals[p] = bz_slices[p][idx];
+            } else {
+              // x_inner = x_l, precomputed slices already offset by x_outer * left
+              state.az_prefix_boolean_evals[p] = az_slices[p][x_inner];
+              state.bz_prefix_boolean_evals[p] = bz_slices[p][x_inner];
+            }
           }
 
           // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
@@ -424,11 +479,15 @@ where
           );
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
-          // Fused DMR: acc += e_L × az_ext × bz_ext with zero field reductions.
+          // Fused DMR: acc += e_inner × az_ext × bz_ext with zero field reductions.
           // wide_mul computes small × small → product, then unreduced_multiply_accumulate adds field × product
           for &beta_idx in &betas_with_infty {
             let prod = SmallValue::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
-            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], &e_l, &prod);
+            F::unreduced_multiply_accumulate(
+              &mut state.partial_sums[beta_idx],
+              &e_inner_val,
+              &prod,
+            );
           }
         }
 
@@ -442,13 +501,15 @@ where
         }
 
         // Scatter: multiply-accumulate into wide accumulator (Montgomery REDC at end)
+        // Uses transposed cache layout: e_cache[round][x_outer * num_y + y] for contiguous y access
         for &(beta_idx, val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            let e_rb = e_rb_cache[pref.round_0][pref.y_idx * right + x_r];
+            let num_y = num_y_per_round[pref.round_0];
+            let e_val = e_cache[pref.round_0][x_outer * num_y + pref.y_idx];
             <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
               &mut state.scatter_acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               &val,
-              &e_rb,
+              &e_val,
             );
           }
         }
@@ -465,7 +526,7 @@ where
       a.scatter_acc.merge(&b.scatter_acc);
       a
     })
-    .expect("right > 0 guarantees non-empty fold results");
+    .expect("outer_dim > 0 guarantees non-empty fold results");
 
   // Reduce each bucket from wide 9-limb to field element
   merged
