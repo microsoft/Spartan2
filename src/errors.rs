@@ -115,4 +115,10 @@ pub enum SpartanError {
     /// Context about where the overflow occurred
     context: String,
   },
+  /// returned when l0 (small-value rounds) is zero
+  #[error("SmallValueRoundsZero: {context}")]
+  SmallValueRoundsZero {
+    /// Context about where the error occurred
+    context: String,
+  },
 }
