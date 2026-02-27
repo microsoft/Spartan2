@@ -101,7 +101,8 @@ where
   let suffix_vars = l - l0;
   let prefix_size = 1usize << l0;
 
-  let (eq_tables, _in_vars, xout_vars) = precompute_eq_tables(taus, l0);
+  let (eq_tables, in_vars, xout_vars) = precompute_eq_tables(taus, l0);
+  let num_x_in = 1usize << in_vars;
   let num_x_out = 1usize << xout_vars;
   let BetaPrefixCache {
     cache: beta_prefix_cache,
@@ -119,17 +120,18 @@ where
 
   let ext_size = base.pow(l0 as u32); // (D+1)^l0
 
-  // Build eq cache: precomputes ex * ey products for all combinations.
-  // Layout: eq_cache[round][x_out * num_y + y] for cache-friendly access.
-  // Each parallel task (fixed x_out) accesses a contiguous block of size num_y.
+  // Build eq cache: precomputes e_in * e_y products for all combinations.
+  // Layout: eq_cache[round][x_in * num_y + y] for cache-friendly access.
+  // Each parallel task (fixed x_in) accesses a contiguous block of size num_y.
+  // Note: We use e_in (outer loop variable) for the cache, not e_xout.
   let eq_cache: Vec<Vec<F>> = eq_tables
     .e_y
     .iter()
     .map(|round_ey| {
       eq_tables
-        .e_xout
+        .e_in
         .iter()
-        .flat_map(|ex| round_ey.iter().map(|ey| *ex * *ey))
+        .flat_map(|ein| round_ey.iter().map(|ey| *ein * *ey))
         .collect()
     })
     .collect();
@@ -137,34 +139,48 @@ where
   // Precompute num_y per round for transposed access
   let num_y_per_round: Vec<usize> = eq_tables.e_y.iter().map(|ey| ey.len()).collect();
 
-  // Borrow e_in directly (no clone needed)
-  let e_in = &eq_tables.e_in;
+  // Borrow e_xout for inner loop (e_in is used in eq_cache)
+  let e_xout = &eq_tables.e_xout;
 
-  // Parallel over x_out with thread-local state (zero per-iteration allocations)
+  // Parallel over x_in with thread-local state (zero per-iteration allocations)
+  // Loop swap: outer=x_in (larger set), inner=x_out (smaller set, contiguous access)
   type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
 
-  let fold_results: Vec<State<F, SmallValue>> = (0..num_x_out)
+  let fold_results: Vec<State<F, SmallValue>> = (0..num_x_in)
     .into_par_iter()
     .fold(
       || State::<F, SmallValue>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<F, SmallValue>, x_out_bits| {
-        // Reset partial sums for this x_out iteration
+      |mut state: State<F, SmallValue>, x_in_bits| {
+        // Reset partial sums for this x_in iteration
         state.reset_partial_sums();
 
-        // Inner loop over x_in - accumulate into UNREDUCED form
-        // Each beta_partial_sums[beta_idx] accumulates 2^(l/2) terms per x_out.
-        // Safety bound for SignedWideLimbs<N> (N limbs, 64 bits per limb):
-        //   field_bits + product_bits + (l/2) < 64*N
-        // i32 path: N=5, product_bits<=62; i64 path: N=6, product_bits<=126.
-        for (x_in_bits, e_in_eval) in e_in.iter().enumerate() {
-          let suffix = (x_in_bits << xout_vars) | x_out_bits;
+        // Precompute contiguous slices for each prefix (bounds checks eliminated in inner loop).
+        // With x_out in LOW suffix bits, each prefix's x_out values are contiguous in memory.
+        let x_in_offset = x_in_bits << xout_vars;
+        let az_slices: Vec<&[SmallValue]> = (0..prefix_size)
+          .map(|p| {
+            let base = (p << suffix_vars) | x_in_offset;
+            &az.Z[base..base + num_x_out]
+          })
+          .collect();
+        let bz_slices: Vec<&[SmallValue]> = (0..prefix_size)
+          .map(|p| {
+            let base = (p << suffix_vars) | x_in_offset;
+            &bz.Z[base..base + num_x_out]
+          })
+          .collect();
 
-          // Fill prefix buffers by index assignment (no allocation)
+        // Inner loop over x_out - contiguous memory access (suffix increments by 1)
+        // Each beta_partial_sums[beta_idx] accumulates 2^xout_vars terms per x_in.
+        // Safety bound for SignedWideLimbs<N> (N limbs, 64 bits per limb):
+        //   field_bits + product_bits + xout_vars < 64*N
+        // i32 path: N=5, product_bits<=62; i64 path: N=6, product_bits<=126.
+        for (x_out_bits, e_xout_eval) in e_xout.iter().enumerate() {
+          // Fill prefix buffers from precomputed slices (contiguous access per prefix)
           #[allow(clippy::needless_range_loop)]
           for prefix in 0..prefix_size {
-            let idx = (prefix << suffix_vars) | suffix;
-            state.az_prefix_boolean_evals[prefix] = az.Z[idx];
-            state.bz_prefix_boolean_evals[prefix] = bz.Z[idx];
+            state.az_prefix_boolean_evals[prefix] = az_slices[prefix][x_out_bits];
+            state.bz_prefix_boolean_evals[prefix] = bz_slices[prefix][x_out_bits];
           }
 
           // Extend Az and Bz to Lagrange domain in-place (zero allocation)
@@ -185,9 +201,10 @@ where
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
           // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
           // wide_mul computes small × small → product, then unreduced_multiply_accumulate adds field × product
+          // Note: multiply by e_xout_eval (inner loop variable) here
           for &beta_idx in &betas_with_infty {
             let prod = SmallValue::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
-            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], e_in_eval, &prod);
+            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], e_xout_eval, &prod);
           }
         }
 
@@ -211,9 +228,9 @@ where
         // Multiply-accumulate into wide accumulator (Montgomery REDC at end)
         for &(beta_idx, ref val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
-            // Transposed layout: eq_cache[round][x_out * num_y + y] for contiguous y access
+            // Transposed layout: eq_cache[round][x_in * num_y + y] for contiguous y access
             let num_y = num_y_per_round[pref.round_0];
-            let eq_eval = eq_cache[pref.round_0][x_out_bits * num_y + pref.y_idx];
+            let eq_eval = eq_cache[pref.round_0][x_in_bits * num_y + pref.y_idx];
             <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
               &mut state.acc.rounds[pref.round_0].data_mut()[pref.v_idx][pref.u_idx],
               val,
@@ -236,7 +253,7 @@ where
       a.acc.merge(&b.acc);
       a
     })
-    .expect("num_x_out > 0 guarantees non-empty fold results");
+    .expect("num_x_in > 0 guarantees non-empty fold results");
 
   // Finalize: reduce each bucket from wide 9-limb to field element
   let mut result: LagrangeAccumulators<F, 2> = LagrangeAccumulators::new(l0);

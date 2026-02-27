@@ -12,6 +12,23 @@ use super::domain::LagrangeIndex;
 use std::ops::{Add, Sub};
 
 // ============================================================================
+// Const-generic helpers
+// ============================================================================
+
+/// Compile-time power function: computes BASE^EXP.
+/// Used for computing array sizes like 3^L0 for Lagrange domain extension.
+#[allow(dead_code)] // Will be used for future const-generic optimizations
+pub const fn const_pow<const BASE: usize, const EXP: usize>() -> usize {
+  let mut result = 1;
+  let mut i = 0;
+  while i < EXP {
+    result *= BASE;
+    i += 1;
+  }
+  result
+}
+
+// ============================================================================
 // Helper functions for Lagrange extension
 // ============================================================================
 
