@@ -75,10 +75,10 @@ where
 ///
 /// This struct contains the compressed univariate polynomials that constitute
 /// the prover's messages in each round of the sum-check protocol.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "")]
 pub struct SumcheckProof<E: Engine> {
-  compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
+  pub(crate) compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
 }
 
 impl<E: Engine> SumcheckProof<E> {
@@ -473,13 +473,12 @@ impl<E: Engine> SumcheckProof<E> {
 
     let num_rounds = taus.len();
 
-    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus);
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(&taus);
 
     for round in 0..num_rounds {
       let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
 
       let poly = {
-        // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
           eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
@@ -546,7 +545,7 @@ impl<E: Engine> SumcheckProof<E> {
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_outer_round = E::Scalar::ZERO;
-    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.to_vec());
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus);
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
@@ -895,7 +894,7 @@ pub(crate) mod eq_sumcheck {
     /// for efficient lookup during the sumcheck rounds. The round counter starts at 1 (not 0)
     /// to simplify indexing into precomputed arrays, as the first evaluation happens before
     /// any binding operations occur.
-    pub fn new(taus: Vec<E::Scalar>) -> Self {
+    pub fn new(taus: &[E::Scalar]) -> Self {
       let l = taus.len();
       let first_half = l / 2;
 
@@ -950,12 +949,22 @@ pub(crate) mod eq_sumcheck {
         first_half,
         second_half: l - first_half,
         round: 1, // Start at 1 to simplify array indexing (round-1 gives 0-based index)
-        taus,
+        taus: taus.to_vec(),
         eval_eq_left: E::Scalar::ONE,
         poly_eq_left,
         poly_eq_right,
         eq_tau_0_2_3,
       }
+    }
+
+    /// Sets the accumulated eq evaluation factor from previous rounds.
+    ///
+    /// This allows reusing an EqSumCheckInstance created for suffix variables
+    /// while incorporating the eq factor from prefix rounds (small-value rounds).
+    /// Call this before starting the remaining rounds to inject the factor
+    /// `eq(τ_{0..l0}, r_{0..l0})` accumulated during small-value rounds.
+    pub fn set_eval_eq_left(&mut self, factor: E::Scalar) {
+      self.eval_eq_left = factor;
     }
 
     /// Evaluate poly_A * poly_B - poly_C

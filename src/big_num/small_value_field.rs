@@ -10,7 +10,65 @@
 
 #![allow(dead_code)]
 
+use super::{DelayedReduction, WideMul};
 use ff::PrimeField;
+use num_traits::Zero;
+use std::ops::{Add, Sub};
+
+// =============================================================================
+// SmallValue trait
+// =============================================================================
+
+/// Small integer type usable in small-value sumcheck.
+///
+/// Bundles all required bounds for Lagrange extension and accumulation:
+/// - `WideMul`: widening multiplication for product computation
+/// - `Copy + Default + Zero`: basic value semantics
+/// - `Add + Sub`: arithmetic for Lagrange extension
+/// - `Send + Sync`: thread safety for parallel processing
+pub trait SmallValue:
+  WideMul + Copy + Default + Zero + Add<Output = Self> + Sub<Output = Self> + Send + Sync
+{
+}
+
+impl SmallValue for i32 {}
+impl SmallValue for i64 {}
+
+// =============================================================================
+// SmallValueEngine trait
+// =============================================================================
+
+/// Field that supports small-value sumcheck with value type `SV`.
+///
+/// Bundles all field requirements for small-value optimization:
+/// - `SmallValueField<SV>`: conversion between field and small values
+/// - `DelayedReduction<SV>`: accumulate field × small products
+/// - `DelayedReduction<SV::Product>`: accumulate field × wide products
+/// - `DelayedReduction<Self>`: accumulate field × field products
+pub trait SmallValueEngine<SV: SmallValue>:
+  PrimeField
+  + SmallValueField<SV>
+  + DelayedReduction<SV>
+  + DelayedReduction<SV::Product>
+  + DelayedReduction<Self>
+  + Send
+  + Sync
+{
+}
+
+// Blanket implementation
+impl<F, SV> SmallValueEngine<SV> for F
+where
+  SV: SmallValue,
+  F: PrimeField
+    + SmallValueField<SV>
+    + DelayedReduction<SV>
+    + DelayedReduction<SV::Product>
+    + DelayedReduction<F>
+    + Send
+    + Sync,
+{
+}
 
 /// Trait for fields that support small-value optimization.
 ///

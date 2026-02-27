@@ -85,6 +85,59 @@ impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
   }
 }
 
+/// Compute suffix eq tables for small-value sumcheck optimization.
+///
+/// Given τ = (τ₀, τ₁, ..., τ_{l-1}) and `l0` (the number of small-value rounds),
+/// computes tables `E_y[i]` = eq(τ[i+1:l0], ·) for i = 0..l0-1.
+///
+/// These tables allow O(1) lookup of eq suffix products during accumulation,
+/// avoiding redundant computation in the inner loop.
+///
+/// Returns empty vec if l0 == 0 (optimization disabled).
+pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Vec<S>> {
+  // Handle l0 == 0: no suffix tables needed (small-value optimization disabled)
+  if l0 == 0 {
+    return Vec::new();
+  }
+
+  assert!(taus.len() >= l0, "taus must have at least l0 elements");
+
+  let mut result: Vec<Vec<S>> = vec![vec![]; l0];
+
+  // Base case: E_y[l0-1] = eq([], ·) = [1] (empty suffix)
+  result[l0 - 1] = vec![S::ONE];
+
+  // Build backwards: each step prepends one τ value
+  // E_y[i] = eq(τ[i+1:l0], ·) is built from E_y[i+1] = eq(τ[i+2:l0], ·)
+  // by prepending τ[i+1]
+  for i in (0..l0 - 1).rev() {
+    let tau = taus[i + 1];
+    let prev = &result[i + 1];
+    let prev_len = prev.len();
+
+    // New table has 2× the entries (prepending a new variable)
+    // For multilinear indexing: first variable is high bit
+    // new_idx = new_bit * prev_len + old_idx
+    //
+    // new_bit = 0: eq factor is (1 - τ)
+    // new_bit = 1: eq factor is τ
+    //
+    // Optimized: use 1 multiplication per element instead of 2
+    // hi = v * τ, lo = v - hi = v * (1 - τ)
+    let mut next = vec![S::ZERO; prev_len * 2];
+    let (lo_half, hi_half) = next.split_at_mut(prev_len);
+
+    for ((lo, hi), v) in lo_half.iter_mut().zip(hi_half.iter_mut()).zip(prev.iter()) {
+      *hi = *v * tau;
+      *lo = *v - *hi;
+    }
+
+    result[i] = next;
+  }
+
+  result
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
