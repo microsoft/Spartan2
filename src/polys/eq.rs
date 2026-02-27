@@ -85,6 +85,57 @@ impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
   }
 }
 
+/// Build a full eq polynomial pyramid from tau values.
+///
+/// Given taus = [τ₀, τ₁, ..., τ_{n-1}], builds a pyramid where:
+/// - Layer 0: [1]
+/// - Layer 1: [1-τ_{n-1}, τ_{n-1}]
+/// - Layer k: eq([τ_{n-k}, ..., τ_{n-1}], ·), size 2^k
+/// - Layer n: eq([τ₀, ..., τ_{n-1}], ·), size 2^n (the full eq table)
+///
+/// The pyramid has n+1 layers total. This structure matches EqSumCheckInstance's
+/// internal representation, enabling pyramid reuse between accumulator building
+/// and sumcheck evaluation.
+///
+/// The taus are processed in reverse order (last tau first) to match the
+/// standard multilinear indexing convention where the first tau corresponds
+/// to the most significant bit of the index.
+///
+/// Each layer is stored as [lo_0, lo_1, ..., lo_n, hi_0, hi_1, ..., hi_n]
+/// where lo values are multiplied by (1-τ) and hi values by τ.
+pub fn build_eq_pyramid<S: PrimeField>(taus: &[S]) -> Vec<Vec<S>> {
+  use rayon::prelude::*;
+
+  let n = taus.len();
+  let mut pyramid = Vec::with_capacity(n + 1);
+
+  // Layer 0: base case [1]
+  pyramid.push(vec![S::ONE]);
+
+  // Build layers 1..n by adding one tau at a time (in reverse order)
+  // Uses the same parallel pattern as EqSumCheckInstance::new
+  for i in 0..n {
+    let tau = taus[n - 1 - i]; // Process taus in reverse
+    let prev = &pyramid[i];
+
+    // Build next layer: [lo_0, ..., lo_n, hi_0, ..., hi_n]
+    // First, copy prev and extend with hi values (prev * tau)
+    let mut next = prev.to_vec();
+    next.par_extend(prev.par_iter().map(|v| *v * tau));
+
+    // Then subtract hi from lo: lo = prev - hi = prev * (1 - tau)
+    let (first, last) = next.split_at_mut(prev.len());
+    first
+      .par_iter_mut()
+      .zip(last)
+      .for_each(|(a, b)| *a -= *b);
+
+    pyramid.push(next);
+  }
+
+  pyramid
+}
+
 /// Compute suffix eq tables for small-value sumcheck optimization.
 ///
 /// Given τ = (τ₀, τ₁, ..., τ_{l-1}) and `l0` (the number of small-value rounds),
