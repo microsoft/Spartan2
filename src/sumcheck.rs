@@ -1014,14 +1014,81 @@ pub(crate) mod eq_sumcheck {
       }
     }
 
-    /// Sets the accumulated eq evaluation factor from previous rounds.
+    /// Creates an EqSumCheckInstance from precomputed eq pyramids.
     ///
-    /// This allows reusing an EqSumCheckInstance created for suffix variables
-    /// while incorporating the eq factor from prefix rounds (small-value rounds).
-    /// Call this before starting the remaining rounds to inject the factor
-    /// `eq(τ_{0..l0}, r_{0..l0})` accumulated during small-value rounds.
-    pub fn set_eval_eq_left(&mut self, factor: E::Scalar) {
-      self.eval_eq_left = factor;
+    /// This constructor enables reuse of pyramids already computed during accumulator
+    /// building, avoiding redundant eq polynomial computation.
+    ///
+    /// # Arguments
+    ///
+    /// - `e_in_pyramid`: Pyramid for inner variables (ALREADY POPPED by caller).
+    ///   Has `in_vars` layers where layer k has size 2^k.
+    ///   Built from τ[l₀+1 : l₀+in_vars] (first suffix tau τ[l₀] is excluded).
+    /// - `e_xout_pyramid`: Full pyramid for outer variables.
+    ///   Has `xout_vars+1` layers where layer k has size 2^k.
+    ///   Built from τ[l₀+in_vars : ℓ].
+    /// - `taus`: The suffix tau values τ[l₀:ℓ] (needed for `bound()` and `eq_tau_0_2_3`).
+    /// - `eval_eq_left`: Accumulated eq factor from prefix rounds, eq(τ[0:l₀], r[0:l₀]).
+    ///
+    /// # Factorization
+    ///
+    /// The eq polynomial factors as:
+    /// ```text
+    /// eq(τ[l₀:ℓ], x) = eq(τ[l₀], x₀) × eq(τ[l₀+1:l₀+in_vars], x_in) × eq(τ[l₀+in_vars:ℓ], x_out)
+    ///                  └─ tracked in eval_eq_left ─┘   └── e_in_pyramid ──┘   └── e_xout_pyramid ──┘
+    /// ```
+    ///
+    /// The first suffix tau τ[l₀] is handled via `eval_eq_left` and `bound()`,
+    /// matching the Nova optimization where the first variable is tracked separately.
+    pub fn from_pyramids(
+      e_in_pyramid: Vec<Vec<E::Scalar>>,
+      e_xout_pyramid: Vec<Vec<E::Scalar>>,
+      taus: &[E::Scalar],
+      eval_eq_left: E::Scalar,
+    ) -> Self {
+      // in_vars = number of layers in popped pyramid (one less than original)
+      // After pop: e_in_pyramid has in_vars layers for in_vars-1 taus
+      // But first_half should equal in_vars (the number of rounds for left side)
+      let in_vars = e_in_pyramid.len();
+      let xout_vars = e_xout_pyramid.len().saturating_sub(1);
+
+      debug_assert_eq!(
+        in_vars + xout_vars,
+        taus.len(),
+        "Pyramid sizes must match taus length: in_vars={}, xout_vars={}, taus.len()={}",
+        in_vars,
+        xout_vars,
+        taus.len()
+      );
+
+      // Compute eq_tau_0_2_3 for all suffix taus (same logic as new())
+      // These are precomputed eq evaluations at points 0, 2, 3:
+      //   eq(τ, 0) = 1 - τ
+      //   eq(τ, 2) = 3τ - 1
+      //   eq(τ, 3) = 5τ - 2
+      let f2 = E::Scalar::ONE.double();
+      let f1 = E::Scalar::ONE;
+      let eq_tau_0_2_3 = taus
+        .par_iter()
+        .map(|tau| {
+          let tau2 = tau.double();
+          let tau3 = tau2 + tau;
+          let tau5 = tau3 + tau2;
+          (f1 - tau, tau3 - f1, tau5 - f2)
+        })
+        .collect::<Vec<_>>();
+
+      Self {
+        init_num_vars: in_vars + xout_vars,
+        first_half: in_vars,
+        second_half: xout_vars,
+        round: 1,
+        taus: taus.to_vec(),
+        eval_eq_left,
+        poly_eq_left: e_in_pyramid,
+        poly_eq_right: e_xout_pyramid,
+        eq_tau_0_2_3,
+      }
     }
 
     /// Evaluate eq(tau,X) * (A*B - C) using 2 N-scaling sums instead of 3

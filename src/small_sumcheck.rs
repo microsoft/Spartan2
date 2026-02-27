@@ -243,13 +243,13 @@ where
 
   // ===== Pre-computation Phase =====
   // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic.
+  // Also builds eq pyramids for reuse by EqSumCheckInstance.
   // Internally computes eq tables with balanced split and precomputed eq_cache.
   // Uses: small × small → intermediate (for Az·Bz products),
   // then intermediate × field (for eq weighting via DelayedReduction).
-  let accumulators = build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
+  let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
+    build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
 
-  // Create EqSumCheckInstance for suffix variables (used in remaining rounds).
-  let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(&taus[l0..]);
   let mut small_value_sumcheck =
     SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
 
@@ -306,11 +306,21 @@ where
   );
 
   // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
-  // Inject the accumulated eq factor from small-value rounds into eq_instance.
-  // This incorporates eq(τ_{0..l0}, r_{0..l0}) so the pyramid results are correct.
-  eq_instance.set_eval_eq_left(small_value_sumcheck.eq_alpha());
+  // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
+  // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
+  // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
+  e_in_pyramid.pop();
 
-  // Continue with the remaining rounds using the REUSED eq instance.
+  // Create EqSumCheckInstance from precomputed pyramids, avoiding redundant eq computation.
+  // The accumulated eq factor from small-value rounds is passed directly.
+  let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
+    e_in_pyramid,
+    e_xout_pyramid,
+    &taus[l0..],
+    small_value_sumcheck.eq_alpha(),
+  );
+
+  // Continue with the remaining rounds using the eq instance built from pyramids.
   // The eq_instance was created with taus[l0..], so its internal round counter tracks
   // local rounds. We pass global round index for the round_idx parameter since
   // eval_one_case_cubic_three_inputs uses it for a round-0 optimization.
@@ -421,7 +431,7 @@ mod tests {
     let mut claim = F::ZERO;
 
     // Build accumulators using the simplified API
-    let accs = build_accumulators_spartan(&az_poly, &bz_poly, &taus, SMALL_VALUE_ROUNDS);
+    let (accs, _, _) = build_accumulators_spartan(&az_poly, &bz_poly, &taus, SMALL_VALUE_ROUNDS);
     let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
     // Full eq_instance for verification against standard sumcheck
