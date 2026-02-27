@@ -1270,7 +1270,7 @@ mod perf_tests {
     traits::Engine,
   };
   use ff::Field;
-  use rand::{rngs::StdRng, SeedableRng};
+  use rand::{SeedableRng, rngs::StdRng};
   use tracing::info;
   use tracing_subscriber::EnvFilter;
 
@@ -1373,14 +1373,9 @@ mod perf_tests {
 
       let (_span, t) = start_span!("prove_quad", field = field_name, num_vars = num_vars);
 
-      let (proof, _r, _evals) = SumcheckProof::<E>::prove_quad(
-        &claim,
-        num_vars,
-        &mut poly_a,
-        &mut poly_b,
-        &mut transcript,
-      )
-      .expect("proof generation should succeed");
+      let (proof, _r, _evals) =
+        SumcheckProof::<E>::prove_quad(&claim, num_vars, &mut poly_a, &mut poly_b, &mut transcript)
+          .expect("proof generation should succeed");
 
       info!(field = field_name, num_vars, n = len, ms = ?t.elapsed().as_millis(), "completed");
 
