@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
   big_num::{DelayedReduction, SmallValue, SmallValueEngine},
-  polys::{eq::EqPolynomial, eq::compute_suffix_eq_pyramid, multilinear::MultilinearPolynomial},
+  polys::{eq::build_eq_pyramid, eq::compute_suffix_eq_pyramid, multilinear::MultilinearPolynomial},
 };
 use ff::PrimeField;
 use num_traits::Zero;
@@ -28,12 +28,14 @@ use super::index::compute_idx4;
 /// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
 pub const SPARTAN_T_DEGREE: usize = 2;
 
-/// Precomputed eq polynomial tables with balanced split.
+/// Precomputed eq polynomial pyramids with balanced split.
 struct EqSplitTables<F: PrimeField> {
-  /// eq(τ[l0..l0+in_vars], ·) evaluations, size 2^in_vars
-  e_in: Vec<F>,
-  /// eq(τ[l0+in_vars..], ·) evaluations, size 2^xout_vars
-  e_xout: Vec<F>,
+  /// Full pyramid for inner variables: eq(τ[l0..l0+in_vars], ·)
+  /// Layer k has size 2^k, layer in_vars is the full table (size 2^in_vars)
+  e_in_pyramid: Vec<Vec<F>>,
+  /// Full pyramid for outer variables: eq(τ[l0+in_vars..], ·)
+  /// Layer k has size 2^k, layer xout_vars is the full table (size 2^xout_vars)
+  e_xout_pyramid: Vec<Vec<F>>,
   /// Suffix eq pyramid for prefix variables, Vec per round
   e_y: Vec<Vec<F>>,
 }
@@ -44,7 +46,7 @@ pub(crate) struct BetaPrefixCache {
   num_betas: usize,
 }
 
-/// Precompute eq polynomial tables with balanced split for e_in and e_xout.
+/// Precompute eq polynomial pyramids with balanced split for e_in and e_xout.
 ///
 /// Returns (tables, in_vars, xout_vars) where:
 /// - in_vars = ceil((l - l0) / 2) - variables for inner loop (e_in)
@@ -52,17 +54,29 @@ pub(crate) struct BetaPrefixCache {
 ///
 /// The balanced split reduces precomputation cost by ~33% compared to the
 /// asymmetric l/2 split, and enables odd number of rounds.
+///
+/// Both e_in and e_xout are returned as full pyramids (not just top layers),
+/// enabling reuse by EqSumCheckInstance for the remaining sumcheck rounds.
 fn precompute_eq_tables<F: PrimeField>(taus: &[F], l0: usize) -> (EqSplitTables<F>, usize, usize) {
   let l = taus.len();
   let suffix_vars = l - l0;
   let in_vars = suffix_vars.div_ceil(2); // ceiling: e_in larger (inner loop, sequential access)
   let xout_vars = suffix_vars - in_vars; // floor: e_xout smaller (outer loop, reused)
 
-  let e_in = EqPolynomial::evals_from_points(&taus[l0..l0 + in_vars]); // 2^in_vars entries
-  let e_xout = EqPolynomial::evals_from_points(&taus[l0 + in_vars..]); // 2^xout_vars entries
+  // Build full pyramids (not just top layers) for reuse by EqSumCheckInstance
+  let e_in_pyramid = build_eq_pyramid(&taus[l0..l0 + in_vars]); // in_vars+1 layers
+  let e_xout_pyramid = build_eq_pyramid(&taus[l0 + in_vars..]); // xout_vars+1 layers
   let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round, total 2^l0 - 1
 
-  (EqSplitTables { e_in, e_xout, e_y }, in_vars, xout_vars)
+  (
+    EqSplitTables {
+      e_in_pyramid,
+      e_xout_pyramid,
+      e_y,
+    },
+    in_vars,
+    xout_vars,
+  )
 }
 
 /// Build beta → prefix index cache for O(1) scatter access.
@@ -90,6 +104,16 @@ pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
 /// - `F`: Field type with small-value and delayed reduction support
 /// - `SV`: Witness value type (i32 or i64)
 ///
+/// # Returns
+///
+/// A tuple of (accumulators, e_in_pyramid, e_xout_pyramid) where:
+/// - accumulators: The computed Lagrange accumulators for small-value rounds
+/// - e_in_pyramid: Full eq pyramid for inner variables τ[l0..l0+in_vars], has in_vars+1 layers
+/// - e_xout_pyramid: Full eq pyramid for outer variables τ[l0+in_vars..ℓ], has xout_vars+1 layers
+///
+/// The pyramids can be reused by EqSumCheckInstance for the remaining sumcheck rounds,
+/// avoiding redundant eq polynomial computation.
+///
 /// # Parallelism strategy
 ///
 /// - Outer parallel loop over x_out values (using Rayon fold-reduce)
@@ -105,7 +129,7 @@ pub fn build_accumulators_spartan<F, SV>(
   bz: &MultilinearPolynomial<SV>,
   taus: &[F],
   l0: usize,
-) -> LagrangeAccumulators<F, 2>
+) -> (LagrangeAccumulators<F, 2>, Vec<Vec<F>>, Vec<Vec<F>>)
 where
   F: SmallValueEngine<SV>,
   SV: SmallValue,
@@ -120,9 +144,15 @@ where
   let suffix_vars = l - l0;
   let prefix_size = 1usize << l0;
 
-  // Precompute eq tables with balanced split
-  let (eq_tables, _in_vars, xout_vars) = precompute_eq_tables(taus, l0);
+  // Precompute eq pyramids with balanced split
+  let (eq_tables, in_vars, xout_vars) = precompute_eq_tables(taus, l0);
   let num_x_out = 1usize << xout_vars;
+
+  // Get top layers (full eq tables) for accumulator computation
+  let e_in = eq_tables.e_in_pyramid.last().expect("e_in_pyramid non-empty");
+  let e_xout = eq_tables.e_xout_pyramid.last().expect("e_xout_pyramid non-empty");
+  debug_assert_eq!(e_in.len(), 1 << in_vars);
+  debug_assert_eq!(e_xout.len(), 1 << xout_vars);
 
   // Build beta → prefix index cache
   let BetaPrefixCache {
@@ -145,8 +175,7 @@ where
     .e_y
     .iter()
     .map(|round_ey| {
-      eq_tables
-        .e_xout
+      e_xout
         .iter()
         .flat_map(|ex| round_ey.iter().map(|ey| *ex * *ey))
         .collect()
@@ -155,9 +184,6 @@ where
 
   // Precompute num_y per round for transposed access
   let num_y_per_round: Vec<usize> = eq_tables.e_y.iter().map(|ey| ey.len()).collect();
-
-  // Borrow e_in directly (no clone needed)
-  let e_in = &eq_tables.e_in;
 
   // Parallel over x_out with thread-local state (zero per-iteration allocations)
   type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
@@ -249,9 +275,16 @@ where
     .expect("num_x_out > 0 guarantees non-empty fold results");
 
   // Finalize: reduce each bucket from wide 9-limb to field element
-  merged
+  let accumulators = merged
     .acc
-    .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+    .map(|acc| <F as DelayedReduction<F>>::reduce(acc));
+
+  // Return accumulators along with full pyramids for EqSumCheckInstance reuse
+  (
+    accumulators,
+    eq_tables.e_in_pyramid,
+    eq_tables.e_xout_pyramid,
+  )
 }
 
 #[cfg(test)]
@@ -283,7 +316,7 @@ mod tests {
 
     let taus: Vec<Scalar> = vec![Scalar::from(3u64), Scalar::from(5u64)];
 
-    let acc = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞}.
     // Buckets for u = 0 should be zero (binary β), bucket for u = ∞ should be non-zero.
@@ -331,8 +364,8 @@ mod tests {
     ];
 
     // Build accumulators twice
-    let acc1 = build_accumulators_spartan(&az, &bz, &taus, l0);
-    let acc2 = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc1, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc2, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     // Compare all buckets
     for round in 0..l0 {
@@ -369,8 +402,8 @@ mod tests {
     let taus: Vec<Scalar> = (0..l).map(|i| Scalar::from((i * 7 + 3) as u64)).collect();
 
     // Build accumulators twice to verify consistency
-    let acc1 = build_accumulators_spartan(&az, &bz, &taus, l0);
-    let acc2 = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc1, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc2, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
 
     for round in 0..l0 {
       let num_v = (D + 1).pow(round as u32);
