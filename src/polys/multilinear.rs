@@ -8,9 +8,9 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial};
+use crate::{big_num::SmallValueField, math::Math, polys::eq::EqPolynomial};
 use core::ops::Index;
-use ff::PrimeField;
+use ff::{Field, PrimeField};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -30,9 +30,12 @@ use serde::{Deserialize, Serialize};
 /// $$
 ///
 /// Vector $Z$ indicates $Z(e)$ where $e$ ranges from $0$ to $2^m-1$.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultilinearPolynomial<Scalar: PrimeField> {
-  pub(crate) Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
+///
+/// The type parameter `T` is the coefficient type. Typically this is a field element,
+/// but can also be any type with ring operations (add, sub, mul, zero).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultilinearPolynomial<T> {
+  pub(crate) Z: Vec<T>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
   // Non-zero prefix lengths for each half of Z, enabling zero-skip in bind/eval.
   // When Z has 2n elements: lo_eff covers Z[0..n), hi_eff covers Z[n..2n).
   // Z[i] = 0 for lo_eff <= i < n, and Z[n+i] = 0 for hi_eff <= i < n.
@@ -47,19 +50,16 @@ fn default_eff() -> usize {
   usize::MAX
 }
 
-impl<Scalar: PrimeField> PartialEq for MultilinearPolynomial<Scalar> {
-  fn eq(&self, other: &Self) -> bool {
-    self.Z == other.Z
-  }
-}
-impl<Scalar: PrimeField> Eq for MultilinearPolynomial<Scalar> {}
-
-impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
+impl<T> MultilinearPolynomial<T> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
   ///
   /// # Panics
-  /// The number of evaluations must be a power of two.
-  pub fn new(Z: Vec<Scalar>) -> Self {
+  /// Panics if the number of evaluations is empty or not a power of two.
+  pub fn new(Z: Vec<T>) -> Self {
+    assert!(
+      !Z.is_empty() && Z.len().is_power_of_two(),
+      "Vector Z must be non-empty and its length must be a power of two."
+    );
     MultilinearPolynomial {
       Z,
       lo_eff: usize::MAX,
@@ -83,16 +83,18 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   }
 
   /// Consume and return the inner Vec (preserving capacity for reuse).
-  pub fn into_vec(self) -> Vec<Scalar> {
+  pub fn into_vec(self) -> Vec<T> {
     self.Z
   }
+}
 
+impl<T: Field> MultilinearPolynomial<T> {
   /// Binds the polynomial's top variable using the given scalar.
   ///
   /// Exploits zero-structure: when hi half is all zero or sparse, uses
   /// cheaper operations (scale by (1-r) instead of sub+mul+add).
   #[inline(always)]
-  pub fn bind_poly_var_top(&mut self, r: &Scalar) {
+  pub fn bind_poly_var_top(&mut self, r: &T) {
     assert!(
       self.Z.len() >= 2,
       "Vector Z must have at least two elements to bind the top variable."
@@ -105,7 +107,7 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
 
     if hi == 0 {
       // Hi half is all zero: result = left[i] * (1-r)
-      let one_minus_r = Scalar::ONE - *r;
+      let one_minus_r = T::ONE - *r;
       if rayon::current_num_threads() <= 1 {
         for a in self.Z[..lo].iter_mut() {
           *a *= one_minus_r;
@@ -120,13 +122,13 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
         for i in 0..hi {
           left[i] += *r * (right[i] - left[i]);
         }
-        let one_minus_r = Scalar::ONE - *r;
+        let one_minus_r = T::ONE - *r;
         for a in left[hi..lo].iter_mut() {
           *a *= one_minus_r;
         }
       } else {
         let r_val = *r;
-        let one_minus_r = Scalar::ONE - r_val;
+        let one_minus_r = T::ONE - r_val;
         left[..lo].par_iter_mut().enumerate().for_each(|(i, a)| {
           if i < hi {
             *a += r_val * (right[i] - *a);
@@ -162,13 +164,72 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     self.lo_eff = eff.min(n / 2);
     self.hi_eff = eff.saturating_sub(n / 2);
   }
+
+  /// Binds the polynomial's top variables using the given scalars.
+  pub fn bind_with(poly: &[T], L: &[T], r_len: usize) -> Vec<T> {
+    assert_eq!(
+      poly.len(),
+      L.len() * r_len,
+      "poly length ({}) must equal L.len() * r_len ({} * {}) = {}",
+      poly.len(),
+      L.len(),
+      r_len,
+      L.len() * r_len
+    );
+
+    (0..r_len)
+      .into_par_iter()
+      .map(|i| {
+        let mut acc = T::ZERO;
+        for j in 0..L.len() {
+          // row-major: index = j * r_len + i
+          acc += L[j] * poly[j * r_len + i];
+        }
+        acc
+      })
+      .collect()
+  }
 }
 
-impl<Scalar: PrimeField> Index<usize> for MultilinearPolynomial<Scalar> {
-  type Output = Scalar;
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i32>)
+// ============================================================================
+
+#[allow(dead_code)]
+impl MultilinearPolynomial<i32> {
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<i32>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
+  }
+}
+
+// ============================================================================
+// Small-value polynomial operations (MultilinearPolynomial<i64>)
+// ============================================================================
+
+#[allow(dead_code)]
+impl MultilinearPolynomial<i64> {
+  /// Get the number of variables.
+  pub fn num_vars(&self) -> usize {
+    self.Z.len().trailing_zeros() as usize
+  }
+
+  /// Convert to field-element polynomial.
+  pub fn to_field<F: SmallValueField<i64>>(&self) -> MultilinearPolynomial<F> {
+    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
+  }
+}
+
+impl<T> Index<usize> for MultilinearPolynomial<T> {
+  type Output = T;
 
   #[inline(always)]
-  fn index(&self, _index: usize) -> &Scalar {
+  fn index(&self, _index: usize) -> &T {
     &(self.Z[_index])
   }
 }
@@ -213,15 +274,14 @@ mod tests {
 
   use super::*;
   use crate::provider::pasta::pallas;
+  use ff::Field;
+  use pallas::Scalar;
 
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.
   ///
   /// The point must have a value for each variable.
-  pub fn evaluate<Scalar: PrimeField>(
-    poly: &MultilinearPolynomial<Scalar>,
-    r: &[Scalar],
-  ) -> Scalar {
+  pub fn evaluate<S: PrimeField>(poly: &MultilinearPolynomial<S>, r: &[S]) -> S {
     // r must have a value for each variable
     let chis = EqPolynomial::evals_from_points(r);
 
@@ -233,7 +293,7 @@ mod tests {
   }
 
   /// Evaluates the polynomial with the given evaluations and point.
-  pub fn evaluate_with<Scalar: PrimeField>(Z: &[Scalar], r: &[Scalar]) -> Scalar {
+  pub fn evaluate_with<S: PrimeField>(Z: &[S], r: &[S]) -> S {
     zip_with!(
       (
         EqPolynomial::evals_from_points(r).into_par_iter(),
@@ -325,12 +385,12 @@ mod tests {
   }
 
   /// Returns a random ML polynomial
-  fn random<R: RngCore + CryptoRng, Scalar: PrimeField>(
+  fn random<R: RngCore + CryptoRng, S: PrimeField>(
     num_vars: usize,
     mut rng: &mut R,
-  ) -> MultilinearPolynomial<Scalar> {
+  ) -> MultilinearPolynomial<S> {
     MultilinearPolynomial::new(
-      std::iter::from_fn(|| Some(Scalar::random(&mut rng)))
+      std::iter::from_fn(|| Some(S::random(&mut rng)))
         .take(1 << num_vars)
         .collect(),
     )
@@ -376,5 +436,54 @@ mod tests {
   #[test]
   fn test_bind_and_evaluate() {
     bind_and_evaluate_with::<pallas::Scalar>();
+  }
+
+  /// Explicit check that bind_poly_var_top matches manual linear interpolation on the MSB.
+  #[test]
+  fn test_bind_matches_direct_evaluation_explicit() {
+    // ℓ=3, poly[i] = i^2 + 1
+    let l = 3;
+    let size = 1 << l;
+    let vals: Vec<Scalar> = (0..size)
+      .map(|i| Scalar::from((i * i + 1) as u64))
+      .collect();
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+
+    let r = Scalar::from(7u64);
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), size / 2);
+
+    // Bound variable is the MSB: new[j] = (1-r)*vals[j] + r*vals[j+4]
+    for j in 0..(size / 2) {
+      let expected = (Scalar::ONE - r) * vals[j] + r * vals[j + size / 2];
+      assert_eq!(poly.Z[j], expected, "Mismatch at j={}", j);
+    }
+  }
+
+  /// Ensure "top" refers to the MSB (high-order variable), not the LSB.
+  #[test]
+  fn test_bind_top_is_msb_not_lsb() {
+    // ℓ=2, values encode (x0,x1) with x0 as MSB: [p(0,0), p(0,1), p(1,0), p(1,1)]
+    let vals = vec![
+      Scalar::from(1u64), // (0,0)
+      Scalar::from(2u64), // (0,1)
+      Scalar::from(3u64), // (1,0)
+      Scalar::from(4u64), // (1,1)
+    ];
+    let mut poly = MultilinearPolynomial::new(vals.clone());
+    let r = Scalar::from(5u64);
+
+    poly.bind_poly_var_top(&r);
+    assert_eq!(poly.Z.len(), 2);
+
+    // Expected with MSB binding:
+    // new[0] = (1-r)*p(0,0) + r*p(1,0) = (1-5)*1 + 5*3 = 11
+    // new[1] = (1-r)*p(0,1) + r*p(1,1) = (1-5)*2 + 5*4 = 12
+    assert_eq!(poly.Z[0], Scalar::from(11u64));
+    assert_eq!(poly.Z[1], Scalar::from(12u64));
+
+    // If LSB were bound, results would differ (6 and 8 respectively).
+    assert_ne!(poly.Z[0], Scalar::from(6u64));
+    assert_ne!(poly.Z[1], Scalar::from(8u64));
   }
 }
