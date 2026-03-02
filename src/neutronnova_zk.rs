@@ -230,6 +230,7 @@ where
 }
 
 /// Fold witnesses and instances using small-value optimization, update VC.
+#[allow(dead_code)]
 fn fold_and_update_vc_small<E, SV>(
   r_bs: &[E::Scalar],
   T_cur: E::Scalar,
@@ -330,6 +331,86 @@ where
     .collect()
 }
 
+/// Fold pairs of field element vectors using a single round's challenge with DMR.
+/// Folds m vectors → m/2 vectors: result[i] = (1-r) × vectors[2i] + r × vectors[2i+1]
+fn fold_field_vectors_round_dmr<F>(vectors: &[Vec<F>], r: F) -> Vec<Vec<F>>
+where
+  F: PrimeField + DelayedReduction<F>,
+{
+  let pairs = vectors.len() / 2;
+  let one_minus_r = F::ONE - r;
+
+  (0..pairs)
+    .into_par_iter()
+    .map(|i| {
+      let lo = &vectors[2 * i];
+      let hi = &vectors[2 * i + 1];
+      let dim = lo.len();
+
+      (0..dim)
+        .map(|j| {
+          let mut acc = <F as DelayedReduction<F>>::Accumulator::zero();
+          <F as DelayedReduction<F>>::unreduced_multiply_accumulate(&mut acc, &one_minus_r, &lo[j]);
+          <F as DelayedReduction<F>>::unreduced_multiply_accumulate(&mut acc, &r, &hi[j]);
+          <F as DelayedReduction<F>>::reduce(&acc)
+        })
+        .collect()
+    })
+    .collect()
+}
+
+/// Fold pairs of witnesses using a single round's challenge with DMR.
+/// Folds m witnesses → m/2 witnesses.
+fn fold_witnesses_round_dmr<E>(Ws: &[R1CSWitness<E>], r: E::Scalar) -> Vec<R1CSWitness<E>>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<E::Scalar>,
+  E::PCS: FoldingEngineTrait<E>,
+{
+  let pairs = Ws.len() / 2;
+  let one_minus_r = E::Scalar::ONE - r;
+
+  (0..pairs)
+    .into_par_iter()
+    .map(|i| {
+      let W_lo = &Ws[2 * i];
+      let W_hi = &Ws[2 * i + 1];
+      let dim = W_lo.W.len();
+
+      // Fold witness vectors with DMR
+      let W_folded: Vec<E::Scalar> = (0..dim)
+        .map(|j| {
+          let mut acc = <E::Scalar as DelayedReduction<E::Scalar>>::Accumulator::zero();
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc,
+            &one_minus_r,
+            &W_lo.W[j],
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut acc,
+            &r,
+            &W_hi.W[j],
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc)
+        })
+        .collect();
+
+      // Fold blinds (group operation, no DMR)
+      let r_W_folded = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+        &[W_lo.r_W.clone(), W_hi.r_W.clone()],
+        &[one_minus_r, r],
+      )
+      .expect("fold_blinds");
+
+      R1CSWitness {
+        W: W_folded,
+        r_W: r_W_folded,
+        is_small: false,
+      }
+    })
+    .collect()
+}
+
 impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
@@ -417,6 +498,104 @@ where
     (eval_at_0, quad_coeff)
   }
 
+  /// Computes the evaluations of the sum-check polynomial at 0 and the quadratic coefficient.
+  /// Uses two-level delayed modular reduction (inner + middle levels).
+  ///
+  /// This is the DMR-optimized version of `prove_helper` that reduces Montgomery reductions
+  /// from O(left × right) to O(right).
+  #[inline]
+  fn prove_helper_dmr(
+    round: usize,
+    (left, right): (usize, usize),
+    e: &[E::Scalar],
+    Az1: &[E::Scalar],
+    Bz1: &[E::Scalar],
+    Cz1: &[E::Scalar],
+    Az2: &[E::Scalar],
+    Bz2: &[E::Scalar],
+    _Cz2: &[E::Scalar],
+  ) -> (E::Scalar, E::Scalar)
+  where
+    E::Scalar: DelayedReduction<E::Scalar>,
+  {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
+    // sanity check sizes
+    assert_eq!(e.len(), left + right);
+    assert_eq!(Az1.len(), left * right);
+
+    let f = &e[left..];
+
+    // Middle level: accumulate over i (0..right)
+    let (acc_e0, acc_quad) = (0..right)
+      .into_par_iter()
+      .fold(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut middle_acc, i| {
+          // Inner level: accumulate over j (0..left) - NO reductions in this loop!
+          let mut inner_e0 = Acc::<E::Scalar>::zero();
+          let mut inner_quad = Acc::<E::Scalar>::zero();
+
+          for (j, e_j) in e[..left].iter().enumerate() {
+            let k = i * left + j;
+
+            // eval_at_0: skip in round 0 since T_cur = 0
+            if round != 0 {
+              let inner_val = Az1[k] * Bz1[k] - Cz1[k];
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut inner_e0,
+                e_j,
+                &inner_val,
+              );
+            }
+
+            // quad_coeff = (Az2 - Az1) × (Bz2 - Bz1)
+            let az_diff = Az2[k] - Az1[k];
+            let bz_diff = Bz2[k] - Bz1[k];
+            let quad_val = mul_opt(&az_diff, &bz_diff);
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut inner_quad,
+              e_j,
+              &quad_val,
+            );
+          }
+
+          // ONE reduction per i (end of inner loop)
+          let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
+          let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+
+          // Accumulate f[i] × inner_result into middle (no reduction yet)
+          let f_i = &f[i];
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut middle_acc.0,
+            f_i,
+            &inner_e0_red,
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut middle_acc.1,
+            f_i,
+            &inner_quad_red,
+          );
+
+          middle_acc
+        },
+      )
+      .reduce(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a
+        },
+      );
+
+    // ONE final reduction each
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
+    )
+  }
+
   /// Small-value NIFS sumcheck using Lagrange accumulators.
   ///
   /// Builds accumulators from small-value Az/Bz/Cz layers and runs all ℓ_b sumcheck rounds.
@@ -470,7 +649,7 @@ where
 
     // 1. Build accumulators (takes pre-computed E_eq, not tau)
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
-    let accumulators = build_accumulators_neutronnova(a_layers, b_layers, e_eq, left, right, rhos);
+    let accumulators = build_accumulators_neutronnova(a_layers, b_layers, e_eq, left, right, rhos, ell_b);
     info!(
       elapsed_ms = %acc_t.elapsed().as_millis(),
       "build_accumulators_neutronnova"
@@ -540,6 +719,7 @@ where
   /// Generic over `SV` to support different small value types.
   ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
+  #[allow(dead_code)]
   fn prove_small_value<SV>(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
@@ -822,6 +1002,12 @@ where
       let c = &poly_t.coeffs;
       vc.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
 
+      // Debug: print polynomial values for regular path
+      debug!(
+        "Regular round {}: e0={:?}, quad={:?}, T_cur={:?}, poly=[{:?}, {:?}, {:?}, {:?}]",
+        t, e0, quad_coeff, T_cur, c[0], c[1], c[2], c[3]
+      );
+
       let (_vc_span, vc_t) = start_span!("vc_commit");
       let chals =
         SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, t, transcript)?;
@@ -880,22 +1066,26 @@ where
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }
 
-  /// NIFS prove with configurable small-value optimization.
+  /// NIFS prove with configurable l0 rounds of small-value sumcheck.
   ///
-  /// When `is_small` is true, uses small-value sumcheck optimization (requires witness
-  /// values to fit in i64). When false, uses standard field arithmetic.
+  /// - `l0 = 0`: Large-value mode (standard field arithmetic, no small-value optimization)
+  /// - `l0 > 0`: Decoupled mode:
+  ///   - Phase 1: Small-value sumcheck for l0 rounds using Lagrange accumulators
+  ///   - Transition: Fold 2^ℓ_b → 2^(ℓ_b-l0) instances using DMR
+  ///   - Phase 2: SumFold with three-level DMR for remaining (ℓ_b - l0) rounds
+  ///   - Final: One big MSM to fold all commitments
   ///
   /// Returns (E_eq, Az folded, Bz folded, Cz folded, folded witness, folded instance).
-  pub fn prove(
+  pub fn prove<SmallValue>(
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
+    l0: usize,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
     vc_shape: &SplitMultiRoundR1CSShape<E>,
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
-    is_small: bool,
   ) -> Result<
     (
       Vec<E::Scalar>,  // E_eq (split evals, length left+right)
@@ -908,16 +1098,433 @@ where
     SpartanError,
   >
   where
-    E::Scalar: SmallValueField<i64>
-      + DelayedReduction<i64>
-      + DelayedReduction<i128>
+    SmallValue: WideMul
+      + Copy
+      + Default
+      + Zero
+      + num_traits::One
+      + num_traits::Bounded
+      + Add<Output = SmallValue>
+      + Sub<Output = SmallValue>
+      + Into<SmallValue::Product>
+      + Send
+      + Sync,
+    SmallValue::Product: Copy
+      + Ord
+      + num_traits::Signed
+      + std::ops::Div<Output = SmallValue::Product>
+      + std::ops::Mul<Output = SmallValue::Product>
+      + num_traits::One
+      + From<i32>,
+    E::Scalar: SmallValueField<SmallValue>
+      + DelayedReduction<SmallValue>
+      + DelayedReduction<SmallValue::Product>
       + DelayedReduction<E::Scalar>,
   {
-    if is_small {
-      Self::prove_small_value::<i64>(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
-    } else {
-      Self::prove_regular(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+    // l0 = 0 means large-value mode (no small-value optimization)
+    if l0 == 0 {
+      return Self::prove_regular(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript);
     }
+
+    // Compute ell_b early to check if we need to fall back
+    // (must be done BEFORE prepare_nifs_inputs to avoid corrupting transcript)
+    let ell_b_early = Us.len().next_power_of_two().trailing_zeros() as usize;
+
+    // Validate l0
+    if l0 > ell_b_early {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("l0 ({}) must be <= ell_b ({})", l0, ell_b_early),
+      });
+    }
+
+    // Currently, the small-value accumulator builder only supports l0 == ell_b.
+    // For l0 < ell_b, fall back to regular mode (no small-value optimization).
+    // TODO: Implement correct l0 < ell_b path (requires computing Az*Bz products before
+    // eq-weighted folding, which defeats the small-value optimization).
+    if l0 < ell_b_early {
+      info!(
+        "l0 ({}) < ell_b ({}): falling back to regular mode (no small-value optimization)",
+        l0, ell_b_early
+      );
+      return Self::prove_regular(S, Us, Ws, vc, vc_state, vc_shape, vc_ck, transcript);
+    }
+
+    use crate::r1cs::weights_from_r;
+
+    let (_nifs_total_span, _nifs_total_t) = start_span!("nifs_prove");
+
+    // === SHARED SETUP ===
+    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(&Us, &Ws, transcript)?;
+    let n_padded = Us.len();
+    debug_assert_eq!(ell_b, ell_b_early, "ell_b should match early computation");
+
+    info!(
+      "Decoupled NIFS: {} total rounds, {} small-value rounds, {} SumFold rounds",
+      ell_b,
+      l0,
+      ell_b - l0
+    );
+
+    // === TENSOR DECOMPOSITION ===
+    let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
+    let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
+
+    // === CONVERT TO SMALL VALUES ===
+    let (_convert_span, convert_t) = start_span!("convert_to_small");
+    let ws_small: Vec<Vec<SmallValue>> = Ws
+      .iter()
+      .map(|w| vec_to_small_for_extension::<E::Scalar, SmallValue, 2>(&w.W, l0))
+      .collect::<Result<Vec<_>, _>>()?;
+    let xs_small: Vec<Vec<SmallValue>> = Us
+      .iter()
+      .map(|u| vec_to_small_for_extension::<E::Scalar, SmallValue, 2>(&u.X, l0))
+      .collect::<Result<Vec<_>, _>>()?;
+    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
+
+    // === MATRIX-VECTOR MULTIPLY (small values) ===
+    // NOTE: Use .collect() to preserve index order (fold+reduce doesn't preserve order!)
+    let (_matrix_span, matrix_t) = start_span!("matrix_vector_multiply_small", instances = n_padded);
+    let triples: Vec<_> = (0..n_padded)
+      .into_par_iter()
+      .map(|i| {
+        let z_small = build_z_small(&ws_small[i], &xs_small[i]);
+        let az = S.A.multiply_vec_small::<2, SmallValue>(&z_small, l0).unwrap();
+        let bz = S.B.multiply_vec_small::<2, SmallValue>(&z_small, l0).unwrap();
+        let cz = S.C.multiply_vec_small::<2, SmallValue>(&z_small, l0).unwrap();
+        (az, bz, cz)
+      })
+      .collect();
+    let (a_small, b_small, c_small): (Vec<Vec<SmallValue>>, Vec<Vec<SmallValue>>, Vec<Vec<SmallValue>>) =
+      triples.into_iter().fold(
+        (
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+        ),
+        |(mut a, mut b, mut c), (az, bz, cz)| {
+          a.push(az);
+          b.push(bz);
+          c.push(cz);
+          (a, b, c)
+        },
+      );
+    info!(elapsed_ms = %matrix_t.elapsed().as_millis(), instances = n_padded, "matrix_vector_multiply_small");
+
+    // === PHASE 1: SMALL-VALUE SUMCHECK (l0 rounds) ===
+    let (_phase1_span, phase1_t) = start_span!("phase1_small_value", rounds = l0);
+
+    // Build accumulators for l0 rounds
+    // Pass full rhos (length ℓ_b) and l0 to enable eq-weighted folding of suffix instances
+    let accumulators = build_accumulators_neutronnova(
+      &a_small,
+      &b_small,
+      &E_eq,
+      left,
+      right,
+      &rhos,
+      l0,
+    );
+
+    // Run l0 rounds of small-value sumcheck
+    let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
+    let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO;
+    let mut acc_eq = E::Scalar::ONE;
+
+    for t in 0..l0 {
+      let rho_t = rhos[t];
+
+      // Evaluate t_i at Û_2
+      let t_all = small_value.eval_t_all_u(t);
+      let t0 = t_all.at_zero();
+      let t_inf = t_all.at_infinity();
+
+      // Compute eq factor ℓ_i(X) for challenge ρ_t
+      let li = small_value.eq_round_values(rho_t);
+
+      // Derive t(1) from sumcheck constraint
+      let t1 = derive_t1(li.at_zero(), li.at_one(), T_cur, t0)
+        .ok_or(SpartanError::InvalidSumcheckProof)?;
+
+      // Build cubic polynomial
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+      polys.push(poly.clone());
+
+      // Store polynomial coefficients for verifier circuit
+      let c = &poly.coeffs;
+      vc.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
+
+      // Debug: print polynomial values for Phase 1
+      debug!(
+        "Phase1 round {}: t0={:?}, t1={:?}, t_inf={:?}, T_cur={:?}, poly=[{:?}, {:?}, {:?}, {:?}]",
+        t, t0, t1, t_inf, T_cur, c[0], c[1], c[2], c[3]
+      );
+
+      // Get challenge from transcript
+      let chals =
+        SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, t, transcript)?;
+      let r_t = chals[0];
+      r_bs.push(r_t);
+
+      // Update running values
+      T_cur = poly.evaluate(&r_t);
+      acc_eq *= (E::Scalar::ONE - r_t) * (E::Scalar::ONE - rho_t) + r_t * rho_t;
+
+      // Advance accumulator state
+      small_value.advance(&li, r_t);
+    }
+    info!(elapsed_ms = %phase1_t.elapsed().as_millis(), rounds = l0, "phase1_small_value");
+
+    // === TRANSITION: FOLD TO FIELD ELEMENTS ===
+    let (_transition_span, transition_t) = start_span!("transition_fold");
+
+    // Compute eq weights for transition: fold 2^ℓ_b → 2^(ℓ_b - l0) instances
+    // r_bs[0..l0] are the challenges from Phase 1
+    let r_bs_rev: Vec<_> = r_bs[..l0].iter().rev().cloned().collect();
+    let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
+    let num_cons = a_small[0].len();
+    let n_intermediate = 1 << (ell_b - l0);
+
+    // Fold Az/Bz/Cz layers from small-value to field elements
+    // Each intermediate instance j gets contribution from instances j*2^l0..(j+1)*2^l0
+    // NOTE: Use .collect() to preserve index order (fold+reduce doesn't preserve order!)
+    let fold_az_bz_cz = |a_small: &[Vec<SmallValue>],
+                          b_small: &[Vec<SmallValue>],
+                          c_small: &[Vec<SmallValue>]|
+     -> (Vec<Vec<E::Scalar>>, Vec<Vec<E::Scalar>>, Vec<Vec<E::Scalar>>) {
+      let group_size = 1 << l0;
+      let triples: Vec<_> = (0..n_intermediate)
+        .into_par_iter()
+        .map(|j| {
+          let start = j * group_size;
+          let group_eq = &eq_evals[..group_size];
+          let group_a = &a_small[start..start + group_size];
+          let group_b = &b_small[start..start + group_size];
+          let group_c = &c_small[start..start + group_size];
+
+          let az_folded = small_value_eq_weighted_fold::<E, SmallValue>(group_eq, group_a, num_cons);
+          let bz_folded = small_value_eq_weighted_fold::<E, SmallValue>(group_eq, group_b, num_cons);
+          let cz_folded = small_value_eq_weighted_fold::<E, SmallValue>(group_eq, group_c, num_cons);
+
+          (az_folded, bz_folded, cz_folded)
+        })
+        .collect();
+      // Unzip into separate layer vectors (preserves order)
+      triples.into_iter().fold(
+        (
+          Vec::with_capacity(n_intermediate),
+          Vec::with_capacity(n_intermediate),
+          Vec::with_capacity(n_intermediate),
+        ),
+        |(mut a, mut b, mut c), (az, bz, cz)| {
+          a.push(az);
+          b.push(bz);
+          c.push(cz);
+          (a, b, c)
+        },
+      )
+    };
+
+    let (mut A_layers, mut B_layers, mut C_layers) = fold_az_bz_cz(&a_small, &b_small, &c_small);
+
+    // Fold witnesses from small-value to field elements
+    let w_transition = weights_from_r::<E::Scalar>(&r_bs[..l0], n_padded);
+    let group_size = 1 << l0;
+    let mut Ws_intermediate: Vec<R1CSWitness<E>> = (0..n_intermediate)
+      .into_par_iter()
+      .map(|j| {
+        let start = j * group_size;
+        let group_weights = &w_transition[start..start + group_size];
+        let group_ws_small = &ws_small[start..start + group_size];
+
+        let W_folded = fold_small_value_vectors(group_weights, group_ws_small);
+
+        // Fold blinds
+        let r_Ws: Vec<_> = Ws[start..start + group_size]
+          .iter()
+          .map(|w| w.r_W.clone())
+          .collect();
+        let r_W_folded =
+          <E::PCS as FoldingEngineTrait<E>>::fold_blinds(&r_Ws, group_weights).unwrap();
+
+        R1CSWitness {
+          W: W_folded,
+          r_W: r_W_folded,
+          is_small: false,
+        }
+      })
+      .collect();
+
+    // Fold instance X vectors from small-value to field elements
+    let mut Xs_intermediate: Vec<Vec<E::Scalar>> = (0..n_intermediate)
+      .into_par_iter()
+      .map(|j| {
+        let start = j * group_size;
+        let group_weights = &w_transition[start..start + group_size];
+        let group_xs_small = &xs_small[start..start + group_size];
+        fold_small_value_vectors(group_weights, group_xs_small)
+      })
+      .collect();
+
+    info!(elapsed_ms = %transition_t.elapsed().as_millis(), "transition_fold");
+
+    // === PHASE 2: SUMFOLD WITH THREE-LEVEL DMR (ℓ_b - l0 rounds) ===
+    let (_phase2_span, phase2_t) = start_span!("phase2_sumfold", rounds = ell_b - l0);
+    let mut m = n_intermediate;
+
+    for t in l0..ell_b {
+      let rho_t = rhos[t];
+      let pairs = m / 2;
+
+      // Three-level DMR: outer accumulation over pairs
+      type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
+      let (acc_e0, acc_quad) = A_layers
+        .par_chunks(2)
+        .zip(B_layers.par_chunks(2))
+        .zip(C_layers.par_chunks(2))
+        .enumerate()
+        .fold(
+          || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+          |mut outer_acc, (pair_idx, ((pair_a, pair_b), pair_c))| {
+            // Two-level DMR prove_helper
+            // Pass global round index t (not t-l0) so round 0 optimization only
+            // triggers when T_cur is actually 0 (i.e., the very first round overall)
+            let (e0, quad_coeff) = Self::prove_helper_dmr(
+              t,
+              (left, right),
+              &E_eq,
+              &pair_a[0],
+              &pair_b[0],
+              &pair_c[0],
+              &pair_a[1],
+              &pair_b[1],
+              &pair_c[1],
+            );
+
+            // Suffix weight for outer accumulation
+            let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+
+            // Outer-level DMR accumulation
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut outer_acc.0,
+              &w,
+              &e0,
+            );
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut outer_acc.1,
+              &w,
+              &quad_coeff,
+            );
+
+            outer_acc
+          },
+        )
+        .reduce(
+          || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+          |mut a, b| {
+            a.0 += b.0;
+            a.1 += b.1;
+            a
+          },
+        );
+
+      let e0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0);
+      let quad_coeff = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad);
+
+      // Build cubic polynomial
+      let one_minus_rho = E::Scalar::ONE - rho_t;
+      let two_rho_minus_one = rho_t - one_minus_rho;
+      let c = e0 * acc_eq;
+      let a = quad_coeff * acc_eq;
+      let a_b_c = (T_cur - c * one_minus_rho)
+        * rho_t
+          .invert()
+          .into_option()
+          .ok_or(SpartanError::ProofVerifyError {
+            reason: "rho_t is zero".to_string(),
+          })?;
+      let b = a_b_c - a - c;
+      let new_a = a * two_rho_minus_one;
+      let new_b = b * two_rho_minus_one + a * one_minus_rho;
+      let new_c = c * two_rho_minus_one + b * one_minus_rho;
+      let new_d = c * one_minus_rho;
+
+      let poly_t = UniPoly {
+        coeffs: vec![new_d, new_c, new_b, new_a],
+      };
+      polys.push(poly_t.clone());
+
+      // Store polynomial coefficients for verifier circuit
+      let c = &poly_t.coeffs;
+      vc.nifs_polys[t] = [c[0], c[1], c[2], c[3]];
+
+      // Get challenge from transcript
+      let chals =
+        SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, t, transcript)?;
+      let r_t = chals[0];
+      r_bs.push(r_t);
+
+      // Update running values
+      acc_eq *= (E::Scalar::ONE - r_t) * (E::Scalar::ONE - rho_t) + r_t * rho_t;
+      T_cur = poly_t.evaluate(&r_t);
+
+      // Fold Az/Bz/Cz layers for next round using DMR
+      A_layers = fold_field_vectors_round_dmr(&A_layers, r_t);
+      B_layers = fold_field_vectors_round_dmr(&B_layers, r_t);
+      C_layers = fold_field_vectors_round_dmr(&C_layers, r_t);
+
+      // Fold witnesses for next round using DMR
+      Ws_intermediate = fold_witnesses_round_dmr::<E>(&Ws_intermediate, r_t);
+
+      // Fold instance X vectors for next round using DMR
+      Xs_intermediate = fold_field_vectors_round_dmr(&Xs_intermediate, r_t);
+
+      m = pairs;
+    }
+    info!(elapsed_ms = %phase2_t.elapsed().as_millis(), rounds = ell_b - l0, "phase2_sumfold");
+
+    // === FINAL: ONE BIG MSM FOR COMMITMENTS ===
+    let (_final_span, final_t) = start_span!("final_commitment_fold");
+
+    // Compute final weights from all challenges
+    let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
+
+    // One big MSM for all original commitments
+    let all_comms: Vec<_> = Us.iter().map(|u| u.comm_W.clone()).collect();
+    let final_comm =
+      <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&all_comms, &final_weights)?;
+
+    // T_out = T_cur / acc_eq
+    let T_out = T_cur
+      * acc_eq
+        .invert()
+        .into_option()
+        .ok_or(SpartanError::ProofVerifyError {
+          reason: "acc_eq is zero".to_string(),
+        })?;
+    vc.t_out_step = T_out;
+    vc.eq_rho_at_rb = acc_eq;
+    SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+
+    // Final folded witness and instance
+    let folded_W = Ws_intermediate.into_iter().next().unwrap();
+    let folded_U = R1CSInstance {
+      X: Xs_intermediate.into_iter().next().unwrap(),
+      comm_W: final_comm,
+    };
+
+    let (az_folded, bz_folded, cz_folded) = (
+      A_layers.into_iter().next().unwrap(),
+      B_layers.into_iter().next().unwrap(),
+      C_layers.into_iter().next().unwrap(),
+    );
+
+    info!(elapsed_ms = %final_t.elapsed().as_millis(), "final_commitment_fold");
+    info!(elapsed_ms = %_nifs_total_t.elapsed().as_millis(), "nifs_prove");
+
+    Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }
 }
 
@@ -1079,12 +1686,15 @@ where
   }
 
   /// Prepares the pre-processed state for proving
+  /// Prepare witnesses for NeutronNova proving.
+  /// `l0 > 0` requires small-value compatible witnesses.
   pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
-    is_small: bool, // do witness elements fit in machine words?
+    l0: usize,
   ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
+    let is_small = l0 > 0;
     let (_prep_span, prep_t) = start_span!("neutronnova_prep_prove");
 
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
@@ -1131,12 +1741,17 @@ where
   }
 
   /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together
+  ///
+  /// # Arguments
+  /// * `l0` - Number of small-value sumcheck rounds:
+  ///   - `l0 = 0`: Large-value mode (standard field arithmetic)
+  ///   - `l0 > 0`: Decoupled mode with l0 small-value rounds (requires witness values to fit in i64)
   pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
     prep_snark: &NeutronNovaPrepZkSNARK<E>,
-    is_small: bool, // do witness elements fit in machine words?
+    l0: usize,
   ) -> Result<Self, SpartanError>
   where
     E::Scalar: SmallValueField<i64>
@@ -1144,6 +1759,8 @@ where
       + DelayedReduction<i128>
       + DelayedReduction<E::Scalar>,
   {
+    // l0 > 0 requires small-value compatible witnesses
+    let is_small = l0 > 0;
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
     // rerandomize prep state: we first rerandomize core, then step circuits by reusing shared commitments
@@ -1271,16 +1888,16 @@ where
 
     // Perform ZK NIFS prove and collect outputs
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
+    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove::<i64>(
       &pk.S_step,
       &step_instances_regular,
       &step_witnesses,
+      l0,
       &mut vc,
       &mut vc_state,
       &pk.vc_shape,
       &pk.vc_ck,
       &mut transcript,
-      is_small,
     )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
@@ -1914,7 +2531,7 @@ mod tests {
     vk: &NeutronNovaVerifierKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
-    is_small: bool,
+    l0: usize,
   ) where
     E::PCS: FoldingEngineTrait<E>,
     E::Scalar: SmallValueField<i64>
@@ -1923,12 +2540,12 @@ mod tests {
       + DelayedReduction<E::Scalar>,
   {
     println!(
-      "[bench_neutron_inner] name: {name}, num_circuits: {}, is_small: {is_small}",
+      "[bench_neutron_inner] name: {name}, num_circuits: {}, l0: {l0}",
       step_circuits.len()
     );
 
-    let ps = NeutronNovaZkSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
-    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, &ps, is_small);
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, l0).unwrap();
+    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, &ps, l0);
     assert!(res.is_ok());
 
     let snark = res.unwrap();
@@ -1963,7 +2580,7 @@ mod tests {
           &vk,
           &circuits,
           &circuits[0], // core circuit is the first one, for test purposes
-          false,        // SHA256 witnesses don't fit in i64
+          0,            // SHA256 witnesses don't fit in i64, use large-value mode
         );
       }
     }
@@ -2058,24 +2675,25 @@ mod tests {
       })
       .collect();
 
-    // Prep once with is_small=true (can be shared between both prove paths)
-    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+    // Prep once (can be shared between both prove paths)
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], 0).unwrap();
 
-    // Verify vanilla path works
+    // Verify large-value path works (l0=0)
     {
-      let snark_v = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, false)
-        .expect("vanilla prove should succeed");
+      let snark_v = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, 0)
+        .expect("large-value prove should succeed");
       let res_v = snark_v.verify(&vk, circuits.len());
       assert!(
         res_v.is_ok(),
-        "vanilla proof should verify: {:?}",
+        "large-value proof should verify: {:?}",
         res_v.err()
       );
     }
 
-    // Verify small-value path works
+    // Verify small-value path works (l0=ell_b for fully decoupled mode)
     {
-      let snark_s = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, true)
+      let ell_b = num_circuits.next_power_of_two().trailing_zeros() as usize;
+      let snark_s = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, ell_b)
         .expect("small-value prove should succeed");
       let res_s = snark_s.verify(&vk, circuits.len());
       assert!(
@@ -2125,13 +2743,17 @@ mod tests {
     // Create circuit instances (all identical for this test)
     let circuits: Vec<_> = (0..num_circuits).map(|_| circuit.clone()).collect();
 
-    // Prep once with is_small=true (can be shared between both prove paths)
-    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+    // Prep once (can be shared between both prove paths)
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], 0).unwrap();
+
+    // Compute ell_b for small-value l0 constraint
+    let ell_b = num_circuits.next_power_of_two().trailing_zeros() as usize;
+    let small_l0 = std::cmp::min(3, ell_b);
 
     // Helper to test prove and verify
     #[allow(clippy::expect_fun_call)]
-    let assert_prove_and_verify = |is_small: bool, path_name: &str| {
-      let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, is_small).expect(
+    let assert_prove_and_verify = |l0: usize, path_name: &str| {
+      let snark = NeutronNovaZkSNARK::prove(&pk, &circuits, &circuits[0], &ps, l0).expect(
         &format!("{path_name} prove should succeed for num_circuits={num_circuits}"),
       );
       let res = snark.verify(&vk, circuits.len());
@@ -2155,8 +2777,8 @@ mod tests {
       }
     };
 
-    assert_prove_and_verify(false, "regular");
-    assert_prove_and_verify(true, "small-value");
+    assert_prove_and_verify(0, "large-value");
+    assert_prove_and_verify(small_l0, "small-value");
   }
 
   /// Test that NIFS sumcheck polynomial generation produces identical results
@@ -2178,7 +2800,7 @@ mod tests {
     let circuits: Vec<_> = (0..num_instances).map(|_| circuit.clone()).collect();
 
     // 2. Generate witnesses using prep_prove
-    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], true).unwrap();
+    let ps = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &circuits[0], 0).unwrap();
 
     // 3. Synthesize full instances and witnesses
     let mut instances_witnesses: Vec<(R1CSInstance<E>, R1CSWitness<E>)> = Vec::new();
@@ -2362,7 +2984,7 @@ mod tests {
 
     // Run SMALL-VALUE path sumcheck
     let accumulators =
-      build_accumulators_neutronnova(&a_small, &b_small, &E_eq, left, right, &rhos);
+      build_accumulators_neutronnova(&a_small, &b_small, &E_eq, left, right, &rhos, ell_b);
     let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
 
     let mut polys_small: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);

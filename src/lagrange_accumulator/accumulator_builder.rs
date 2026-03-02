@@ -114,6 +114,8 @@ where
   // The ∞ coordinate corresponds to the "leading coefficient" of the Lagrange polynomial,
   // which is non-zero only for non-constant polynomials. Non-binary evaluations (those
   // with ∞) are where we accumulate the sumcheck.
+  // In the extension layout: digit 0 → ∞, digit 1 → 0, digit 2 → 1.
+  // We select betas where at least one digit equals 0 (∞).
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
@@ -282,8 +284,12 @@ where
 /// Unlike Spartan (which gathers from a single polynomial), NeutronNova gathers
 /// across instances: `a_layers[p][x_R * left + x_L]` for each instance p.
 ///
-/// All ℓ_b rounds are Lagrange (l0 = ℓ_b). Uses fused three-way DMR in the inner
-/// loop and non-Montgomery scatter with precomputed `e_rb_cache`.
+/// When `l0 = ℓ_b` (full small-value mode): Uses fused three-way DMR in the inner
+/// loop with small-value extension.
+///
+/// When `l0 < ℓ_b` (partial mode): Folds the `2^{ℓ_b-l0}` suffix instances with
+/// eq weights from `rhos[l0..ℓ_b]`, then extends the resulting `2^l0` field-valued
+/// "super-instances" to the Lagrange domain.
 ///
 /// # Arguments
 /// * `a_layers` - Az evaluations per instance, each of length `left * right`
@@ -294,7 +300,8 @@ where
 /// * `right` - Size of right tensor component (from `compute_tensor_decomp`)
 /// * `rhos` - Instance-folding challenges (ρ₁, ..., ρ_{ℓ_b}) for the NIFS folding sumcheck.
 ///   These are the verifier challenges for folding n = 2^{ℓ_b} instances, not the main
-///   constraint-satisfiability sumcheck challenges.
+///   constraint-satisfiability sumcheck challenges. Must have length ℓ_b.
+/// * `l0` - Number of small-value rounds to build accumulators for. Must be ≤ ℓ_b.
 ///
 /// # Scatter optimization
 ///
@@ -310,6 +317,7 @@ pub fn build_accumulators_neutronnova<F, SmallValue>(
   left: usize,
   right: usize,
   rhos: &[F],
+  l0: usize,
 ) -> LagrangeAccumulators<F, 2>
 where
   F: PrimeField
@@ -329,10 +337,19 @@ where
     + Sync,
 {
   let n = a_layers.len();
-  let l0 = n.trailing_zeros() as usize; // ℓ_b = log2(n)
-  debug_assert_eq!(n, 1 << l0, "number of instances must be power of 2");
+  let ell_b = n.trailing_zeros() as usize; // ℓ_b = log2(n)
+
+  // Currently, we only support l0 == ℓ_b (full small-value mode).
+  // The l0 < ℓ_b case requires computing Az*Bz products before folding with eq weights,
+  // which would require field arithmetic and defeat the small-value optimization.
+  // For decoupled mode (l0 < ℓ_b), use regular sumfold for all rounds instead.
+  assert_eq!(
+    l0, ell_b,
+    "build_accumulators_neutronnova currently requires l0 == ℓ_b. Got l0={}, ℓ_b={}",
+    l0, ell_b
+  );
+  debug_assert_eq!(rhos.len(), ell_b, "rhos must have length ell_b");
   debug_assert_eq!(b_layers.len(), n);
-  debug_assert_eq!(rhos.len(), l0);
   debug_assert_eq!(
     e_eq.len(),
     left + right,
@@ -341,7 +358,7 @@ where
   debug_assert_eq!(a_layers[0].len(), left * right);
 
   let base: usize = 3; // D + 1 = 2 + 1 = 3
-  let prefix_size = n; // 2^l_b
+  let prefix_size = n; // 2^ℓ_b (= 2^l0 when l0 == ℓ_b)
 
   // Suffix eq weights over instance-folding challenges ρ.
   let e_b = compute_suffix_eq_pyramid(rhos, l0);
@@ -381,11 +398,11 @@ where
   // Precompute num_y per round for transposed access
   let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
 
-  // Build bit-reversal permutation
+  // Build bit-reversal permutation for l0 bits (for Lagrange extension).
   let bit_rev: Vec<usize> = (0..prefix_size)
     .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
     .collect();
-  let ext_size = base.pow(l0 as u32); // 3^l_b
+  let ext_size = base.pow(l0 as u32); // 3^l0
 
   let BetaPrefixCache {
     cache: beta_prefix_cache,
@@ -398,6 +415,8 @@ where
   // The ∞ coordinate corresponds to the "leading coefficient" of the Lagrange polynomial,
   // which is non-zero only for non-constant polynomials. Non-binary evaluations (those
   // with ∞) are where we accumulate the sumcheck.
+  // In the extension layout: digit 0 → ∞, digit 1 → 0, digit 2 → 1.
+  // We select betas where at least one digit equals 0 (∞).
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)).is_multiple_of(base)))
     .collect();
@@ -416,21 +435,16 @@ where
       |mut state: State<F, SmallValue>, x_outer| {
         state.reset_partial_sums();
 
-        // Precompute slice references for this outer iteration (outside inner loop).
-        // Eliminates bit_rev lookup and bounds checks from hot loop.
-        // When not swapped (x_r outer): slices are contiguous in memory.
-        // When swapped (x_l outer): slices are strided but we still eliminate bit_rev lookups.
+        // Precompute slice references for this outer iteration.
+        // Since l0 == ell_b, prefix_size == n, so we access all instances directly.
         let az_slices: Vec<&[SmallValue]> = if swap_loops {
-          // x_outer = x_l, inner will iterate x_r; base varies with x_r
-          // Can't precompute contiguous slices, but precompute layer pointers
           (0..prefix_size)
             .map(|p| &a_layers[bit_rev[p]][..])
             .collect()
         } else {
-          // x_outer = x_r, inner will iterate x_l; contiguous slices
-          let base = x_outer * left;
+          let base_offset = x_outer * left;
           (0..prefix_size)
-            .map(|p| &a_layers[bit_rev[p]][base..base + left])
+            .map(|p| &a_layers[bit_rev[p]][base_offset..base_offset + left])
             .collect()
         };
         let bz_slices: Vec<&[SmallValue]> = if swap_loops {
@@ -438,33 +452,27 @@ where
             .map(|p| &b_layers[bit_rev[p]][..])
             .collect()
         } else {
-          let base = x_outer * left;
+          let base_offset = x_outer * left;
           (0..prefix_size)
-            .map(|p| &b_layers[bit_rev[p]][base..base + left])
+            .map(|p| &b_layers[bit_rev[p]][base_offset..base_offset + left])
             .collect()
         };
 
         for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
-          // Gather: collect Az_p(x_L, x_R) for each instance p (stays in small value type)
-          // Index computation depends on swap_loops:
-          // - not swapped: x_outer=x_r, x_inner=x_l, idx = x_r * left + x_l
-          // - swapped: x_outer=x_l, x_inner=x_r, idx = x_r * left + x_l = x_inner * left + x_outer
+          // Gather: collect Az_p(x_L, x_R) for each instance p (small value type)
           #[allow(clippy::needless_range_loop)]
           for p in 0..prefix_size {
             if swap_loops {
-              // x_inner = x_r, x_outer = x_l
               let idx = x_inner * left + x_outer;
               state.az_prefix_boolean_evals[p] = az_slices[p][idx];
               state.bz_prefix_boolean_evals[p] = bz_slices[p][idx];
             } else {
-              // x_inner = x_l, precomputed slices already offset by x_outer * left
               state.az_prefix_boolean_evals[p] = az_slices[p][x_inner];
               state.bz_prefix_boolean_evals[p] = bz_slices[p][x_inner];
             }
           }
 
-          // Extend to U₂^{ℓ_b} — integer add/sub only, no field arithmetic
-          // Values stay in small value type throughout (safe due to bound check in vec_to_small_for_extension)
+          // Extend to U₂^{l0} — integer add/sub only
           let az_size = extend_to_lagrange_domain::<SmallValue, 2>(
             &state.az_prefix_boolean_evals,
             &mut state.az_extended_evals,
@@ -479,8 +487,7 @@ where
           );
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
-          // Fused DMR: acc += e_inner × az_ext × bz_ext with zero field reductions.
-          // wide_mul computes small × small → product, then unreduced_multiply_accumulate adds field × product
+          // Fused DMR: acc += e_inner × az_ext × bz_ext
           for &beta_idx in &betas_with_infty {
             let prod = SmallValue::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
             F::unreduced_multiply_accumulate(
@@ -491,7 +498,7 @@ where
           }
         }
 
-        // Reduce partial sums to field elements and filter non-zero
+        // Reduce partial sums to field elements
         for &beta_idx in &betas_with_infty {
           let unreduced = &state.partial_sums[beta_idx];
           if !unreduced.is_zero() {
@@ -500,8 +507,7 @@ where
           }
         }
 
-        // Scatter: multiply-accumulate into wide accumulator (Montgomery REDC at end)
-        // Uses transposed cache layout: e_cache[round][x_outer * num_y + y] for contiguous y access
+        // Scatter: multiply-accumulate into wide accumulator
         for &(beta_idx, val) in &state.beta_values {
           for pref in &beta_prefix_cache[beta_idx] {
             let num_y = num_y_per_round[pref.round_0];

@@ -313,7 +313,6 @@ impl<E: Engine> R1CSShape<E> {
   }
 
   /// Checks if the R1CS instance is satisfiable given a witness and its shape
-  #[allow(dead_code)]
   pub fn is_sat(
     &self,
     ck: &CommitmentKey<E>,

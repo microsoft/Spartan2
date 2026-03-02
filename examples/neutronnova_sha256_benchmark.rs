@@ -52,6 +52,8 @@ enum BenchMode {
   Nifs,
   /// Benchmark full NeutronNovaZkSNARK::prove
   ZkProve,
+  /// Benchmark decoupled NIFS with configurable l0
+  Decoupled,
 }
 
 #[derive(Parser)]
@@ -65,6 +67,9 @@ struct Args {
   field: FieldChoice,
   #[arg(long, value_enum, default_value = "nifs")]
   mode: BenchMode,
+  /// Number of small-value sumcheck rounds (for decoupled mode)
+  #[arg(long)]
+  l0: Option<usize>,
 }
 
 /// Generate step circuits with distinct inputs
@@ -132,11 +137,13 @@ where
 }
 
 /// Run NeutronNovaNIFS::prove with fresh vc/vc_state/transcript.
-fn nifs_prove_single<E: Engine>(
+/// - `l0 = 0`: large-value mode (no small-value optimization)
+/// - `l0 > 0`: decoupled mode with l0 small-value rounds
+fn nifs_prove<E: Engine>(
   pk: &NeutronNovaProverKey<E>,
   instances: &[R1CSInstance<E>],
   witnesses: &[R1CSWitness<E>],
-  is_small: bool,
+  l0: usize,
 ) where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<i64>
@@ -157,16 +164,16 @@ fn nifs_prove_single<E: Engine>(
   let mut transcript = E::TE::new(b"neutronnova_prove");
   transcript.absorb(b"vk", &pk.vk_digest);
 
-  NeutronNovaNIFS::<E>::prove(
+  NeutronNovaNIFS::<E>::prove::<i64>(
     &pk.S_step,
     instances,
     witnesses,
+    l0,
     &mut vc,
     &mut vc_state,
     &pk.vc_shape,
     &pk.vc_ck,
     &mut transcript,
-    is_small,
   )
   .expect("NeutronNovaNIFS::prove failed");
 }
@@ -178,7 +185,7 @@ fn verify_snark<E: Engine>(
   circuits: &[SmallSha256ChainCircuit<E::Scalar>],
   core_circuit: &SmallSha256ChainCircuit<E::Scalar>,
   num_instances: usize,
-  is_small: bool,
+  l0: usize,
 ) where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<i64>
@@ -186,15 +193,11 @@ fn verify_snark<E: Engine>(
     + DelayedReduction<i128>
     + DelayedReduction<E::Scalar>,
 {
-  let mode = if is_small {
-    "small-value"
-  } else {
-    "large-value"
-  };
+  let mode = if l0 > 0 { "small-value" } else { "large-value" };
   let prep =
-    NeutronNovaZkSNARK::<E>::prep_prove(pk, circuits, core_circuit, is_small).expect("prep_prove");
+    NeutronNovaZkSNARK::<E>::prep_prove(pk, circuits, core_circuit, l0).expect("prep_prove");
   let snark =
-    NeutronNovaZkSNARK::<E>::prove(pk, circuits, core_circuit, &prep, is_small).expect("prove");
+    NeutronNovaZkSNARK::<E>::prove(pk, circuits, core_circuit, &prep, l0).expect("prove");
   let res = snark.verify(vk, num_instances);
   assert!(res.is_ok(), "Verification failed: {:?}", res.err());
   eprintln!("  verified: yes ({})", mode);
@@ -232,11 +235,13 @@ fn benchmark_nifs_prove<E: Engine>(
   let setup_ms = t0.elapsed().as_millis();
   eprintln!("Setup done in {} ms", setup_ms);
 
+  let ell_b = num_instances.next_power_of_two().trailing_zeros() as usize;
   let mut small_timings = HashMap::new();
   let mut large_timings = HashMap::new();
 
-  for is_small in [true, false] {
-    let mode = if is_small { "small" } else { "large" };
+  // l0 = ell_b for small (all rounds small-value), l0 = 0 for large
+  for l0 in [ell_b, 0] {
+    let mode = if l0 > 0 { "small" } else { "large" };
     let _mode_span = info_span!("mode", mode).entered();
 
     clear_timings(timing_data);
@@ -244,14 +249,15 @@ fn benchmark_nifs_prove<E: Engine>(
     let t_total = Instant::now();
 
     // Witness generation: prep_prove
-    let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, is_small)
+    let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, l0)
       .expect("prep_prove");
 
     // Witness generation: synthesize instances
+    let is_small = l0 > 0;
     let (instances, witnesses) = generate_instances_and_witnesses(&pk, &prep, &circuits, is_small);
 
     // NIFS prove
-    nifs_prove_single(&pk, &instances, &witnesses, is_small);
+    nifs_prove(&pk, &instances, &witnesses, l0);
 
     let total_ms = t_total.elapsed().as_millis();
     info!(elapsed_ms = total_ms as u64, "end_to_end_total");
@@ -259,7 +265,7 @@ fn benchmark_nifs_prove<E: Engine>(
     let mut timings = snapshot_timings(timing_data, NEUTRONNOVA_PHASES);
     // Normalize parallel spans to approximate wall-clock time
     normalize_parallel_timings(&mut timings, PARALLEL_SPANS, parallel_divisor);
-    if is_small {
+    if l0 > 0 {
       small_timings = timings;
     } else {
       large_timings = timings;
@@ -267,8 +273,8 @@ fn benchmark_nifs_prove<E: Engine>(
   }
 
   // Verify using the full ZkSNARK pipeline
-  verify_snark(&pk, &vk, &circuits, &core_circuit, num_instances, true);
-  verify_snark(&pk, &vk, &circuits, &core_circuit, num_instances, false);
+  verify_snark(&pk, &vk, &circuits, &core_circuit, num_instances, ell_b);
+  verify_snark(&pk, &vk, &circuits, &core_circuit, num_instances, 0);
 
   let header = format!(
     "===== NeutronNova NIFS: instances={}, chain_length={}, constraints={}, cores={} =====",
@@ -280,6 +286,7 @@ fn benchmark_nifs_prove<E: Engine>(
 fn benchmark_zk_prove<E: Engine>(
   num_instances: usize,
   chain_length: usize,
+  l0: usize,
   timing_data: &TimingData,
 ) where
   E::PCS: FoldingEngineTrait<E>,
@@ -289,15 +296,15 @@ fn benchmark_zk_prove<E: Engine>(
     + DelayedReduction<E::Scalar>,
 {
   let num_cores = rayon::current_num_threads();
-  // +1 for core circuit which also runs precommitted_witness
   let parallel_divisor = (num_instances + 1).min(num_cores);
 
   let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
   let core_circuit = circuits[0].clone();
 
+  let ell_b = num_instances.next_power_of_two().trailing_zeros() as usize;
   eprintln!(
-    "Setting up NeutronNova for {} instances, chain_length={}, cores={}...",
-    num_instances, chain_length, num_cores
+    "Setting up NeutronNova for {} instances (ℓ_b={}), chain_length={}, l0={}, cores={}...",
+    num_instances, ell_b, chain_length, l0, num_cores
   );
   let t0 = Instant::now();
   let (pk, vk) =
@@ -305,51 +312,128 @@ fn benchmark_zk_prove<E: Engine>(
   let setup_ms = t0.elapsed().as_millis();
   eprintln!("Setup done in {} ms", setup_ms);
 
-  let mut small_timings = HashMap::new();
-  let mut large_timings = HashMap::new();
+  clear_timings(timing_data);
 
-  for is_small in [true, false] {
-    let mode = if is_small { "small" } else { "large" };
-    let _mode_span = info_span!("mode", mode).entered();
+  let mode = if l0 > 0 { "small-value" } else { "large-value" };
+  let _mode_span = info_span!("mode", mode).entered();
 
-    clear_timings(timing_data);
+  let t_total = Instant::now();
 
-    let t_total = Instant::now();
+  // Full ZK prove
+  let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, l0)
+    .expect("prep_prove");
+  let snark = NeutronNovaZkSNARK::<E>::prove(&pk, &circuits, &core_circuit, &prep, l0)
+    .expect("prove");
 
-    // Full ZK prove
-    let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, is_small)
-      .expect("prep_prove");
-    let snark = NeutronNovaZkSNARK::<E>::prove(&pk, &circuits, &core_circuit, &prep, is_small)
-      .expect("prove");
+  let total_ms = t_total.elapsed().as_millis();
+  info!(elapsed_ms = total_ms as u64, "end_to_end_total");
 
-    let total_ms = t_total.elapsed().as_millis();
-    info!(elapsed_ms = total_ms as u64, "end_to_end_total");
+  let timings = snapshot_timings(timing_data, NEUTRONNOVA_ZK_PROVE_PHASES);
 
-    let mut timings = snapshot_timings(timing_data, NEUTRONNOVA_ZK_PROVE_PHASES);
-    // Normalize parallel spans to approximate wall-clock time
-    normalize_parallel_timings(&mut timings, PARALLEL_SPANS, parallel_divisor);
-    if is_small {
-      small_timings = timings;
-    } else {
-      large_timings = timings;
-    }
+  // Verify
+  let res = snark.verify(&vk, num_instances);
+  assert!(res.is_ok(), "Verification failed: {:?}", res.err());
+  eprintln!("  verified: yes ({})", mode);
 
-    // Verify
-    let res = snark.verify(&vk, num_instances);
-    assert!(res.is_ok(), "Verification failed: {:?}", res.err());
-    eprintln!("  verified: yes ({})", mode);
+  // Print timing table
+  let header = format!(
+    "===== NeutronNova ZkProve: instances={}, l0={}, chain_length={}, constraints={}, cores={} =====",
+    num_instances, l0, chain_length, pk.S_step.num_cons, num_cores,
+  );
+  eprintln!("\n{}", header);
+  eprintln!("{:-<80}", "");
+  eprintln!("{:<40} {:>15}", "Phase", "Time (ms)");
+  eprintln!("{:-<80}", "");
+  for (_span_name, display_name) in NEUTRONNOVA_ZK_PROVE_PHASES {
+    let time = timings.get(*display_name).copied().unwrap_or(0);
+    eprintln!("{:<40} {:>15}", display_name, time);
   }
+  eprintln!("{:-<80}", "");
+  eprintln!("{:<40} {:>15}", "TOTAL", total_ms);
+}
+
+/// Decoupled NIFS phases for timing
+const DECOUPLED_PHASES: &[(&str, &str)] = &[
+  ("convert_to_small", "convert_small"),
+  ("matrix_vector_multiply_small", "mat_vec_small"),
+  ("phase1_small_value", "phase1_small"),
+  ("transition_fold", "transition"),
+  ("fold_witnesses", "fold_W"),
+  ("fold_instances", "fold_U"),
+  ("phase2_sumfold", "phase2_sumfold"),
+  ("final_commitment_fold", "final_msm"),
+  ("nifs_prove", "total_nifs"),
+];
+
+fn benchmark_decoupled<E: Engine>(
+  num_instances: usize,
+  chain_length: usize,
+  l0: usize,
+  timing_data: &TimingData,
+) where
+  E::PCS: FoldingEngineTrait<E>,
+  E::Scalar: SmallValueField<i64>
+    + DelayedReduction<i64>
+    + DelayedReduction<i128>
+    + DelayedReduction<E::Scalar>,
+{
+  let num_cores = rayon::current_num_threads();
+  let parallel_divisor = (num_instances + 1).min(num_cores);
+
+  let circuits = make_circuits::<E::Scalar>(num_instances, chain_length);
+  let core_circuit = circuits[0].clone();
+
+  let ell_b = num_instances.next_power_of_two().trailing_zeros() as usize;
+  eprintln!(
+    "Setting up NeutronNova for {} instances (ℓ_b={}), chain_length={}, l0={}, cores={}...",
+    num_instances, ell_b, chain_length, l0, num_cores
+  );
+
+  let t0 = Instant::now();
+  let (pk, _vk) =
+    NeutronNovaZkSNARK::<E>::setup(&circuits[0], &core_circuit, num_instances).expect("setup");
+  let setup_ms = t0.elapsed().as_millis();
+  eprintln!("Setup done in {} ms", setup_ms);
+
+  clear_timings(timing_data);
+
+  let _mode_span = info_span!("mode", mode = "decoupled").entered();
+
+  let t_total = Instant::now();
+
+  // Witness generation: prep_prove (l0 > 0 requires small-value compatible witnesses)
+  let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core_circuit, l0)
+    .expect("prep_prove");
+
+  // Witness generation: synthesize instances
+  let is_small = l0 > 0;
+  let (instances, witnesses) = generate_instances_and_witnesses(&pk, &prep, &circuits, is_small);
+
+  // NIFS prove with l0
+  nifs_prove(&pk, &instances, &witnesses, l0);
+
+  let total_ms = t_total.elapsed().as_millis();
+  info!(elapsed_ms = total_ms as u64, "end_to_end_total");
+
+  let mut timings = snapshot_timings(timing_data, DECOUPLED_PHASES);
+  normalize_parallel_timings(&mut timings, PARALLEL_SPANS, parallel_divisor);
 
   let header = format!(
-    "===== NeutronNova ZkProve: instances={}, chain_length={}, constraints={}, cores={} =====",
-    num_instances, chain_length, pk.S_step.num_cons, num_cores,
+    "===== NeutronNova Decoupled: instances={}, l0={}, chain_length={}, constraints={}, cores={} =====",
+    num_instances, l0, chain_length, pk.S_step.num_cons, num_cores,
   );
-  print_table(
-    &header,
-    NEUTRONNOVA_ZK_PROVE_PHASES,
-    &small_timings,
-    &large_timings,
-  );
+
+  // Print single-column table for decoupled mode
+  eprintln!("\n{}", header);
+  eprintln!("{:-<80}", "");
+  eprintln!("{:<40} {:>15}", "Phase", "Time (ms)");
+  eprintln!("{:-<80}", "");
+  for (_span_name, display_name) in DECOUPLED_PHASES {
+    let time = timings.get(*display_name).copied().unwrap_or(0);
+    eprintln!("{:<40} {:>15}", display_name, time);
+  }
+  eprintln!("{:-<80}", "");
+  eprintln!("{:<40} {:>15}", "TOTAL", total_ms);
 }
 
 fn main() {
@@ -373,19 +457,34 @@ fn main() {
       benchmark_nifs_prove::<Bn254Engine>(args.instances, args.chain_length, &timing_data)
     }
     (FieldChoice::Bn254Fr, BenchMode::ZkProve) => {
-      benchmark_zk_prove::<Bn254Engine>(args.instances, args.chain_length, &timing_data)
+      let l0 = args.l0.expect("--l0 is required for zk-prove mode");
+      benchmark_zk_prove::<Bn254Engine>(args.instances, args.chain_length, l0, &timing_data)
+    }
+    (FieldChoice::Bn254Fr, BenchMode::Decoupled) => {
+      let l0 = args.l0.expect("--l0 is required for decoupled mode");
+      benchmark_decoupled::<Bn254Engine>(args.instances, args.chain_length, l0, &timing_data)
     }
     (FieldChoice::PallasFq, BenchMode::Nifs) => {
       benchmark_nifs_prove::<PallasHyraxEngine>(args.instances, args.chain_length, &timing_data)
     }
     (FieldChoice::PallasFq, BenchMode::ZkProve) => {
-      benchmark_zk_prove::<PallasHyraxEngine>(args.instances, args.chain_length, &timing_data)
+      let l0 = args.l0.expect("--l0 is required for zk-prove mode");
+      benchmark_zk_prove::<PallasHyraxEngine>(args.instances, args.chain_length, l0, &timing_data)
+    }
+    (FieldChoice::PallasFq, BenchMode::Decoupled) => {
+      let l0 = args.l0.expect("--l0 is required for decoupled mode");
+      benchmark_decoupled::<PallasHyraxEngine>(args.instances, args.chain_length, l0, &timing_data)
     }
     (FieldChoice::VestaFp, BenchMode::Nifs) => {
       benchmark_nifs_prove::<VestaHyraxEngine>(args.instances, args.chain_length, &timing_data)
     }
     (FieldChoice::VestaFp, BenchMode::ZkProve) => {
-      benchmark_zk_prove::<VestaHyraxEngine>(args.instances, args.chain_length, &timing_data)
+      let l0 = args.l0.expect("--l0 is required for zk-prove mode");
+      benchmark_zk_prove::<VestaHyraxEngine>(args.instances, args.chain_length, l0, &timing_data)
+    }
+    (FieldChoice::VestaFp, BenchMode::Decoupled) => {
+      let l0 = args.l0.expect("--l0 is required for decoupled mode");
+      benchmark_decoupled::<VestaHyraxEngine>(args.instances, args.chain_length, l0, &timing_data)
     }
   }
 }
