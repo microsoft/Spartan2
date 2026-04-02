@@ -19,6 +19,7 @@ use crate::{
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
+  big_num::DelayedReduction,
   digest::{DigestComputer, SimpleDigestible},
   errors::SpartanError,
   math::Math,
@@ -45,6 +46,7 @@ use crate::{
   zk::NeutronNovaVerifierCircuit,
 };
 use ff::Field;
+use num_traits::Zero;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -99,6 +101,8 @@ where
   E::PCS: FoldingEngineTrait<E>,
 {
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
+  /// Uses two-level delayed modular reduction (inner + middle levels).
+  /// Note: Outer level (over pairs) uses regular field arithmetic since there are few pairs.
   #[inline]
   fn prove_helper(
     round: usize,
@@ -111,6 +115,8 @@ where
     Bz2: &[E::Scalar],
     Cz2: &[E::Scalar],
   ) -> (E::Scalar, E::Scalar) {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
     // sanity check sizes
     assert_eq!(e.len(), left + right);
     assert_eq!(Az1.len(), left * right);
@@ -120,65 +126,76 @@ where
     assert_eq!(Bz2.len(), left * right);
     assert_eq!(Cz2.len(), left * right);
 
-    let comb_func = |c1: &E::Scalar, c2: &E::Scalar, c3: &E::Scalar, c4: &E::Scalar| -> E::Scalar {
-      *c1 * (*c2 * *c3 - *c4)
-    };
+    let f = &e[left..];
 
-    let (eval_at_0, quad_coeff) = (0..right)
+    // Middle level: accumulate over i (0..right)
+    let (acc_e0, acc_quad) = (0..right)
       .into_par_iter()
-      .map(|i| {
-        let (mut i_eval_at_0, mut i_quad_coeff) = (0..left)
-          .into_par_iter()
-          .map(|j| {
-            // Turn the two dimensional (i, j) into a single dimension index
+      .fold(
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut middle_acc, i| {
+          // Inner level: accumulate over j (0..left)
+          let mut inner_e0 = Acc::<E::Scalar>::zero();
+          let mut inner_quad = Acc::<E::Scalar>::zero();
+
+          for (j, e_j) in e[..left].iter().enumerate() {
             let k = i * left + j;
-            let poly_e_bound_point = e[j];
 
-            // eval 0: bound_func is A(low)
-            // Optimization: In round 0, the target value T_cur = 0. The sumcheck polynomial
-            // constructed from eval_point_0 and quad_coeff must satisfy T_cur when evaluated
-            // at rho_t. Since T_cur = 0 in the first round, we can skip computing eval_point_0
-            // (which would be e[j] * (Az1[k] * Bz1[k] - Cz1[k])) and use ZERO directly without
-            // affecting the correctness of the folding protocol.
-            let eval_point_0 = if round == 0 {
-              E::Scalar::ZERO
-            } else {
-              comb_func(&poly_e_bound_point, &Az1[k], &Bz1[k], &Cz1[k])
-            };
+            // eval_at_0
+            // Optimization: In round 0, the target value T_cur = 0. We can skip computing
+            // eval_point_0 and use ZERO directly without affecting correctness.
+            if round != 0 {
+              let inner_val = Az1[k] * Bz1[k] - Cz1[k];
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut inner_e0,
+                e_j,
+                &inner_val,
+              );
+            }
 
-            // quad coeff
-            let poly_Az_bound_point = Az2[k] - Az1[k];
-            let poly_Bz_bound_point = Bz2[k] - Bz1[k];
-            let quad_coeff = mul_opt(
-              &mul_opt(&poly_Az_bound_point, &poly_Bz_bound_point),
-              &poly_e_bound_point,
+            // quad_coeff
+            let az_diff = Az2[k] - Az1[k];
+            let bz_diff = Bz2[k] - Bz1[k];
+            let quad_val = az_diff * bz_diff;
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut inner_quad,
+              e_j,
+              &quad_val,
             );
+          }
 
-            (eval_point_0, quad_coeff)
-          })
-          .reduce(
-            || (E::Scalar::ZERO, E::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1),
+          // Reduce inner sums, multiply by f[i], accumulate into middle
+          let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
+          let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+
+          let f_i = &f[i];
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut middle_acc.0,
+            f_i,
+            &inner_e0_red,
+          );
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut middle_acc.1,
+            f_i,
+            &inner_quad_red,
           );
 
-        let f = &e[left..];
-
-        let poly_f_bound_point = f[i];
-
-        // eval 0: bound_func is A(low)
-        i_eval_at_0 *= poly_f_bound_point;
-
-        // quad coeff
-        i_quad_coeff *= poly_f_bound_point;
-
-        (i_eval_at_0, i_quad_coeff)
-      })
+          middle_acc
+        },
+      )
       .reduce(
-        || (E::Scalar::ZERO, E::Scalar::ZERO),
-        |a, b| (a.0 + b.0, a.1 + b.1),
+        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        |mut a, b| {
+          a.0 += b.0;
+          a.1 += b.1;
+          a
+        },
       );
 
-    (eval_at_0, quad_coeff)
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
+    )
   }
 
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
@@ -274,6 +291,7 @@ where
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
     let (_nifs_rounds_span, nifs_rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
+
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // the current target value, starts at 0
