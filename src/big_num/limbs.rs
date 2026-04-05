@@ -441,23 +441,34 @@ pub(super) fn mul_3x4_lo4(a: &[u64; 3], b: &[u64; 4]) -> [u64; 4] {
 /// Multiply 3-limb by 4-limb, returning low 5 limbs.
 ///
 /// Full 3×4 multiply keeping only the low 5 limbs of the 7-limb result.
+/// Structured with per-row loops matching `mul_3x4_lo4` for clarity.
 #[inline(always)]
 pub(super) fn mul_3x4_lo5(a: &[u64; 3], b: &[u64; 4]) -> [u64; 5] {
   let mut result = [0u64; 5];
 
-  for i in 0..3 {
-    let mut carry = 0u128;
-    for j in 0..4 {
-      if i + j < 5 {
-        let prod = (a[i] as u128) * (b[j] as u128) + (result[i + j] as u128) + carry;
-        result[i + j] = prod as u64;
-        carry = prod >> 64;
-      }
-    }
-    // Handle the final carry for position i+4 if it's within bounds
-    if i + 4 < 5 {
-      result[i + 4] = carry as u64;
-    }
+  // a[0] * b[0..4] → contributes to limbs 0-4
+  let mut carry = 0u128;
+  for j in 0..4 {
+    let prod = (a[0] as u128) * (b[j] as u128) + carry;
+    result[j] = prod as u64;
+    carry = prod >> 64;
+  }
+  result[4] = carry as u64;
+
+  // a[1] * b[0..4] → contributes to limbs 1-4 (carry into 5 is discarded)
+  carry = 0;
+  for j in 0..4 {
+    let prod = (a[1] as u128) * (b[j] as u128) + (result[1 + j] as u128) + carry;
+    result[1 + j] = prod as u64;
+    carry = prod >> 64;
+  }
+
+  // a[2] * b[0..3] → contributes to limbs 2-4 (carry into 5 is discarded)
+  carry = 0;
+  for j in 0..3 {
+    let prod = (a[2] as u128) * (b[j] as u128) + (result[2 + j] as u128) + carry;
+    result[2 + j] = prod as u64;
+    carry = prod >> 64;
   }
 
   result

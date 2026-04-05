@@ -415,10 +415,30 @@ pub const fn compute_barrett_mu(p: [u64; 4]) -> [u64; 5] {
 
   let shift_bits = divisor_clz - dividend_clz;
 
-  // Shift divisor left to align with dividend
+  // Shift divisor left to align with dividend.
+  // Batch by whole limbs (64 bits each), then remaining bits.
   let mut shifted_divisor = divisor;
+  let whole_limbs = (shift_bits / 64) as usize;
+  let rem_bits = shift_bits % 64;
+
+  // Shift by whole limbs (move elements up)
+  if whole_limbs > 0 {
+    let mut i = 8;
+    while i >= whole_limbs {
+      shifted_divisor[i] = shifted_divisor[i - whole_limbs];
+      i -= 1;
+    }
+    // Zero out the vacated low limbs (i is now whole_limbs - 1)
+    let mut j = 0;
+    while j < whole_limbs {
+      shifted_divisor[j] = 0;
+      j += 1;
+    }
+  }
+
+  // Shift remaining bits one at a time
   let mut i = 0;
-  while i < shift_bits {
+  while i < rem_bits {
     shifted_divisor = shl::<9>(&shifted_divisor);
     i += 1;
   }
