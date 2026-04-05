@@ -176,6 +176,16 @@ macro_rules! impl_small_value_field {
 macro_rules! impl_delayed_reduction {
   ($field:ty) => {
     impl $crate::big_num::DelayedReduction<i32> for $field {
+      // Note: an i32-only specialization could shrink this to SignedWideLimbs<5>.
+      // For our supported 254-256 bit fields, a 320-bit accumulator still leaves
+      // at least 33 bits of headroom for worst-case same-sign terms
+      // (field_bits <= 256, |i32| <= 2^31). A conservative rule is to keep each
+      // sign bucket (`acc.pos` and `acc.neg`, counted separately before `sub_mag`)
+      // below 2^32 same-sign accumulated terms. We keep 6 limbs here to share
+      // the i64/u64 accumulation path and the existing 6-limb Barrett reducer;
+      // a 5-limb specialization would need to pad the 5-limb `sub_mag`
+      // output to 6 limbs before `barrett_reduce_6`, or add a dedicated 5-limb
+      // reduction path.
       type Accumulator = $crate::big_num::SignedWideLimbs<6>;
 
       #[inline(always)]
@@ -235,7 +245,12 @@ macro_rules! impl_delayed_reduction {
 
       #[inline(always)]
       fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &i128) {
-        $crate::big_num::delayed_reduction::accumulate_field_times_i128(acc, field, value);
+        let (target, mag) = if *value >= 0 {
+          (&mut acc.pos, *value as u128)
+        } else {
+          (&mut acc.neg, (*value).wrapping_neg() as u128)
+        };
+        $crate::big_num::delayed_reduction::accumulate_field_times_u128(target, field, mag);
       }
 
       #[inline(always)]

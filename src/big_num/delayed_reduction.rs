@@ -19,7 +19,7 @@
 //! - `impl_delayed_reduction!` for all fields (generic Barrett)
 
 use super::{
-  limbs::{SignedWideLimbs, WideLimbs, mac, mul_4_by_4},
+  limbs::{WideLimbs, mac, mul_4_by_4},
   montgomery::{MontgomeryLimbs, montgomery_reduce_9},
 };
 use ff::PrimeField;
@@ -83,32 +83,33 @@ pub(crate) fn accumulate_field_times_u64<F: MontgomeryLimbs>(
   );
 }
 
-/// Accumulate field × i128 product into a SignedWideLimbs<7> accumulator.
+/// Accumulate field × small_value where small_value is a single u128 magnitude.
 ///
-/// Uses 4×2 multiply pattern since i128 spans 2 limbs.
+/// This function is shared by signed 128-bit accumulation after the caller
+/// extracts the absolute value and chooses the target (pos or neg side).
+/// Uses a 4×2 multiply pattern because the magnitude spans 2 limbs.
+///
+/// # Arguments
+/// - `target`: The unsigned accumulator to add to (either pos or neg side)
+/// - `field`: The field element (4 limbs in Montgomery form)
+/// - `magnitude`: The absolute value of the small integer (as u128)
 ///
 /// # Overflow Bounds
 /// - Supported field element: 254-256 bits
-/// - i128 magnitude: 128 bits
+/// - u128 magnitude: 128 bits
 /// - Product size: 382-384 bits (6 limbs)
-/// - SignedWideLimbs<7>: 448 bits capacity
+/// - WideLimbs<7>: 448 bits capacity
 /// - Headroom: 64-66 bits → supports at least 2^64 accumulations
 #[inline(always)]
-pub(crate) fn accumulate_field_times_i128<F: MontgomeryLimbs>(
-  acc: &mut SignedWideLimbs<7>,
+pub(crate) fn accumulate_field_times_u128<F: MontgomeryLimbs>(
+  target: &mut WideLimbs<7>,
   field: &F,
-  value: &i128,
+  magnitude: u128,
 ) {
-  let (target, mag) = if *value >= 0 {
-    (&mut acc.pos, *value as u128)
-  } else {
-    (&mut acc.neg, (*value).wrapping_neg() as u128)
-  };
-
   // Fused 4×2 multiply-accumulate: two passes at different offsets
   let a = field.to_limbs();
-  let b_lo = mag as u64;
-  let b_hi = (mag >> 64) as u64;
+  let b_lo = magnitude as u64;
+  let b_hi = (magnitude >> 64) as u64;
 
   // Pass 1: multiply by b_lo at offset 0
   let (r0, c) = mac(target.0[0], a[0], b_lo, 0);
@@ -137,7 +138,7 @@ pub(crate) fn accumulate_field_times_i128<F: MontgomeryLimbs>(
   target.0[6] = target.0[6].wrapping_add(c);
   debug_assert!(
     target.0[6] >= old_limb6,
-    "DelayedReduction i128 accumulator overflow: limb 6 wrapped from {} to {} (carry={})",
+    "DelayedReduction 128-bit small-value accumulator overflow: limb 6 wrapped from {} to {} (carry={})",
     old_limb6,
     target.0[6],
     c
