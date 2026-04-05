@@ -73,7 +73,14 @@ pub(crate) fn accumulate_field_times_small<F: MontgomeryLimbs>(
   target.0[2] = r2;
   target.0[3] = r3;
   target.0[4] = r4;
+  let old_limb5 = target.0[5];
   target.0[5] = target.0[5].wrapping_add(of as u64);
+  debug_assert!(
+    target.0[5] >= old_limb5,
+    "DelayedReduction small-value accumulator overflow: limb 5 wrapped from {} to {}",
+    old_limb5,
+    target.0[5]
+  );
 }
 
 /// Accumulate field × i128 product into a SignedWideLimbs<7> accumulator.
@@ -126,7 +133,15 @@ pub(crate) fn accumulate_field_times_i128<F: MontgomeryLimbs>(
   target.0[4] = r4;
   target.0[5] = r5;
   // Propagate final carry through remaining limbs (just add)
+  let old_limb6 = target.0[6];
   target.0[6] = target.0[6].wrapping_add(c);
+  debug_assert!(
+    target.0[6] >= old_limb6,
+    "DelayedReduction i128 accumulator overflow: limb 6 wrapped from {} to {} (carry={})",
+    old_limb6,
+    target.0[6],
+    c
+  );
 }
 
 /// Accumulate field × field product into a WideLimbs<9> accumulator.

@@ -187,6 +187,7 @@ impl<const N: usize> AddAssign for WideLimbs<N> {
       self.0[i] = sum;
       carry = (c1 as u64) + (c2 as u64);
     }
+    debug_assert_eq!(carry, 0, "WideLimbs overflow on merge");
   }
 }
 
@@ -200,6 +201,7 @@ impl<const N: usize> AddAssign<&Self> for WideLimbs<N> {
       self.0[i] = sum;
       carry = (c1 as u64) + (c2 as u64);
     }
+    debug_assert_eq!(carry, 0, "WideLimbs overflow on merge");
   }
 }
 
