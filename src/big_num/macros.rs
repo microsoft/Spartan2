@@ -124,11 +124,7 @@ macro_rules! impl_small_value_field {
     impl $crate::big_num::SmallValueField<i32> for $field {
       #[inline]
       fn small_to_field(val: i32) -> Self {
-        if val >= 0 {
-          Self::from(val as u64)
-        } else {
-          -Self::from((-val) as u64)
-        }
+        $crate::big_num::small_value_field::i64_to_field(val as i64)
       }
 
       fn try_field_to_small(val: &Self) -> Option<i32> {

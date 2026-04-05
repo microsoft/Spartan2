@@ -220,6 +220,18 @@ macro_rules! test_small_value_field {
       }
 
       #[test]
+      fn small_value_i32_boundaries() {
+        let min_field = <$field as SmallValueField<i32>>::small_to_field(i32::MIN);
+        assert_eq!(min_field, i64_to_field::<$field>(i32::MIN as i64));
+
+        for val in [i32::MIN, i32::MAX, -1, 0, 1] {
+          let field = <$field as SmallValueField<i32>>::small_to_field(val);
+          let back = <$field as SmallValueField<i32>>::try_field_to_small(&field);
+          assert_eq!(back, Some(val));
+        }
+      }
+
+      #[test]
       fn small_value_i32_roundtrip() {
         assert_eq!(
           <$field as SmallValueField<i32>>::try_field_to_small(&<$field>::from(42u64)),
