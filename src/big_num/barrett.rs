@@ -280,8 +280,7 @@ where
 }
 
 /// Stress test with 2000 products (release builds only).
-#[cfg(test)]
-#[allow(dead_code)] // Only used in release builds
+#[cfg(all(test, not(debug_assertions)))]
 pub(crate) fn test_barrett_many_products_impl<F, R>(reduce_6: R)
 where
   F: ff::Field + ff::PrimeField + MontgomeryLimbs,

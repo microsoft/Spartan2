@@ -288,41 +288,6 @@ pub(super) const fn sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] 
   result
 }
 
-/// Subtract N-limb b from N-limb a with borrow output: a - b → (result, borrow).
-///
-/// Used for branchless canonicalization patterns.
-#[inline(always)]
-#[allow(dead_code)]
-pub(super) const fn sub_with_borrow<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], u64) {
-  let mut result = [0u64; N];
-  let mut borrow = 0u64;
-  let mut i = 0;
-  while i < N {
-    let (diff, b1) = a[i].overflowing_sub(b[i]);
-    let (diff2, b2) = diff.overflowing_sub(borrow);
-    result[i] = diff2;
-    borrow = (b1 as u64) + (b2 as u64);
-    i += 1;
-  }
-  (result, borrow)
-}
-
-/// Constant-time select: if cond { a } else { b }
-///
-/// Used for branchless canonicalization to avoid data-dependent branches.
-#[inline(always)]
-#[allow(dead_code)]
-pub(super) const fn select<const N: usize>(cond: bool, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
-  let mask = (cond as u64).wrapping_neg(); // 0xFFFF...FFFF if true, 0 if false
-  let mut result = [0u64; N];
-  let mut i = 0;
-  while i < N {
-    result[i] = (a[i] & mask) | (b[i] & !mask);
-    i += 1;
-  }
-  result
-}
-
 /// Shift an N-limb value left by one bit.
 #[inline(always)]
 pub(super) const fn shl<const N: usize>(a: &[u64; N]) -> [u64; N] {
@@ -340,7 +305,6 @@ pub(super) const fn shl<const N: usize>(a: &[u64; N]) -> [u64; N] {
 
 /// Shift an N-limb value right by one bit.
 #[inline(always)]
-#[allow(dead_code)]
 pub(super) const fn shr<const N: usize>(a: &[u64; N]) -> [u64; N] {
   let mut result = [0u64; N];
   let mut carry = 0u64;
@@ -418,21 +382,6 @@ pub(super) fn mul_4_by_1(a: &[u64; 4], b: u64) -> [u64; 5] {
     carry = prod >> 64;
   }
   result[4] = carry as u64;
-  result
-}
-
-/// Multiply 2-limb by 1-limb, producing a 3-limb result.
-#[inline(always)]
-#[allow(dead_code)]
-pub(super) fn mul_2_by_1(a: &[u64; 2], b: u64) -> [u64; 3] {
-  let mut result = [0u64; 3];
-  let mut carry = 0u128;
-  for i in 0..2 {
-    let prod = (a[i] as u128) * (b as u128) + carry;
-    result[i] = prod as u64;
-    carry = prod >> 64;
-  }
-  result[2] = carry as u64;
   result
 }
 
