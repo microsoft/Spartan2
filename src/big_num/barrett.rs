@@ -157,7 +157,9 @@ pub(crate) fn barrett_reduce_7<F: BarrettReductionConstants>(c: &[u64; 7]) -> [u
 fn add_r384_mod<F: BarrettReductionConstants>(r: [u64; 4]) -> [u64; 4] {
   if F::USE_4_LIMB_BARRETT {
     let (mut sum, carry) = add::<4>(&r, &F::R384_MOD);
-    debug_assert_eq!(carry, 0, "R384_MOD repair overflowed the 4-limb fast path");
+    // On the 4-limb fast path we require p < 2^255. Both `r` and `R384_MOD`
+    // are reduced mod p, so their sum must stay below 2^256.
+    assert_eq!(carry, 0, "R384_MOD repair overflowed the 4-limb fast path");
 
     if gte::<4>(&sum, &F::MODULUS) {
       sum = sub::<4>(&sum, &F::MODULUS);

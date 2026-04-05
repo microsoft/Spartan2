@@ -51,11 +51,11 @@ pub trait DelayedReduction<Value>: Sized {
 /// - `magnitude`: The absolute value of the small integer (as u64)
 ///
 /// # Overflow Bounds
-/// - Field element: 254 bits (BN254 Fr)
+/// - Supported field element: 254-256 bits
 /// - u64 magnitude: 64 bits
-/// - Product size: 318 bits (5 limbs)
+/// - Product size: 318-320 bits (5 limbs)
 /// - WideLimbs<6>: 384 bits capacity
-/// - Headroom: 66 bits → supports up to 2^66 accumulations
+/// - Headroom: 64-66 bits → supports at least 2^64 accumulations
 #[inline(always)]
 pub(crate) fn accumulate_field_times_small<F: MontgomeryLimbs>(
   target: &mut WideLimbs<6>,
@@ -88,11 +88,11 @@ pub(crate) fn accumulate_field_times_small<F: MontgomeryLimbs>(
 /// Uses 4×2 multiply pattern since i128 spans 2 limbs.
 ///
 /// # Overflow Bounds
-/// - Field element: 254 bits (BN254 Fr)
+/// - Supported field element: 254-256 bits
 /// - i128 magnitude: 128 bits
-/// - Product size: 382 bits (6 limbs)
+/// - Product size: 382-384 bits (6 limbs)
 /// - SignedWideLimbs<7>: 448 bits capacity
-/// - Headroom: 66 bits → supports up to 2^66 accumulations
+/// - Headroom: 64-66 bits → supports at least 2^64 accumulations
 #[inline(always)]
 pub(crate) fn accumulate_field_times_i128<F: MontgomeryLimbs>(
   acc: &mut SignedWideLimbs<7>,
