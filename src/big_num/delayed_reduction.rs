@@ -57,7 +57,7 @@ pub trait DelayedReduction<Value>: Sized {
 /// - WideLimbs<6>: 384 bits capacity
 /// - Headroom: 64-66 bits → supports at least 2^64 accumulations
 #[inline(always)]
-pub(crate) fn accumulate_field_times_small<F: MontgomeryLimbs>(
+pub(crate) fn accumulate_field_times_u64<F: MontgomeryLimbs>(
   target: &mut WideLimbs<6>,
   field: &F,
   magnitude: u64,

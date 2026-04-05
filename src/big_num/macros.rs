@@ -186,7 +186,7 @@ macro_rules! impl_delayed_reduction {
         } else {
           (&mut acc.neg, value64.wrapping_neg() as u64)
         };
-        $crate::big_num::delayed_reduction::accumulate_field_times_small(target, field, mag);
+        $crate::big_num::delayed_reduction::accumulate_field_times_u64(target, field, mag);
       }
 
       #[inline(always)]
@@ -213,7 +213,7 @@ macro_rules! impl_delayed_reduction {
         } else {
           (&mut acc.neg, (*value).wrapping_neg() as u64)
         };
-        $crate::big_num::delayed_reduction::accumulate_field_times_small(target, field, mag);
+        $crate::big_num::delayed_reduction::accumulate_field_times_u64(target, field, mag);
       }
 
       #[inline(always)]

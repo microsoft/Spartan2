@@ -28,9 +28,10 @@ mod limbs;
 pub use delayed_reduction::DelayedReduction;
 pub use field_reduction_constants::{BarrettReductionConstants, FieldReductionConstants};
 pub use small_value_field::SmallValueField;
+// TODO: Remove unused imports after adding small-value sumcheck support (https://github.com/microsoft/Spartan2/pull/112)
 #[allow(unused_imports)]
 pub use wide_mul::WideMul;
 
-// Re-exports: types
+// TODO: Remove unused imports after adding small-value sumcheck support (https://github.com/microsoft/Spartan2/pull/112)
 #[allow(unused_imports)]
 pub use limbs::{SignedWideLimbs, SubMagResult, WideLimbs, sub_mag};
