@@ -95,7 +95,7 @@ pub(crate) fn accumulate_field_times_i128<F: MontgomeryLimbs>(
   let (target, mag) = if *value >= 0 {
     (&mut acc.pos, *value as u128)
   } else {
-    (&mut acc.neg, (-*value) as u128)
+    (&mut acc.neg, (*value).wrapping_neg() as u128)
   };
 
   // Fused 4×2 multiply-accumulate: two passes at different offsets
@@ -255,6 +255,111 @@ where
   );
 }
 
+/// Regression coverage for `DelayedReduction<i32>` signed boundary values.
+#[cfg(test)]
+pub(crate) fn test_delayed_reduction_i32_boundaries_impl<F>()
+where
+  F: MontgomeryLimbs + PrimeField + Copy + DelayedReduction<i32>,
+{
+  let fields = [F::from(1u64), F::from(7u64), F::from(u32::MAX as u64)];
+  let values = [i32::MIN, i32::MAX];
+
+  for field in fields {
+    for value in values {
+      let mut acc = <F as DelayedReduction<i32>>::Accumulator::default();
+      <F as DelayedReduction<i32>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+
+      let result = <F as DelayedReduction<i32>>::reduce(&acc);
+      let expected = field * super::small_value_field::i64_to_field::<F>(value as i64);
+
+      assert_eq!(
+        result, expected,
+        "Delayed reduction failed for i32 boundary value {value}"
+      );
+    }
+  }
+
+  let mut acc = <F as DelayedReduction<i32>>::Accumulator::default();
+  let mut expected = F::ZERO;
+  for (field, value) in fields.into_iter().zip([i32::MIN, i32::MAX, i32::MIN]) {
+    <F as DelayedReduction<i32>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+    expected += field * super::small_value_field::i64_to_field::<F>(value as i64);
+  }
+
+  let result = <F as DelayedReduction<i32>>::reduce(&acc);
+  assert_eq!(result, expected, "Delayed reduction failed for accumulated i32 boundaries");
+}
+
+/// Regression coverage for `DelayedReduction<i64>` signed boundary values.
+#[cfg(test)]
+pub(crate) fn test_delayed_reduction_i64_boundaries_impl<F>()
+where
+  F: MontgomeryLimbs + PrimeField + Copy + DelayedReduction<i64> + super::SmallValueField<i64>,
+{
+  let fields = [F::from(1u64), F::from(7u64), F::from(u32::MAX as u64)];
+  let values = [i64::MIN, i64::MAX];
+
+  for field in fields {
+    for value in values {
+      let mut acc = <F as DelayedReduction<i64>>::Accumulator::default();
+      <F as DelayedReduction<i64>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+
+      let result = <F as DelayedReduction<i64>>::reduce(&acc);
+      let expected = field * F::small_to_field(value);
+
+      assert_eq!(
+        result, expected,
+        "Delayed reduction failed for i64 boundary value {value}"
+      );
+    }
+  }
+
+  let mut acc = <F as DelayedReduction<i64>>::Accumulator::default();
+  let mut expected = F::ZERO;
+  for (field, value) in fields.into_iter().zip([i64::MIN, i64::MAX, i64::MIN]) {
+    <F as DelayedReduction<i64>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+    expected += field * F::small_to_field(value);
+  }
+
+  let result = <F as DelayedReduction<i64>>::reduce(&acc);
+  assert_eq!(result, expected, "Delayed reduction failed for accumulated i64 boundaries");
+}
+
+/// Regression coverage for `DelayedReduction<i128>` signed boundary values.
+#[cfg(test)]
+pub(crate) fn test_delayed_reduction_i128_boundaries_impl<F>()
+where
+  F: MontgomeryLimbs + PrimeField + Copy + DelayedReduction<i128>,
+{
+  let fields = [F::from(1u64), F::from(7u64), F::from(u32::MAX as u64)];
+  let values = [i128::MIN, i128::MAX];
+
+  for field in fields {
+    for value in values {
+      let mut acc = <F as DelayedReduction<i128>>::Accumulator::default();
+      <F as DelayedReduction<i128>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+
+      let result = <F as DelayedReduction<i128>>::reduce(&acc);
+      let expected = field * super::small_value_field::i128_to_field::<F>(value);
+
+      assert_eq!(
+        result, expected,
+        "Delayed reduction failed for i128 boundary value {value}"
+      );
+    }
+  }
+
+  let mut acc = <F as DelayedReduction<i128>>::Accumulator::default();
+  let mut expected = F::ZERO;
+  for (field, value) in fields.into_iter().zip([i128::MIN, i128::MAX, i128::MIN]) {
+    <F as DelayedReduction<i128>>::unreduced_multiply_accumulate(&mut acc, &field, &value);
+    expected += field * super::small_value_field::i128_to_field::<F>(value);
+  }
+
+  let result = <F as DelayedReduction<i128>>::reduce(&acc);
+  assert_eq!(result, expected, "Delayed reduction failed for accumulated i128 boundaries");
+}
+
 /// Generate tests for `DelayedReduction` implementation (field × field only).
 #[cfg(test)]
 #[macro_export]
@@ -278,16 +383,19 @@ macro_rules! test_delayed_reduction_small {
       #[test]
       fn delayed_reduction_i32() {
         $crate::big_num::delayed_reduction::test_delayed_reduction_small_impl::<$field, i32>();
+        $crate::big_num::delayed_reduction::test_delayed_reduction_i32_boundaries_impl::<$field>();
       }
 
       #[test]
       fn delayed_reduction_i64() {
         $crate::big_num::delayed_reduction::test_delayed_reduction_small_impl::<$field, i64>();
+        $crate::big_num::delayed_reduction::test_delayed_reduction_i64_boundaries_impl::<$field>();
       }
 
       #[test]
       fn delayed_reduction_i128() {
         $crate::big_num::delayed_reduction::test_delayed_reduction_small_impl::<$field, i128>();
+        $crate::big_num::delayed_reduction::test_delayed_reduction_i128_boundaries_impl::<$field>();
       }
     }
   };
