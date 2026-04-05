@@ -67,6 +67,7 @@ mod big_num_tests {
     crate::provider::bn254::types::Scalar,
     crate::big_num::barrett::barrett_reduce_6::<crate::provider::bn254::types::Scalar>
   );
+  crate::test_barrett_reduction_7!(scalar_br7, crate::provider::bn254::types::Scalar);
   crate::test_delayed_reduction_small!(scalar_dr_small, crate::provider::bn254::types::Scalar);
   crate::test_small_value_field!(scalar_svf, crate::provider::bn254::types::Scalar);
 }

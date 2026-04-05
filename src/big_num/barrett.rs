@@ -47,7 +47,7 @@
 
 use super::{
   field_reduction_constants::BarrettReductionConstants,
-  limbs::{gte, mul_3x4_lo4, mul_3x4_lo5, mul_3x5_to_8, mul_4_by_1, sub, sub_5_4},
+  limbs::{add, gte, mul_3x4_lo4, mul_3x4_lo5, mul_3x5_to_8, mul_4_by_1, sub, sub_5_4},
 };
 
 // ==========================================================================
@@ -110,21 +110,75 @@ pub(crate) fn barrett_reduce_6<F: BarrettReductionConstants>(c: &[u64; 6]) -> [u
 
 /// Barrett reduction for 7-limb input.
 ///
-/// Folds limb 6 using R384_MOD, then delegates to [`barrett_reduce_6`].
+/// We intentionally do not run a "direct" 7-limb Barrett here. That direct
+/// form would:
+/// 1. take `q1 = [c[3], c[4], c[5], c[6]]`,
+/// 2. compute `q2 = q1 × μ` with a 4×5→9 multiply,
+/// 3. take `q3 = floor(q2 / b^5)`,
+/// 4. compute `q3 × p` with a low 4×4 multiply on the fast path.
+///
+/// For our supported 254-256 bit fields, folding is cheaper on the fast path:
+/// - fold-based path here = `mul_4_by_1` (4 multiplies) + `barrett_reduce_6`
+///   fast path (`mul_3x5_to_8`: 15 multiplies, `mul_3x4_lo4`: 9 multiplies)
+///   = 28 limb multiplies total,
+/// - direct 7-limb Barrett = `mul_4x5_to_9` (20 multiplies) +
+///   `mul_4x4_lo4` (10 multiplies) = 30 limb multiplies total.
+///
+/// So we fold `c[6]·2^384` into the low 6 limbs with `2^384 ≡ R384_MOD (mod p)`
+/// and reuse the already-tuned 6-limb reducer. If that fold overflows limb 5,
+/// the lost bit is one extra `2^384` term, so we repair it by adding
+/// `R384_MOD` after the 6-limb reduction.
 #[inline]
 pub(crate) fn barrett_reduce_7<F: BarrettReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
   // Fold limb 6: c[6] × 2^384 ≡ c[6] × R384_MOD (mod p)
   let c6_contrib = mul_4_by_1(&F::R384_MOD, c[6]);
 
-  // Add c[0..6] + c6_contrib[0..5] using carrying_add
+  // Add the folded contribution into the low 6 limbs. We intentionally route
+  // the result through barrett_reduce_6 because that path is already tuned for
+  // our supported fields; the only extra case we must handle is a carry out of
+  // limb 5, which represents one more 2^384 term.
   let (s0, cy) = c[0].carrying_add(c6_contrib[0], false);
   let (s1, cy) = c[1].carrying_add(c6_contrib[1], cy);
   let (s2, cy) = c[2].carrying_add(c6_contrib[2], cy);
   let (s3, cy) = c[3].carrying_add(c6_contrib[3], cy);
   let (s4, cy) = c[4].carrying_add(c6_contrib[4], cy);
-  let (s5, _) = c[5].carrying_add(0, cy);
+  let (s5, extra) = c[5].carrying_add(0, cy);
 
-  barrett_reduce_6::<F>(&[s0, s1, s2, s3, s4, s5])
+  let reduced = barrett_reduce_6::<F>(&[s0, s1, s2, s3, s4, s5]);
+  if extra {
+    // The dropped carry is one extra 2^384 term, so add back 2^384 mod p.
+    add_r384_mod::<F>(reduced)
+  } else {
+    reduced
+  }
+}
+
+#[inline]
+fn add_r384_mod<F: BarrettReductionConstants>(r: [u64; 4]) -> [u64; 4] {
+  if F::USE_4_LIMB_BARRETT {
+    let (mut sum, carry) = add::<4>(&r, &F::R384_MOD);
+    debug_assert_eq!(carry, 0, "R384_MOD repair overflowed the 4-limb fast path");
+
+    if gte::<4>(&sum, &F::MODULUS) {
+      sum = sub::<4>(&sum, &F::MODULUS);
+    }
+
+    sum
+  } else {
+    let (sum_lo4, carry) = add::<4>(&r, &F::R384_MOD);
+    let mut sum = [sum_lo4[0], sum_lo4[1], sum_lo4[2], sum_lo4[3], carry];
+
+    if sum[4] != 0 || gte::<4>(&sum_lo4, &F::MODULUS) {
+      sum = sub_5_4(&sum, &F::MODULUS);
+    }
+
+    debug_assert!(
+      sum[4] == 0 && !gte::<4>(&[sum[0], sum[1], sum[2], sum[3]], &F::MODULUS),
+      "R384_MOD repair produced non-canonical result"
+    );
+
+    [sum[0], sum[1], sum[2], sum[3]]
+  }
 }
 
 // ==========================================================================
@@ -133,6 +187,33 @@ pub(crate) fn barrett_reduce_7<F: BarrettReductionConstants>(c: &[u64; 7]) -> [u
 
 #[cfg(test)]
 use super::montgomery::MontgomeryLimbs;
+#[cfg(test)]
+use num_bigint::BigUint;
+
+#[cfg(test)]
+fn limbs_to_biguint<const N: usize>(limbs: &[u64; N]) -> BigUint {
+  let mut bytes = Vec::with_capacity(N * 8);
+  for limb in limbs {
+    bytes.extend_from_slice(&limb.to_le_bytes());
+  }
+  BigUint::from_bytes_le(&bytes)
+}
+
+#[cfg(test)]
+fn biguint_to_limbs4(value: &BigUint) -> [u64; 4] {
+  let mut bytes = value.to_bytes_le();
+  bytes.resize(32, 0);
+
+  let mut limbs = [0u64; 4];
+  for (i, limb) in limbs.iter_mut().enumerate() {
+    let mut chunk = [0u8; 8];
+    let start = i * 8;
+    chunk.copy_from_slice(&bytes[start..start + 8]);
+    *limb = u64::from_le_bytes(chunk);
+  }
+
+  limbs
+}
 
 /// Test that reducing zero gives zero.
 #[cfg(test)]
@@ -232,6 +313,24 @@ where
   assert_eq!(result, expected_sum);
 }
 
+/// Regression for the original 7-limb fold bug.
+///
+/// The old implementation dropped the carry after folding the 7th limb with
+/// `2^384 mod p`. This vector is `x = 2^385 - 1` and reliably triggers that path.
+#[cfg(test)]
+pub(crate) fn test_barrett_reduce_7_regression_impl<F>()
+where
+  F: BarrettReductionConstants,
+{
+  let c = [u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, 1];
+
+  let modulus = limbs_to_biguint(&F::MODULUS);
+  let x = limbs_to_biguint(&c);
+  let expected = biguint_to_limbs4(&(x % &modulus));
+  let actual = barrett_reduce_7::<F>(&c);
+  assert_eq!(actual, expected, "barrett_reduce_7 mismatch for input {:?}", c);
+}
+
 /// Generate tests for Barrett reduction functions.
 ///
 /// # Example
@@ -259,6 +358,20 @@ macro_rules! test_barrett_reduction {
       #[cfg(not(debug_assertions))]
       fn many_products() {
         $crate::big_num::barrett::test_barrett_many_products_impl::<$field, _>($reduce_fn);
+      }
+    }
+  };
+}
+
+/// Generate the targeted regression test for the 7-limb Barrett fold carry bug.
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_barrett_reduction_7 {
+  ($mod_name:ident, $field:ty) => {
+    mod $mod_name {
+      #[test]
+      fn fold_carry_regression() {
+        $crate::big_num::barrett::test_barrett_reduce_7_regression_impl::<$field>();
       }
     }
   };
