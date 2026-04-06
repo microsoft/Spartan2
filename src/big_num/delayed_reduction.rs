@@ -303,7 +303,10 @@ where
   }
 
   let result = <F as DelayedReduction<i32>>::reduce(&acc);
-  assert_eq!(result, expected, "Delayed reduction failed for accumulated i32 boundaries");
+  assert_eq!(
+    result, expected,
+    "Delayed reduction failed for accumulated i32 boundaries"
+  );
 }
 
 /// Regression coverage for `DelayedReduction<i64>` signed boundary values.
@@ -338,7 +341,10 @@ where
   }
 
   let result = <F as DelayedReduction<i64>>::reduce(&acc);
-  assert_eq!(result, expected, "Delayed reduction failed for accumulated i64 boundaries");
+  assert_eq!(
+    result, expected,
+    "Delayed reduction failed for accumulated i64 boundaries"
+  );
 }
 
 /// Regression coverage for `DelayedReduction<i128>` signed boundary values.
@@ -373,7 +379,10 @@ where
   }
 
   let result = <F as DelayedReduction<i128>>::reduce(&acc);
-  assert_eq!(result, expected, "Delayed reduction failed for accumulated i128 boundaries");
+  assert_eq!(
+    result, expected,
+    "Delayed reduction failed for accumulated i128 boundaries"
+  );
 }
 
 /// Generate tests for `DelayedReduction` implementation (field × field only).

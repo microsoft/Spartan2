@@ -323,13 +323,25 @@ pub(crate) fn test_barrett_reduce_7_regression_impl<F>()
 where
   F: BarrettReductionConstants,
 {
-  let c = [u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, 1];
+  let c = [
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    1,
+  ];
 
   let modulus = limbs_to_biguint(&F::MODULUS);
   let x = limbs_to_biguint(&c);
   let expected = biguint_to_limbs4(&(x % &modulus));
   let actual = barrett_reduce_7::<F>(&c);
-  assert_eq!(actual, expected, "barrett_reduce_7 mismatch for input {:?}", c);
+  assert_eq!(
+    actual, expected,
+    "barrett_reduce_7 mismatch for input {:?}",
+    c
+  );
 }
 
 /// Generate tests for Barrett reduction functions.
