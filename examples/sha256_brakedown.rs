@@ -4,11 +4,11 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! examples/sha256.rs
+//! examples/sha256_brakedown.rs
 //! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
-//! circuit with varying message lengths
+//! circuit with varying message lengths using Brakedown PCS.
 //!
-//! Run with: `RUST_LOG=info cargo run --release --example sha256`
+//! Run with: `RUST_LOG=info cargo run --release --example sha256_brakedown`
 #[cfg(feature = "jem")]
 #[global_allocator]
 static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
@@ -21,7 +21,7 @@ use bellpepper_core::{
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
-  provider::T256HyraxEngine,
+  provider::PallasBrakedownEngine,
   spartan::SpartanSNARK,
   traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
@@ -29,7 +29,7 @@ use std::{marker::PhantomData, time::Instant};
 use tracing::{info, info_span};
 use tracing_subscriber::EnvFilter;
 
-type E = T256HyraxEngine;
+type E = PallasBrakedownEngine;
 
 #[derive(Clone, Debug)]
 struct Sha256Circuit<Scalar: PrimeField> {
@@ -86,7 +86,7 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
       .preimage
       .clone()
       .into_iter()
-      .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+      .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
       .map(Some)
       .collect();
     assert_eq!(bit_values.len(), self.preimage.len() * 8);
@@ -160,10 +160,10 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
 
 fn main() {
   tracing_subscriber::fmt()
-      .with_target(false)
-      .with_ansi(true)                // no bold colour codes
-      .with_env_filter(EnvFilter::from_default_env())
-      .init();
+    .with_target(false)
+    .with_ansi(true)                // no bold colour codes
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
 
   // Message lengths: 2^10 … 2^11 bytes.
   let circuits: Vec<_> = (10..=11)

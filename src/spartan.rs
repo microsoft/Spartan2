@@ -526,6 +526,10 @@ mod tests {
     type E2 = crate::provider::T256HyraxEngine;
     type S2 = SpartanSNARK<E2>;
     test_snark_with::<E2, S2>();
+
+    type E3 = crate::provider::PallasBrakedownEngine;
+    type S3 = SpartanSNARK<E3>;
+    test_snark_with::<E3, S3>();
   }
 
   fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
