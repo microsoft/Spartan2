@@ -78,8 +78,7 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
   // Therefore fold_carry = ⌊result / R²⌋ ∈ {0, 1}
   debug_assert!(
     fold_carry <= 1,
-    "fold carry must be 0 or 1, got {}",
-    fold_carry
+    "fold carry must be 0 or 1, got {fold_carry}",
   );
 
   // STEP 2: Montgomery REDC on 8 limbs → canonical result in [0, p)

@@ -11,3 +11,5 @@ pub mod ipa;
 
 // implementations of polynomial commitment schemes
 pub mod hyrax_pc;
+/// Multilinear KZG polynomial commitment scheme
+pub mod mkzg;
