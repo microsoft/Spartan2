@@ -47,7 +47,7 @@ pub use basis::{LagrangeBasisFactory, LagrangeCoeff};
 pub use accumulator::{LagrangeAccumulators, RoundAccumulator};
 
 // Builder functions
-pub use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators_spartan};
+pub use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators_spartan_satisfying};
 
 // Eq round factor and derivation
 pub use eq_round::{EqRoundFactor, derive_t1};

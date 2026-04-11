@@ -16,14 +16,15 @@
 //!
 //! # Overview
 //!
-//! The main entry point is [`prove_cubic_small_value`], which implements
+//! The main entry point is [`prove_cubic_small_value_satisfying`], which implements
+//! the satisfying-witness-only version of the small-value optimization.
 
 use crate::{
   big_num::{DelayedReduction, SmallValue, SmallValueEngine},
   errors::SpartanError,
   lagrange_accumulator::{
     EqRoundFactor, LagrangeAccumulators, LagrangeBasisFactory, LagrangeCoeff, LagrangeEvals,
-    LagrangeHatEvals, SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1,
+    LagrangeHatEvals, SPARTAN_T_DEGREE, build_accumulators_spartan_satisfying, derive_t1,
   },
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, univariate::UniPoly},
   start_span,
@@ -202,6 +203,8 @@ where
 ///
 /// Field-element polynomials are created internally via batched eq-weighted binding
 /// from the small-value inputs, eliminating the need for pre-allocated field polys.
+/// This specialized prover assumes a satisfying witness, so `Az * Bz = Cz` on
+/// `{0,1}^n` and the incoming `claim` is expected to be zero.
 ///
 /// Generic over `SmallValue` to support both i32/i64 and i64/i128 configurations.
 ///
@@ -211,7 +214,7 @@ where
 ///   `min(LB, num_rounds / 2)`. Caller should ensure input values are bounded by
 ///   `SV::MAX / 3^LB` for safe Lagrange extension (see [`ExtensionBound`]).
 ///   Typical values are 3-4 for practical instances (3^4 = 81× growth factor).
-pub fn prove_cubic_small_value<E, SV, const LB: usize>(
+pub fn prove_cubic_small_value_satisfying<E, SV, const LB: usize>(
   claim: &E::Scalar,
   taus: Vec<E::Scalar>,
   poly_A_small: &MultilinearPolynomial<SV>,
@@ -242,13 +245,15 @@ where
   }
 
   // ===== Pre-computation Phase =====
-  // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic.
+  // Build satisfying-witness accumulators A_i(v, u) for all i ∈ [ℓ₀] using
+  // small-value arithmetic. This optimized prefix path intentionally omits
+  // explicit C handling because Az·Bz - Cz vanishes on binary points.
   // Also builds eq pyramids for reuse by EqSumCheckInstance.
   // Internally computes eq tables with balanced split and precomputed eq_cache.
   // Uses: small × small → intermediate (for Az·Bz products),
   // then intermediate × field (for eq weighting via DelayedReduction).
   let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
-    build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
+    build_accumulators_spartan_satisfying(poly_A_small, poly_B_small, &taus, l0);
 
   let mut small_value_sumcheck =
     SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
@@ -300,9 +305,10 @@ where
   }
 
   // ===== Transition Phase =====
-  // Create bound field-element polynomials via batched eq-weighted small-value accumulation.
-  // Binds all completed small-value rounds in a single pass using field×int
-  // unreduced accumulation.
+  // Create bound field-element polynomials via batched eq-weighted small-value
+  // accumulation. The satisfying-witness shortcut only applies to the prefix
+  // accumulators above; we still carry `poly_C_small` explicitly through this
+  // transition and all remaining rounds.
   let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
   let (mut poly_A, mut poly_B, mut poly_C) =
     bind_three_polys_batched_small_value(
@@ -323,7 +329,8 @@ where
     // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
     e_in_pyramid.pop();
 
-    // Reuse the precomputed eq pyramids when all planned small-value rounds succeeded.
+    // Reuse the precomputed eq pyramids when all planned small-value rounds
+    // succeeded under the satisfying-witness shortcut.
     eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
       e_in_pyramid,
       e_xout_pyramid,
@@ -407,9 +414,9 @@ mod tests {
   type E = PallasHyraxEngine;
   type F = <E as Engine>::Scalar;
 
-  /// Generic helper to test that SmallValueSumCheck produces the same polynomial
-  /// evaluations as EqSumCheckInstance across multiple rounds.
-  fn run_smallvalue_round_test<SV>()
+  /// Generic helper to test that `SmallValueSumCheck` produces the same
+  /// polynomial evaluations as `EqSumCheckInstance` on satisfying inputs.
+  fn run_satisfying_smallvalue_round_test<SV>()
   where
     SV: SmallValue + Mul<Output = SV> + TryFrom<usize>,
     <SV as TryFrom<usize>>::Error: Debug,
@@ -423,7 +430,7 @@ mod tests {
       .map(|i| F::from((i + 2) as u64))
       .collect::<Vec<_>>();
 
-    // Small-value polynomials for build_accumulators_spartan
+    // Small-value polynomials for build_accumulators_spartan_satisfying
     let az_small: Vec<SV> = (0..n).map(|i| SV::try_from(i + 1).unwrap()).collect();
     let bz_small: Vec<SV> = (0..n).map(|i| SV::try_from(i + 3).unwrap()).collect();
     let cz_small: Vec<SV> = az_small
@@ -447,8 +454,9 @@ mod tests {
     // Claim = 0 for satisfying witness (Az·Bz = Cz)
     let mut claim = F::ZERO;
 
-    // Build accumulators using the simplified API
-    let (accs, _, _) = build_accumulators_spartan(&az_poly, &bz_poly, &taus, SMALL_VALUE_ROUNDS);
+    // Build accumulators using the satisfying-witness API.
+    let (accs, _, _) =
+      build_accumulators_spartan_satisfying(&az_poly, &bz_poly, &taus, SMALL_VALUE_ROUNDS);
     let mut small_value = SmallValueSumCheck::from_accumulators(accs);
 
     // Full eq_instance for verification against standard sumcheck
@@ -512,17 +520,17 @@ mod tests {
   }
 
   #[test]
-  fn test_smallvalue_round_matches_eq_instance_evals_i32() {
-    run_smallvalue_round_test::<i32>();
+  fn test_satisfying_smallvalue_round_matches_eq_instance_evals_i32() {
+    run_satisfying_smallvalue_round_test::<i32>();
   }
 
   #[test]
-  fn test_smallvalue_round_matches_eq_instance_evals_i64() {
-    run_smallvalue_round_test::<i64>();
+  fn test_satisfying_smallvalue_round_matches_eq_instance_evals_i64() {
+    run_satisfying_smallvalue_round_test::<i64>();
   }
 
-  /// Test that prove_cubic_small_value produces identical
-  /// output to prove_cubic_with_three_inputs using synthetic small-value polynomials.
+  /// Test that `prove_cubic_small_value_satisfying` produces identical output
+  /// to `prove_cubic_with_three_inputs` on satisfying synthetic inputs.
   ///
   /// Uses synthetic Az, Bz values in a small range and computes Cz = Az * Bz.
   fn run_equivalence_test<SV>(num_vars: usize)
@@ -599,7 +607,7 @@ mod tests {
     .expect("standard prove should succeed");
 
     // Run small-value method
-    let (proof2, r2, evals2) = prove_cubic_small_value::<E, SV, 3>(
+    let (proof2, r2, evals2) = prove_cubic_small_value_satisfying::<E, SV, 3>(
       &claim,
       taus.clone(),
       &az_small_poly,
@@ -633,7 +641,7 @@ mod tests {
     assert_eq!(final_claim, expected, "final claim mismatch");
   }
 
-  /// Test small-value sumcheck equivalence with synthetic polynomials.
+  /// Test satisfying small-value sumcheck equivalence with synthetic polynomials.
   ///
   /// Tests multiple sizes to ensure equivalence holds for various l0 values.
   /// With LB=3, l0 = min(3, num_vars - 1):
@@ -643,21 +651,21 @@ mod tests {
   /// - num_vars=6: l0=3, suffix_vars=3
   /// - num_vars=10: l0=3, suffix_vars=7
   #[test]
-  fn test_sumcheck_equivalence_with_synthetic_i32() {
+  fn test_satisfying_sumcheck_equivalence_with_synthetic_i32() {
     for num_vars in [2, 3, 4, 6, 10] {
       run_equivalence_test::<i32>(num_vars);
     }
   }
 
   #[test]
-  fn test_sumcheck_equivalence_with_synthetic_i64() {
+  fn test_satisfying_sumcheck_equivalence_with_synthetic_i64() {
     for num_vars in [2, 3, 4, 6, 10] {
       run_equivalence_test::<i64>(num_vars);
     }
   }
 
   #[test]
-  fn test_sumcheck_equivalence_when_first_tau_is_zero() {
+  fn test_satisfying_sumcheck_equivalence_when_first_tau_is_zero() {
     const NUM_VARS: usize = 6;
     const SEED: u64 = 0xDEADBEEF;
     let mut rng = StdRng::seed_from_u64(SEED);
@@ -697,7 +705,7 @@ mod perf_tests {
   #[cfg(not(debug_assertions))]
   const TEST_SIZES: &[usize] = &[16, 18, 20, 22, 24];
 
-  fn test_small_value_sumcheck_with<E: Engine>()
+  fn test_satisfying_small_value_sumcheck_with<E: Engine>()
   where
     E::Scalar: SmallValueEngine<i64>,
   {
@@ -733,7 +741,7 @@ mod perf_tests {
         num_vars = num_vars
       );
 
-      let (proof, _r, _evals) = prove_cubic_small_value::<E, _, 3>(
+      let (proof, _r, _evals) = prove_cubic_small_value_satisfying::<E, _, 3>(
         &E::Scalar::ZERO,
         taus.clone(),
         &az_poly,
@@ -754,7 +762,7 @@ mod perf_tests {
   }
 
   #[test]
-  fn test_small_value_sumcheck_perf() {
+  fn test_satisfying_small_value_sumcheck_perf() {
     let _ = tracing_subscriber::fmt()
       .with_target(false)
       .with_ansi(true)
@@ -764,14 +772,14 @@ mod perf_tests {
     use crate::provider::Bn254Engine;
 
     // Always test with BN254
-    test_small_value_sumcheck_with::<Bn254Engine>();
+    test_satisfying_small_value_sumcheck_with::<Bn254Engine>();
 
     // Additional engines only in release builds
     #[cfg(not(debug_assertions))]
     {
       use crate::provider::{PallasHyraxEngine, T256HyraxEngine};
-      test_small_value_sumcheck_with::<PallasHyraxEngine>();
-      test_small_value_sumcheck_with::<T256HyraxEngine>();
+      test_satisfying_small_value_sumcheck_with::<PallasHyraxEngine>();
+      test_satisfying_small_value_sumcheck_with::<T256HyraxEngine>();
     }
   }
 }

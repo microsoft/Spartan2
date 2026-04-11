@@ -7,7 +7,7 @@
 //! Thread-local scratch buffers for accumulator building.
 //!
 //! These structs eliminate per-iteration heap allocations in the parallel fold loops
-//! of `build_accumulators_spartan`. By hoisting buffer allocations to the fold identity
+//! of `build_accumulators_spartan_satisfying`. By hoisting buffer allocations to the fold identity
 //! closure (called once per Rayon thread subdivision), we reduce allocations from
 //! O(num_x_out) to O(num_threads).
 
@@ -15,7 +15,7 @@ use super::accumulator::LagrangeAccumulators;
 use crate::big_num::{DelayedReduction, SmallValue, SmallValueEngine};
 use num_traits::Zero;
 
-/// Thread-local scratch buffers for `build_accumulators_spartan`.
+/// Thread-local scratch buffers for `build_accumulators_spartan_satisfying`.
 ///
 /// # Motivation
 ///

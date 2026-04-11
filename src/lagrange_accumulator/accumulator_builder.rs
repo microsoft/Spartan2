@@ -7,7 +7,8 @@
 //! Builder functions for constructing Lagrange accumulators (Procedure 9).
 //!
 //! This module provides:
-//! - [`build_accumulators_spartan`]: Optimized builder for Spartan's cubic relation
+//! - [`build_accumulators_spartan_satisfying`]: Optimized builder for Spartan's
+//!   satisfying-witness cubic relation
 
 use super::{
   accumulator::LagrangeAccumulators, csr::Csr, domain::LagrangeIndex,
@@ -93,9 +94,15 @@ pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
   BetaPrefixCache { cache, num_betas }
 }
 
-/// Procedure 9: Build accumulators A_i(v, u) for Spartan's first sum-check (Algorithm 6).
+/// Procedure 9: Build accumulators A_i(v, u) for Spartan's satisfying-witness
+/// first sum-check (Algorithm 6).
 ///
 /// Computes accumulators for: g(X) = eq(τ, X) · (Az(X) · Bz(X) - Cz(X))
+///
+/// This specialized builder assumes `Az * Bz = Cz` on `{0,1}^n`. Under that
+/// satisfying-witness invariant, all binary-β contributions vanish, so the
+/// optimized prefix rounds can omit explicit `C` handling and only accumulate
+/// the non-binary β values containing `∞`.
 ///
 /// D is the degree bound of t_i(X) (not s_i); for Spartan, D = 2.
 ///
@@ -124,7 +131,7 @@ pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
 ///
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so Az·Bz - Cz = 0
 /// - Only process betas containing ∞ (non-binary evaluations where contributions are non-zero)
-pub fn build_accumulators_spartan<F, SV>(
+pub fn build_accumulators_spartan_satisfying<F, SV>(
   az: &MultilinearPolynomial<SV>,
   bz: &MultilinearPolynomial<SV>,
   taus: &[F],
@@ -161,7 +168,8 @@ where
   } = build_beta_cache::<2>(l0);
 
   // Only betas containing at least one ∞ coordinate contribute non-zero values.
-  // On binary inputs {0,1}^n, Az·Bz = Cz (R1CS identity), so Az·Bz - Cz = 0.
+  // This builder intentionally omits explicit C terms: on satisfying witnesses,
+  // Az·Bz = Cz on {0,1}^n, so all binary-β contributions are zero already.
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)) % base == 0))
     .collect();
@@ -223,7 +231,8 @@ where
           );
           let bz_ext = &state.bz_extended_evals[..bz_size];
 
-          // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
+          // Only process betas with ∞. Omitting explicit C terms is intentional here:
+          // the satisfying-witness invariant makes every binary-β contribution vanish.
           // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
           for &beta_idx in &betas_with_infty {
             let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
@@ -301,7 +310,7 @@ mod tests {
   /// Binary-β zero shortcut: Az=Bz=Cz=first variable (x0), so Az·Bz−Cz=0 on binary β.
   /// Non-binary β (∞) should yield non-zero in some bucket.
   #[test]
-  fn test_binary_beta_zero_shortcut_behavior() {
+  fn test_binary_beta_zero_shortcut_behavior_for_satisfying_witness() {
     // Use l0=1 so round 0 buckets are fed only by β of length 1 (easy to reason about).
     let l0 = 1;
     let l = 2;
@@ -316,7 +325,7 @@ mod tests {
 
     let taus: Vec<Scalar> = vec![Scalar::from(3u64), Scalar::from(5u64)];
 
-    let (acc, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc, _, _) = build_accumulators_spartan_satisfying(&az, &bz, &taus, l0);
 
     // Only round 0 exists (v is empty). β ranges over U_d with binary {0,1} and non-binary {∞}.
     // Buckets for u = 0 should be zero (binary β), bucket for u = ∞ should be non-zero.
@@ -333,11 +342,12 @@ mod tests {
     );
   }
 
-  /// Test build_accumulators_spartan with i32 witnesses produces consistent results.
+  /// Test `build_accumulators_spartan_satisfying` with i32 satisfying witnesses
+  /// produces consistent results.
   ///
   /// Verifies that running the same computation twice produces the same output.
   #[test]
-  fn test_build_accumulators_spartan_small_consistent() {
+  fn test_build_accumulators_spartan_satisfying_small_consistent() {
     let l0 = 2;
 
     // Define deterministic Az, Bz over {0,1}^4 using small values
@@ -364,8 +374,8 @@ mod tests {
     ];
 
     // Build accumulators twice
-    let (acc1, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
-    let (acc2, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc1, _, _) = build_accumulators_spartan_satisfying(&az, &bz, &taus, l0);
+    let (acc2, _, _) = build_accumulators_spartan_satisfying(&az, &bz, &taus, l0);
 
     // Compare all buckets
     for round in 0..l0 {
@@ -384,9 +394,10 @@ mod tests {
     }
   }
 
-  /// Test build_accumulators_spartan with i32 witnesses using larger inputs to stress test.
+  /// Test `build_accumulators_spartan_satisfying` with i32 satisfying witnesses
+  /// using larger inputs to stress the satisfying-witness shortcut.
   #[test]
-  fn test_build_accumulators_spartan_small_larger() {
+  fn test_build_accumulators_spartan_satisfying_small_larger() {
     let l0 = 3;
     let l = 10;
     let n = 1 << l;
@@ -402,8 +413,8 @@ mod tests {
     let taus: Vec<Scalar> = (0..l).map(|i| Scalar::from((i * 7 + 3) as u64)).collect();
 
     // Build accumulators twice to verify consistency
-    let (acc1, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
-    let (acc2, _, _) = build_accumulators_spartan(&az, &bz, &taus, l0);
+    let (acc1, _, _) = build_accumulators_spartan_satisfying(&az, &bz, &taus, l0);
+    let (acc2, _, _) = build_accumulators_spartan_satisfying(&az, &bz, &taus, l0);
 
     for round in 0..l0 {
       let num_v = (D + 1).pow(round as u32);
