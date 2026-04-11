@@ -953,6 +953,14 @@ pub(crate) mod eq_sumcheck {
     /// to simplify indexing into precomputed arrays, as the first evaluation happens before
     /// any binding operations occur.
     pub fn new(taus: &[E::Scalar]) -> Self {
+      Self::new_with_eval_eq_left(taus, E::Scalar::ONE)
+    }
+
+    /// Creates a new EqSumCheckInstance with an externally supplied prefix eq factor.
+    ///
+    /// This is used when another prover path has already consumed a prefix of rounds and
+    /// we need to continue with the standard eq-sumcheck from the first remaining round.
+    pub fn new_with_eval_eq_left(taus: &[E::Scalar], eval_eq_left: E::Scalar) -> Self {
       let l = taus.len();
       let first_half = l / 2;
 
@@ -1007,7 +1015,7 @@ pub(crate) mod eq_sumcheck {
         second_half: l - first_half,
         round: 1, // Start at 1 to simplify array indexing (round-1 gives 0-based index)
         taus: taus.to_vec(),
-        eval_eq_left: E::Scalar::ONE,
+        eval_eq_left,
         poly_eq_left,
         poly_eq_right,
         eq_tau_0_slope_m1,

@@ -252,6 +252,7 @@ where
 
   let mut small_value_sumcheck =
     SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
+  let mut transition_round = l0;
 
   // ===== Small-Value Rounds (0 to ℓ₀-1) =====
   // During these rounds, we use the precomputed accumulators. Polynomials are NOT bound
@@ -268,9 +269,13 @@ where
     // 2. Get eq factor values ℓ_i(0), ℓ_i(1), ℓ_i(∞)
     let li = small_value_sumcheck.eq_round_values(taus[round]);
 
-    // 3. Derive t(1) from sumcheck constraint: s(0) + s(1) = claim
-    let t1 = derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0)
-      .ok_or(SpartanError::InvalidSumcheckProof)?;
+    // 3. Derive t(1) from the sumcheck constraint. If ℓ_i(1)=0, the optimized
+    // path cannot recover t_i(1), so we fall back to the standard prover from
+    // this round onward.
+    let Some(t1) = derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0) else {
+      transition_round = round;
+      break;
+    };
 
     // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
     let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
@@ -296,35 +301,47 @@ where
 
   // ===== Transition Phase =====
   // Create bound field-element polynomials via batched eq-weighted small-value accumulation.
-  // Binds all l0 variables in a single pass using field×int unreduced accumulation.
+  // Binds all completed small-value rounds in a single pass using field×int
+  // unreduced accumulation.
   let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
   let (mut poly_A, mut poly_B, mut poly_C) =
-    bind_three_polys_batched_small_value(poly_A_small, poly_B_small, poly_C_small, &r[..l0]);
+    bind_three_polys_batched_small_value(
+      poly_A_small,
+      poly_B_small,
+      poly_C_small,
+      &r[..transition_round],
+    );
   info!(
     elapsed_ms = %bind_t.elapsed().as_millis(),
     "bind_poly_vars_transition"
   );
 
   // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
-  // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
-  // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
-  // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
-  e_in_pyramid.pop();
+  let mut eq_instance = if transition_round == l0 {
+    // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
+    // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
+    // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
+    e_in_pyramid.pop();
 
-  // Create EqSumCheckInstance from precomputed pyramids, avoiding redundant eq computation.
-  // The accumulated eq factor from small-value rounds is passed directly.
-  let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
-    e_in_pyramid,
-    e_xout_pyramid,
-    &taus[l0..],
-    small_value_sumcheck.eq_alpha(),
-  );
+    // Reuse the precomputed eq pyramids when all planned small-value rounds succeeded.
+    eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
+      e_in_pyramid,
+      e_xout_pyramid,
+      &taus[l0..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  } else {
+    eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
+      &taus[transition_round..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  };
 
   // Continue with the remaining rounds using the eq instance built from pyramids.
   // The eq_instance was created with taus[l0..], so its internal round counter tracks
   // local rounds. We pass global round index for the round_idx parameter since
   // eval_one_case_cubic_three_inputs uses it for a round-0 optimization.
-  for round in l0..num_rounds {
+  for round in transition_round..num_rounds {
     let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
 
     let poly = {
@@ -533,13 +550,25 @@ mod tests {
       .map(|(&a, &b)| a * b)
       .collect();
 
-    // Convert to field elements
+    // Random taus
+    let taus: Vec<F> = (0..num_vars).map(|_| F::random(&mut rng)).collect();
+
+    run_equivalence_test_with_taus::<SV>(taus, az_small, bz_small, cz_small);
+  }
+
+  fn run_equivalence_test_with_taus<SV>(
+    taus: Vec<F>,
+    az_small: Vec<SV>,
+    bz_small: Vec<SV>,
+    cz_small: Vec<SV>,
+  ) where
+    SV: SmallValue + Mul<Output = SV>,
+    F: SmallValueEngine<SV>,
+  {
+    let num_vars = taus.len();
     let az_vals: Vec<F> = az_small.iter().map(|&v| F::small_to_field(v)).collect();
     let bz_vals: Vec<F> = bz_small.iter().map(|&v| F::small_to_field(v)).collect();
     let cz_vals: Vec<F> = cz_small.iter().map(|&v| F::small_to_field(v)).collect();
-
-    // Random taus
-    let taus: Vec<F> = (0..num_vars).map(|_| F::random(&mut rng)).collect();
 
     // Claim = 0 for satisfying witness (Az·Bz = Cz on {0,1}^n)
     let claim: F = F::ZERO;
@@ -625,6 +654,27 @@ mod tests {
     for num_vars in [2, 3, 4, 6, 10] {
       run_equivalence_test::<i64>(num_vars);
     }
+  }
+
+  #[test]
+  fn test_sumcheck_equivalence_when_first_tau_is_zero() {
+    const NUM_VARS: usize = 6;
+    const SEED: u64 = 0xDEADBEEF;
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let n = 1usize << NUM_VARS;
+
+    let az_small: Vec<i32> = (0..n).map(|_| rng.gen_range(-100i32..=100i32)).collect();
+    let bz_small: Vec<i32> = (0..n).map(|_| rng.gen_range(-100i32..=100i32)).collect();
+    let cz_small: Vec<i32> = az_small
+      .iter()
+      .zip(&bz_small)
+      .map(|(&a, &b)| a * b)
+      .collect();
+
+    let mut taus: Vec<F> = (0..NUM_VARS).map(|_| F::random(&mut rng)).collect();
+    taus[0] = F::ZERO;
+
+    run_equivalence_test_with_taus::<i32>(taus, az_small, bz_small, cz_small);
   }
 }
 
