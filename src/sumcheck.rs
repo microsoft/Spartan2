@@ -37,10 +37,10 @@ use tracing::info;
 ///
 /// This struct contains the compressed univariate polynomials that constitute
 /// the prover's messages in each round of the sum-check protocol.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "")]
 pub struct SumcheckProof<E: Engine> {
-  compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
+  pub(crate) compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
 }
 
 impl<E: Engine> SumcheckProof<E> {
@@ -499,13 +499,12 @@ impl<E: Engine> SumcheckProof<E> {
 
     let num_rounds = taus.len();
 
-    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus);
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(&taus);
 
     for round in 0..num_rounds {
       let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
 
       let poly = {
-        // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
           eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
@@ -572,7 +571,7 @@ impl<E: Engine> SumcheckProof<E> {
   ) -> Result<Vec<E::Scalar>, SpartanError> {
     let mut r_x: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_outer_round = E::Scalar::ZERO;
-    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus.to_vec());
+    let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new(taus);
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
@@ -916,7 +915,15 @@ pub(crate) mod eq_sumcheck {
     /// for efficient lookup during the sumcheck rounds. The round counter starts at 1 (not 0)
     /// to simplify indexing into precomputed arrays, as the first evaluation happens before
     /// any binding operations occur.
-    pub fn new(taus: Vec<E::Scalar>) -> Self {
+    pub fn new(taus: &[E::Scalar]) -> Self {
+      Self::new_with_eval_eq_left(taus, E::Scalar::ONE)
+    }
+
+    /// Creates a new EqSumCheckInstance with an externally supplied prefix eq factor.
+    ///
+    /// This is used when another prover path has already consumed a prefix of rounds and
+    /// we need to continue with the standard eq-sumcheck from the first remaining round.
+    pub fn new_with_eval_eq_left(taus: &[E::Scalar], eval_eq_left: E::Scalar) -> Self {
       let l = taus.len();
       let first_half = l / 2;
 
@@ -971,10 +978,87 @@ pub(crate) mod eq_sumcheck {
         first_half,
         second_half: l - first_half,
         round: 1, // Start at 1 to simplify array indexing (round-1 gives 0-based index)
-        taus,
-        eval_eq_left: E::Scalar::ONE,
+        taus: taus.to_vec(),
+        eval_eq_left,
         poly_eq_left,
         poly_eq_right,
+        eq_tau_0_2_3,
+      }
+    }
+
+    /// Creates an EqSumCheckInstance from precomputed eq pyramids.
+    ///
+    /// This constructor enables reuse of pyramids already computed during accumulator
+    /// building, avoiding redundant eq polynomial computation.
+    ///
+    /// # Arguments
+    ///
+    /// - `e_in_pyramid`: Pyramid for inner variables (ALREADY POPPED by caller).
+    ///   Has `in_vars` layers where layer k has size 2^k.
+    ///   Built from τ[l₀+1 : l₀+in_vars] (first suffix tau τ[l₀] is excluded).
+    /// - `e_xout_pyramid`: Full pyramid for outer variables.
+    ///   Has `xout_vars+1` layers where layer k has size 2^k.
+    ///   Built from τ[l₀+in_vars : ℓ].
+    /// - `taus`: The suffix tau values τ[l₀:ℓ] (needed for `bound()` and `eq_tau_0_2_3`).
+    /// - `eval_eq_left`: Accumulated eq factor from prefix rounds, eq(τ[0:l₀], r[0:l₀]).
+    ///
+    /// # Factorization
+    ///
+    /// The eq polynomial factors as:
+    /// ```text
+    /// eq(τ[l₀:ℓ], x) = eq(τ[l₀], x₀) × eq(τ[l₀+1:l₀+in_vars], x_in) × eq(τ[l₀+in_vars:ℓ], x_out)
+    ///                  └─ tracked in eval_eq_left ─┘   └── e_in_pyramid ──┘   └── e_xout_pyramid ──┘
+    /// ```
+    ///
+    /// The first suffix tau τ[l₀] is handled via `eval_eq_left` and `bound()`,
+    /// matching the Nova optimization where the first variable is tracked separately.
+    pub fn from_pyramids(
+      e_in_pyramid: Vec<Vec<E::Scalar>>,
+      e_xout_pyramid: Vec<Vec<E::Scalar>>,
+      taus: &[E::Scalar],
+      eval_eq_left: E::Scalar,
+    ) -> Self {
+      // in_vars = number of layers in popped pyramid (one less than original)
+      // After pop: e_in_pyramid has in_vars layers for in_vars-1 taus
+      // But first_half should equal in_vars (the number of rounds for left side)
+      let in_vars = e_in_pyramid.len();
+      let xout_vars = e_xout_pyramid.len().saturating_sub(1);
+
+      debug_assert_eq!(
+        in_vars + xout_vars,
+        taus.len(),
+        "Pyramid sizes must match taus length: in_vars={}, xout_vars={}, taus.len()={}",
+        in_vars,
+        xout_vars,
+        taus.len()
+      );
+
+      // Compute eq_tau_0_2_3 for all suffix taus (same logic as new())
+      // These are precomputed eq evaluations at points 0, 2, 3:
+      //   eq(τ, 0) = 1 - τ
+      //   eq(τ, 2) = 3τ - 1
+      //   eq(τ, 3) = 5τ - 2
+      let f2 = E::Scalar::ONE.double();
+      let f1 = E::Scalar::ONE;
+      let eq_tau_0_2_3 = taus
+        .par_iter()
+        .map(|tau| {
+          let tau2 = tau.double();
+          let tau3 = tau2 + tau;
+          let tau5 = tau3 + tau2;
+          (f1 - tau, tau3 - f1, tau5 - f2)
+        })
+        .collect::<Vec<_>>();
+
+      Self {
+        init_num_vars: in_vars + xout_vars,
+        first_half: in_vars,
+        second_half: xout_vars,
+        round: 1,
+        taus: taus.to_vec(),
+        eval_eq_left,
+        poly_eq_left: e_in_pyramid,
+        poly_eq_right: e_xout_pyramid,
         eq_tau_0_2_3,
       }
     }

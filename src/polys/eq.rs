@@ -85,6 +85,110 @@ impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
   }
 }
 
+/// Build a full eq polynomial pyramid from tau values.
+///
+/// Given taus = [τ₀, τ₁, ..., τ_{n-1}], builds a pyramid where:
+/// - Layer 0: [1]
+/// - Layer 1: [1-τ_{n-1}, τ_{n-1}]
+/// - Layer k: eq([τ_{n-k}, ..., τ_{n-1}], ·), size 2^k
+/// - Layer n: eq([τ₀, ..., τ_{n-1}], ·), size 2^n (the full eq table)
+///
+/// The pyramid has n+1 layers total. This structure matches EqSumCheckInstance's
+/// internal representation, enabling pyramid reuse between accumulator building
+/// and sumcheck evaluation.
+///
+/// The taus are processed in reverse order (last tau first) to match the
+/// standard multilinear indexing convention where the first tau corresponds
+/// to the most significant bit of the index.
+///
+/// Each layer is stored as [lo_0, lo_1, ..., lo_n, hi_0, hi_1, ..., hi_n]
+/// where lo values are multiplied by (1-τ) and hi values by τ.
+pub fn build_eq_pyramid<S: PrimeField>(taus: &[S]) -> Vec<Vec<S>> {
+  use rayon::prelude::*;
+
+  let n = taus.len();
+  let mut pyramid = Vec::with_capacity(n + 1);
+
+  // Layer 0: base case [1]
+  pyramid.push(vec![S::ONE]);
+
+  // Build layers 1..n by adding one tau at a time (in reverse order)
+  // Uses the same parallel pattern as EqSumCheckInstance::new
+  for i in 0..n {
+    let tau = taus[n - 1 - i]; // Process taus in reverse
+    let prev = &pyramid[i];
+
+    // Build next layer: [lo_0, ..., lo_n, hi_0, ..., hi_n]
+    // First, copy prev and extend with hi values (prev * tau)
+    let mut next = prev.to_vec();
+    next.par_extend(prev.par_iter().map(|v| *v * tau));
+
+    // Then subtract hi from lo: lo = prev - hi = prev * (1 - tau)
+    let (first, last) = next.split_at_mut(prev.len());
+    first
+      .par_iter_mut()
+      .zip(last)
+      .for_each(|(a, b)| *a -= *b);
+
+    pyramid.push(next);
+  }
+
+  pyramid
+}
+
+/// Compute suffix eq tables for small-value sumcheck optimization.
+///
+/// Given τ = (τ₀, τ₁, ..., τ_{l-1}) and `l0` (the number of small-value rounds),
+/// computes tables `E_y[i]` = eq(τ[i+1:l0], ·) for i = 0..l0-1.
+///
+/// These tables allow O(1) lookup of eq suffix products during accumulation,
+/// avoiding redundant computation in the inner loop.
+///
+/// Returns empty vec if l0 == 0 (optimization disabled).
+pub fn compute_suffix_eq_pyramid<S: PrimeField>(taus: &[S], l0: usize) -> Vec<Vec<S>> {
+  // Handle l0 == 0: no suffix tables needed (small-value optimization disabled)
+  if l0 == 0 {
+    return Vec::new();
+  }
+
+  assert!(taus.len() >= l0, "taus must have at least l0 elements");
+
+  let mut result: Vec<Vec<S>> = vec![vec![]; l0];
+
+  // Base case: E_y[l0-1] = eq([], ·) = [1] (empty suffix)
+  result[l0 - 1] = vec![S::ONE];
+
+  // Build backwards: each step prepends one τ value
+  // E_y[i] = eq(τ[i+1:l0], ·) is built from E_y[i+1] = eq(τ[i+2:l0], ·)
+  // by prepending τ[i+1]
+  for i in (0..l0 - 1).rev() {
+    let tau = taus[i + 1];
+    let prev = &result[i + 1];
+    let prev_len = prev.len();
+
+    // New table has 2× the entries (prepending a new variable)
+    // For multilinear indexing: first variable is high bit
+    // new_idx = new_bit * prev_len + old_idx
+    //
+    // new_bit = 0: eq factor is (1 - τ)
+    // new_bit = 1: eq factor is τ
+    //
+    // Optimized: use 1 multiplication per element instead of 2
+    // hi = v * τ, lo = v - hi = v * (1 - τ)
+    let mut next = vec![S::ZERO; prev_len * 2];
+    let (lo_half, hi_half) = next.split_at_mut(prev_len);
+
+    for ((lo, hi), v) in lo_half.iter_mut().zip(hi_half.iter_mut()).zip(prev.iter()) {
+      *hi = *v * tau;
+      *lo = *v - *hi;
+    }
+
+    result[i] = next;
+  }
+
+  result
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
