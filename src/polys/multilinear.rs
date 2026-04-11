@@ -42,8 +42,12 @@ impl<T> MultilinearPolynomial<T> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
   ///
   /// # Panics
-  /// The number of evaluations must be a power of two.
+  /// Panics if the number of evaluations is empty or not a power of two.
   pub fn new(Z: Vec<T>) -> Self {
+    assert!(
+      !Z.is_empty() && Z.len().is_power_of_two(),
+      "Vector Z must be non-empty and its length must be a power of two."
+    );
     MultilinearPolynomial { Z }
   }
 }
@@ -390,5 +394,17 @@ mod tests {
     // If LSB were bound, results would differ (6 and 8 respectively).
     assert_ne!(poly.Z[0], Scalar::from(6u64));
     assert_ne!(poly.Z[1], Scalar::from(8u64));
+  }
+
+  #[test]
+  #[should_panic(expected = "Vector Z must be non-empty and its length must be a power of two.")]
+  fn test_new_rejects_empty() {
+    let _: MultilinearPolynomial<Scalar> = MultilinearPolynomial::new(vec![]);
+  }
+
+  #[test]
+  #[should_panic(expected = "Vector Z must be non-empty and its length must be a power of two.")]
+  fn test_new_rejects_non_power_of_two_length() {
+    let _ = MultilinearPolynomial::new(vec![Scalar::ONE, Scalar::ZERO, Scalar::ONE]);
   }
 }
