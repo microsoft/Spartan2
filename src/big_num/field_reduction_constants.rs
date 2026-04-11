@@ -1,7 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // SPDX-License-Identifier: MIT
 
-//! Field-specific constants for Montgomery reduction.
+//! Field-specific constants for modular reduction.
+//!
+//! This module defines two independent traits for reduction constants:
+//! - [`FieldReductionConstants`] - for Montgomery REDC (all fields)
+//! - [`BarrettReductionConstants`] - for generic μ-Barrett reduction (field × small_int)
+//!
+//! Implementations are generated via macros in `macros.rs`.
+
+// ==========================================================================
+// FieldReductionConstants - Constants for Montgomery REDC
+// ==========================================================================
 
 /// Trait providing precomputed constants for efficient modular reduction.
 ///
@@ -35,6 +45,38 @@ pub trait FieldReductionConstants {
   /// for 256-bit primes, we need up to ⌊R/p⌋ final subtractions to reduce
   /// the result into the canonical range [0, p).
   const MAX_REDC_SUB_CORRECTIONS: usize;
+}
+
+// ==========================================================================
+// BarrettReductionConstants - Constants for generic μ-Barrett reduction
+// ==========================================================================
+
+/// Constants for generic Barrett reduction.
+///
+/// Used by `barrett_reduce_6` and `barrett_reduce_7` for accumulating
+/// field × small_int products with delayed reduction.
+pub trait BarrettReductionConstants {
+  /// The 4-limb prime modulus p (little-endian, 256 bits)
+  const MODULUS: [u64; 4];
+
+  /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
+  const R384_MOD: [u64; 4];
+
+  /// Barrett reciprocal μ = ⌊2^512 / p⌋ (5 limbs).
+  ///
+  /// Used in true Barrett reduction to compute the quotient estimate:
+  /// q ≈ x × μ / 2^512. This allows reducing a 6-limb value to 4 limbs
+  /// with exactly one conditional subtract.
+  const BARRETT_MU: [u64; 5];
+
+  /// Whether 2p < 2^256, enabling the 4-limb Barrett fast path.
+  ///
+  /// When true, Barrett remainder r ∈ [0, 2p) fits in 4 limbs, so we can:
+  /// - Use `mul_3x4_lo4` instead of `mul_3x4_lo5` (saves 3 multiplications)
+  /// - Skip the 5th limb check entirely
+  ///
+  /// True for BN254Fr (p < 2^255). False for T256Fq (p ≈ 2^256).
+  const USE_4_LIMB_BARRETT: bool;
 }
 
 // =============================================================================
@@ -137,6 +179,55 @@ macro_rules! test_field_reduction_constants {
       #[test]
       fn max_redc_sub_corrections() {
         $crate::big_num::field_reduction_constants::test_max_redc_sub_corrections_impl::<$field>();
+      }
+    }
+  };
+}
+
+// =============================================================================
+// Barrett reduction test helpers
+// =============================================================================
+
+#[cfg(test)]
+fn limbs5_to_biguint(limbs: &[u64; 5]) -> BigUint {
+  let mut bytes = [0u8; 40];
+  for (i, limb) in limbs.iter().enumerate() {
+    bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+  }
+  BigUint::from_bytes_le(&bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn test_barrett_mu_impl<F: BarrettReductionConstants>() {
+  let p = limbs_to_biguint(&F::MODULUS);
+  let two_pow_512 = BigUint::from(1u64) << 512;
+  let expected = &two_pow_512 / &p;
+  let actual = limbs5_to_biguint(&F::BARRETT_MU);
+  assert_eq!(actual, expected, "BARRETT_MU mismatch");
+}
+
+#[cfg(test)]
+pub(crate) fn test_r384_mod_impl<F: BarrettReductionConstants>() {
+  let p = limbs_to_biguint(&F::MODULUS);
+  let two_pow_384 = BigUint::from(1u64) << 384;
+  let expected = &two_pow_384 % &p;
+  let actual = limbs_to_biguint(&F::R384_MOD);
+  assert_eq!(actual, expected, "R384_MOD mismatch");
+}
+
+/// Generate tests for `BarrettReductionConstants` implementation.
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_barrett_reduction_constants {
+  ($mod_name:ident, $field:ty) => {
+    mod $mod_name {
+      #[test]
+      fn barrett_mu() {
+        $crate::big_num::field_reduction_constants::test_barrett_mu_impl::<$field>();
+      }
+      #[test]
+      fn r384_mod() {
+        $crate::big_num::field_reduction_constants::test_r384_mod_impl::<$field>();
       }
     }
   };
