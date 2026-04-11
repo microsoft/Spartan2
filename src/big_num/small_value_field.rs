@@ -183,7 +183,7 @@ where
     .enumerate()
     .map(|(i, f)| {
       F::try_field_to_small(f).ok_or_else(|| SpartanError::SmallValueOverflow {
-        value: format!("{:?}", f),
+        value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
         context: format!("vec_to_small at index {}", i),
       })
     })

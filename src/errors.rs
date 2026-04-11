@@ -108,7 +108,7 @@ pub enum SpartanError {
     max: usize,
   },
   /// returned when a field element cannot be converted to a small integer
-  #[error("SmallValueOverflow: {context}")]
+  #[error("SmallValueOverflow: {context}; value={value}")]
   SmallValueOverflow {
     /// The value that could not be converted
     value: String,
