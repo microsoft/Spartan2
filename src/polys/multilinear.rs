@@ -486,4 +486,16 @@ mod tests {
     assert_ne!(poly.Z[0], Scalar::from(6u64));
     assert_ne!(poly.Z[1], Scalar::from(8u64));
   }
+
+  #[test]
+  #[should_panic(expected = "Vector Z must be non-empty and its length must be a power of two.")]
+  fn test_new_rejects_empty() {
+    let _: MultilinearPolynomial<Scalar> = MultilinearPolynomial::new(vec![]);
+  }
+
+  #[test]
+  #[should_panic(expected = "Vector Z must be non-empty and its length must be a power of two.")]
+  fn test_new_rejects_non_power_of_two_length() {
+    let _ = MultilinearPolynomial::new(vec![Scalar::ONE, Scalar::ZERO, Scalar::ONE]);
+  }
 }
