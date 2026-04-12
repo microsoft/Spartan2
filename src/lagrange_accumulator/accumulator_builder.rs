@@ -16,7 +16,9 @@ use super::{
 };
 use crate::{
   big_num::{DelayedReduction, SmallValue, SmallValueEngine},
-  polys::{eq::build_eq_pyramid, eq::compute_suffix_eq_pyramid, multilinear::MultilinearPolynomial},
+  polys::{
+    eq::build_eq_pyramid, eq::compute_suffix_eq_pyramid, multilinear::MultilinearPolynomial,
+  },
 };
 use ff::PrimeField;
 use num_traits::Zero;
@@ -26,78 +28,41 @@ use super::index::compute_idx4;
 
 /// Polynomial degree D for Spartan's small-value sumcheck.
 /// For Spartan's cubic relation (A·B - C), D=2 yields quadratic t_i.
-pub const SPARTAN_T_DEGREE: usize = 2;
+pub(crate) const SPARTAN_T_DEGREE: usize = 2;
 
-/// Precomputed eq polynomial pyramids with balanced split.
-struct EqSplitTables<F: PrimeField> {
-  /// Full pyramid for inner variables: eq(τ[l0..l0+in_vars], ·)
-  /// Layer k has size 2^k, layer in_vars is the full table (size 2^in_vars)
-  e_in_pyramid: Vec<Vec<F>>,
-  /// Full pyramid for outer variables: eq(τ[l0+in_vars..], ·)
-  /// Layer k has size 2^k, layer xout_vars is the full table (size 2^xout_vars)
-  e_xout_pyramid: Vec<Vec<F>>,
-  /// Suffix eq pyramid for prefix variables, Vec per round
-  e_y: Vec<Vec<F>>,
-}
-
-/// Cached prefix indices for O(1) scatter access.
-pub(crate) struct BetaPrefixCache {
-  cache: Csr<AccumulatorPrefixIndex>,
-  num_betas: usize,
-}
-
-/// Precompute eq polynomial pyramids with balanced split for e_in and e_xout.
+/// Builds the table accumulators `A_i(v, u)` used in Spartan's first `l0`
+/// outer sumcheck rounds.
 ///
-/// Returns (tables, in_vars, xout_vars) where:
-/// - in_vars = ceil((l - l0) / 2) - variables for inner loop (e_in)
-/// - xout_vars = floor((l - l0) / 2) - variables for outer loop (e_xout)
+/// For round `i = 1, ..., l0`, the table is indexed by:
+/// - `v ∈ U_2^{i-1}`: the prefix fixed by earlier rounds
+/// - `u ∈ Û_2 = {∞, 0}`: the current coordinate
 ///
-/// The balanced split reduces precomputation cost by ~33% compared to the
-/// asymmetric l/2 split, and enables odd number of rounds.
+/// Each entry stores the suffix-summed contribution
 ///
-/// Both e_in and e_xout are returned as full pyramids (not just top layers),
-/// enabling reuse by EqSumCheckInstance for the remaining sumcheck rounds.
-fn precompute_eq_tables<F: PrimeField>(taus: &[F], l0: usize) -> (EqSplitTables<F>, usize, usize) {
-  let l = taus.len();
-  let suffix_vars = l - l0;
-  let in_vars = suffix_vars.div_ceil(2); // ceiling: e_in larger (inner loop, sequential access)
-  let xout_vars = suffix_vars - in_vars; // floor: e_xout smaller (outer loop, reused)
-
-  // Build full pyramids (not just top layers) for reuse by EqSumCheckInstance
-  let e_in_pyramid = build_eq_pyramid(&taus[l0..l0 + in_vars]); // in_vars+1 layers
-  let e_xout_pyramid = build_eq_pyramid(&taus[l0 + in_vars..]); // xout_vars+1 layers
-  let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round, total 2^l0 - 1
-
-  (
-    EqSplitTables {
-      e_in_pyramid,
-      e_xout_pyramid,
-      e_y,
-    },
-    in_vars,
-    xout_vars,
-  )
-}
-
-/// Build beta → prefix index cache for O(1) scatter access.
-pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
-  let base: usize = D + 1;
-  let num_betas = base.pow(l0 as u32);
-  let mut cache: Csr<AccumulatorPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
-  for b in 0..num_betas {
-    let beta = LagrangeIndex::<D>::from_flat_index(b, l0);
-    let entries = compute_idx4(&beta);
-    cache.push(&entries);
-  }
-
-  BetaPrefixCache { cache, num_betas }
-}
-
-/// Procedure 9: Build accumulators A_i(v, u) for Spartan's first sum-check (Algorithm 6).
+/// `A_i(v, u) = Σ_{y ∈ {0,1}^{l0-i}} Σ_{x ∈ {0,1}^{ℓ-l0}}
+///     eq((τ_{i+1}, ..., τ_ℓ), (y, x)) · Az(v, u, y, x) · Bz(v, u, y, x)`.
 ///
-/// Computes accumulators for: g(X) = eq(τ, X) · (Az(X) · Bz(X) - Cz(X))
+/// Here:
+/// - `y` is the remaining binary suffix inside the first `l0` variables
+/// - `x` is the suffix after the first `l0` variables
+/// - `Az(v, u, y, x)` and `Bz(v, u, y, x)` evaluate the first `l0` coordinates
+///   on the degree-2 Lagrange domain `U_2 = {∞, 0, 1}`, while the remaining
+///   coordinates stay on the Boolean hypercube
 ///
-/// D is the degree bound of t_i(X) (not s_i); for Spartan, D = 2.
+/// Intuitively, `A_i(v, u)` is a table bucket that collects every contribution
+/// compatible with the prefix `v` and current coordinate `u`.
+///
+/// The table stores only `u ∈ Û_2`, not `u = 1`, because the `u = 1` value is
+/// recovered later from the sumcheck relation.
+///
+/// This builder is Spartan-outer-specific, not a generic Algorithm 6 backend.
+/// It relies on the structure of Spartan's first sumcheck:
+/// - on `{0,1}^n`, satisfying witnesses obey `Az(x) · Bz(x) - Cz(x) = 0`, so
+///   purely binary β points can be skipped
+/// - if a prefix coordinate is `∞`, only the highest-degree term contributes,
+///   so the linear `Cz` term drops out of the accumulator
+///
+/// D is the degree bound of `t_i(X)` (not `s_i`); for Spartan, `D = 2`.
 ///
 /// # Type Parameters
 ///
@@ -107,7 +72,7 @@ pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
 /// # Returns
 ///
 /// A tuple of (accumulators, e_in_pyramid, e_xout_pyramid) where:
-/// - accumulators: The computed Lagrange accumulators for small-value rounds
+/// - accumulators: The computed table accumulators for the small-value rounds
 /// - e_in_pyramid: Full eq pyramid for inner variables τ[l0..l0+in_vars], has in_vars+1 layers
 /// - e_xout_pyramid: Full eq pyramid for outer variables τ[l0+in_vars..ℓ], has xout_vars+1 layers
 ///
@@ -123,8 +88,9 @@ pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
 /// # Spartan-specific optimizations (D=2)
 ///
 /// - Skip binary betas: for satisfying witnesses, Az·Bz = Cz on {0,1}^n, so Az·Bz - Cz = 0
-/// - Only process betas containing ∞ (non-binary evaluations where contributions are non-zero)
-pub fn build_accumulators_spartan<F, SV>(
+/// - Only process betas containing ∞: these are exactly the points where the
+///   highest-degree `Az·Bz` term can contribute after the `Cz` term drops out
+pub(crate) fn build_accumulators_spartan<F, SV>(
   az: &MultilinearPolynomial<SV>,
   bz: &MultilinearPolynomial<SV>,
   taus: &[F],
@@ -149,8 +115,14 @@ where
   let num_x_out = 1usize << xout_vars;
 
   // Get top layers (full eq tables) for accumulator computation
-  let e_in = eq_tables.e_in_pyramid.last().expect("e_in_pyramid non-empty");
-  let e_xout = eq_tables.e_xout_pyramid.last().expect("e_xout_pyramid non-empty");
+  let e_in = eq_tables
+    .e_in_pyramid
+    .last()
+    .expect("e_in_pyramid non-empty");
+  let e_xout = eq_tables
+    .e_xout_pyramid
+    .last()
+    .expect("e_xout_pyramid non-empty");
   debug_assert_eq!(e_in.len(), 1 << in_vars);
   debug_assert_eq!(e_xout.len(), 1 << xout_vars);
 
@@ -285,6 +257,71 @@ where
     eq_tables.e_in_pyramid,
     eq_tables.e_xout_pyramid,
   )
+}
+
+/// Precomputed eq polynomial pyramids with balanced split.
+struct EqSplitTables<F: PrimeField> {
+  /// Full pyramid for inner variables: eq(τ[l0..l0+in_vars], ·)
+  /// Layer k has size 2^k, layer in_vars is the full table (size 2^in_vars)
+  e_in_pyramid: Vec<Vec<F>>,
+  /// Full pyramid for outer variables: eq(τ[l0+in_vars..], ·)
+  /// Layer k has size 2^k, layer xout_vars is the full table (size 2^xout_vars)
+  e_xout_pyramid: Vec<Vec<F>>,
+  /// Suffix eq pyramid for prefix variables, Vec per round
+  e_y: Vec<Vec<F>>,
+}
+
+/// Cached prefix indices for O(1) scatter access.
+pub(crate) struct BetaPrefixCache {
+  cache: Csr<AccumulatorPrefixIndex>,
+  num_betas: usize,
+}
+
+/// Precompute eq polynomial pyramids with balanced split for e_in and e_xout.
+///
+/// Returns (tables, in_vars, xout_vars) where:
+/// - in_vars = ceil((l - l0) / 2) - variables for inner loop (e_in)
+/// - xout_vars = floor((l - l0) / 2) - variables for outer loop (e_xout)
+///
+/// The balanced split reduces precomputation cost by ~33% compared to the
+/// asymmetric l/2 split, and enables odd number of rounds.
+///
+/// Both e_in and e_xout are returned as full pyramids (not just top layers),
+/// enabling reuse by EqSumCheckInstance for the remaining sumcheck rounds.
+fn precompute_eq_tables<F: PrimeField>(taus: &[F], l0: usize) -> (EqSplitTables<F>, usize, usize) {
+  let l = taus.len();
+  let suffix_vars = l - l0;
+  let in_vars = suffix_vars.div_ceil(2); // ceiling: e_in larger (inner loop, sequential access)
+  let xout_vars = suffix_vars - in_vars; // floor: e_xout smaller (outer loop, reused)
+
+  // Build full pyramids (not just top layers) for reuse by EqSumCheckInstance
+  let e_in_pyramid = build_eq_pyramid(&taus[l0..l0 + in_vars]); // in_vars+1 layers
+  let e_xout_pyramid = build_eq_pyramid(&taus[l0 + in_vars..]); // xout_vars+1 layers
+  let e_y = compute_suffix_eq_pyramid(&taus[..l0], l0); // Vec per round, total 2^l0 - 1
+
+  (
+    EqSplitTables {
+      e_in_pyramid,
+      e_xout_pyramid,
+      e_y,
+    },
+    in_vars,
+    xout_vars,
+  )
+}
+
+/// Build beta → prefix index cache for O(1) scatter access.
+pub(crate) fn build_beta_cache<const D: usize>(l0: usize) -> BetaPrefixCache {
+  let base: usize = D + 1;
+  let num_betas = base.pow(l0 as u32);
+  let mut cache: Csr<AccumulatorPrefixIndex> = Csr::with_capacity(num_betas, num_betas * l0);
+  for b in 0..num_betas {
+    let beta = LagrangeIndex::<D>::from_flat_index(b, l0);
+    let entries = compute_idx4(&beta);
+    cache.push(&entries);
+  }
+
+  BetaPrefixCache { cache, num_betas }
 }
 
 #[cfg(test)]

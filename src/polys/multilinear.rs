@@ -69,7 +69,7 @@ impl<T> MultilinearPolynomial<T> {
 
   /// Creates a new polynomial with known non-zero prefix lengths for each half.
   /// For a polynomial of size 2n: Z[i]=0 for lo_eff <= i < n, Z[n+i]=0 for hi_eff <= i < n.
-  pub fn new_with_halves(Z: Vec<Scalar>, lo_eff: usize, hi_eff: usize) -> Self {
+  pub fn new_with_halves(Z: Vec<T>, lo_eff: usize, hi_eff: usize) -> Self {
     MultilinearPolynomial { Z, lo_eff, hi_eff }
   }
 
@@ -94,6 +94,15 @@ impl<T: Field> MultilinearPolynomial<T> {
   /// Exploits zero-structure: when hi half is all zero or sparse, uses
   /// cheaper operations (scale by (1-r) instead of sub+mul+add).
   #[inline(always)]
+
+  /// This operation modifies the polynomial in-place.
+  ///
+  /// Variable order is MSB-first: the "top" variable is the most-significant
+  /// Boolean coordinate in the evaluation table. Equivalently, the table is
+  /// laid out as `[p(0, ...), p(1, ...)]`, so binding the top variable combines
+  /// the left half and right half of `Z`.
+  ///
+  /// Formula: `new[i] = old[i] + r * (old[i + n] - old[i])`.
   pub fn bind_poly_var_top(&mut self, r: &T) {
     assert!(
       self.Z.len() >= 2,

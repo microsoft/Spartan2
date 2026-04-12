@@ -4,13 +4,109 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Lagrange basis computation for U_d = {∞, 0, 1, ..., d-1}.
+//! Lagrange-domain evaluation types and basis computation for
+//! `U_d = {∞, 0, 1, ..., d-1}`.
 
-use super::{domain::LagrangePoint, evals::LagrangeEvals};
+use super::domain::LagrangePoint;
 use ff::PrimeField;
 
-/// Evaluated Lagrange basis at a single r, stored in LagrangePoint order.
-pub type LagrangeBasisEval<F, const D: usize> = LagrangeEvals<F, D>;
+/// Evaluations at all `D + 1` points of `U_d = {∞, 0, 1, ..., D-1}`.
+///
+/// Values are stored in [`LagrangePoint<D>`] order, with the point at infinity
+/// separated from the `D` finite points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LagrangeDomainEvals<T, const D: usize> {
+  infinity: T,
+  finite: [T; D],
+}
+
+impl<T: Copy, const D: usize> LagrangeDomainEvals<T, D> {
+  /// Create new evaluations from infinity and finite values.
+  #[inline]
+  pub(crate) fn new(infinity: T, finite: [T; D]) -> Self {
+    Self { infinity, finite }
+  }
+
+  /// Get value at infinity.
+  #[inline]
+  pub(crate) fn at_infinity(&self) -> T {
+    self.infinity
+  }
+
+  /// Get value at zero (finite point 0).
+  #[inline]
+  pub(crate) fn at_zero(&self) -> T {
+    self.finite[0]
+  }
+
+  /// Get value at one (finite point 1).
+  ///
+  /// # Panics (debug builds only)
+  /// Panics if `D < 2`.
+  #[inline]
+  pub(crate) fn at_one(&self) -> T {
+    debug_assert!(D >= 2, "at_one() requires D >= 2");
+    self.finite[1]
+  }
+
+  /// Iterate values in `U_d` order: `[∞, 0, 1, ..., D-1]`.
+  pub(crate) fn iter_ud_order(&self) -> impl Iterator<Item = T> + '_ {
+    std::iter::once(self.infinity).chain(self.finite.iter().copied())
+  }
+}
+
+/// Test-only helper methods for `LagrangeDomainEvals`.
+#[cfg(test)]
+impl<T: Copy, const D: usize> LagrangeDomainEvals<T, D> {
+  /// Get the value at a specific domain point.
+  #[inline]
+  pub(in crate::lagrange_accumulator) fn get(&self, p: LagrangePoint<D>) -> T {
+    match p {
+      LagrangePoint::Infinity => self.infinity,
+      LagrangePoint::Finite(k) => self.finite[k],
+    }
+  }
+}
+
+impl<F: PrimeField> LagrangeDomainEvals<F, 2> {
+  /// Evaluate the represented linear polynomial at `u`.
+  ///
+  /// For evaluations of a degree-1 polynomial over `U_2 = {∞, 0, 1}`, this
+  /// computes `L(u) = l_∞ · u + l_0`.
+  #[inline]
+  pub(crate) fn eval_linear_at(&self, u: F) -> F {
+    self.infinity * u + self.finite[0]
+  }
+}
+
+/// Evaluations at all `D` points of `Û_d = U_d \ {1}`.
+///
+/// This reduced domain excludes `1` because `s(1)` is recovered later from the
+/// sum-check relation `s(0) + s(1) = claim`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReducedLagrangeDomainEvals<T, const D: usize> {
+  data: [T; D],
+}
+
+impl<T: Copy, const D: usize> ReducedLagrangeDomainEvals<T, D> {
+  /// Create from array indexed by `LagrangeHatPoint::to_index()`.
+  #[inline]
+  pub(crate) fn from_array(data: [T; D]) -> Self {
+    Self { data }
+  }
+
+  /// Get value at infinity (index 0).
+  #[inline]
+  pub(crate) fn at_infinity(&self) -> T {
+    self.data[0]
+  }
+
+  /// Get value at zero (index 1).
+  #[inline]
+  pub(crate) fn at_zero(&self) -> T {
+    self.data[1]
+  }
+}
 
 /// Precomputes data for the 1-D Lagrange basis on U_d = {∞, 0, 1, ..., d-1}.
 ///
@@ -20,15 +116,30 @@ pub type LagrangeBasisEval<F, const D: usize> = LagrangeEvals<F, D>;
 ///
 /// With these weights, basis evaluation at any r costs O(D) multiplies
 /// and uses no per-round inversions.
-pub struct LagrangeBasisFactory<F, const D: usize> {
+pub(crate) struct LagrangeBasisFactory<F, const D: usize> {
   finite_points: [F; D],
   weights: [F; D],
 }
 
-/// R_i tensor coefficients used in Algorithm 6.
+/// Tensor-product coefficients `R_i(v)` used to recover `t_i(u)` from the
+/// accumulator table `A_i(v, u)`.
 ///
-/// Indexing matches LagrangeIndex::to_flat_index() over U_d^{i-1}.
-pub struct LagrangeCoeff<F, const D: usize> {
+/// After the first `i - 1` verifier challenges have been bound, the round-`i`
+/// values are computed as
+///
+/// `t_i(u) = Σ_{v ∈ U_d^{i-1}} R_i(v) · A_i(v, u)`.
+///
+/// For `v = (v_1, ..., v_{i-1})`, the coefficient is the tensor-product
+/// Lagrange basis evaluation
+///
+/// `R_i(v) = ∏_{j=1}^{i-1} L_{v_j}(r_j)`,
+///
+/// where `L_{v_j}` is the 1-D Lagrange basis polynomial on `U_d` evaluated at
+/// the verifier challenge `r_j`.
+///
+/// `coeffs` stores the flattened table of `R_i(v)` values in
+/// `LagrangeIndex::to_flat_index()` order over `U_d^{i-1}`.
+pub(crate) struct LagrangeCoeff<F, const D: usize> {
   coeffs: Vec<F>,
 }
 
@@ -39,30 +150,33 @@ impl<F: PrimeField, const D: usize> Default for LagrangeCoeff<F, D> {
 }
 
 impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
-  /// Initialize R_1 = [1].
-  pub fn new() -> Self {
+  /// Initialize the base case `R_1 = [1]`.
+  ///
+  /// In the first round there is no prefix `v`, so the coefficient table has a
+  /// single entry equal to 1.
+  pub(crate) fn new() -> Self {
     Self {
       coeffs: vec![F::ONE],
     }
   }
 
   /// Returns the number of coefficients.
-  pub fn len(&self) -> usize {
+  pub(crate) fn len(&self) -> usize {
     self.coeffs.len()
   }
 
-  /// Returns true if there are no coefficients (always false by construction).
-  pub fn is_empty(&self) -> bool {
-    self.coeffs.is_empty()
-  }
-
   /// Returns a slice of the coefficients.
-  pub fn as_slice(&self) -> &[F] {
+  pub(crate) fn as_slice(&self) -> &[F] {
     &self.coeffs
   }
 
-  /// Extend: R_{i+1} = R_i ⊗ L(r_i).
-  pub fn extend(&mut self, basis: &LagrangeBasisEval<F, D>) {
+  /// Extend the coefficient table by one verifier challenge:
+  /// `R_{i+1} = R_i ⊗ L(r_i)`.
+  ///
+  /// If `R_i` is indexed by `v ∈ U_d^{i-1}` and `L(r_i)` is the 1-D Lagrange
+  /// basis on `U_d`, then the new table is indexed by `(v, k) ∈ U_d^i` and
+  /// stores `R_{i+1}(v, k) = R_i(v) · L_k(r_i)`.
+  pub(crate) fn extend(&mut self, basis: &LagrangeDomainEvals<F, D>) {
     let base = D + 1;
     let mut next = vec![F::ZERO; self.coeffs.len() * base];
     for (i, &c) in self.coeffs.iter().enumerate() {
@@ -85,7 +199,7 @@ impl<F: PrimeField, const D: usize> LagrangeCoeff<F, D> {
 
 impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   /// Construct the domain using an embedding from indices to field elements.
-  pub fn new(embed: impl Fn(usize) -> F) -> Self {
+  pub(crate) fn new(embed: impl Fn(usize) -> F) -> Self {
     let finite_points = std::array::from_fn(embed);
     let weights = Self::weights_general(&finite_points);
 
@@ -98,13 +212,13 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
   /// Evaluate the Lagrange basis at r.
   ///
   /// Returns values in LagrangePoint order: [L∞(r), L0(r), L1(r), ..., L_{d-1}(r)].
-  pub fn basis_at(&self, r: F) -> LagrangeBasisEval<F, D> {
+  pub(crate) fn basis_at(&self, r: F) -> LagrangeDomainEvals<F, D> {
     // One-hot if r equals a finite domain point.
     for (k, &xk) in self.finite_points.iter().enumerate() {
       if r == xk {
         let mut finite = [F::ZERO; D];
         finite[k] = F::ONE;
-        return LagrangeEvals::new(F::ZERO, finite);
+        return LagrangeDomainEvals::new(F::ZERO, finite);
       }
     }
 
@@ -131,7 +245,7 @@ impl<F: PrimeField, const D: usize> LagrangeBasisFactory<F, D> {
       finite[k] = numer * self.weights[k];
     }
 
-    LagrangeEvals::new(prod, finite)
+    LagrangeDomainEvals::new(prod, finite)
   }
 
   fn weights_general(points: &[F; D]) -> [F; D] {
@@ -234,10 +348,10 @@ mod tests {
       let r = Scalar::from(k as u64);
       let basis = factory.basis_at(r);
 
-      assert_eq!(basis.infinity, Scalar::ZERO);
+      assert_eq!(basis.at_infinity(), Scalar::ZERO);
       for j in 0..D {
         let expected = if j == k { Scalar::ONE } else { Scalar::ZERO };
-        assert_eq!(basis.finite[j], expected);
+        assert_eq!(basis.get(LagrangePoint::Finite(j)), expected);
       }
     }
   }
@@ -252,7 +366,7 @@ mod tests {
     let basis = factory.basis_at(r);
 
     let expected = (0..D).fold(Scalar::ONE, |acc, k| acc * (r - Scalar::from(k as u64)));
-    assert_eq!(basis.infinity, expected);
+    assert_eq!(basis.at_infinity(), expected);
   }
 
   // Property: Σ_k L_k(r) = 1 for any r (constant polynomial).
@@ -264,7 +378,9 @@ mod tests {
     let r = Scalar::from(7u64);
     let basis = factory.basis_at(r);
 
-    let sum = basis.finite.iter().fold(Scalar::ZERO, |acc, v| acc + v);
+    let sum = (0..D).fold(Scalar::ZERO, |acc, j| {
+      acc + basis.get(LagrangePoint::Finite(j))
+    });
     assert_eq!(sum, Scalar::ONE);
   }
 
@@ -273,7 +389,7 @@ mod tests {
   fn test_basis_eval_order_and_get() {
     const D: usize = 3;
 
-    let eval = LagrangeEvals::<Scalar, D>::new(
+    let eval = LagrangeDomainEvals::<Scalar, D>::new(
       Scalar::from(2u64),
       [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
     );
@@ -312,7 +428,7 @@ mod tests {
     }
     for r in rs {
       let basis = factory.basis_at(r);
-      let reconstructed = s_inf * basis.infinity + s0 * basis.finite[0] + s1 * basis.finite[1];
+      let reconstructed = s_inf * basis.at_infinity() + s0 * basis.at_zero() + s1 * basis.at_one();
       assert_eq!(reconstructed, eval(r));
     }
   }
@@ -342,8 +458,10 @@ mod tests {
     }
     for r in rs {
       let basis = factory.basis_at(r);
-      let reconstructed =
-        s_inf * basis.infinity + s0 * basis.finite[0] + s1 * basis.finite[1] + s2 * basis.finite[2];
+      let reconstructed = s_inf * basis.at_infinity()
+        + s0 * basis.at_zero()
+        + s1 * basis.at_one()
+        + s2 * basis.get(LagrangePoint::Finite(2));
       assert_eq!(reconstructed, eval(r));
     }
   }
@@ -359,7 +477,7 @@ mod tests {
     assert_eq!(coeff.len(), 1);
     assert_eq!(coeff.get(0), Scalar::ONE);
 
-    let basis = LagrangeEvals::<Scalar, D>::new(
+    let basis = LagrangeDomainEvals::<Scalar, D>::new(
       Scalar::from(2u64),
       [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
     );
@@ -384,11 +502,11 @@ mod tests {
     const D: usize = 3;
     let base = D + 1;
 
-    let basis1 = LagrangeEvals::<Scalar, D>::new(
+    let basis1 = LagrangeDomainEvals::<Scalar, D>::new(
       Scalar::from(2u64),
       [Scalar::from(3u64), Scalar::from(5u64), Scalar::from(7u64)],
     );
-    let basis2 = LagrangeEvals::<Scalar, D>::new(
+    let basis2 = LagrangeDomainEvals::<Scalar, D>::new(
       Scalar::from(11u64),
       [
         Scalar::from(13u64),

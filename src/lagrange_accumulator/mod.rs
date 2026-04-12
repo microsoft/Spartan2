@@ -12,42 +12,25 @@
 //! # Module Structure
 //!
 //! - [`domain`]: Domain types (LagrangePoint, LagrangeHatPoint, LagrangeIndex)
-//! - [`evals`]: Evaluation containers (LagrangeEvals, LagrangeHatEvals)
-//! - [`basis`]: Lagrange basis computation (LagrangeBasisFactory, LagrangeCoeff)
+//! - [`basis`]: Domain eval containers, basis computation, and tensor coefficients
 //! - [`extension`]: Multilinear polynomial extension (Procedure 6)
 //! - [`accumulator`]: Accumulator data structures
 //! - [`accumulator_builder`]: Accumulator construction (Procedure 9)
 //! - [`index`]: Index mapping (Definition A.5)
 //! - [`thread_state`]: Thread-local buffers for parallel execution
-//! - [`eq_round`]: Per-round equality factor tracking
 
 mod accumulator;
 mod accumulator_builder;
 mod basis;
 mod csr;
 mod domain;
-mod eq_round;
-mod evals;
 pub(crate) mod extension;
 mod index;
 mod thread_state;
 
-// Re-exports for public API
-#[allow(unused_imports)]
-pub use domain::{LagrangeHatPoint, LagrangeIndex, LagrangePoint, ValueOneExcluded};
-
-// Evaluation containers
-pub use evals::{LagrangeEvals, LagrangeHatEvals};
-
-// Basis computation
-pub use basis::{LagrangeBasisFactory, LagrangeCoeff};
-
-// Accumulators
-#[allow(unused_imports)]
-pub use accumulator::{LagrangeAccumulators, RoundAccumulator};
-
-// Builder functions
-pub use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators_spartan};
-
-// Eq round factor and derivation
-pub use eq_round::{EqRoundFactor, derive_t1};
+// Crate-internal surface used by the small-value sumcheck implementation.
+pub(crate) use accumulator::LagrangeAccumulators;
+pub(crate) use accumulator_builder::{SPARTAN_T_DEGREE, build_accumulators_spartan};
+pub(crate) use basis::{
+  LagrangeBasisFactory, LagrangeCoeff, LagrangeDomainEvals, ReducedLagrangeDomainEvals,
+};

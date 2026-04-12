@@ -22,7 +22,7 @@
 ///
 /// Type parameter `D` is the degree bound, so valid finite values are 0..D-1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LagrangePoint<const D: usize> {
+pub(in crate::lagrange_accumulator) enum LagrangePoint<const D: usize> {
   /// The point at infinity — represents leading coefficient
   Infinity,
   /// A finite field value 0, 1, ..., D-1
@@ -36,7 +36,7 @@ impl<const D: usize> LagrangePoint<D> {
   /// Convert to flat index for array access.
   /// Infinity → 0, Finite(v) → v + 1
   #[inline]
-  pub fn to_index(self) -> usize {
+  pub(in crate::lagrange_accumulator) fn to_index(self) -> usize {
     match self {
       LagrangePoint::Infinity => 0,
       LagrangePoint::Finite(v) => v + 1,
@@ -49,7 +49,7 @@ impl<const D: usize> LagrangePoint<D> {
   /// # Panics (debug builds only)
   /// Panics if idx > D
   #[inline]
-  pub fn from_index(idx: usize) -> Self {
+  pub(in crate::lagrange_accumulator) fn from_index(idx: usize) -> Self {
     debug_assert!(
       idx <= D,
       "LagrangePoint::from_index({idx}) out of bounds for D={D}"
@@ -63,7 +63,7 @@ impl<const D: usize> LagrangePoint<D> {
 
   /// Is this a binary point (0 or 1)?
   #[inline]
-  pub fn is_binary(self) -> bool {
+  pub(in crate::lagrange_accumulator) fn is_binary(self) -> bool {
     matches!(self, LagrangePoint::Finite(0) | LagrangePoint::Finite(1))
   }
 
@@ -71,7 +71,7 @@ impl<const D: usize> LagrangePoint<D> {
   ///
   /// Returns `None` for Finite(1) since 1 ∉ Û_d.
   #[inline]
-  pub fn to_ud_hat(self) -> Option<LagrangeHatPoint<D>> {
+  pub(in crate::lagrange_accumulator) fn to_ud_hat(self) -> Option<LagrangeHatPoint<D>> {
     LagrangeHatPoint::try_from(self).ok()
   }
 }
@@ -94,7 +94,7 @@ impl<const D: usize> LagrangePoint<D> {
 /// The value 1 is excluded from Û_d because s(1) can be recovered
 /// from the sum-check constraint s(0) + s(1) = claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ValueOneExcluded;
+pub(in crate::lagrange_accumulator) struct ValueOneExcluded;
 
 impl std::fmt::Display for ValueOneExcluded {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -111,7 +111,7 @@ impl std::error::Error for ValueOneExcluded {}
 ///
 /// Type parameter `D` is the degree bound (size of Û_d).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LagrangeHatPoint<const D: usize> {
+pub(in crate::lagrange_accumulator) enum LagrangeHatPoint<const D: usize> {
   /// The point at infinity — represents leading coefficient
   Infinity,
   /// A finite field value: 0, 2, 3, ... (never 1)
@@ -122,7 +122,7 @@ impl<const D: usize> LagrangeHatPoint<D> {
   /// Convert to array index.
   /// Mapping: ∞ → 0, 0 → 1, 2 → 2, 3 → 3, ...
   #[inline]
-  pub fn to_index(self) -> usize {
+  pub(in crate::lagrange_accumulator) fn to_index(self) -> usize {
     match self {
       LagrangeHatPoint::Infinity => 0,
       LagrangeHatPoint::Finite(0) => 1,
@@ -132,7 +132,7 @@ impl<const D: usize> LagrangeHatPoint<D> {
 
   /// Convert to LagrangePoint (U_d point)
   #[inline]
-  pub fn to_ud_point(self) -> LagrangePoint<D> {
+  pub(in crate::lagrange_accumulator) fn to_ud_point(self) -> LagrangePoint<D> {
     match self {
       LagrangeHatPoint::Infinity => LagrangePoint::Infinity,
       LagrangeHatPoint::Finite(v) => LagrangePoint::Finite(v),
@@ -204,26 +204,28 @@ impl<const D: usize> TryFrom<LagrangePoint<D>> for LagrangeHatPoint<D> {
 ///
 /// Type parameter `D` is the degree bound (U_D has D+1 points).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LagrangeIndex<const D: usize>(pub Vec<LagrangePoint<D>>);
+pub(in crate::lagrange_accumulator) struct LagrangeIndex<const D: usize>(
+  pub(in crate::lagrange_accumulator) Vec<LagrangePoint<D>>,
+);
 
 impl<const D: usize> LagrangeIndex<D> {
   /// Base of the domain U_D (= D + 1)
   pub const BASE: usize = D + 1;
 
   /// Number of coordinates
-  pub fn len(&self) -> usize {
+  pub(in crate::lagrange_accumulator) fn len(&self) -> usize {
     self.0.len()
   }
 
   /// Returns true if there are no coordinates.
-  pub fn is_empty(&self) -> bool {
+  pub(in crate::lagrange_accumulator) fn is_empty(&self) -> bool {
     self.0.is_empty()
   }
 
   /// Convert from flat index (mixed-radix decoding)
   ///
   /// Uses compile-time BASE = D + 1
-  pub fn from_flat_index(mut idx: usize, len: usize) -> Self {
+  pub(in crate::lagrange_accumulator) fn from_flat_index(mut idx: usize, len: usize) -> Self {
     let mut points = vec![LagrangePoint::Infinity; len];
     for i in (0..len).rev() {
       points[i] = LagrangePoint::from_index(idx % Self::BASE);

@@ -71,10 +71,7 @@ where
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![
-        <F as DelayedReduction<SV::Product>>::Accumulator::zero();
-        num_betas
-      ],
+      partial_sums: vec![<F as DelayedReduction<SV::Product>>::Accumulator::zero(); num_betas],
       acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![SV::zero(); prefix_size],
       bz_prefix_boolean_evals: vec![SV::zero(); prefix_size],

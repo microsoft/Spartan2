@@ -16,11 +16,8 @@ use super::domain::{LagrangeIndex, LagrangePoint};
 /// - Binary suffix y = (β_{i+1}, ..., β_{ℓ₀}) as flat index
 ///
 /// Compact 12-byte layout for cache efficiency (5 entries per 64-byte cache line).
-/// Field sizes chosen for practical bounds:
-/// - `v_idx`: up to 3^ℓ₀ where ℓ₀ ≤ 20 → max ~3.5B, fits u32
-/// - `y_idx`: up to 2^ℓ₀ where ℓ₀ ≤ 32 → fits u32
-/// - `round_0`: 0..ℓ₀ where ℓ₀ ≤ 255 → fits u8
-/// - `u_idx`: 0..D where D ≤ 255 → fits u8
+/// The narrowed integer fields are an internal layout optimization. The code
+/// debug-asserts that each computed index fits before casting.
 #[derive(Clone, Copy)]
 pub(crate) struct AccumulatorPrefixIndex {
   /// Prefix v as flat index in U_d^{i-1}
@@ -77,6 +74,11 @@ pub(crate) fn compute_idx4<const D: usize>(beta: &LagrangeIndex<D>) -> Vec<Accum
     let Some(u_hat) = u.to_ud_hat() else {
       continue; // u = Finite(1), not in Û_d
     };
+
+    debug_assert!(u32::try_from(prefix_idx[i - 1]).is_ok());
+    debug_assert!(u32::try_from(suffix_idx[i]).is_ok());
+    debug_assert!(u8::try_from(i - 1).is_ok());
+    debug_assert!(u8::try_from(u_hat.to_index()).is_ok());
 
     result.push(AccumulatorPrefixIndex {
       v_idx: prefix_idx[i - 1] as u32,
