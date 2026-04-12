@@ -925,7 +925,9 @@ pub(crate) mod eq_sumcheck {
   //! The claim-derived evaluation points (computing only 2 N-scaling sums per round
   //! instead of 3) follow BDDT (eprint 2025/1117, Section 6.2).
   use crate::{
-    big_num::DelayedReduction, polys::multilinear::MultilinearPolynomial, traits::Engine,
+    big_num::DelayedReduction,
+    polys::{eq::build_eq_pyramid, multilinear::MultilinearPolynomial},
+    traits::Engine,
   };
   use ff::{Field, PrimeField};
   use rayon::prelude::*;
@@ -964,38 +966,18 @@ pub(crate) mod eq_sumcheck {
       let l = taus.len();
       let first_half = l / 2;
 
-      let compute_eq_polynomials = |taus: Vec<&E::Scalar>| -> Vec<Vec<E::Scalar>> {
-        let len = taus.len();
-        let mut result = Vec::with_capacity(len + 1);
-
-        result.push(vec![E::Scalar::ONE]);
-
-        for i in 0..len {
-          let tau = taus[i];
-
-          let prev = &result[i];
-          let mut v_next = prev.to_vec();
-          v_next.par_extend(prev.par_iter().map(|v| *v * tau));
-          let (first, last) = v_next.split_at_mut(prev.len());
-          first.par_iter_mut().zip(last).for_each(|(a, b)| *a -= *b);
-
-          result.push(v_next);
-        }
-
-        result
-      };
-
       let (left_taus, right_taus) = taus.split_at(first_half);
       // Skip the first element of left_taus because the equality polynomial evaluation
       // for the first variable is tracked separately in eval_eq_left (initialized to 1).
       // This matches the Nova optimization approach where the left part is processed
       // incrementally through the bound() method rather than via lookup tables.
-      let left_taus = left_taus.iter().skip(1).rev().collect::<Vec<_>>();
-      let right_taus = right_taus.iter().rev().collect::<Vec<_>>();
+      // `build_eq_pyramid` itself consumes taus in reverse order, so we pass the
+      // natural-order slices directly here.
+      let left_taus = if first_half > 0 { &left_taus[1..] } else { &[] };
 
       let (poly_eq_left, poly_eq_right) = rayon::join(
-        || compute_eq_polynomials(left_taus),
-        || compute_eq_polynomials(right_taus),
+        || build_eq_pyramid(left_taus),
+        || build_eq_pyramid(right_taus),
       );
 
       let eq_tau_0_slope_m1 = taus
@@ -1509,6 +1491,97 @@ pub(crate) mod eq_sumcheck {
       // is init_num_vars (as we do init_num_vars rounds), so the index is always >= 0.
       &self.poly_eq_right[self.init_num_vars - self.round]
     }
+  }
+  #[cfg(test)]
+  mod tests {
+    use super::EqSumCheckInstance;
+    use crate::{polys::eq::build_eq_pyramid, provider::PallasHyraxEngine};
+
+    type E = PallasHyraxEngine;
+    type F = <E as crate::traits::Engine>::Scalar;
+
+    #[test]
+    fn test_new_with_eval_eq_left_reuses_shared_pyramid_logic() {
+      for len in [0usize, 1, 2, 5] {
+        let taus: Vec<F> = (0..len).map(|i| F::from((i as u64) + 2)).collect();
+        let first_half = len / 2;
+        let eval_eq_left = F::from(17u64);
+
+        let instance = EqSumCheckInstance::<E>::new_with_eval_eq_left(&taus, eval_eq_left);
+
+        let (left_taus, right_taus) = taus.split_at(first_half);
+        let expected_left = if first_half > 0 {
+          build_eq_pyramid(&left_taus[1..])
+        } else {
+          build_eq_pyramid(&[])
+        };
+        let expected_right = build_eq_pyramid(right_taus);
+
+        assert_eq!(instance.poly_eq_left, expected_left);
+        assert_eq!(instance.poly_eq_right, expected_right);
+      }
+    }
+  }
+
+  /// Evaluates a cubic polynomial at points 0, 2, and 3 for three-input case.
+  ///
+  /// Computes evaluation points for the sum-check protocol when combining three
+  /// multilinear polynomials using a cubic combination function. Uses cached
+  /// evaluations at 0 and 1 to efficiently compute the required evaluation points.
+  ///
+  /// # Arguments
+  /// * `round_idx` - Current round index in the sum-check protocol
+  /// * `zero_a`, `one_a` - Evaluations of polynomial A at 0 and 1
+  /// * `zero_b`, `one_b` - Evaluations of polynomial B at 0 and 1
+  /// * `zero_c`, `one_c` - Evaluations of polynomial C at 0 and 1
+  ///
+  /// # Returns
+  /// A tuple `(eval_0, eval_2, eval_3)` containing the evaluation points.
+  #[inline]
+  fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
+    round_idx: usize,
+    zero_a: &Scalar,
+    one_a: &Scalar,
+    zero_b: &Scalar,
+    one_b: &Scalar,
+    zero_c: &Scalar,
+    one_c: &Scalar,
+  ) -> (Scalar, Scalar, Scalar) {
+    // Optimization: In the first round (round == 0), eval_0 is always ZERO.
+    // This is mathematically correct because in round 0 of the sumcheck protocol with equality
+    // polynomials, when evaluating at point 0, the equality polynomial factor eq(tau, 0, ...)
+    // evaluates to (1 - tau_0) for the first variable. The sumcheck instance's update_evals
+    // method multiplies eval_0 by eq_tau_0_p, which for round 0 equals (1 - tau_0) * eval_eq_left.
+    // The contribution from eval_0 to the final sum is zero in this case due to the structure of
+    // the equality polynomial and how it combines with the cubic terms in the first round.
+    // This optimization avoids unnecessary computation of zero_a * zero_b - zero_c when the result
+    // will be zeroed out anyway by the equality polynomial evaluation at point 0 in round 0.
+    let eval_0 = if round_idx == 0 {
+      Scalar::ZERO
+    } else {
+      *zero_a * *zero_b - *zero_c
+    };
+
+    let double_one_a = one_a.double();
+    let double_one_b = one_b.double();
+    let double_one_c = one_c.double();
+
+    let eval_2 = {
+      let point_a = double_one_a - *zero_a;
+      let point_b = double_one_b - *zero_b;
+      let point_c = double_one_c - *zero_c;
+
+      point_a * point_b - point_c
+    };
+
+    let eval_3 = {
+      let point_a = double_one_a + one_a - zero_a.double();
+      let point_b = double_one_b + one_b - zero_b.double();
+      let point_c = double_one_c + one_c - zero_c.double();
+      point_a * point_b - point_c
+    };
+
+    (eval_0, eval_2, eval_3)
   }
 }
 

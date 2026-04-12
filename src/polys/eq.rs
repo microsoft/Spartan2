@@ -164,10 +164,7 @@ pub fn build_eq_pyramid<S: PrimeField>(taus: &[S]) -> Vec<Vec<S>> {
 
     // Then subtract hi from lo: lo = prev - hi = prev * (1 - tau)
     let (first, last) = next.split_at_mut(prev.len());
-    first
-      .par_iter_mut()
-      .zip(last)
-      .for_each(|(a, b)| *a -= *b);
+    first.par_iter_mut().zip(last).for_each(|(a, b)| *a -= *b);
 
     pyramid.push(next);
   }

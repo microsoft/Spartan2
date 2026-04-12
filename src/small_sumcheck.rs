@@ -4,12 +4,20 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Small-value sumcheck implementation for the first ℓ₀ rounds.
+//! Small-value sumcheck implementation for the first ℓ₀ rounds of Spartan's
+//! outer cubic sum-check.
 //!
 //! This module provides optimized sumcheck proving using native integer
 //! arithmetic for polynomials with small coefficients. The key optimization
 //! is replacing expensive field multiplications with native integer operations
 //! during the initial rounds when polynomial values are guaranteed to be small.
+//!
+//! This implementation is not a generic small-value prover for arbitrary
+//! `A(X) * B(X) - C(X)` relations. It relies on the Spartan outer-sumcheck
+//! structure:
+//! - `A(x) * B(x) - C(x) = 0` on the Boolean hypercube for satisfying witnesses
+//! - contributions with an `∞` prefix coordinate only need the highest-degree
+//!   term, so the linear `C` term drops out there
 //!
 //! Based on "Speeding Up Sum-Check Proving" by Suyash Bagad, Quang Dao,
 //! Yuval Domb, and Justin Thaler. <https://eprint.iacr.org/2025/1117.pdf>
@@ -19,11 +27,11 @@
 //! The main entry point is [`prove_cubic_small_value`], which implements
 
 use crate::{
-  big_num::{DelayedReduction, SmallValue, SmallValueEngine},
+  big_num::{DelayedReduction, SmallValue, SmallValueEngine, SmallValueField},
   errors::SpartanError,
   lagrange_accumulator::{
-    EqRoundFactor, LagrangeAccumulators, LagrangeBasisFactory, LagrangeCoeff, LagrangeEvals,
-    LagrangeHatEvals, SPARTAN_T_DEGREE, build_accumulators_spartan, derive_t1,
+    LagrangeAccumulators, LagrangeBasisFactory, LagrangeCoeff, LagrangeDomainEvals,
+    ReducedLagrangeDomainEvals, SPARTAN_T_DEGREE, build_accumulators_spartan,
   },
   polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial, univariate::UniPoly},
   start_span,
@@ -46,8 +54,220 @@ use crate::sumcheck::PAR_THRESHOLD;
 struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
   accumulators: LagrangeAccumulators<Scalar, D>,
   coeff: LagrangeCoeff<Scalar, D>,
-  eq_factor: EqRoundFactor<Scalar>,
+  eq_alpha: Scalar,
   basis_factory: LagrangeBasisFactory<Scalar, D>,
+}
+
+
+/// Prove Spartan's outer `poly_A * poly_B - poly_C` relation using Algorithm 6
+/// (EqPoly-SmallValueSC).
+///
+/// This function combines small-value optimization (Algorithm 4) for the first ℓ₀ rounds
+/// with eq-poly optimization (Algorithm 5) for the remaining rounds.
+///
+/// Field-element polynomials are created internally via batched eq-weighted binding
+/// from the small-value inputs, eliminating the need for pre-allocated field polys.
+///
+/// This path is Spartan-outer-specific. It assumes:
+/// - the witness satisfies `A(x) * B(x) - C(x) = 0` on `{0,1}^n`
+/// - for evaluation points containing `∞`, only the highest-degree term matters,
+///   so `C` does not contribute to the accumulator
+///
+/// Generic over `SmallValue` to support both i32/i64 and i64/i128 configurations.
+///
+/// # Type Parameters
+///
+/// - `LB`: Number of small-value rounds (ℓ₀). The actual number of rounds used is
+///   `min(LB, num_rounds.saturating_sub(1))`, so the transition path always leaves
+///   at least one suffix variable for the standard eq-sumcheck continuation.
+///   Caller should ensure input values are bounded by roughly `SV::MAX / 3^LB`
+///   for safe Lagrange extension, since extending a Boolean prefix to
+///   `U_2 = {∞, 0, 1}` can grow magnitudes by a factor of about `3^LB`.
+///   Typical values are 3-4 for practical instances (3^4 = 81× growth factor).
+pub fn prove_cubic_small_value<E, SV, const LB: usize>(
+  claim: &E::Scalar,
+  taus: Vec<E::Scalar>,
+  poly_A_small: &MultilinearPolynomial<SV>,
+  poly_B_small: &MultilinearPolynomial<SV>,
+  poly_C_small: &MultilinearPolynomial<SV>,
+  transcript: &mut E::TE,
+) -> Result<(SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+where
+  E: Engine,
+  SV: SmallValue,
+  E::Scalar: SmallValueEngine<SV>,
+{
+  let num_rounds = taus.len();
+  let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
+  let mut polys: Vec<crate::polys::univariate::CompressedUniPoly<E::Scalar>> =
+    Vec::with_capacity(num_rounds);
+  let mut claim_per_round = *claim;
+
+  // Determine ℓ₀: number of small-value rounds (at most LB, but must be < num_rounds
+  // to leave at least one suffix variable for the transition phase)
+  let l0 = std::cmp::min(LB, num_rounds.saturating_sub(1));
+
+  // If l0 is 0, the small-value optimization is not applicable
+  if l0 == 0 {
+    let mut poly_a = small_poly_to_field::<E::Scalar, SV>(poly_A_small);
+    let mut poly_b = small_poly_to_field::<E::Scalar, SV>(poly_B_small);
+    let mut poly_c = small_poly_to_field::<E::Scalar, SV>(poly_C_small);
+    return SumcheckProof::prove_cubic_with_three_inputs(
+      claim,
+      taus,
+      &mut poly_a,
+      &mut poly_b,
+      &mut poly_c,
+      transcript,
+    );
+  }
+
+  // ===== Pre-computation Phase =====
+  // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic.
+  // Also builds eq pyramids for reuse by EqSumCheckInstance.
+  // Internally computes eq tables with balanced split and precomputed eq_cache.
+  // Uses: small × small → intermediate (for Az·Bz products),
+  // then intermediate × field (for eq weighting via DelayedReduction).
+  let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
+    build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
+
+  let mut small_value_sumcheck =
+    SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
+  let mut transition_round = l0;
+
+  // ===== Small-Value Rounds (0 to ℓ₀-1) =====
+  // During these rounds, we use the precomputed accumulators. Polynomials are NOT bound
+  // during these rounds - that will happen in the transition phase.
+  #[allow(clippy::needless_range_loop)]
+  for round in 0..l0 {
+    let (_round_span, round_t) = start_span!("sumcheck_smallvalue_round", round = round);
+
+    // 1. Get t_i evaluations from accumulators
+    let t_all = small_value_sumcheck.eval_t_all_u(round);
+    let t_inf = t_all.at_infinity();
+    let t0 = t_all.at_zero();
+
+    // 2. Get eq factor values ℓ_i(0), ℓ_i(1), ℓ_i(∞)
+    let li = small_value_sumcheck.eq_round_values(taus[round]);
+
+    // 3. Derive t(1) from the sumcheck constraint. If ℓ_i(1)=0, the optimized
+    // path cannot recover t_i(1), so we fall back to the standard prover from
+    // this round onward.
+    let Some(t1) = derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0) else {
+      transition_round = round;
+      break;
+    };
+
+    // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
+    let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+
+    // 5. Transcript interaction
+    transcript.absorb(b"p", &poly);
+    let r_i = transcript.squeeze(b"c")?;
+    r.push(r_i);
+    polys.push(poly.compress());
+
+    // 6. Update claim
+    claim_per_round = poly.evaluate(&r_i);
+
+    // 7. Advance small-value state (updates R_{i+1} and the prefix eq factor)
+    small_value_sumcheck.advance(&li, r_i);
+
+    info!(
+      elapsed_ms = %round_t.elapsed().as_millis(),
+      round = round,
+      "sumcheck_smallvalue_round"
+    );
+  }
+
+  // ===== Transition Phase =====
+  // Create bound field-element polynomials via batched eq-weighted small-value accumulation.
+  // Binds all completed small-value rounds in a single pass using field×int
+  // unreduced accumulation.
+  let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
+  let (mut poly_A, mut poly_B, mut poly_C) = bind_three_polys_batched_small_value(
+    poly_A_small,
+    poly_B_small,
+    poly_C_small,
+    &r[..transition_round],
+  );
+  info!(
+    elapsed_ms = %bind_t.elapsed().as_millis(),
+    "bind_poly_vars_transition"
+  );
+
+  // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
+  let mut eq_instance = if transition_round == l0 {
+    // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
+    // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
+    // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
+    e_in_pyramid.pop();
+
+    // Reuse the precomputed eq pyramids when all planned small-value rounds succeeded.
+    eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
+      e_in_pyramid,
+      e_xout_pyramid,
+      &taus[l0..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  } else {
+    eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
+      &taus[transition_round..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  };
+
+  // Continue with the remaining rounds using the eq instance built from pyramids.
+  // The eq_instance was created with taus[l0..], so its internal round counter tracks
+  // local rounds. We pass global round index for the round_idx parameter since
+  // eval_one_case_cubic_three_inputs uses it for a round-0 optimization.
+  for round in transition_round..num_rounds {
+    let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
+
+    let poly = {
+      let (_eval_span, eval_t) = start_span!("compute_eval_points");
+      // Pass global round index for round_idx since it's used for the round-0 optimization
+      let (eval_point_0, eval_point_2, eval_point_3) =
+        eq_instance.evaluation_points_cubic_with_three_inputs(round, &poly_A, &poly_B, &poly_C);
+      if eval_t.elapsed().as_millis() > 0 {
+        info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
+      }
+
+      let evals = [
+        eval_point_0,
+        claim_per_round - eval_point_0,
+        eval_point_2,
+        eval_point_3,
+      ];
+      UniPoly::from_evals(&evals)?
+    };
+
+    // Transcript interaction
+    transcript.absorb(b"p", &poly);
+    let r_i = transcript.squeeze(b"c")?;
+    r.push(r_i);
+    polys.push(poly.compress());
+
+    // Update claim
+    claim_per_round = poly.evaluate(&r_i);
+
+    // Bind polynomials and advance eq instance
+    let (_bind_span, bind_t) = start_span!("bind_poly_vars");
+    poly_A.bind_poly_var_top(&r_i);
+    poly_B.bind_poly_var_top(&r_i);
+    poly_C.bind_poly_var_top(&r_i);
+    eq_instance.bound(&r_i);
+    info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
+    info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
+  }
+
+  Ok((
+    SumcheckProof {
+      compressed_polys: polys,
+    },
+    r,
+    vec![poly_A[0], poly_B[0], poly_C[0]],
+  ))
 }
 
 impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
@@ -59,7 +279,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
     Self {
       accumulators,
       coeff: LagrangeCoeff::new(),
-      eq_factor: EqRoundFactor::new(),
+      eq_alpha: Scalar::ONE,
       basis_factory,
     }
   }
@@ -71,18 +291,21 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
   }
 
   /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
-  fn eval_t_all_u(&self, round: usize) -> LagrangeHatEvals<Scalar, D> {
-    self.accumulators.round(round).eval_t_all_u(&self.coeff)
+  fn eval_t_all_u(&self, round: usize) -> ReducedLagrangeDomainEvals<Scalar, D> {
+    self.accumulators.eval_t_all_u(round, &self.coeff)
   }
 
   /// Compute ℓ_i values for the provided w_i.
-  fn eq_round_values(&self, w_i: Scalar) -> LagrangeEvals<Scalar, 2> {
-    self.eq_factor.values(w_i)
+  fn eq_round_values(&self, w_i: Scalar) -> LagrangeDomainEvals<Scalar, 2> {
+    let l0 = self.eq_alpha * (Scalar::ONE - w_i);
+    let l1 = self.eq_alpha * w_i;
+    let linf = self.eq_alpha * (w_i.double() - Scalar::ONE);
+    LagrangeDomainEvals::new(linf, [l0, l1])
   }
 
   /// Advance the round state with the verifier challenge r_i.
-  fn advance(&mut self, li: &LagrangeEvals<Scalar, 2>, r_i: Scalar) {
-    self.eq_factor.advance(li, r_i);
+  fn advance(&mut self, li: &LagrangeDomainEvals<Scalar, 2>, r_i: Scalar) {
+    self.eq_alpha = li.eval_linear_at(r_i);
     self.coeff.extend(&self.basis_factory.basis_at(r_i));
   }
 
@@ -91,8 +314,19 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
   /// After l0 rounds, this gives the eq factor that must be incorporated
   /// into the remaining sumcheck rounds.
   fn eq_alpha(&self) -> Scalar {
-    self.eq_factor.alpha()
+    self.eq_alpha
   }
+}
+
+/// Derive `t_i(1)` from the sumcheck relation
+/// `claim_prev = ℓ_i(0) · t_i(0) + ℓ_i(1) · t_i(1)`.
+///
+/// Returns `None` when `ℓ_i(1) = 0`, since the optimized path cannot recover
+/// `t_i(1)` in that case.
+fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
+  let s0 = l0 * t0;
+  let s1 = claim_prev - s0;
+  l1.invert().into_option().map(|inv| s1 * inv)
 }
 
 /// Build the cubic round polynomial s_i(X) in coefficient form for Spartan.
@@ -101,7 +335,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
 /// - ℓ_i(X) is the linear eq factor
 /// - t_i(X) is the degree-2 polynomial from accumulators
 fn build_univariate_round_polynomial<F: PrimeField>(
-  li: &LagrangeEvals<F, 2>,
+  li: &LagrangeDomainEvals<F, 2>,
   t0: F,
   t1: F,
   t_inf: F,
@@ -195,200 +429,15 @@ where
   )
 }
 
-/// Prove poly_A * poly_B - poly_C using Algorithm 6 (EqPoly-SmallValueSC).
-///
-/// This function combines small-value optimization (Algorithm 4) for the first ℓ₀ rounds
-/// with eq-poly optimization (Algorithm 5) for the remaining rounds.
-///
-/// Field-element polynomials are created internally via batched eq-weighted binding
-/// from the small-value inputs, eliminating the need for pre-allocated field polys.
-///
-/// Generic over `SmallValue` to support both i32/i64 and i64/i128 configurations.
-///
-/// # Type Parameters
-///
-/// - `LB`: Number of small-value rounds (ℓ₀). The actual number of rounds used is
-///   `min(LB, num_rounds / 2)`. Caller should ensure input values are bounded by
-///   `SV::MAX / 3^LB` for safe Lagrange extension (see [`ExtensionBound`]).
-///   Typical values are 3-4 for practical instances (3^4 = 81× growth factor).
-pub fn prove_cubic_small_value<E, SV, const LB: usize>(
-  claim: &E::Scalar,
-  taus: Vec<E::Scalar>,
-  poly_A_small: &MultilinearPolynomial<SV>,
-  poly_B_small: &MultilinearPolynomial<SV>,
-  poly_C_small: &MultilinearPolynomial<SV>,
-  transcript: &mut E::TE,
-) -> Result<(SumcheckProof<E>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
+/// Convert a small-value polynomial to its field-valued representation.
+fn small_poly_to_field<F, SV>(poly: &MultilinearPolynomial<SV>) -> MultilinearPolynomial<F>
 where
-  E: Engine,
-  SV: SmallValue,
-  E::Scalar: SmallValueEngine<SV>,
+  F: PrimeField + SmallValueField<SV>,
+  SV: Copy,
 {
-  let num_rounds = taus.len();
-  let mut r: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
-  let mut polys: Vec<crate::polys::univariate::CompressedUniPoly<E::Scalar>> =
-    Vec::with_capacity(num_rounds);
-  let mut claim_per_round = *claim;
-
-  // Determine ℓ₀: number of small-value rounds (at most LB, but must be < num_rounds
-  // to leave at least one suffix variable for the transition phase)
-  let l0 = std::cmp::min(LB, num_rounds.saturating_sub(1));
-
-  // If l0 is 0, the small-value optimization is not applicable
-  if l0 == 0 {
-    return Err(SpartanError::SmallValueRoundsZero {
-      context: format!("l0={}, num_vars={}", l0, num_rounds),
-    });
-  }
-
-  // ===== Pre-computation Phase =====
-  // Build accumulators A_i(v, u) for all i ∈ [ℓ₀] using small-value arithmetic.
-  // Also builds eq pyramids for reuse by EqSumCheckInstance.
-  // Internally computes eq tables with balanced split and precomputed eq_cache.
-  // Uses: small × small → intermediate (for Az·Bz products),
-  // then intermediate × field (for eq weighting via DelayedReduction).
-  let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
-    build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
-
-  let mut small_value_sumcheck =
-    SmallValueSumCheck::<E::Scalar, SPARTAN_T_DEGREE>::from_accumulators(accumulators);
-  let mut transition_round = l0;
-
-  // ===== Small-Value Rounds (0 to ℓ₀-1) =====
-  // During these rounds, we use the precomputed accumulators. Polynomials are NOT bound
-  // during these rounds - that will happen in the transition phase.
-  #[allow(clippy::needless_range_loop)]
-  for round in 0..l0 {
-    let (_round_span, round_t) = start_span!("sumcheck_smallvalue_round", round = round);
-
-    // 1. Get t_i evaluations from accumulators
-    let t_all = small_value_sumcheck.eval_t_all_u(round);
-    let t_inf = t_all.at_infinity();
-    let t0 = t_all.at_zero();
-
-    // 2. Get eq factor values ℓ_i(0), ℓ_i(1), ℓ_i(∞)
-    let li = small_value_sumcheck.eq_round_values(taus[round]);
-
-    // 3. Derive t(1) from the sumcheck constraint. If ℓ_i(1)=0, the optimized
-    // path cannot recover t_i(1), so we fall back to the standard prover from
-    // this round onward.
-    let Some(t1) = derive_t1(li.at_zero(), li.at_one(), claim_per_round, t0) else {
-      transition_round = round;
-      break;
-    };
-
-    // 4. Build round polynomial s_i(X) = ℓ_i(X) · t_i(X)
-    let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
-
-    // 5. Transcript interaction
-    transcript.absorb(b"p", &poly);
-    let r_i = transcript.squeeze(b"c")?;
-    r.push(r_i);
-    polys.push(poly.compress());
-
-    // 6. Update claim
-    claim_per_round = poly.evaluate(&r_i);
-
-    // 7. Advance small-value state (updates R_{i+1} and eq_factor)
-    small_value_sumcheck.advance(&li, r_i);
-
-    info!(
-      elapsed_ms = %round_t.elapsed().as_millis(),
-      round = round,
-      "sumcheck_smallvalue_round"
-    );
-  }
-
-  // ===== Transition Phase =====
-  // Create bound field-element polynomials via batched eq-weighted small-value accumulation.
-  // Binds all completed small-value rounds in a single pass using field×int
-  // unreduced accumulation.
-  let (_bind_span, bind_t) = start_span!("bind_poly_vars_transition");
-  let (mut poly_A, mut poly_B, mut poly_C) =
-    bind_three_polys_batched_small_value(
-      poly_A_small,
-      poly_B_small,
-      poly_C_small,
-      &r[..transition_round],
-    );
-  info!(
-    elapsed_ms = %bind_t.elapsed().as_millis(),
-    "bind_poly_vars_transition"
-  );
-
-  // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
-  let mut eq_instance = if transition_round == l0 {
-    // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
-    // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
-    // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
-    e_in_pyramid.pop();
-
-    // Reuse the precomputed eq pyramids when all planned small-value rounds succeeded.
-    eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
-      e_in_pyramid,
-      e_xout_pyramid,
-      &taus[l0..],
-      small_value_sumcheck.eq_alpha(),
-    )
-  } else {
-    eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
-      &taus[transition_round..],
-      small_value_sumcheck.eq_alpha(),
-    )
-  };
-
-  // Continue with the remaining rounds using the eq instance built from pyramids.
-  // The eq_instance was created with taus[l0..], so its internal round counter tracks
-  // local rounds. We pass global round index for the round_idx parameter since
-  // eval_one_case_cubic_three_inputs uses it for a round-0 optimization.
-  for round in transition_round..num_rounds {
-    let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
-
-    let poly = {
-      let (_eval_span, eval_t) = start_span!("compute_eval_points");
-      // Pass global round index for round_idx since it's used for the round-0 optimization
-      let (eval_point_0, eval_point_2, eval_point_3) =
-        eq_instance.evaluation_points_cubic_with_three_inputs(round, &poly_A, &poly_B, &poly_C);
-      if eval_t.elapsed().as_millis() > 0 {
-        info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
-      }
-
-      let evals = [
-        eval_point_0,
-        claim_per_round - eval_point_0,
-        eval_point_2,
-        eval_point_3,
-      ];
-      UniPoly::from_evals(&evals)?
-    };
-
-    // Transcript interaction
-    transcript.absorb(b"p", &poly);
-    let r_i = transcript.squeeze(b"c")?;
-    r.push(r_i);
-    polys.push(poly.compress());
-
-    // Update claim
-    claim_per_round = poly.evaluate(&r_i);
-
-    // Bind polynomials and advance eq instance
-    let (_bind_span, bind_t) = start_span!("bind_poly_vars");
-    poly_A.bind_poly_var_top(&r_i);
-    poly_B.bind_poly_var_top(&r_i);
-    poly_C.bind_poly_var_top(&r_i);
-    eq_instance.bound(&r_i);
-    info!(elapsed_ms = %bind_t.elapsed().as_millis(), "bind_poly_vars");
-    info!(elapsed_ms = %round_t.elapsed().as_millis(), round = round, "sumcheck_round");
-  }
-
-  Ok((
-    SumcheckProof {
-      compressed_polys: polys,
-    },
-    r,
-    vec![poly_A[0], poly_B[0], poly_C[0]],
-  ))
+  MultilinearPolynomial::new(poly.Z.iter().copied().map(F::small_to_field).collect())
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -406,6 +455,71 @@ mod tests {
 
   type E = PallasHyraxEngine;
   type F = <E as Engine>::Scalar;
+
+  fn eqe_bit(w: F, x: F) -> F {
+    F::ONE - w - x + (w * x).double()
+  }
+
+  #[test]
+  fn test_eq_round_values_matches_formula() {
+    let mut small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::new(
+      LagrangeAccumulators::new(1),
+      LagrangeBasisFactory::new(|i| F::from(i as u64)),
+    );
+    small_value.eq_alpha = F::from(13u64);
+
+    let w = F::from(7u64);
+    let li = small_value.eq_round_values(w);
+
+    assert_eq!(li.at_zero(), small_value.eq_alpha * (F::ONE - w));
+    assert_eq!(li.at_one(), small_value.eq_alpha * w);
+    assert_eq!(
+      li.at_infinity(),
+      small_value.eq_alpha * (w.double() - F::ONE)
+    );
+  }
+
+  #[test]
+  fn test_advance_matches_prefix_eq_product() {
+    let mut small_value = SmallValueSumCheck::<F, SPARTAN_T_DEGREE>::new(
+      LagrangeAccumulators::new(4),
+      LagrangeBasisFactory::new(|i| F::from(i as u64)),
+    );
+    let taus = [F::from(2u64), F::from(5u64), F::from(8u64)];
+    let rs = [F::from(3u64), F::from(4u64), F::from(7u64)];
+
+    let mut expected = F::ONE;
+    for (tau, r) in taus.into_iter().zip(rs) {
+      let li = small_value.eq_round_values(tau);
+      small_value.advance(&li, r);
+      expected *= eqe_bit(tau, r);
+      assert_eq!(small_value.eq_alpha(), expected);
+    }
+  }
+
+  #[test]
+  fn test_derive_t1_returns_value() {
+    let l0 = F::from(2u64);
+    let l1 = F::from(5u64);
+    let t0 = F::from(11u64);
+    let claim = F::from(97u64);
+
+    let s0 = l0 * t0;
+    let s1 = claim - s0;
+    let expected = s1 * l1.invert().unwrap();
+
+    assert_eq!(derive_t1(l0, l1, claim, t0), Some(expected));
+  }
+
+  #[test]
+  fn test_derive_t1_returns_none_on_zero_l1() {
+    let l0 = F::from(3u64);
+    let l1 = F::ZERO;
+    let t0 = F::from(4u64);
+    let claim = F::from(10u64);
+
+    assert_eq!(derive_t1(l0, l1, claim, t0), None);
+  }
 
   /// Generic helper to test that SmallValueSumCheck produces the same polynomial
   /// evaluations as EqSumCheckInstance across multiple rounds.

@@ -16,7 +16,7 @@ use std::ops::Index;
 /// - 2 allocations total (vs N+1)
 /// - Contiguous memory for cache-friendly iteration
 /// - No pointer chasing
-pub struct Csr<T> {
+pub(in crate::lagrange_accumulator) struct Csr<T> {
   offsets: Vec<u32>,
   data: Vec<T>,
 }
@@ -27,7 +27,10 @@ impl<T> Csr<T> {
   /// # Arguments
   /// * `num_rows` - Expected number of rows
   /// * `total_elements` - Expected total elements across all rows
-  pub fn with_capacity(num_rows: usize, total_elements: usize) -> Self {
+  pub(in crate::lagrange_accumulator) fn with_capacity(
+    num_rows: usize,
+    total_elements: usize,
+  ) -> Self {
     let mut offsets = Vec::with_capacity(num_rows + 1);
     offsets.push(0);
     Self {
@@ -37,7 +40,7 @@ impl<T> Csr<T> {
   }
 
   /// Append a new row with the given elements.
-  pub fn push(&mut self, elements: &[T])
+  pub(in crate::lagrange_accumulator) fn push(&mut self, elements: &[T])
   where
     T: Clone,
   {
