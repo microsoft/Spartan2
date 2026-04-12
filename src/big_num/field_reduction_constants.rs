@@ -51,6 +51,17 @@ pub trait FieldReductionConstants {
 // BarrettReductionConstants - Constants for generic μ-Barrett reduction
 // ==========================================================================
 
+/// Width of the intermediate Barrett remainder path.
+///
+/// The quotient estimate always uses the same reciprocal `μ`; this enum only
+/// controls whether the remainder computation can stay within 4 limbs or must
+/// keep a 5th limb for the borrow/carry path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarrettRemainderWidth {
+  FourLimbs,
+  FiveLimbs,
+}
+
 /// Constants for generic Barrett reduction.
 ///
 /// Used by `barrett_reduce_6` and `barrett_reduce_7` for accumulating
@@ -62,21 +73,20 @@ pub trait BarrettReductionConstants {
   /// 2^384 mod p - reduces the 7th limb (index 6) of a wide integer
   const R384_MOD: [u64; 4];
 
-  /// Barrett reciprocal μ = ⌊2^512 / p⌋ (5 limbs).
+  /// Barrett reciprocal μ for a 4-limb modulus, stored in 5 limbs.
   ///
-  /// Used in true Barrett reduction to compute the quotient estimate:
-  /// q ≈ x × μ / 2^512. This allows reducing a 6-limb value to 4 limbs
-  /// with exactly one conditional subtract.
+  /// For base `b = 2^64` and modulus width `k = 4`, Barrett uses
+  /// `μ = floor(b^(2k) / p) = floor(b^8 / p) = floor(2^512 / p)`.
+  /// Since `p` is a 4-limb modulus but `μ` can be larger than `b^4`, we store
+  /// it in 5 limbs.
   const BARRETT_MU: [u64; 5];
 
-  /// Whether 2p < 2^256, enabling the 4-limb Barrett fast path.
+  /// Width of the remainder path used after the quotient estimate.
   ///
-  /// When true, Barrett remainder r ∈ [0, 2p) fits in 4 limbs, so we can:
-  /// - Use `mul_3x4_lo4` instead of `mul_3x4_lo5` (saves 3 multiplications)
-  /// - Skip the 5th limb check entirely
-  ///
-  /// True for BN254Fr (p < 2^255). False for T256Fq (p ≈ 2^256).
-  const USE_4_LIMB_BARRETT: bool;
+  /// If `2p < 2^256`, the candidate remainder is guaranteed to fit in 4 limbs,
+  /// so the reducer can use the tighter 4-limb subtraction path. Otherwise it
+  /// must keep a 5th limb during the remainder computation.
+  const BARRETT_REMAINDER_WIDTH: BarrettRemainderWidth;
 }
 
 // =============================================================================

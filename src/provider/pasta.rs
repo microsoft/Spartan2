@@ -58,14 +58,10 @@ impl_traits!(
 crate::impl_field_reduction_constants!(pallas::Scalar);
 crate::impl_montgomery_limbs!(pallas::Scalar);
 crate::impl_barrett_reduction_constants!(pallas::Scalar);
-crate::impl_small_value_field!(pallas::Scalar);
-crate::impl_delayed_reduction!(pallas::Scalar);
 
 crate::impl_field_reduction_constants!(vesta::Scalar);
 crate::impl_montgomery_limbs!(vesta::Scalar);
 crate::impl_barrett_reduction_constants!(vesta::Scalar);
-crate::impl_small_value_field!(vesta::Scalar);
-crate::impl_delayed_reduction!(vesta::Scalar);
 
 #[cfg(test)]
 mod tests {

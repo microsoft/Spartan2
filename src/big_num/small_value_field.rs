@@ -6,10 +6,12 @@
 
 //! SmallValueField trait for small-value optimization.
 //!
-//! The functions in this module are used by the `impl_small_value_field!` macro.
+//! This module provides generic helpers plus blanket `SmallValueField`
+//! implementations for the supported scalar field types.
 
 #![allow(dead_code)]
 
+use super::montgomery::MontgomeryLimbs;
 use ff::PrimeField;
 
 /// Trait for fields that support small-value optimization.
@@ -24,8 +26,6 @@ use ff::PrimeField;
 /// # Type Parameters
 /// - `SmallValue`: Native type for witness values (i32, i64, or i128)
 ///
-/// # Implementations
-/// Generated via `impl_small_value_field!` macro in provider files.
 pub trait SmallValueField<SmallValue>: PrimeField {
   /// Convert SmallValue to field element.
   fn small_to_field(val: SmallValue) -> Self;
@@ -33,6 +33,51 @@ pub trait SmallValueField<SmallValue>: PrimeField {
   /// Try to convert a field element to SmallValue.
   /// Returns None if the value doesn't fit.
   fn try_field_to_small(val: &Self) -> Option<SmallValue>;
+}
+
+impl<F> SmallValueField<i32> for F
+where
+  F: PrimeField + MontgomeryLimbs,
+{
+  #[inline]
+  fn small_to_field(val: i32) -> Self {
+    i64_to_field(val as i64)
+  }
+
+  #[inline]
+  fn try_field_to_small(val: &Self) -> Option<i32> {
+    try_field_to_small_i32(val)
+  }
+}
+
+impl<F> SmallValueField<i64> for F
+where
+  F: PrimeField + MontgomeryLimbs,
+{
+  #[inline]
+  fn small_to_field(val: i64) -> Self {
+    i64_to_field(val)
+  }
+
+  #[inline]
+  fn try_field_to_small(val: &Self) -> Option<i64> {
+    try_field_to_i64(val)
+  }
+}
+
+impl<F> SmallValueField<i128> for F
+where
+  F: PrimeField + MontgomeryLimbs,
+{
+  #[inline]
+  fn small_to_field(val: i128) -> Self {
+    i128_to_field(val)
+  }
+
+  #[inline]
+  fn try_field_to_small(val: &Self) -> Option<i128> {
+    try_field_to_i128(val)
+  }
 }
 
 // ============================================================================

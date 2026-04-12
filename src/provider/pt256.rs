@@ -60,14 +60,10 @@ impl_traits!(
 crate::impl_field_reduction_constants!(p256::Scalar);
 crate::impl_montgomery_limbs!(p256::Scalar);
 crate::impl_barrett_reduction_constants!(p256::Scalar);
-crate::impl_small_value_field!(p256::Scalar);
-crate::impl_delayed_reduction!(p256::Scalar);
 
 crate::impl_field_reduction_constants!(t256::Scalar);
 crate::impl_montgomery_limbs!(t256::Scalar);
 crate::impl_barrett_reduction_constants!(t256::Scalar);
-crate::impl_small_value_field!(t256::Scalar);
-crate::impl_delayed_reduction!(t256::Scalar);
 
 impl<G: Group> TranscriptReprTrait<G> for t256::Base {
   fn to_transcript_bytes(&self) -> Vec<u8> {

@@ -13,14 +13,15 @@
 //! This module provides:
 //! - [`DelayedReduction`] trait defining the accumulation interface
 //! - Standalone accumulation functions for different product types
-//! - Macros to generate trait implementations for specific fields
-//!
-//! The trait implementations are generated via macros in provider files:
-//! - `impl_delayed_reduction!` for all fields (generic Barrett)
+//! - Blanket trait implementations for field × field and field × small_int
+//!   accumulation
 
 use super::{
+  BarrettReductionConstants, SignedWideLimbs, SubMagResult,
+  barrett::{barrett_reduce_6, barrett_reduce_7},
   limbs::{WideLimbs, mac, mul_4_by_4},
   montgomery::{MontgomeryLimbs, montgomery_reduce_9},
+  sub_mag,
 };
 use ff::PrimeField;
 use num_traits::Zero;
@@ -186,6 +187,28 @@ pub(crate) fn accumulate_field_times_field<F: MontgomeryLimbs + Copy>(
   );
 }
 
+#[inline(always)]
+fn reduce_signed_6<F>(acc: &SignedWideLimbs<6>) -> F
+where
+  F: MontgomeryLimbs + BarrettReductionConstants + PrimeField + Copy,
+{
+  match sub_mag::<6>(&acc.pos.0, &acc.neg.0) {
+    SubMagResult::Positive(mag) => F::from_limbs(barrett_reduce_6::<F>(&mag)),
+    SubMagResult::Negative(mag) => -F::from_limbs(barrett_reduce_6::<F>(&mag)),
+  }
+}
+
+#[inline(always)]
+fn reduce_signed_7<F>(acc: &SignedWideLimbs<7>) -> F
+where
+  F: MontgomeryLimbs + BarrettReductionConstants + PrimeField + Copy,
+{
+  match sub_mag::<7>(&acc.pos.0, &acc.neg.0) {
+    SubMagResult::Positive(mag) => F::from_limbs(barrett_reduce_7::<F>(&mag)),
+    SubMagResult::Negative(mag) => -F::from_limbs(barrett_reduce_7::<F>(&mag)),
+  }
+}
+
 // ============================================================================
 // DelayedReduction<F> implementation for field × field
 // ============================================================================
@@ -204,6 +227,89 @@ impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
   #[inline(always)]
   fn reduce(acc: &Self::Accumulator) -> Self {
     F::from_limbs(montgomery_reduce_9::<F>(&acc.0))
+  }
+}
+
+/// DelayedReduction<i32> for field × small_i32 products.
+///
+/// Uses a signed 6-limb accumulator and 6-limb Barrett reduction after
+/// combining the positive and negative buckets.
+impl<F> DelayedReduction<i32> for F
+where
+  F: MontgomeryLimbs + BarrettReductionConstants + PrimeField + Copy,
+{
+  // Note: an i32-only specialization could shrink this to SignedWideLimbs<5>.
+  // For our supported 254-256 bit fields, a 320-bit accumulator still leaves
+  // at least 33 bits of headroom for worst-case same-sign terms
+  // (field_bits <= 256, |i32| <= 2^31). A conservative rule is to keep each
+  // sign bucket (`acc.pos` and `acc.neg`, counted separately before `sub_mag`)
+  // below 2^32 same-sign accumulated terms. We keep 6 limbs here to share
+  // the i64/u64 accumulation path and the existing 6-limb Barrett reducer;
+  // a 5-limb specialization would need to pad the 5-limb `sub_mag`
+  // output to 6 limbs before `barrett_reduce_6`, or add a dedicated 5-limb
+  // reduction path.
+  type Accumulator = SignedWideLimbs<6>;
+
+  #[inline(always)]
+  fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &i32) {
+    let value64 = *value as i64;
+    let (target, mag) = if value64 >= 0 {
+      (&mut acc.pos, value64 as u64)
+    } else {
+      (&mut acc.neg, value64.wrapping_neg() as u64)
+    };
+    accumulate_field_times_u64(target, field, mag);
+  }
+
+  #[inline(always)]
+  fn reduce(acc: &Self::Accumulator) -> Self {
+    reduce_signed_6::<F>(acc)
+  }
+}
+
+/// DelayedReduction<i64> for field × small_i64 products.
+impl<F> DelayedReduction<i64> for F
+where
+  F: MontgomeryLimbs + BarrettReductionConstants + PrimeField + Copy,
+{
+  type Accumulator = SignedWideLimbs<6>;
+
+  #[inline(always)]
+  fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &i64) {
+    let (target, mag) = if *value >= 0 {
+      (&mut acc.pos, *value as u64)
+    } else {
+      (&mut acc.neg, value.wrapping_neg() as u64)
+    };
+    accumulate_field_times_u64(target, field, mag);
+  }
+
+  #[inline(always)]
+  fn reduce(acc: &Self::Accumulator) -> Self {
+    reduce_signed_6::<F>(acc)
+  }
+}
+
+/// DelayedReduction<i128> for field × small_i128 products.
+impl<F> DelayedReduction<i128> for F
+where
+  F: MontgomeryLimbs + BarrettReductionConstants + PrimeField + Copy,
+{
+  type Accumulator = SignedWideLimbs<7>;
+
+  #[inline(always)]
+  fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &i128) {
+    let (target, mag) = if *value >= 0 {
+      (&mut acc.pos, *value as u128)
+    } else {
+      (&mut acc.neg, value.wrapping_neg() as u128)
+    };
+    accumulate_field_times_u128(target, field, mag);
+  }
+
+  #[inline(always)]
+  fn reduce(acc: &Self::Accumulator) -> Self {
+    reduce_signed_7::<F>(acc)
   }
 }
 

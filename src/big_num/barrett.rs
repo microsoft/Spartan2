@@ -41,12 +41,12 @@
 //!
 //! | Constant | Value | Purpose |
 //! |----------|-------|---------|
-//! | `BARRETT_MU` | `⌊2^512 / p⌋` | Reciprocal for quotient estimate |
+//! | `BARRETT_MU` | `⌊2^512 / p⌋` stored in 5 limbs | Reciprocal for quotient estimate |
 //! | `R384_MOD` | `2^384 mod p` | Fold 7-limb input to 6 limbs first |
-//! | `USE_4_LIMB_BARRETT` | `2p < 2^256?` | Fast path when remainder fits 4 limbs |
+//! | `BARRETT_REMAINDER_WIDTH` | `FourLimbs` / `FiveLimbs` | Width of the remainder path |
 
 use super::{
-  field_reduction_constants::BarrettReductionConstants,
+  field_reduction_constants::{BarrettReductionConstants, BarrettRemainderWidth},
   limbs::{add, gte, mul_3x4_lo4, mul_3x4_lo5, mul_3x5_to_8, mul_4_by_1, sub, sub_5_4},
 };
 
@@ -54,80 +54,79 @@ use super::{
 // Generic μ-Barrett reduction (for BN254, P256, T256, Pasta)
 // ==========================================================================
 
-/// Barrett reduction for 6-limb input.
+/// Barrett reduction for a 6-limb value `x` modulo a 4-limb modulus `p`.
 ///
-/// Uses μ-Barrett algorithm with BARRETT_MU reciprocal.
+/// Uses standard multi-limb Barrett reduction in base `b = 2^64`.
+/// For a 4-limb modulus, the textbook quotient estimate is
+/// `q_hat = floor(x * μ / b^8)`, where `μ = floor(b^8 / p)`.
+///
+/// We do not form the full `x * μ` product. Split `x` as
+/// `x = q1 * b^3 + x_lo`, where `q1 = floor(x / b^3)` and `x_lo = x mod b^3`.
+/// Then `x * μ = (q1 * μ) * b^3 + x_lo * μ`.
 #[inline]
 pub(crate) fn barrett_reduce_6<F: BarrettReductionConstants>(c: &[u64; 6]) -> [u64; 4] {
-  // Step 1: q1 = floor(x / b³) = [c[3], c[4], c[5]]
+  // Step 1: q1 = floor(x / b^3) = the high 3 limbs of x.
   let q1 = [c[3], c[4], c[5]];
 
-  // Step 2: q2 = q1 × μ (3×5 → 8 limbs)
+  // Step 2: q2 = q1 * μ.
   let q2 = mul_3x5_to_8(&q1, &F::BARRETT_MU);
 
-  // Step 3: q3 = floor(q2 / b⁵) = [q2[5], q2[6], q2[7]]
+  // Step 3: q3 = q_hat = floor(q2 / b^5), the Barrett quotient estimate.
   let q3 = [q2[5], q2[6], q2[7]];
 
-  if F::USE_4_LIMB_BARRETT {
-    // Fast path: 4-limb arithmetic for BN254 (where 2p < b⁴)
-    // t = q3 × p (low 4 limbs only)
-    let t = mul_3x4_lo4(&q3, &F::MODULUS);
+  match F::BARRETT_REMAINDER_WIDTH {
+    BarrettRemainderWidth::FourLimbs => {
+      // 4-limb remainder path: 2p < b^4, so the candidate remainder fits in 4 limbs.
+      // We only need (q_hat * p) mod b^4 here, so keep the low 4 limbs only.
+      let t = mul_3x4_lo4(&q3, &F::MODULUS);
 
-    // r = (x mod b⁴) - t (wrapping subtraction in 4 limbs)
-    let x_lo4 = [c[0], c[1], c[2], c[3]];
-    let mut r = sub::<4>(&x_lo4, &t);
+      // Candidate remainder: (x mod b^4) - (q_hat * p mod b^4).
+      let x_lo4 = [c[0], c[1], c[2], c[3]];
+      let mut r = sub::<4>(&x_lo4, &t);
 
-    // One conditional subtract (proven tight)
-    if gte::<4>(&r, &F::MODULUS) {
-      r = sub::<4>(&r, &F::MODULUS);
+      // One conditional subtract (proven tight)
+      if gte::<4>(&r, &F::MODULUS) {
+        r = sub::<4>(&r, &F::MODULUS);
+      }
+
+      debug_assert!(
+        !gte::<4>(&r, &F::MODULUS),
+        "Barrett reduction produced non-canonical result"
+      );
+
+      r
     }
+    BarrettRemainderWidth::FiveLimbs => {
+      // 5-limb remainder path: the candidate remainder can exceed b^4, so keep
+      // one extra limb through the subtraction before canonicalizing.
+      // Textbook Barrett remainder step:
+      //   r1 = x mod b^5
+      //   r2 = (q_hat * p) mod b^5
+      //   r  = r1 - r2
+      let r1 = [c[0], c[1], c[2], c[3], c[4]];
+      let r2 = mul_3x4_lo5(&q3, &F::MODULUS);
+      let mut r = sub::<5>(&r1, &r2);
 
-    debug_assert!(
-      !gte::<4>(&r, &F::MODULUS),
-      "Barrett reduction produced non-canonical result"
-    );
+      // One conditional subtract
+      if r[4] != 0 || gte::<4>(&[r[0], r[1], r[2], r[3]], &F::MODULUS) {
+        r = sub_5_4(&r, &F::MODULUS);
+      }
 
-    r
-  } else {
-    // 5-limb path for T256 (where 2p can exceed b⁴)
-    let r1 = [c[0], c[1], c[2], c[3], c[4]];
-    let r2 = mul_3x4_lo5(&q3, &F::MODULUS);
-    let mut r = sub::<5>(&r1, &r2);
+      debug_assert!(
+        r[4] == 0 && !gte::<4>(&[r[0], r[1], r[2], r[3]], &F::MODULUS),
+        "Barrett reduction produced non-canonical result"
+      );
 
-    // One conditional subtract
-    if r[4] != 0 || gte::<4>(&[r[0], r[1], r[2], r[3]], &F::MODULUS) {
-      r = sub_5_4(&r, &F::MODULUS);
+      [r[0], r[1], r[2], r[3]]
     }
-
-    debug_assert!(
-      r[4] == 0 && !gte::<4>(&[r[0], r[1], r[2], r[3]], &F::MODULUS),
-      "Barrett reduction produced non-canonical result"
-    );
-
-    [r[0], r[1], r[2], r[3]]
   }
 }
 
 /// Barrett reduction for 7-limb input.
 ///
-/// We intentionally do not run a "direct" 7-limb Barrett here. That direct
-/// form would:
-/// 1. take `q1 = [c[3], c[4], c[5], c[6]]`,
-/// 2. compute `q2 = q1 × μ` with a 4×5→9 multiply,
-/// 3. take `q3 = floor(q2 / b^5)`,
-/// 4. compute `q3 × p` with a low 4×4 multiply on the fast path.
-///
-/// For our supported 254-256 bit fields, folding is cheaper on the fast path:
-/// - fold-based path here = `mul_4_by_1` (4 multiplies) + `barrett_reduce_6`
-///   fast path (`mul_3x5_to_8`: 15 multiplies, `mul_3x4_lo4`: 9 multiplies)
-///   = 28 limb multiplies total,
-/// - direct 7-limb Barrett = `mul_4x5_to_9` (20 multiplies) +
-///   `mul_4x4_lo4` (10 multiplies) = 30 limb multiplies total.
-///
-/// So we fold `c[6]·2^384` into the low 6 limbs with `2^384 ≡ R384_MOD (mod p)`
-/// and reuse the already-tuned 6-limb reducer. If that fold overflows limb 5,
-/// the lost bit is one extra `2^384` term, so we repair it by adding
-/// `R384_MOD` after the 6-limb reduction.
+/// We fold `c[6]·2^384` into the low 6 limbs with `2^384 ≡ R384_MOD (mod p)`
+/// and reuse the 6-limb reducer. If that fold overflows limb 5, the dropped bit
+/// is one extra `2^384` term, so we repair it by adding `R384_MOD` afterward.
 #[inline]
 pub(crate) fn barrett_reduce_7<F: BarrettReductionConstants>(c: &[u64; 7]) -> [u64; 4] {
   // Fold limb 6: c[6] × 2^384 ≡ c[6] × R384_MOD (mod p)
@@ -155,31 +154,37 @@ pub(crate) fn barrett_reduce_7<F: BarrettReductionConstants>(c: &[u64; 7]) -> [u
 
 #[inline]
 fn add_r384_mod<F: BarrettReductionConstants>(r: [u64; 4]) -> [u64; 4] {
-  if F::USE_4_LIMB_BARRETT {
-    let (mut sum, carry) = add::<4>(&r, &F::R384_MOD);
-    // On the 4-limb fast path we require p < 2^255. Both `r` and `R384_MOD`
-    // are reduced mod p, so their sum must stay below 2^256.
-    assert_eq!(carry, 0, "R384_MOD repair overflowed the 4-limb fast path");
+  match F::BARRETT_REMAINDER_WIDTH {
+    BarrettRemainderWidth::FourLimbs => {
+      let (mut sum, carry) = add::<4>(&r, &F::R384_MOD);
+      // On the 4-limb remainder path we require p < 2^255. Both `r` and
+      // `R384_MOD` are reduced mod p, so their sum must stay below 2^256.
+      assert_eq!(
+        carry, 0,
+        "R384_MOD repair overflowed the 4-limb remainder path"
+      );
 
-    if gte::<4>(&sum, &F::MODULUS) {
-      sum = sub::<4>(&sum, &F::MODULUS);
+      if gte::<4>(&sum, &F::MODULUS) {
+        sum = sub::<4>(&sum, &F::MODULUS);
+      }
+
+      sum
     }
+    BarrettRemainderWidth::FiveLimbs => {
+      let (sum_lo4, carry) = add::<4>(&r, &F::R384_MOD);
+      let mut sum = [sum_lo4[0], sum_lo4[1], sum_lo4[2], sum_lo4[3], carry];
 
-    sum
-  } else {
-    let (sum_lo4, carry) = add::<4>(&r, &F::R384_MOD);
-    let mut sum = [sum_lo4[0], sum_lo4[1], sum_lo4[2], sum_lo4[3], carry];
+      if sum[4] != 0 || gte::<4>(&sum_lo4, &F::MODULUS) {
+        sum = sub_5_4(&sum, &F::MODULUS);
+      }
 
-    if sum[4] != 0 || gte::<4>(&sum_lo4, &F::MODULUS) {
-      sum = sub_5_4(&sum, &F::MODULUS);
+      debug_assert!(
+        sum[4] == 0 && !gte::<4>(&[sum[0], sum[1], sum[2], sum[3]], &F::MODULUS),
+        "R384_MOD repair produced non-canonical result"
+      );
+
+      [sum[0], sum[1], sum[2], sum[3]]
     }
-
-    debug_assert!(
-      sum[4] == 0 && !gte::<4>(&[sum[0], sum[1], sum[2], sum[3]], &F::MODULUS),
-      "R384_MOD repair produced non-canonical result"
-    );
-
-    [sum[0], sum[1], sum[2], sum[3]]
   }
 }
 
