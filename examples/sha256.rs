@@ -190,8 +190,8 @@ fn main() {
 
     // PROVE
     let t0 = Instant::now();
-    let proof =
-      SpartanSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, true).expect("prove failed");
+    let (proof, _prep_snark) =
+      SpartanSNARK::<E>::prove(&pk, circuit.clone(), prep_snark, true).expect("prove failed");
     let prove_ms = t0.elapsed().as_millis();
     info!(elapsed_ms = prove_ms, "prove");
 

@@ -5,8 +5,9 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! This module defines traits that a circuit provider must implement to be used with Spartan.
-use crate::traits::Engine;
 use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
+
+use crate::traits::Engine;
 
 /// A helper trait for defining a randomized circuit that Spartan proves.
 /// The circuit contains a set of variables that are shared with other circuits.
@@ -82,4 +83,7 @@ pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
 
   /// Returns the number of rounds in the circuit
   fn num_rounds(&self) -> usize;
+
+  /// Returns the commitment width for per-round witness commitments.
+  fn commitment_width(&self) -> usize;
 }

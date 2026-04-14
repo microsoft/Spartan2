@@ -11,6 +11,7 @@ use crate::{
   traits::{Engine, TranscriptReprTrait},
 };
 use core::fmt::Debug;
+use ff::Field;
 use serde::{Deserialize, Serialize};
 
 /// This trait defines the behavior of the commitment
@@ -52,6 +53,10 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     width: usize,
   ) -> (Self::CommitmentKey, Self::VerifierKey);
 
+  /// Eagerly initialize any lazily-computed tables in the commitment key.
+  /// Call before cloning to ensure copies get precomputed state.
+  fn precompute_ck(_ck: &Self::CommitmentKey) {}
+
   /// Returns a blind to be used for commitment to a polynomial of size `n`
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind;
 
@@ -62,6 +67,18 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     r: &Self::Blind,
     is_small: bool,
   ) -> Result<Self::Commitment, SpartanError>;
+
+  /// Commits to an all-zero vector of size `n` with the given blind.
+  /// Default: creates a zero vector and calls `commit`. Implementations may override
+  /// for efficiency (e.g., computing only the blind contribution per row).
+  fn commit_zeros(
+    ck: &Self::CommitmentKey,
+    n: usize,
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let zeros = vec![E::Scalar::ZERO; n];
+    Self::commit(ck, &zeros, r, true)
+  }
 
   /// Checks if the provided commitment commits to a vector of the specified length
   fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError>;
@@ -120,6 +137,79 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     comm_eval: &Self::Commitment,
     arg: &Self::EvaluationArgument,
   ) -> Result<(), SpartanError>;
+
+  /// Compute raw (unblinded) commitment. Returns per-row group elements.
+  /// Default: not supported (panics). Override for schemes that support this.
+  fn commit_raw(
+    _ck: &Self::CommitmentKey,
+    _v: &[E::Scalar],
+    _is_small: bool,
+  ) -> Result<Vec<E::GE>, SpartanError> {
+    Err(SpartanError::InternalError {
+      reason: "commit_raw not supported for this PCS".to_string(),
+    })
+  }
+
+  /// Build commitment from precomputed raw MSMs plus a delta vector.
+  /// For each row: final = raw[i] + MSM(delta[row_i], gens) + blind[i] * H
+  /// Default: not supported (panics). Override for schemes that support this.
+  fn commit_from_raw_and_delta(
+    _ck: &Self::CommitmentKey,
+    _raw: &[E::GE],
+    _delta: &[E::Scalar],
+    _blind: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    Err(SpartanError::InternalError {
+      reason: "commit_from_raw_and_delta not supported for this PCS".to_string(),
+    })
+  }
+
+  /// Like commit_from_raw_and_delta but accepts optional precomputed blinding points.
+  /// When blinding_points is Some, uses point addition instead of fixed-base mul.
+  fn commit_from_raw_delta_blinding(
+    ck: &Self::CommitmentKey,
+    raw: &[E::GE],
+    delta: &[E::Scalar],
+    blind: &Self::Blind,
+    _blinding_points: Option<&[E::GE]>,
+  ) -> Result<Self::Commitment, SpartanError> {
+    // Default: ignore blinding_points, fall back to regular commit
+    Self::commit_from_raw_and_delta(ck, raw, delta, blind)
+  }
+
+  /// Direct polynomial opening (prover side).
+  ///
+  /// Splits the evaluation point into row and column parts based on the commitment width,
+  /// computes the RLC'd vector `v` (of length `width`) and the combined scalar blind.
+  /// Returns `(v, combined_blind)`.
+  ///
+  /// The evaluation is then `<v, eq(point_right)>`.
+  fn prove_direct(
+    _ck: &Self::CommitmentKey,
+    _poly: &[E::Scalar],
+    _blind: &Self::Blind,
+    _point: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, E::Scalar), SpartanError> {
+    Err(SpartanError::InternalError {
+      reason: "prove_direct not supported for this PCS".to_string(),
+    })
+  }
+
+  /// Verify a direct polynomial opening (verifier side).
+  ///
+  /// Checks that the RLC'd vector `v` is consistent with the row commitments in `comm`,
+  /// then computes and returns the polynomial evaluation `<v, eq(point_right)>`.
+  fn verify_direct(
+    _vk: &Self::VerifierKey,
+    _comm: &Self::Commitment,
+    _v: &[E::Scalar],
+    _combined_blind: &E::Scalar,
+    _point: &[E::Scalar],
+  ) -> Result<E::Scalar, SpartanError> {
+    Err(SpartanError::InternalError {
+      reason: "verify_direct not supported for this PCS".to_string(),
+    })
+  }
 }
 
 /// A trait that extends the PCSEngineTrait to include folding capabilities
@@ -138,4 +228,18 @@ pub trait FoldingEngineTrait<E: Engine>: PCSEngineTrait<E> {
     blinds: &[Self::Blind],
     weights: &[E::Scalar],
   ) -> Result<Self::Blind, SpartanError>;
+
+  /// Fold commitments, but for rows beyond `num_data_rows`, compute from
+  /// folded blind + h instead of full MSM. This is an optimization for
+  /// split instances where rest rows are blind-only (zero witness).
+  /// Default: falls back to full fold_commitments.
+  fn fold_commitments_partial(
+    comms: &[Self::Commitment],
+    weights: &[E::Scalar],
+    _num_data_rows: usize,
+    _folded_blind: &Self::Blind,
+    _ck: &Self::CommitmentKey,
+  ) -> Result<Self::Commitment, SpartanError> {
+    Self::fold_commitments(comms, weights)
+  }
 }

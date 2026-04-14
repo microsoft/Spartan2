@@ -6,6 +6,7 @@
 
 //! This module defines various traits required by the users of the library to implement.
 use core::fmt::Debug;
+
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,8 @@ pub trait Engine: Clone + Copy + Debug + Send + Sync + Sized + Eq + PartialEq {
     + Serialize
     + for<'de> Deserialize<'de>
     + FieldReductionConstants
-    + DelayedReduction<Self::Scalar>;
+    + DelayedReduction<Self::Scalar>
+    + crate::big_num::montgomery::MontgomeryLimbs;
 
   /// A type that represents an element of the group
   type GE: Group<Base = Self::Base, Scalar = Self::Scalar> + Serialize + for<'de> Deserialize<'de>;
