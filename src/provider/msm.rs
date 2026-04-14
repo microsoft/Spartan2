@@ -7,13 +7,15 @@
 //! This module provides a multi-scalar multiplication routine
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.
-use crate::{errors::SpartanError, start_span};
 use ff::{Field, PrimeField};
+use halo2curves::CurveExt;
 use halo2curves::{CurveAffine, group::Group};
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
 use tracing::info;
+
+use crate::{errors::SpartanError, start_span};
 
 #[derive(Clone, Copy)]
 enum Bucket<C: CurveAffine> {
@@ -26,15 +28,27 @@ impl<C: CurveAffine> Bucket<C> {
   fn add_assign(&mut self, other: &C) {
     *self = match *self {
       Bucket::None => Bucket::Affine(*other),
-      Bucket::Affine(a) => Bucket::Projective(a + *other),
-      Bucket::Projective(a) => Bucket::Projective(a + other),
+      // Vartime mixed addition (7M+3S vs 11M complete) for bucket accumulation.
+      // Safe because generators are never identity and distinct generators have different x-coords.
+      Bucket::Affine(a) => {
+        Bucket::Projective(a.to_curve().add_mixed_vartime(other))
+      }
+      Bucket::Projective(a) => Bucket::Projective(a.add_mixed_vartime(other)),
     }
   }
 
   fn add(self, other: C::Curve) -> C::Curve {
     match self {
       Bucket::None => other,
-      Bucket::Affine(a) => other + a,
+      Bucket::Affine(a) => other.add_mixed_vartime(&a),
+      Bucket::Projective(a) => other + a,
+    }
+  }
+
+  fn add_ref(&self, other: C::Curve) -> C::Curve {
+    match *self {
+      Bucket::None => other,
+      Bucket::Affine(a) => other.add_mixed_vartime(&a),
       Bucket::Projective(a) => other + a,
     }
   }
@@ -49,7 +63,7 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
     (f64::from(bases.len() as u32)).ln().ceil() as usize
   };
 
-  fn get_at<F: PrimeField>(segment: usize, c: usize, bytes: &F::Repr) -> usize {
+  fn get_at(segment: usize, c: usize, bytes: &[u8; 32]) -> usize {
     let skip_bits = segment * c;
     let skip_bytes = skip_bits / 8;
 
@@ -58,7 +72,7 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
     }
 
     let mut v = [0; 8];
-    for (v, o) in v.iter_mut().zip(bytes.as_ref()[skip_bytes..].iter()) {
+    for (v, o) in v.iter_mut().zip(bytes[skip_bytes..].iter()) {
       *v = *o;
     }
 
@@ -69,52 +83,96 @@ fn cpu_msm_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve
     tmp as usize
   }
 
-  // Boolean scalars: accumulated and separated from non-Boolean scalars
+  // Separate boolean scalars, precompute representations once
   let mut boolean_sum = C::Curve::identity();
-  let mut non_boolean = Vec::new();
+  let mut reprs: Vec<[u8; 32]> = Vec::with_capacity(coeffs.len());
+  let mut nb_bases: Vec<C> = Vec::with_capacity(coeffs.len());
 
   for (s, b) in coeffs.iter().zip(bases) {
     if *s == C::Scalar::ONE {
-      boolean_sum += b;
+      boolean_sum = boolean_sum.add_mixed_vartime(b);
     } else if *s != C::Scalar::ZERO {
-      non_boolean.push((*s, *b));
+      let repr = s.to_repr();
+      let mut bytes = [0u8; 32];
+      bytes.copy_from_slice(repr.as_ref());
+      reprs.push(bytes);
+      nb_bases.push(*b);
     }
   }
 
-  if non_boolean.is_empty() {
+  if reprs.is_empty() {
     return boolean_sum;
   }
 
-  let non_boolean_sum = {
-    let segments = (256 / c) + 1;
-    (0..segments)
-      .rev()
-      .fold(C::Curve::identity(), |mut acc, segment| {
-        (0..c).for_each(|_| acc = acc.double());
+  let n = reprs.len();
+  let segments = (256 / c) + 1;
 
-        let mut buckets = vec![Bucket::None; (1 << c) - 1];
+  // Signed Pippenger: use signed digit decomposition to halve bucket count.
+  // Digits in [-(2^(c-1)), 2^(c-1)-1] with carry propagation.
+  let half = 1usize << (c - 1);
+  let full = 1usize << c;
+  let num_buckets = half;
 
-        for (coeff, base) in non_boolean.iter() {
-          let coeff = get_at::<C::Scalar>(segment, c, &coeff.to_repr());
-          if coeff != 0 {
-            buckets[coeff - 1].add_assign(base);
-          }
-        }
+  // Precompute signed digits low-to-high (carry flows upward)
+  let max_segments = segments + 1;
+  let mut signed_digits = vec![0i16; max_segments * n];
+  let mut carry = vec![0u8; n];
 
-        // Summation by parts
-        // e.g. 3a + 2b + 1c = a +
-        //                    (a) + b +
-        //                    ((a) + b) + c
-        let mut running_sum = C::Curve::identity();
-        for exp in buckets.into_iter().rev() {
-          running_sum = exp.add(running_sum);
-          acc += &running_sum;
-        }
-        acc
-      })
+  for seg in 0..segments {
+    let offset = seg * n;
+    for j in 0..n {
+      let raw = get_at(seg, c, &reprs[j]) + carry[j] as usize;
+      carry[j] = 0;
+      if raw >= half {
+        signed_digits[offset + j] = -((full - raw) as i16);
+        carry[j] = 1;
+      } else {
+        signed_digits[offset + j] = raw as i16;
+      }
+    }
+  }
+
+  let total_segments = if carry.iter().any(|&c| c != 0) {
+    let offset = segments * n;
+    for j in 0..n {
+      signed_digits[offset + j] = carry[j] as i16;
+    }
+    segments + 1
+  } else {
+    segments
   };
 
-  boolean_sum + non_boolean_sum
+  // Process segments high-to-low with inline Horner evaluation
+  let mut buckets = vec![Bucket::<C>::None; num_buckets];
+  let mut acc = C::Curve::identity();
+
+  for segment in (0..total_segments).rev() {
+    for _ in 0..c {
+      acc = acc.double();
+    }
+    for b in buckets.iter_mut() {
+      *b = Bucket::None;
+    }
+
+    let offset = segment * n;
+    for j in 0..n {
+      let digit = signed_digits[offset + j];
+      if digit > 0 {
+        buckets[digit as usize - 1].add_assign(&nb_bases[j]);
+      } else if digit < 0 {
+        buckets[(-digit) as usize - 1].add_assign(&(-nb_bases[j]));
+      }
+    }
+
+    // Summation by parts
+    let mut running_sum = C::Curve::identity();
+    for exp in buckets.iter().rev() {
+      running_sum = exp.add_ref(running_sum);
+      acc += &running_sum;
+    }
+  }
+
+  boolean_sum + acc
 }
 
 /// Performs a multi-scalar-multiplication operation without GPU acceleration.
@@ -137,12 +195,8 @@ pub fn msm<C: CurveAffine>(
     });
   }
 
-  let num_threads = if coeffs.len() > 1024 {
-    // If the number of coefficients is large, we use parallelism.
-    // Otherwise, we use a single thread.
-    // This is a heuristic to avoid overhead from parallelism for small inputs.
-    1
-  } else if use_parallelism_internally {
+  let num_threads = if use_parallelism_internally && coeffs.len() >= 1024 {
+    // Large inputs benefit from parallel chunk-based MSM
     current_num_threads()
   } else {
     1
@@ -163,6 +217,140 @@ pub fn msm<C: CurveAffine>(
     info!(elapsed_ms = %msm_t.elapsed().as_millis(), size = coeffs.len(), "msm");
   }
   Ok(result)
+}
+
+/// Shared-weight multi-MSM: compute multiple MSMs that all use the same scalar weights
+/// but different base point sets. Precomputes scalar decomposition once.
+/// `bases_rows[i]` is the i-th row of base points (length = num_weights).
+/// Returns one result per row.
+pub fn msm_shared_weights<C: CurveAffine>(
+  weights: &[C::Scalar],
+  bases_rows: &[&[C]],
+) -> Result<Vec<C::Curve>, SpartanError> {
+  let n = weights.len();
+  if n == 0 || bases_rows.is_empty() {
+    return Ok(vec![C::Curve::identity(); bases_rows.len()]);
+  }
+
+  let c = if n < 4 {
+    1
+  } else if n < 32 {
+    3
+  } else {
+    (f64::from(n as u32)).ln().ceil() as usize
+  };
+
+  fn get_at(segment: usize, c: usize, bytes: &[u8; 32]) -> usize {
+    let skip_bits = segment * c;
+    let skip_bytes = skip_bits / 8;
+    if skip_bytes >= 32 {
+      return 0;
+    }
+    let mut v = [0; 8];
+    for (v, o) in v.iter_mut().zip(bytes[skip_bytes..].iter()) {
+      *v = *o;
+    }
+    let mut tmp = u64::from_le_bytes(v);
+    tmp >>= skip_bits - (skip_bytes * 8);
+    tmp %= 1 << c;
+    tmp as usize
+  }
+
+  // Precompute scalar classification: separate boolean (=1) from general, compute repr once
+  let mut boolean_indices: Vec<usize> = Vec::new();
+  let mut general_indices: Vec<usize> = Vec::new();
+  let mut reprs: Vec<[u8; 32]> = Vec::new();
+
+  for (i, s) in weights.iter().enumerate() {
+    if *s == C::Scalar::ONE {
+      boolean_indices.push(i);
+    } else if *s != C::Scalar::ZERO {
+      general_indices.push(i);
+      let repr = s.to_repr();
+      let mut bytes = [0u8; 32];
+      bytes.copy_from_slice(repr.as_ref());
+      reprs.push(bytes);
+    }
+  }
+
+  let ng = general_indices.len();
+  let segments = (256 / c) + 1;
+
+  // Signed Pippenger: precompute signed digit decomposition once for all rows
+  let half = 1usize << (c - 1);
+  let full = 1usize << c;
+  let num_buckets = half;
+
+  let mut signed_windows: Vec<Vec<i16>> = Vec::with_capacity(segments + 1);
+  let mut carry = vec![0u8; ng];
+
+  for seg in 0..segments {
+    let mut seg_digits = Vec::with_capacity(ng);
+    for (j, repr) in reprs.iter().enumerate() {
+      let raw = get_at(seg, c, repr) + carry[j] as usize;
+      carry[j] = 0;
+      if raw >= half {
+        seg_digits.push(-((full - raw) as i16));
+        carry[j] = 1;
+      } else {
+        seg_digits.push(raw as i16);
+      }
+    }
+    signed_windows.push(seg_digits);
+  }
+
+  let total_segments = if carry.iter().any(|&c| c != 0) {
+    signed_windows.push(carry.iter().map(|&c| c as i16).collect());
+    segments + 1
+  } else {
+    segments
+  };
+
+  // Process each row using the precomputed signed digit decomposition
+  let results: Vec<C::Curve> = bases_rows
+    .par_iter()
+    .map(|bases| {
+      // Sum boolean scalars
+      let mut boolean_sum = C::Curve::identity();
+      for &idx in &boolean_indices {
+        boolean_sum = boolean_sum.add_mixed_vartime(&bases[idx]);
+      }
+
+      if general_indices.is_empty() {
+        return boolean_sum;
+      }
+
+      let mut buckets = vec![Bucket::<C>::None; num_buckets];
+      let mut acc = C::Curve::identity();
+
+      for segment in (0..total_segments).rev() {
+        for _ in 0..c {
+          acc = acc.double();
+        }
+        for b in buckets.iter_mut() {
+          *b = Bucket::None;
+        }
+        let seg_digits = &signed_windows[segment];
+        for j in 0..ng {
+          let digit = seg_digits[j];
+          if digit > 0 {
+            buckets[digit as usize - 1].add_assign(&bases[general_indices[j]]);
+          } else if digit < 0 {
+            buckets[(-digit) as usize - 1].add_assign(&(-bases[general_indices[j]]));
+          }
+        }
+        let mut running_sum = C::Curve::identity();
+        for exp in buckets.iter().rev() {
+          running_sum = exp.add_ref(running_sum);
+          acc += &running_sum;
+        }
+      }
+
+      boolean_sum + acc
+    })
+    .collect();
+
+  Ok(results)
 }
 
 fn num_bits(n: usize) -> usize {
@@ -441,11 +629,12 @@ fn compute_ln(a: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::provider::pasta::{pallas, vesta};
   use ff::Field;
   use halo2curves::{CurveAffine, group::Group};
   use rand_core::OsRng;
+
+  use crate::provider::pasta::{pallas, vesta};
+  use super::*;
 
   fn test_general_msm_with<F: Field, A: CurveAffine<ScalarExt = F>>() {
     let n = 8;

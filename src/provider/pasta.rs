@@ -8,7 +8,7 @@
 use crate::{
   impl_traits,
   provider::{
-    msm::{msm, msm_small},
+    msm::{msm, msm_small, msm_shared_weights},
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{Group, PrimeFieldExt, transcript::TranscriptReprTrait},
@@ -62,11 +62,13 @@ crate::impl_montgomery_limbs!(vesta::Scalar);
 
 #[cfg(test)]
 mod tests {
-  use crate::provider::{pasta::pallas, traits::DlogGroup};
+  use std::io::Read;
+
   use digest::{ExtendableOutput, Update};
   use halo2curves::{CurveExt, group::Curve};
   use sha3::Shake256;
-  use std::io::Read;
+
+  use crate::provider::{pasta::pallas, traits::DlogGroup};
 
   macro_rules! impl_cycle_pair_test {
     ($curve:ident) => {
