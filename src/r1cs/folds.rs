@@ -10,14 +10,16 @@ use crate::{
   Blind, Commitment, CommitmentKey, PCS,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness},
+  start_span,
   traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::TranscriptReprTrait,
   },
 };
-use ff::Field;
+use ff::{Field, PrimeField};
 use rayon::prelude::*;
+use tracing::info;
 
 // ------------------------------------------------------------------------------------------------
 // Cross-term commitment helpers on the R1CS shape
@@ -34,35 +36,51 @@ impl<E: Engine> R1CSShape<E> {
     W2: &R1CSWitness<E>,
     r_T: &Blind<E>,
   ) -> Result<(Vec<E::Scalar>, Commitment<E>), SpartanError> {
-    // Form the concatenated vectors z1 = (W1, u1, X1) and z2 = (W2, 1, X2).
-    let Z1 = [W1.W.clone(), vec![U1.u], U1.X.clone()].concat();
-    let Z2 = [W2.W.clone(), vec![E::Scalar::ONE], U2.X.clone()].concat();
+    // Form Z = (W1+W2, u1+1, X1+X2) without intermediate allocations.
+    let n_w = W1.W.len();
+    let n_x1 = U1.X.len();
+    let n_x2 = U2.X.len();
+    let total = n_w + 1 + n_x1.max(n_x2);
+    let mut Z = Vec::with_capacity(total);
 
-    if Z1.len() != Z2.len() {
-      return Err(SpartanError::InvalidWitnessLength);
+    for i in 0..n_w {
+      Z.push(W1.W[i] + W2.W[i]);
     }
-
-    // Compute Z = Z1 + Z2 element-wise.
-    let Z: Vec<E::Scalar> = Z1
-      .into_par_iter()
-      .zip(Z2.into_par_iter())
-      .map(|(z1, z2)| z1 + z2)
-      .collect();
+    Z.push(U1.u + E::Scalar::ONE);
+    for i in 0..n_x1 {
+      Z.push(U1.X[i] + U2.X[i]);
+    }
 
     // Effective relaxation parameter.
     let u = U1.u + E::Scalar::ONE;
 
+    let (_mv_span, mv_t) = start_span!("commit_T_multiply_vec");
     let (AZ, BZ, CZ) = self.multiply_vec(&Z)?;
+    info!(elapsed_ms = %mv_t.elapsed().as_millis(), "commit_T_multiply_vec");
 
-    let T: Vec<E::Scalar> = AZ
-      .par_iter()
-      .zip(BZ.par_iter())
-      .zip(CZ.par_iter())
-      .zip(W1.E.par_iter())
-      .map(|(((az, bz), cz), e)| *az * *bz - u * *cz - *e)
-      .collect();
+    let (_cross_span, cross_t) = start_span!("commit_T_cross_term");
+    let T: Vec<E::Scalar> = if rayon::current_num_threads() <= 1 {
+      (0..AZ.len())
+        .map(|i| AZ[i] * BZ[i] - u * CZ[i] - W1.E[i])
+        .collect()
+    } else {
+      AZ.par_iter()
+        .zip(BZ.par_iter())
+        .zip(CZ.par_iter())
+        .zip(W1.E.par_iter())
+        .map(|(((az, bz), cz), e)| *az * *bz - u * *cz - *e)
+        .collect()
+    };
+    info!(elapsed_ms = %cross_t.elapsed().as_millis(), size = %T.len(), "commit_T_cross_term");
 
-    let comm_T = PCS::<E>::commit(ck, &T, r_T, false)?;
+    let (_comm_span, comm_t) = start_span!("commit_T_commit");
+    // Auto-detect if T has small values for faster MSM
+    let t_is_small = T.iter().all(|s| {
+      let bytes = s.to_repr();
+      bytes.as_ref()[8..].iter().all(|&b| b == 0)
+    });
+    let comm_T = PCS::<E>::commit(ck, &T, r_T, t_is_small)?;
+    info!(elapsed_ms = %comm_t.elapsed().as_millis(), "commit_T_commit");
     Ok((T, comm_T))
   }
 }
@@ -101,14 +119,14 @@ where
 
     let W = self
       .W
-      .par_iter()
+      .iter()
       .zip(&W2.W)
       .map(|(w1, w2)| *w1 + *r * *w2)
       .collect::<Vec<_>>();
 
     let E_vec = self
       .E
-      .par_iter()
+      .iter()
       .zip(T)
       .map(|(e1, t)| *e1 + *r * *t)
       .collect::<Vec<_>>();

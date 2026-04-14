@@ -6,8 +6,10 @@
 
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, MULTIROUND_COMMITMENT_WIDTH, PCS,
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS,
   VerifierKey,
+  big_num::DelayedReduction,
+  big_num::montgomery::MontgomeryLimbs,
   digest::SimpleDigestible,
   errors::SpartanError,
   start_span,
@@ -17,8 +19,10 @@ use crate::{
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
+#[allow(unused_imports)]
+use crate::polys::eq::EqPolynomial;
 use core::cmp::max;
-use ff::Field;
+use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,14 +30,119 @@ use tracing::info;
 
 mod folds;
 mod sparse;
+pub(crate) use sparse::PrecomputedSparseMatrix;
+pub(crate) use sparse::FilteredSpmv;
 pub(crate) use sparse::SparseMatrix;
+
+/// Fused evaluation of three sparse matrices at (T_x, T_y).
+/// Processes all three matrices per row to improve T_y cache reuse.
+/// Hoists T_x[row] out of inner loop and uses delayed reduction.
+#[inline(never)]
+#[allow(dead_code)]
+fn evaluate_three_matrices_fused<F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F> + Send + Sync>(
+  pa: &PrecomputedSparseMatrix<F>,
+  pb: &PrecomputedSparseMatrix<F>,
+  pc: &PrecomputedSparseMatrix<F>,
+  t_x: &[F],
+  t_y: &[F],
+) -> (F, F, F) {
+  let num_rows = pa.num_rows;
+
+  if rayon::current_num_threads() <= 1 || num_rows <= 1024 {
+    evaluate_three_matrices_sequential(pa, pb, pc, t_x, t_y, 0, num_rows)
+  } else {
+    use rayon::prelude::*;
+    let num_threads = rayon::current_num_threads();
+    let chunk_size = (num_rows + num_threads - 1) / num_threads;
+
+    let partials: Vec<(F, F, F)> = (0..num_threads)
+      .into_par_iter()
+      .map(|t| {
+        let start = t * chunk_size;
+        let end = (start + chunk_size).min(num_rows);
+        if start >= end {
+          return (F::ZERO, F::ZERO, F::ZERO);
+        }
+        evaluate_three_matrices_sequential(pa, pb, pc, t_x, t_y, start, end)
+      })
+      .collect();
+
+    partials.into_iter().fold(
+      (F::ZERO, F::ZERO, F::ZERO),
+      |(a, b, c), (pa, pb, pc)| (a + pa, b + pb, c + pc),
+    )
+  }
+}
+
+#[inline(never)]
+fn evaluate_three_matrices_sequential<F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F>>(
+  pa: &PrecomputedSparseMatrix<F>,
+  pb: &PrecomputedSparseMatrix<F>,
+  pc: &PrecomputedSparseMatrix<F>,
+  t_x: &[F],
+  t_y: &[F],
+  start_row: usize,
+  end_row: usize,
+) -> (F, F, F) {
+  type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+  let mut acc_a = Acc::<F>::default();
+  let mut acc_b = Acc::<F>::default();
+  let mut acc_c = Acc::<F>::default();
+
+  for row in start_row..end_row {
+    let row_sum_a = row_dot_ty(pa, row, t_y);
+    let row_sum_b = row_dot_ty(pb, row, t_y);
+    let row_sum_c = row_dot_ty(pc, row, t_y);
+
+    let tx = &t_x[row];
+    F::unreduced_multiply_accumulate(&mut acc_a, tx, &row_sum_a);
+    F::unreduced_multiply_accumulate(&mut acc_b, tx, &row_sum_b);
+    F::unreduced_multiply_accumulate(&mut acc_c, tx, &row_sum_c);
+  }
+
+  (F::reduce(&acc_a), F::reduce(&acc_b), F::reduce(&acc_c))
+}
+
+/// Compute dot product of a single matrix row with T_y: sum val * T_y[col].
+/// Uses delayed reduction for general entries to avoid per-multiply Montgomery REDC.
+#[inline(always)]
+fn row_dot_ty<F: PrimeField + DelayedReduction<F>>(pm: &PrecomputedSparseMatrix<F>, row: usize, t_y: &[F]) -> F {
+  // Unit and small entries: regular field arithmetic (additions are cheap)
+  let mut sum = F::ZERO;
+
+  let (s, e) = pm.range_unit_pos(row);
+  for i in s..e {
+    sum += t_y[pm.unit_pos_cols[i] as usize];
+  }
+  let (s, e) = pm.range_unit_neg(row);
+  for i in s..e {
+    sum -= t_y[pm.unit_neg_cols[i] as usize];
+  }
+  let (s, e) = pm.range_small(row);
+  for i in s..e {
+    sum += PrecomputedSparseMatrix::small_mul(pm.small_coeffs[i], t_y[pm.small_cols[i] as usize]);
+  }
+
+  // General entries: use delayed reduction to batch Montgomery reductions
+  let (gs, ge) = pm.range_general(row);
+  if gs < ge {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+    let mut acc = Acc::<F>::default();
+    for i in gs..ge {
+      F::unreduced_multiply_accumulate(&mut acc, &pm.general_vals[i], &t_y[pm.general_cols[i] as usize]);
+    }
+    sum += F::reduce(&acc);
+  }
+
+  sum
+}
 
 fn eq01<F: Field>(bit: u8, r: &F) -> F {
   if bit == 0 { F::ONE - *r } else { *r }
 }
 
 #[inline]
-fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+pub(crate) fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
   let ell = r_bs.len();
   (0..n)
     .map(|i| {
@@ -115,9 +224,10 @@ impl<E: Engine> RelaxedR1CSWitness<E> {
 
 #[cfg(test)]
 mod tests_relaxed_sample {
-  use super::*;
-  use crate::{provider::P256HyraxEngine, traits::Engine};
   use ff::Field;
+
+  use crate::{provider::P256HyraxEngine, traits::Engine};
+  use super::*;
 
   fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
     let one = <E::Scalar as Field>::ONE;
@@ -236,77 +346,6 @@ impl<E: Engine> R1CSShape<E> {
     })
   }
 
-  /// Pads the `R1CSShape` so that the shape passes `is_regular_shape`
-  /// Renumbers variables to accommodate padded variables
-  pub fn pad(&self) -> Self {
-    // check if the provided R1CSShape is already as required
-    if self.is_regular_shape() {
-      return self.clone();
-    }
-
-    // equalize the number of variables and public IO
-    let m = self.num_vars.max(self.num_io).next_power_of_two();
-
-    // check if the number of variables are as expected, then
-    // we simply set the number of constraints to the next power of two
-    if self.num_vars == m {
-      return R1CSShape {
-        num_cons: self.num_cons.next_power_of_two(),
-        num_vars: m,
-        num_io: self.num_io,
-        A: self.A.clone(),
-        B: self.B.clone(),
-        C: self.C.clone(),
-        digest: OnceCell::new(),
-      };
-    }
-
-    // otherwise, we need to pad the number of variables and renumber variable accesses
-    let num_vars_padded = m;
-    let num_cons_padded = self.num_cons.next_power_of_two();
-
-    let apply_pad = |mut M: SparseMatrix<E::Scalar>| -> SparseMatrix<E::Scalar> {
-      M.indices.par_iter_mut().for_each(|c| {
-        if *c >= self.num_vars {
-          *c += num_vars_padded - self.num_vars
-        }
-      });
-
-      M.cols += num_vars_padded - self.num_vars;
-
-      let ex = {
-        let nnz = M.indptr.last().unwrap();
-        vec![*nnz; num_cons_padded - self.num_cons]
-      };
-      M.indptr.extend(ex);
-      M
-    };
-
-    let A_padded = apply_pad(self.A.clone());
-    let B_padded = apply_pad(self.B.clone());
-    let C_padded = apply_pad(self.C.clone());
-
-    R1CSShape {
-      num_cons: num_cons_padded,
-      num_vars: num_vars_padded,
-      num_io: self.num_io,
-      A: A_padded,
-      B: B_padded,
-      C: C_padded,
-      digest: OnceCell::new(),
-    }
-  }
-
-  // Checks regularity conditions on the R1CSShape, required in Spartan-class SNARKs
-  // Returns false if num_cons or num_vars are not powers of two, or if num_io > num_vars
-  #[inline]
-  pub(crate) fn is_regular_shape(&self) -> bool {
-    let cons_valid = self.num_cons.next_power_of_two() == self.num_cons;
-    let vars_valid = self.num_vars.next_power_of_two() == self.num_vars;
-    let io_lt_vars = self.num_io < self.num_vars;
-    cons_valid && vars_valid && io_lt_vars
-  }
-
   /// Checks if the R1CS instance is satisfiable given a witness and its shape
   #[allow(dead_code)]
   pub fn is_sat(
@@ -367,12 +406,18 @@ impl<E: Engine> R1CSShape<E> {
       return Err(SpartanError::InvalidWitnessLength);
     }
 
-    let (Az, (Bz, Cz)) = rayon::join(
-      || self.A.multiply_vec(z),
-      || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
-    );
-
-    Ok((Az?, Bz?, Cz?))
+    if rayon::current_num_threads() <= 1 {
+      let az = self.A.multiply_vec(z)?;
+      let bz = self.B.multiply_vec(z)?;
+      let cz = self.C.multiply_vec(z)?;
+      Ok((az, bz, cz))
+    } else {
+      let (Az, (Bz, Cz)) = rayon::join(
+        || self.A.multiply_vec(z),
+        || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
+      );
+      Ok((Az?, Bz?, Cz?))
+    }
   }
   /// Checks if the Relaxed R1CS instance is satisfiable given a witness and its shape
   pub fn is_sat_relaxed(
@@ -394,8 +439,12 @@ impl<E: Engine> R1CSShape<E> {
 
     // verify if comm_E and comm_W are commitments to E and W
     let res_comm = {
-      let comm_W = PCS::<E>::commit(ck, &W.W, &W.r_W, false)?;
-      let comm_E = PCS::<E>::commit(ck, &W.E, &W.r_E, false)?;
+      let (comm_W_result, comm_E_result) = rayon::join(
+        || PCS::<E>::commit(ck, &W.W, &W.r_W, false),
+        || PCS::<E>::commit(ck, &W.E, &W.r_E, false),
+      );
+      let comm_W = comm_W_result?;
+      let comm_E = comm_E_result?;
       U.comm_W == comm_W && U.comm_E == comm_E
     };
 
@@ -419,11 +468,18 @@ impl<E: Engine> R1CSShape<E> {
     &self,
     ck: &CommitmentKey<E>,
   ) -> Result<(RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>), SpartanError> {
-    // sample Z = (W, u, X)
-    let Z = (0..self.num_vars + self.num_io + 1)
-      .into_par_iter()
-      .map(|_| E::Scalar::random(&mut rand_core::OsRng))
-      .collect::<Vec<E::Scalar>>();
+    let (_sample_span, sample_t) = start_span!("sample_random_details");
+    // Bulk random generation: generate all random bytes at once via ChaCha CSPRNG,
+    // then reduce each 64-byte chunk mod p via from_uniform (wide reduction).
+    use crate::traits::PrimeFieldExt;
+    let mut rng = rand::thread_rng();
+    let z_len = self.num_vars + self.num_io + 1;
+    let total_bytes = z_len * 64;
+    let mut buf = vec![0u8; total_bytes];
+    rand::RngCore::fill_bytes(&mut rng, &mut buf);
+    let Z: Vec<E::Scalar> = (0..z_len)
+      .map(|i| E::Scalar::from_uniform(&buf[i * 64..(i + 1) * 64]))
+      .collect();
 
     let r_W = PCS::<E>::blind(ck, self.num_vars);
     let r_E = PCS::<E>::blind(ck, self.num_cons);
@@ -433,16 +489,21 @@ impl<E: Engine> R1CSShape<E> {
     // compute E <- AZ o BZ - u * CZ
     let (az, bz, cz) = self.multiply_vec(&Z)?;
     let E_vec = az
-      .par_iter()
-      .zip(bz.par_iter())
-      .zip(cz.par_iter())
+      .iter()
+      .zip(bz.iter())
+      .zip(cz.iter())
       .map(|((az_i, bz_i), cz_i)| *az_i * *bz_i - u * *cz_i)
       .collect::<Vec<E::Scalar>>();
 
-    // compute commitments to W,E in parallel
-    let (comm_W_res, comm_E_res) = rayon::join(
-      || PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false),
-      || PCS::<E>::commit(ck, &E_vec, &r_E, false),
+    // compute commitments to W,E
+    let comm_W_res = PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false);
+    let comm_E_res = PCS::<E>::commit(ck, &E_vec, &r_E, false);
+    info!(
+      elapsed_ms = %sample_t.elapsed().as_millis(),
+      num_vars = %self.num_vars,
+      num_cons = %self.num_cons,
+      num_io = %self.num_io,
+      "sample_random_details"
     );
 
     Ok((
@@ -534,6 +595,12 @@ impl<E: Engine> R1CSWitness<E> {
 
     let mut acc_W = vec![E::Scalar::ZERO; dim];
     let tile = 4096; // process 4096 elements at a time
+
+    // Check if all witnesses have small values (fit in u64).
+    // For SHA256 circuits, witnesses are mostly boolean (0/1),
+    // so we can skip the expensive field multiplication for those.
+    let all_small = Ws.iter().all(|wz| wz.is_small);
+
     acc_W
       .par_chunks_mut(tile)
       .enumerate()
@@ -541,13 +608,37 @@ impl<E: Engine> R1CSWitness<E> {
         let start = block_idx * tile;
         let end = start + acc_blk.len(); // last block may be < tile
 
-        // Stream over the small number of rows for this block.
-        // This keeps both `acc_blk` and the row-slice hot in cache.
-        for (i, &wi) in w.iter().enumerate() {
-          let row_slice = &Ws[i].W[start..end];
-          // Accumulate: acc_blk += wi * row_slice
-          for (a, &x) in acc_blk.iter_mut().zip(row_slice.iter()) {
-            *a += wi * x;
+        if all_small {
+          // Fast path: witness values fit in u64.
+          // Skip zero values and use addition for unit values.
+          let zero = E::Scalar::ZERO;
+          let one = E::Scalar::ONE;
+          for (i, &wi) in w.iter().enumerate() {
+            let row_slice = &Ws[i].W[start..end];
+            for (a, x) in acc_blk.iter_mut().zip(row_slice.iter()) {
+              if *x == zero {
+                // skip
+              } else if *x == one {
+                *a += wi;
+              } else {
+                *a += wi * *x;
+              }
+            }
+          }
+        } else {
+          // General path: delayed reduction with element-major access.
+          // Uses a single accumulator (in registers) per element instead of a large buffer.
+          type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+          for j in 0..acc_blk.len() {
+            let mut acc = Acc::<E::Scalar>::default();
+            for (i, &wi) in w.iter().enumerate() {
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc,
+                &wi,
+                &Ws[i].W[start + j],
+              );
+            }
+            acc_blk[j] = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
           }
         }
       });
@@ -663,9 +754,40 @@ pub struct SplitR1CSShape<E: Engine> {
   pub(crate) C: SparseMatrix<E::Scalar>,
   #[serde(skip, default = "OnceCell::new")]
   pub(crate) digest: OnceCell<E::Scalar>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) precomp_A: OnceCell<PrecomputedSparseMatrix<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) precomp_B: OnceCell<PrecomputedSparseMatrix<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) precomp_C: OnceCell<PrecomputedSparseMatrix<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) filtered_A: OnceCell<FilteredSpmv<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) filtered_B: OnceCell<FilteredSpmv<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) filtered_C: OnceCell<FilteredSpmv<E::Scalar>>,
 }
 
-impl<E: Engine> SimpleDigestible for SplitR1CSShape<E> {}
+impl<E: Engine> crate::digest::Digestible for SplitR1CSShape<E> {
+  fn write_bytes<W: Sized + std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+    // Write dimension fields as fixed-size le bytes (deterministic, fast)
+    w.write_all(&(self.num_cons as u64).to_le_bytes())?;
+    w.write_all(&(self.num_cons_unpadded as u64).to_le_bytes())?;
+    w.write_all(&(self.num_shared_unpadded as u64).to_le_bytes())?;
+    w.write_all(&(self.num_precommitted_unpadded as u64).to_le_bytes())?;
+    w.write_all(&(self.num_rest_unpadded as u64).to_le_bytes())?;
+    w.write_all(&(self.num_shared as u64).to_le_bytes())?;
+    w.write_all(&(self.num_precommitted as u64).to_le_bytes())?;
+    w.write_all(&(self.num_rest as u64).to_le_bytes())?;
+    w.write_all(&(self.num_public as u64).to_le_bytes())?;
+    w.write_all(&(self.num_challenges as u64).to_le_bytes())?;
+    // Write matrices as raw bytes (skip bincode per-element overhead)
+    self.A.write_digest_bytes(w)?;
+    self.B.write_digest_bytes(w)?;
+    self.C.write_digest_bytes(w)?;
+    Ok(())
+  }
+}
 
 /// A type that holds a split R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -775,6 +897,12 @@ impl<E: Engine> SplitR1CSShape<E> {
       B: B_padded,
       C: C_padded,
       digest: OnceCell::new(),
+      precomp_A: OnceCell::new(),
+      precomp_B: OnceCell::new(),
+      precomp_C: OnceCell::new(),
+      filtered_A: OnceCell::new(),
+      filtered_B: OnceCell::new(),
+      filtered_C: OnceCell::new(),
     })
   }
 
@@ -910,6 +1038,24 @@ impl<E: Engine> SplitR1CSShape<E> {
     Ok(E::PCS::setup(b"ck", max, DEFAULT_COMMITMENT_WIDTH))
   }
 
+  /// Lazily build precomputed matrices for fast SpMV.
+  fn ensure_precomputed(&self) {
+    self.precomp_A.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.A));
+    self.precomp_B.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.B));
+    self.precomp_C.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.C));
+  }
+
+  /// Eagerly build precomputed matrices during setup.
+  pub fn precompute(&self) {
+    self.ensure_precomputed();
+    // Also build filtered entries for incremental SpMV
+    let col_min = self.num_shared + self.num_precommitted;
+    let nr = self.num_cons_unpadded;
+    self.filtered_A.get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
+    self.filtered_B.get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
+    self.filtered_C.get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
+  }
+
   pub fn multiply_vec(
     &self,
     z: &[E::Scalar],
@@ -925,86 +1071,298 @@ impl<E: Engine> SplitR1CSShape<E> {
       return Err(SpartanError::InvalidWitnessLength);
     }
 
-    let (Az, (Bz, Cz)) = rayon::join(
-      || self.A.multiply_vec(z),
-      || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
-    );
+    self.ensure_precomputed();
+    let pa = self.precomp_A.get().unwrap();
+    let pb = self.precomp_B.get().unwrap();
+    let pc = self.precomp_C.get().unwrap();
 
-    Ok((Az?, Bz?, Cz?))
+    if rayon::current_num_threads() <= 1 {
+      let az = pa.multiply_vec(z);
+      let bz = pb.multiply_vec(z);
+      let cz = pc.multiply_vec(z);
+      Ok((az, bz, cz))
+    } else {
+      let (az, (bz, cz)) = rayon::join(
+        || pa.multiply_vec(z),
+        || rayon::join(|| pb.multiply_vec(z), || pc.multiply_vec(z)),
+      );
+      Ok((az, bz, cz))
+    }
   }
 
-  /// Evaluates the MLE of R1CS matrices at the provided point
-  pub fn evaluate_with_tables(
+  /// Compute partial matrix-vector product for shared + precommitted columns.
+  /// Returns (Az_cached, Bz_cached, Cz_cached) covering all deterministic witness columns.
+  /// The input slice must have length `num_shared + num_precommitted` (the full cached portion of W).
+  pub fn multiply_vec_precommitted(
+    &self,
+    z_cached: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    let cached_len = self.num_shared + self.num_precommitted;
+    assert_eq!(z_cached.len(), cached_len,
+      "multiply_vec_precommitted expects shared + precommitted ({cached_len}), got {}",
+      z_cached.len());
+    // Build a full-size z vector with shared + precommitted values at correct positions
+    let total_len = cached_len + self.num_rest
+      + 1 + self.num_public + self.num_challenges;
+    let mut z_full = vec![E::Scalar::ZERO; total_len];
+    z_full[..cached_len].copy_from_slice(z_cached);
+    self.multiply_vec(&z_full)
+  }
+
+  /// Batched matrix-vector multiply: compute (Az, Bz, Cz) for multiple z vectors in a single pass.
+  /// Traverses each sparse matrix (A, B, C) once instead of n_vecs times.
+  pub fn multiply_vec_batched(
+    &self,
+    zs: &[Vec<E::Scalar>],
+  ) -> Result<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>, SpartanError> {
+    let expected_len = self.num_public + self.num_challenges + 1
+      + self.num_shared + self.num_precommitted + self.num_rest;
+    for z in zs {
+      if z.len() != expected_len {
+        return Err(SpartanError::InvalidWitnessLength);
+      }
+    }
+
+    self.ensure_precomputed();
+    let pa = self.precomp_A.get().unwrap();
+    let pb = self.precomp_B.get().unwrap();
+    let pc = self.precomp_C.get().unwrap();
+
+    let z_refs: Vec<&[E::Scalar]> = zs.iter().map(|z| z.as_slice()).collect();
+    let a_results = pa.multiply_vec_batched(&z_refs);
+    let b_results = pb.multiply_vec_batched(&z_refs);
+    let c_results = pc.multiply_vec_batched(&z_refs);
+
+    Ok(
+      a_results
+        .into_iter()
+        .zip(b_results.into_iter())
+        .zip(c_results.into_iter())
+        .map(|((a, b), c)| (a, b, c))
+        .collect(),
+    )
+  }
+
+  /// Like multiply_vec_incremental but writes into pre-allocated buffers.
+  /// Reuses the allocation if capacity is sufficient (avoids mmap + page faults).
+  pub fn multiply_vec_incremental_into(
+    &self,
+    z: &[E::Scalar],
+    cached_az: &[E::Scalar],
+    cached_bz: &[E::Scalar],
+    cached_cz: &[E::Scalar],
+    az: &mut Vec<E::Scalar>,
+    bz: &mut Vec<E::Scalar>,
+    cz: &mut Vec<E::Scalar>,
+  ) -> Result<(), SpartanError> {
+    // Use filtered entries (built during precompute/setup)
+    let col_min = self.num_shared + self.num_precommitted;
+    let nr = self.num_cons_unpadded;
+    self.ensure_precomputed();
+    self.filtered_A.get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
+    self.filtered_B.get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
+    self.filtered_C.get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
+
+    let fa = self.filtered_A.get().unwrap();
+    let fb = self.filtered_B.get().unwrap();
+    let fc = self.filtered_C.get().unwrap();
+
+    // Reuse allocation: clear and copy from cached
+    az.clear();
+    az.extend_from_slice(cached_az);
+    bz.clear();
+    bz.extend_from_slice(cached_bz);
+    cz.clear();
+    cz.extend_from_slice(cached_cz);
+
+    fa.multiply_vec_add(z, az);
+    fb.multiply_vec_add(z, bz);
+    fc.multiply_vec_add(z, cz);
+
+    Ok(())
+  }
+
+  /// Optimized MLE evaluation using PrecomputedSparseMatrix.
+  /// Fuses A/B/C into a single row-major pass for better T_y cache reuse,
+  /// hoists T_x\[row\] out of inner loop, and uses delayed reduction.
+  pub fn evaluate_with_tables_fast(
     &self,
     T_x: &[E::Scalar],
     T_y: &[E::Scalar],
   ) -> (E::Scalar, E::Scalar, E::Scalar) {
-    let multi_eval = |M: &SparseMatrix<E::Scalar>| -> E::Scalar {
-      M.indptr
-        .par_windows(2)
-        .enumerate()
-        .map(|(row_idx, ptrs)| {
-          M.get_row_unchecked(ptrs.try_into().unwrap())
-            .map(|(val, col_idx)| {
-              let prod = T_x[row_idx] * T_y[*col_idx];
-              if *val == E::Scalar::ONE {
-                prod
-              } else if *val == -E::Scalar::ONE {
-                -prod
-              } else {
-                prod * val
-              }
-            })
-            .sum::<E::Scalar>()
-        })
-        .sum()
-    };
-    (
-      multi_eval(&self.A),
-      multi_eval(&self.B),
-      multi_eval(&self.C),
-    )
+    self.ensure_precomputed();
+    let pa = self.precomp_A.get().unwrap();
+    let pb = self.precomp_B.get().unwrap();
+    let pc = self.precomp_C.get().unwrap();
+    evaluate_three_matrices_fused(pa, pb, pc, T_x, T_y)
   }
 
-  /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-  pub(crate) fn bind_row_vars(
+  /// Merged bind_row_vars + prepare_poly_ABC.
+  ///
+  /// Computes poly_ABC[j] = sum_i (A[i,j] + r*B[i,j] + r^2*C[i,j]) * rx[i]
+  /// directly, avoiding the intermediate evals_A, evals_B, evals_C allocations.
+  ///
+  /// Compact variant: output length = num_vars + num_extra (not 2*num_vars).
+  /// Used by SpartanZK which handles the first inner sumcheck round manually.
+  pub(crate) fn bind_and_prepare_poly_ABC(
     &self,
     rx: &[E::Scalar],
-  ) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
+    r: &E::Scalar,
+  ) -> Vec<E::Scalar> {
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    let num_extra = 1 + self.num_public + self.num_challenges;
+    let out_len = num_vars + num_extra;
+    self.bind_and_prepare_poly_ABC_inner(rx, r, out_len)
+  }
+
+  /// Full-size variant: output length = 2*num_vars (zero-padded).
+  /// Used by NeutronNova which passes poly_ABC directly to batched sumcheck.
+  /// Returns (poly_vec, lo_eff, hi_eff) where lo_eff/hi_eff are the non-zero
+  /// prefix lengths of the lo and hi halves respectively.
+  pub(crate) fn bind_and_prepare_poly_ABC_full(
+    &self,
+    rx: &[E::Scalar],
+    r: &E::Scalar,
+  ) -> (Vec<E::Scalar>, usize, usize) {
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    let vec = self.bind_and_prepare_poly_ABC_inner(rx, r, num_vars * 2);
+    // Variable layout in z: [shared|precommitted|rest|u|X|zeros]
+    // Sections start at padded boundaries: shared at 0, precommitted at num_shared,
+    // rest at num_shared+num_precommitted. Only unpadded vars within each section
+    // appear in constraints.
+    let lo_eff = if self.num_rest_unpadded > 0 {
+      self.num_shared + self.num_precommitted + self.num_rest_unpadded
+    } else if self.num_precommitted_unpadded > 0 {
+      self.num_shared + self.num_precommitted_unpadded
+    } else {
+      self.num_shared_unpadded
+    };
+    let hi_eff = 1 + self.num_public + self.num_challenges; // u + public inputs + challenges
+    (vec, lo_eff, hi_eff)
+  }
+
+  fn bind_and_prepare_poly_ABC_inner(
+    &self,
+    rx: &[E::Scalar],
+    r: &E::Scalar,
+    out_len: usize,
+  ) -> Vec<E::Scalar> {
     assert_eq!(rx.len(), self.num_cons);
 
-    let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
-      for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
-        for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
-          M_evals[*col_idx] += rx[row_idx] * val;
-        }
-      }
-    };
+    self.ensure_precomputed();
+    let pa = self.precomp_A.get().unwrap();
+    let pb = self.precomp_B.get().unwrap();
+    let pc = self.precomp_C.get().unwrap();
 
-    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
-    let (A_evals, (B_evals, C_evals)) = rayon::join(
-      || {
-        let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-        inner(&self.A, &mut A_evals);
-        A_evals
-      },
-      || {
-        rayon::join(
-          || {
-            let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-            inner(&self.B, &mut B_evals);
-            B_evals
-          },
-          || {
-            let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
-            inner(&self.C, &mut C_evals);
-            C_evals
+    let r2 = *r * *r;
+    let num_rows = self.num_cons_unpadded;
+
+    if rayon::current_num_threads() <= 1 || num_rows <= 4096 {
+      // Sequential path: single accumulator
+      let mut poly_abc = vec![E::Scalar::ZERO; out_len];
+      Self::accumulate_rows(pa, pb, pc, rx, r, &r2, 0, num_rows, &mut poly_abc);
+      poly_abc
+    } else {
+      // Parallel path: per-thread accumulators + reduce
+      use rayon::prelude::*;
+      let num_threads = rayon::current_num_threads();
+      let chunk_size = (num_rows + num_threads - 1) / num_threads;
+
+      (0..num_threads)
+        .into_par_iter()
+        .map(|t| {
+          let start = t * chunk_size;
+          let end = (start + chunk_size).min(num_rows);
+          if start >= end {
+            return vec![E::Scalar::ZERO; out_len];
+          }
+          let mut local = vec![E::Scalar::ZERO; out_len];
+          Self::accumulate_rows(pa, pb, pc, rx, r, &r2, start, end, &mut local);
+          local
+        })
+        .reduce(
+          || vec![E::Scalar::ZERO; out_len],
+          |mut a, b| {
+            for (x, y) in a.iter_mut().zip(b.iter()) {
+              *x += *y;
+            }
+            a
           },
         )
-      },
-    );
+    }
+  }
 
-    (A_evals, B_evals, C_evals)
+  #[inline(never)]
+  fn accumulate_rows(
+    pa: &PrecomputedSparseMatrix<E::Scalar>,
+    pb: &PrecomputedSparseMatrix<E::Scalar>,
+    pc: &PrecomputedSparseMatrix<E::Scalar>,
+    rx: &[E::Scalar],
+    r: &E::Scalar,
+    r2: &E::Scalar,
+    start_row: usize,
+    end_row: usize,
+    poly_abc: &mut [E::Scalar],
+  ) {
+    for row in start_row..end_row {
+      let rx_row = rx[row];
+      let r_rx_row = rx_row * *r;
+      let r2_rx_row = rx_row * *r2;
+
+      // A contributions (coefficient = rx[row])
+      let (start, end) = pa.range_unit_pos(row);
+      for i in start..end {
+        poly_abc[pa.unit_pos_cols[i] as usize] += rx_row;
+      }
+      let (start, end) = pa.range_unit_neg(row);
+      for i in start..end {
+        poly_abc[pa.unit_neg_cols[i] as usize] -= rx_row;
+      }
+      let (start, end) = pa.range_small(row);
+      for i in start..end {
+        poly_abc[pa.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pa.small_coeffs[i], rx_row);
+      }
+      let (start, end) = pa.range_general(row);
+      for i in start..end {
+        poly_abc[pa.general_cols[i] as usize] += pa.general_vals[i] * rx_row;
+      }
+
+      // B contributions (coefficient = r * rx[row])
+      let (start, end) = pb.range_unit_pos(row);
+      for i in start..end {
+        poly_abc[pb.unit_pos_cols[i] as usize] += r_rx_row;
+      }
+      let (start, end) = pb.range_unit_neg(row);
+      for i in start..end {
+        poly_abc[pb.unit_neg_cols[i] as usize] -= r_rx_row;
+      }
+      let (start, end) = pb.range_small(row);
+      for i in start..end {
+        poly_abc[pb.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pb.small_coeffs[i], r_rx_row);
+      }
+      let (start, end) = pb.range_general(row);
+      for i in start..end {
+        poly_abc[pb.general_cols[i] as usize] += pb.general_vals[i] * r_rx_row;
+      }
+
+      // C contributions (coefficient = r^2 * rx[row])
+      let (start, end) = pc.range_unit_pos(row);
+      for i in start..end {
+        poly_abc[pc.unit_pos_cols[i] as usize] += r2_rx_row;
+      }
+      let (start, end) = pc.range_unit_neg(row);
+      for i in start..end {
+        poly_abc[pc.unit_neg_cols[i] as usize] -= r2_rx_row;
+      }
+      let (start, end) = pc.range_small(row);
+      for i in start..end {
+        poly_abc[pc.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pc.small_coeffs[i], r2_rx_row);
+      }
+      let (start, end) = pc.range_general(row);
+      for i in start..end {
+        poly_abc[pc.general_cols[i] as usize] += pc.general_vals[i] * r2_rx_row;
+      }
+    }
   }
 }
 
@@ -1019,6 +1377,7 @@ pub struct SplitMultiRoundR1CSShape<E: Engine> {
   pub(crate) num_vars_per_round: Vec<usize>,          // variables per round after padding
   pub(crate) num_challenges_per_round: Vec<usize>,    // challenges per round
   pub(crate) num_public: usize,                       // number of public variables
+  pub(crate) commitment_width: usize,                 // width for per-round commitments
 
   pub(crate) A: SparseMatrix<E::Scalar>,
   pub(crate) B: SparseMatrix<E::Scalar>,
@@ -1249,6 +1608,7 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
       num_vars_per_round: num_vars_per_round_padded,
       num_challenges_per_round,
       num_public,
+      commitment_width: width,
       A: A_padded,
       B: B_padded,
       C: C_padded,
@@ -1285,8 +1645,7 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
   /// Generates public parameters for a multi-round R1CS
   pub fn commitment_key(&self) -> (CommitmentKey<E>, VerifierKey<E>) {
     let total_vars: usize = self.num_vars_per_round.iter().sum();
-    // Use a narrower commitment width for multi-round witnesses to reduce padding overhead.
-    E::PCS::setup(b"ck", total_vars, MULTIROUND_COMMITMENT_WIDTH)
+    E::PCS::setup(b"ck", total_vars, self.commitment_width)
   }
 
   pub fn multiply_vec(
@@ -1364,7 +1723,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
       E::PCS::check_commitment(
         comm,
         s.num_vars_per_round[round],
-        MULTIROUND_COMMITMENT_WIDTH,
+        s.commitment_width,
       )?;
     }
 
@@ -1385,7 +1744,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
       E::PCS::check_commitment(
         &self.comm_w_per_round[round],
         s.num_vars_per_round[round],
-        MULTIROUND_COMMITMENT_WIDTH,
+        s.commitment_width,
       )?;
       transcript.absorb(b"comm_w_round", &self.comm_w_per_round[round]);
 
