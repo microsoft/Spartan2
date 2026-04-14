@@ -12,11 +12,13 @@
 //! marker trait for serializable types, and the `DigestComputer` utility for
 //! computing SHA3-256 digests.
 
-use crate::traits::snark::SpartanDigest;
+use std::io;
+
 use bincode::Options;
 use serde::Serialize;
-use sha3::{Digest, Sha3_256};
-use std::io;
+use sha2::{Digest, Sha256};
+
+use crate::traits::snark::SpartanDigest;
 
 /// Trait for components with potentially discrete digests to be included in their container's digest.
 pub trait Digestible {
@@ -51,8 +53,8 @@ pub struct DigestComputer<'a, T> {
 }
 
 impl<'a, T: Digestible> DigestComputer<'a, T> {
-  fn hasher() -> Sha3_256 {
-    Sha3_256::new()
+  fn hasher() -> Sha256 {
+    Sha256::new()
   }
 
   /// Create a new DigestComputer
@@ -62,20 +64,23 @@ impl<'a, T: Digestible> DigestComputer<'a, T> {
 
   /// Compute the digest of a `Digestible` instance.
   pub fn digest(&self) -> Result<SpartanDigest, io::Error> {
+    // Serialize to buffer first, then hash in one pass.
+    // This is faster than streaming through the hasher because SHA-256
+    // processes large contiguous blocks more efficiently.
+    let mut buf = Vec::with_capacity(128 * 1024 * 1024);
+    self.inner.write_bytes(&mut buf)?;
     let mut hasher = Self::hasher();
-    self
-      .inner
-      .write_bytes(&mut hasher)
-      .expect("Serialization error");
+    hasher.update(&buf);
     Ok(hasher.finalize().into())
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::{DigestComputer, SimpleDigestible};
   use once_cell::sync::OnceCell;
   use serde::{Deserialize, Serialize};
+
+  use super::{DigestComputer, SimpleDigestible};
 
   #[derive(Serialize, Deserialize)]
   struct S {
