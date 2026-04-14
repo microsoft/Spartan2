@@ -8,11 +8,13 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial};
 use core::ops::Index;
+
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::{math::Math, polys::eq::EqPolynomial};
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.
@@ -30,10 +32,29 @@ use serde::{Deserialize, Serialize};
 /// $$
 ///
 /// Vector $Z$ indicates $Z(e)$ where $e$ ranges from $0$ to $2^m-1$.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultilinearPolynomial<Scalar: PrimeField> {
   pub(crate) Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
+  // Non-zero prefix lengths for each half of Z, enabling zero-skip in bind/eval.
+  // When Z has 2n elements: lo_eff covers Z[0..n), hi_eff covers Z[n..2n).
+  // Z[i] = 0 for lo_eff <= i < n, and Z[n+i] = 0 for hi_eff <= i < n.
+  // Default usize::MAX means "unknown, assume fully non-zero".
+  #[serde(skip, default = "default_eff")]
+  pub(crate) lo_eff: usize,
+  #[serde(skip, default = "default_eff")]
+  pub(crate) hi_eff: usize,
 }
+
+fn default_eff() -> usize {
+  usize::MAX
+}
+
+impl<Scalar: PrimeField> PartialEq for MultilinearPolynomial<Scalar> {
+  fn eq(&self, other: &Self) -> bool {
+    self.Z == other.Z
+  }
+}
+impl<Scalar: PrimeField> Eq for MultilinearPolynomial<Scalar> {}
 
 impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// Creates a new `MultilinearPolynomial` from the given evaluations.
@@ -41,12 +62,38 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// # Panics
   /// The number of evaluations must be a power of two.
   pub fn new(Z: Vec<Scalar>) -> Self {
-    MultilinearPolynomial { Z }
+    MultilinearPolynomial {
+      Z,
+      lo_eff: usize::MAX,
+      hi_eff: usize::MAX,
+    }
+  }
+
+  /// Creates a new polynomial with known non-zero prefix lengths for each half.
+  /// For a polynomial of size 2n: Z[i]=0 for lo_eff <= i < n, Z[n+i]=0 for hi_eff <= i < n.
+  pub fn new_with_halves(Z: Vec<Scalar>, lo_eff: usize, hi_eff: usize) -> Self {
+    MultilinearPolynomial { Z, lo_eff, hi_eff }
+  }
+
+  /// Returns the effective number of pairs to iterate in bind/eval: max(lo, hi) clamped to n.
+  #[inline(always)]
+  pub fn eff_pairs(&self) -> usize {
+    let n = self.Z.len() / 2;
+    let lo = self.lo_eff.min(n);
+    let hi = self.hi_eff.min(n);
+    lo.max(hi)
+  }
+
+  /// Consume and return the inner Vec (preserving capacity for reuse).
+  pub fn into_vec(self) -> Vec<Scalar> {
+    self.Z
   }
 
   /// Binds the polynomial's top variable using the given scalar.
   ///
-  /// This operation modifies the polynomial in-place.
+  /// Exploits zero-structure: when hi half is all zero or sparse, uses
+  /// cheaper operations (scale by (1-r) instead of sub+mul+add).
+  #[inline(always)]
   pub fn bind_poly_var_top(&mut self, r: &Scalar) {
     assert!(
       self.Z.len() >= 2,
@@ -54,39 +101,68 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
     );
 
     let n = self.Z.len() / 2;
+    let lo = self.lo_eff.min(n);
+    let hi = self.hi_eff.min(n);
+    let eff = lo.max(hi);
 
-    let (left, right) = self.Z.split_at_mut(n);
-
-    zip_with_for_each!((left.par_iter_mut(), right.par_iter()), |a, b| {
-      *a += *r * (*b - *a);
-    });
+    if hi == 0 {
+      // Hi half is all zero: result = left[i] * (1-r)
+      let one_minus_r = Scalar::ONE - *r;
+      if rayon::current_num_threads() <= 1 {
+        for a in self.Z[..lo].iter_mut() {
+          *a *= one_minus_r;
+        }
+      } else {
+        self.Z[..lo].par_iter_mut().for_each(|a| *a *= one_minus_r);
+      }
+    } else if hi <= lo {
+      // Both halves have non-zeros but hi is shorter
+      let (left, right) = self.Z.split_at_mut(n);
+      if rayon::current_num_threads() <= 1 {
+        for i in 0..hi {
+          left[i] += *r * (right[i] - left[i]);
+        }
+        let one_minus_r = Scalar::ONE - *r;
+        for a in left[hi..lo].iter_mut() {
+          *a *= one_minus_r;
+        }
+      } else {
+        let r_val = *r;
+        let one_minus_r = Scalar::ONE - r_val;
+        left[..lo].par_iter_mut().enumerate().for_each(|(i, a)| {
+          if i < hi {
+            *a += r_val * (right[i] - *a);
+          } else {
+            *a *= one_minus_r;
+          }
+        });
+      }
+    } else {
+      // hi > lo: lo half runs out first
+      let (left, right) = self.Z.split_at_mut(n);
+      if rayon::current_num_threads() <= 1 {
+        for i in 0..lo {
+          left[i] += *r * (right[i] - left[i]);
+        }
+        for i in lo..hi {
+          left[i] = *r * right[i];
+        }
+      } else {
+        let r_val = *r;
+        left[..hi].par_iter_mut().enumerate().for_each(|(i, a)| {
+          if i < lo {
+            *a += r_val * (right[i] - *a);
+          } else {
+            *a = r_val * right[i];
+          }
+        });
+      }
+    }
 
     self.Z.truncate(n);
-  }
 
-  /// binds the polynomial's top variables using the given scalars.
-  pub fn bind_with(poly: &[Scalar], L: &[Scalar], r_len: usize) -> Vec<Scalar> {
-    assert_eq!(
-      poly.len(),
-      L.len() * r_len,
-      "poly length ({}) must equal L.len() * r_len ({} * {}) = {}",
-      poly.len(),
-      L.len(),
-      r_len,
-      L.len() * r_len
-    );
-
-    (0..r_len)
-      .into_par_iter()
-      .map(|i| {
-        let mut acc = Scalar::ZERO;
-        for j in 0..L.len() {
-          // row-major: index = j * r_len + i
-          acc += L[j] * poly[j * r_len + i];
-        }
-        acc
-      })
-      .collect()
+    self.lo_eff = eff.min(n / 2);
+    self.hi_eff = eff.saturating_sub(n / 2);
   }
 }
 
@@ -135,9 +211,10 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::provider::pasta::pallas;
   use rand_core::{CryptoRng, OsRng, RngCore};
+
+  use crate::provider::pasta::pallas;
+  use super::*;
 
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.

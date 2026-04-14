@@ -28,7 +28,6 @@ use crate::{
   zk::{NeutronNovaVerifierCircuit, SpartanVerifierCircuit},
 };
 use ff::Field;
-use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -44,6 +43,16 @@ pub struct SumcheckProof<E: Engine> {
 }
 
 impl<E: Engine> SumcheckProof<E> {
+  /// Returns a new proof with `round0_poly` prepended to the existing rounds.
+  pub fn prepend_round(self, round0_poly: UniPoly<E::Scalar>) -> Self {
+    let mut polys = Vec::with_capacity(1 + self.compressed_polys.len());
+    polys.push(round0_poly.compress());
+    polys.extend(self.compressed_polys);
+    SumcheckProof {
+      compressed_polys: polys,
+    }
+  }
+
   /// Verifies a sum-check proof.
   ///
   /// # Arguments
@@ -89,7 +98,6 @@ impl<E: Engine> SumcheckProof<E> {
 
       //derive the verifier's challenge for the next round
       let r_i = transcript.squeeze(b"c")?;
-
       r.push(r_i);
 
       // evaluate the claimed degree-ell polynomial at r_i
@@ -106,7 +114,7 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Computes evaluation points for a quadratic polynomial using delayed modular reduction.
   ///
-  /// Accumulates a·b products in wide limbs (no intermediate reductions),
+  /// Accumulates a*b products in wide limbs (no intermediate reductions),
   /// reducing only once at the end. This saves N-1 Montgomery reductions per round.
   ///
   /// # Arguments
@@ -115,42 +123,42 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Returns
   /// A tuple `(eval_0, eval_2)` containing evaluations at points 0 and 2.
-  #[inline]
+  #[inline(always)]
   fn compute_eval_points_quad(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
   ) -> (E::Scalar, E::Scalar) {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
-    let len = poly_A.Z.len() / 2;
+    let full_len = poly_A.Z.len() / 2;
+    // Skip positions where all of A's or all of B's contributions are zero.
+    let len = poly_A.eff_pairs().min(poly_B.eff_pairs()).min(full_len);
 
-    let (acc_0, acc_2) = (0..len)
+    let (acc_0, acc_inf) = (0..len)
       .into_par_iter()
       .fold(
-        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
         |mut acc, i| {
           let a_low = &poly_A[i];
-          let a_high = &poly_A[len + i];
+          let a_high = &poly_A[full_len + i];
           let b_low = &poly_B[i];
-          let b_high = &poly_B[len + i];
+          let b_high = &poly_B[full_len + i];
 
-          // eval 0: a_low × b_low
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
             &mut acc.0, a_low, b_low,
           );
 
-          // eval 2: (2·a_high - a_low) × (2·b_high - b_low)
-          let a_bound = *a_high + *a_high - *a_low;
-          let b_bound = *b_high + *b_high - *b_low;
+          let delta_a = *a_high - *a_low;
+          let delta_b = *b_high - *b_low;
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut acc.1, &a_bound, &b_bound,
+            &mut acc.1, &delta_a, &delta_b,
           );
 
           acc
         },
       )
       .reduce(
-        || (Acc::<E::Scalar>::zero(), Acc::<E::Scalar>::zero()),
+        || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
         |mut a, b| {
           a.0 += b.0;
           a.1 += b.1;
@@ -160,7 +168,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     (
       <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf),
     )
   }
 
@@ -193,11 +201,16 @@ impl<E: Engine> SumcheckProof<E> {
 
       let poly = {
         let (_eval_span, eval_t) = start_span!("compute_eval_points_quad");
-        let (eval_point_0, eval_point_2) = Self::compute_eval_points_quad(poly_A, poly_B);
+        let (eval_point_0, t_inf) = Self::compute_eval_points_quad(poly_A, poly_B);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points_quad");
         }
 
+        // BDDT: derive eval_2 from claim, eval_0, and t(inf)
+        // t(X) = a_0 + a_1X + a_2X^2; t(inf)=a_2; t(0)=a_0; claim=t(0)+t(1)=2a_0+a_1+a_2
+        // eval_2 = t(2) = a_0 + 2a_1 + 4a_2 = 2*claim - 3*eval_0 + 2*t_inf
+        let three_eval0 = eval_point_0 + eval_point_0 + eval_point_0;
+        let eval_point_2 = claim_per_round + claim_per_round - three_eval0 + t_inf + t_inf;
         let evals = vec![eval_point_0, claim_per_round - eval_point_0, eval_point_2];
         UniPoly::from_evals(&evals)?
       };
@@ -244,7 +257,7 @@ impl<E: Engine> SumcheckProof<E> {
   ///
   /// # Returns
   /// A tuple containing the evaluations at points 0, 2, and 3.
-  #[inline]
+  #[inline(always)]
   fn compute_eval_points_cubic_with_additive_term(
     poly_A: &MultilinearPolynomial<E::Scalar>,
     poly_B: &MultilinearPolynomial<E::Scalar>,
@@ -260,9 +273,9 @@ impl<E: Engine> SumcheckProof<E> {
       .fold(
         || {
           (
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
           )
         },
         |mut acc, i| {
@@ -307,9 +320,9 @@ impl<E: Engine> SumcheckProof<E> {
       .reduce(
         || {
           (
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
           )
         },
         |mut a, b| {
@@ -327,7 +340,7 @@ impl<E: Engine> SumcheckProof<E> {
     )
   }
 
-  #[inline]
+  #[inline(always)]
   /// Computes evaluation points for a cubic polynomial with additive term.
   /// The outer polynomial is the power of tau, which is an outer product of two polynomials left and right.
   ///
@@ -377,18 +390,18 @@ impl<E: Engine> SumcheckProof<E> {
       .fold(
         || {
           (
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
           )
         },
         |mut outer_acc, i| {
           let pow_left = &pow_tau_left[i];
 
           // Inner loop: accumulate in wide limbs
-          let mut inner_0 = Acc::<E::Scalar>::zero();
-          let mut inner_2 = Acc::<E::Scalar>::zero();
-          let mut inner_3 = Acc::<E::Scalar>::zero();
+          let mut inner_0 = Acc::<E::Scalar>::default();
+          let mut inner_2 = Acc::<E::Scalar>::default();
+          let mut inner_3 = Acc::<E::Scalar>::default();
 
           for j in 0..right {
             let low = i + j * left;
@@ -463,9 +476,9 @@ impl<E: Engine> SumcheckProof<E> {
       .reduce(
         || {
           (
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
-            Acc::<E::Scalar>::zero(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
+            Acc::<E::Scalar>::default(),
           )
         },
         |mut a, b| {
@@ -508,7 +521,9 @@ impl<E: Engine> SumcheckProof<E> {
         // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
         let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs(round, poly_A, poly_B, poly_C);
+          eq_instance.evaluation_points_cubic_with_three_inputs(
+            poly_A, poly_B, poly_C, claim_per_round,
+          );
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -576,9 +591,16 @@ impl<E: Engine> SumcheckProof<E> {
 
     for i in 0..num_rounds {
       // -------- interpolate coefficients --------
-
-      let (eval0, eval2, eval3) =
-        eq_instance.evaluation_points_cubic_with_three_inputs(i, poly_Az, poly_Bz, poly_Cz);
+      let (eval0, eval2, eval3) = if i == 0 {
+        // Zero-check round 0: t(0) = 0 (binary points -> R1CS satisfied), no Cz needed.
+        eq_instance.evaluation_points_zero_check_round0(
+          poly_Az, poly_Bz,
+        )
+      } else {
+        eq_instance.evaluation_points_cubic_with_three_inputs(
+          poly_Az, poly_Bz, poly_Cz, claim_outer_round,
+        )
+      };
       let evals = vec![eval0, claim_outer_round - eval0, eval2, eval3];
       let poly = UniPoly::from_evals(&evals)?;
       verifier_circuit.outer_polys[i] = [
@@ -632,17 +654,21 @@ impl<E: Engine> SumcheckProof<E> {
     vc_ck: &CommitmentKey<E>,
     transcript: &mut E::TE,
     start_round: usize,
+    inner_poly_offset: usize,
   ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let mut r_y: Vec<E::Scalar> = Vec::with_capacity(num_rounds);
     let mut claim_current_round = *claim;
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let (eval0, eval2) = Self::compute_eval_points_quad(poly_ABC, poly_z);
+      let (eval0, t_inf) = Self::compute_eval_points_quad(poly_ABC, poly_z);
+      // BDDT: eval_2 = 2*claim - 3*eval_0 + 2*t_inf
+      let three_eval0 = eval0 + eval0 + eval0;
+      let eval2 = claim_current_round + claim_current_round - three_eval0 + t_inf + t_inf;
       let evals = vec![eval0, claim_current_round - eval0, eval2];
       let poly = UniPoly::from_evals(&evals)?;
 
-      verifier_circuit.inner_polys[j] = [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
+      verifier_circuit.inner_polys[inner_poly_offset + j] = [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
 
       // -------- transcript / witness handling --------
       let chals = SatisfyingAssignment::<E>::process_round(
@@ -693,17 +719,21 @@ impl<E: Engine> SumcheckProof<E> {
 
     for j in 0..num_rounds {
       // -------- interpolate coeffs --------
-      let ((eval0_s, eval2_s), (eval0_c, eval2_c)) = rayon::join(
+      let ((eval0_s, t_inf_s), (eval0_c, t_inf_c)) = rayon::join(
         || Self::compute_eval_points_quad(poly_A_0, poly_B_0),
         || Self::compute_eval_points_quad(poly_A_1, poly_B_1),
       );
 
-      // step branch
+      // step branch -- BDDT: eval_2 = 2*claim - 3*eval_0 + 2*t_inf
+      let three_eval0_s = eval0_s + eval0_s + eval0_s;
+      let eval2_s = claim_step_round + claim_step_round - three_eval0_s + t_inf_s + t_inf_s;
       let evals_s = vec![eval0_s, claim_step_round - eval0_s, eval2_s];
       let poly_s = UniPoly::from_evals(&evals_s)?;
       let coeffs_step = [poly_s.coeffs[0], poly_s.coeffs[1], poly_s.coeffs[2]];
 
-      // core branch
+      // core branch -- BDDT: eval_2 = 2*claim - 3*eval_0 + 2*t_inf
+      let three_eval0_c = eval0_c + eval0_c + eval0_c;
+      let eval2_c = claim_core_round + claim_core_round - three_eval0_c + t_inf_c + t_inf_c;
       let evals_c = vec![eval0_c, claim_core_round - eval0_c, eval2_c];
       let poly_c = UniPoly::from_evals(&evals_c)?;
       let coeffs_core = [poly_c.coeffs[0], poly_c.coeffs[1], poly_c.coeffs[2]];
@@ -723,7 +753,7 @@ impl<E: Engine> SumcheckProof<E> {
       let r_j = chals[0];
       r_y.push(r_j);
 
-      // -------- bind polys --------
+      // bind polynomials to the verifier's challenge
       rayon::join(
         || {
           rayon::join(
@@ -887,13 +917,19 @@ impl<E: Engine> SumcheckProof<E> {
 }
 
 pub(crate) mod eq_sumcheck {
-  //! This module implements the sumcheck optimization for equality polynomials.
-  //! The optimization is described in Section 5 of <https://eprint.iacr.org/2025/1117> algorithm 5.
+  //! Sumcheck optimization for equality polynomials.
+  //!
+  //! The eq-factoring structure (splitting eq into left/right halves) follows
+  //! Gruen (eprint 2024/108, Section 3).
+  //!
+  //! The claim-derived evaluation points (computing only 2 N-scaling sums per round
+  //! instead of 3) follow BDDT (eprint 2025/1117, Section 6.2).
   use crate::{
-    big_num::DelayedReduction, polys::multilinear::MultilinearPolynomial, traits::Engine,
+    big_num::DelayedReduction,
+    polys::multilinear::MultilinearPolynomial,
+    traits::Engine,
   };
   use ff::{Field, PrimeField};
-  use num_traits::Zero;
   use rayon::prelude::*;
 
   pub struct EqSumCheckInstance<E: Engine> {
@@ -906,7 +942,9 @@ pub(crate) mod eq_sumcheck {
     eval_eq_left: E::Scalar,
     poly_eq_left: Vec<Vec<E::Scalar>>,
     poly_eq_right: Vec<Vec<E::Scalar>>,
-    eq_tau_0_2_3: Vec<(E::Scalar, E::Scalar, E::Scalar)>,
+    // Per-tau precomputed values: (eq(tau, 0), eq_slope = 2*tau - 1, eq(tau, -1))
+    // where eq(tau, X) = eq(tau, 0) + eq_slope * X
+    eq_tau_0_slope_m1: Vec<(E::Scalar, E::Scalar, E::Scalar)>,
   }
 
   impl<E: Engine> EqSumCheckInstance<E> {
@@ -954,15 +992,14 @@ pub(crate) mod eq_sumcheck {
         || compute_eq_polynomials(right_taus),
       );
 
-      let f2 = E::Scalar::ONE.double();
-      let f1 = E::Scalar::ONE;
-      let eq_tau_0_2_3 = taus
+      let eq_tau_0_slope_m1 = taus
         .par_iter()
         .map(|tau| {
-          let tau2 = tau.double();
-          let tau3 = tau2 + tau;
-          let tau5 = tau3 + tau2;
-          (f1 - tau, tau3 - f1, tau5 - f2)
+          // eq(tau, X) = (1 - tau) + (2*tau - 1) * X
+          let one_minus_tau = E::Scalar::ONE - tau;
+          let two_tau_minus_one = *tau - one_minus_tau; // 2*tau - 1
+          let eq_m1 = one_minus_tau - two_tau_minus_one; // 2 - 3*tau
+          (one_minus_tau, two_tau_minus_one, eq_m1)
         })
         .collect::<Vec<_>>();
 
@@ -975,18 +1012,23 @@ pub(crate) mod eq_sumcheck {
         eval_eq_left: E::Scalar::ONE,
         poly_eq_left,
         poly_eq_right,
-        eq_tau_0_2_3,
+        eq_tau_0_slope_m1,
       }
     }
 
-    /// Evaluate poly_A * poly_B - poly_C
+    /// Evaluate eq(tau,X) * (A*B - C) using 2 N-scaling sums instead of 3
+    /// (BDDT, eprint 2025/1117, Section 6.2).
+    ///
+    /// Computes only t(0) and t(inf) (the leading coefficient), then derives the
+    /// remaining evaluation points from the sumcheck claim in O(1).
+    /// Falls back to computing all 3 sums when tau=0 makes derivation impossible.
     #[inline]
     pub fn evaluation_points_cubic_with_three_inputs(
       &self,
-      round_idx: usize,
       poly_A: &MultilinearPolynomial<E::Scalar>,
       poly_B: &MultilinearPolynomial<E::Scalar>,
       poly_C: &MultilinearPolynomial<E::Scalar>,
+      claim: E::Scalar,
     ) -> (E::Scalar, E::Scalar, E::Scalar) {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
 
@@ -995,180 +1037,339 @@ pub(crate) mod eq_sumcheck {
       let in_first_half = self.round < self.first_half;
       let half_p = poly_A.Z.len() / 2;
 
-      let (mut eval_0, mut eval_2, mut eval_3) = if in_first_half {
-        // Two-phase accumulation using split-eq factorization:
-        //   E[id] = E_out[x_out] × E_in[x_in]  where id = (x_out << k) | x_in
-        //
-        // We compute: Σ_id E[id] × q_k(A[id], B[id], C[id])
-        //           = Σ_{x_out} E_out[x_out] × (Σ_{x_in} E_in[x_in] × q_k(...))
-        //
-        // The inner sum over x_in is computed in a loop with delayed reduction,
-        // then reduced once before accumulating into the outer sum.
+      // Compute 2 N-scaling sums: t(0) = sum E~(x)*(A_0B_0-C_0) and
+      // t(inf) = sum E~(x)*(A_1-A_0)(B_1-B_0) [leading coefficient of inner polynomial]
+      let (t_0, t_inf) = if in_first_half {
         let (poly_eq_left, poly_eq_right, second_half) = self.poly_eqs_first_half();
         let eq_out_len = poly_eq_left.len();
 
-        // Outer loop: Σ_{x_out} E_out[x_out] × (inner sum)
-        let (acc_0, acc_2, acc_3) = (0..eq_out_len)
+        let (acc_0, acc_inf) = (0..eq_out_len)
           .into_par_iter()
           .fold(
-            || {
-              (
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-              )
-            },
+            || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
             |mut outer_acc, x_out| {
               let e_out = &poly_eq_left[x_out];
-
-              // Inner loop: Σ_{x_in} E_in[x_in] × q_k(A, B, C)
-              // Accumulated in wide limbs without reduction.
-              let mut inner_0 = Acc::<E::Scalar>::zero();
-              let mut inner_2 = Acc::<E::Scalar>::zero();
-              let mut inner_3 = Acc::<E::Scalar>::zero();
+              let mut inner_0 = Acc::<E::Scalar>::default();
+              let mut inner_inf = Acc::<E::Scalar>::default();
 
               for (x_in, e_in) in poly_eq_right.iter().enumerate() {
                 let id = (x_out << second_half) | x_in;
 
                 let (zero_a, one_a) = (&poly_A.Z[id], &poly_A.Z[id + half_p]);
                 let (zero_b, one_b) = (&poly_B.Z[id], &poly_B.Z[id + half_p]);
-                let (zero_c, one_c) = (&poly_C.Z[id], &poly_C.Z[id + half_p]);
+                let zero_c = &poly_C.Z[id];
 
-                let (q0, q2, q3) = eval_one_case_cubic_three_inputs(
-                  round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
-                );
+                let t_0_elem = *zero_a * *zero_b - *zero_c;
+                let t_inf_elem = (*one_a - *zero_a) * (*one_b - *zero_b);
 
                 <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_0,
-                  e_in,
-                  &q0,
+                  &mut inner_0, e_in, &t_0_elem,
                 );
                 <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_2,
-                  e_in,
-                  &q2,
-                );
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_3,
-                  e_in,
-                  &q3,
+                  &mut inner_inf, e_in, &t_inf_elem,
                 );
               }
 
-              // Reduce inner sums, then accumulate E_out × (reduced inner) into outer
               let inner_0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_0);
-              let inner_2_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_2);
-              let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
+              let inner_inf_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_inf);
 
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc.0,
-                e_out,
-                &inner_0_red,
+                &mut outer_acc.0, e_out, &inner_0_red,
               );
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc.1,
-                e_out,
-                &inner_2_red,
-              );
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc.2,
-                e_out,
-                &inner_3_red,
+                &mut outer_acc.1, e_out, &inner_inf_red,
               );
 
               outer_acc
             },
           )
           .reduce(
-            || {
-              (
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-              )
-            },
-            |mut a, b| {
-              a.0 += b.0;
-              a.1 += b.1;
-              a.2 += b.2;
-              a
-            },
+            || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
+            |mut a, b| { a.0 += b.0; a.1 += b.1; a },
           );
 
-        // Final reduction
         (
           <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf),
         )
       } else {
-        // Second half of rounds: E_out is fully bound, only E_in remains.
-        // We compute: Σ_id E[id] × q_k(A[id], B[id], C[id])
         let poly_eq_right = self.poly_eq_right_last_half();
 
-        // Single loop: Σ_id E[id] × q_k(A, B, C)
-        // Accumulated in wide limbs without reduction.
-        let (acc_0, acc_2, acc_3) = (0..half_p)
+        let (acc_0, acc_inf) = (0..half_p)
           .into_par_iter()
           .fold(
-            || {
-              (
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-              )
-            },
+            || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
             |mut acc, id| {
               let e = &poly_eq_right[id];
 
               let (zero_a, one_a) = (&poly_A.Z[id], &poly_A.Z[id + half_p]);
               let (zero_b, one_b) = (&poly_B.Z[id], &poly_B.Z[id + half_p]);
-              let (zero_c, one_c) = (&poly_C.Z[id], &poly_C.Z[id + half_p]);
+              let zero_c = &poly_C.Z[id];
 
-              let (q0, q2, q3) = eval_one_case_cubic_three_inputs(
-                round_idx, zero_a, one_a, zero_b, one_b, zero_c, one_c,
-              );
+              let t_0_elem = *zero_a * *zero_b - *zero_c;
+              let t_inf_elem = (*one_a - *zero_a) * (*one_b - *zero_b);
 
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc.0, e, &q0,
+                &mut acc.0, e, &t_0_elem,
               );
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc.1, e, &q2,
-              );
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc.2, e, &q3,
+                &mut acc.1, e, &t_inf_elem,
               );
 
               acc
             },
           )
           .reduce(
-            || {
-              (
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-                Acc::<E::Scalar>::zero(),
-              )
-            },
-            |mut a, b| {
-              a.0 += b.0;
-              a.1 += b.1;
-              a.2 += b.2;
-              a
-            },
+            || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
+            |mut a, b| { a.0 += b.0; a.1 += b.1; a },
           );
 
-        // Final reduction
         (
           <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
+          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf),
         )
       };
 
-      self.update_evals(&mut eval_0, &mut eval_2, &mut eval_3);
+      // Derive evaluation points from claim (BDDT)
+      if let Some(result) = self.derive_from_claim(t_0, t_inf, claim) {
+        result
+      } else {
+        self.fallback_three_inputs(t_0, t_inf, claim, poly_A, poly_B, poly_C)
+      }
+    }
 
-      (eval_0, eval_2, eval_3)
+    /// Zero-check round 0 optimization: at the first round of a zero-check (claim=0),
+    /// all evaluation points are on the binary hypercube where Az*Bz = Cz (R1CS satisfied),
+    /// so t(0) = 0. Only t(inf) (leading coefficient, no Cz) needs to be computed.
+    /// This saves ~50% of round 0 computation.
+    #[inline]
+    pub fn evaluation_points_zero_check_round0(
+      &self,
+      poly_A: &MultilinearPolynomial<E::Scalar>,
+      poly_B: &MultilinearPolynomial<E::Scalar>,
+    ) -> (E::Scalar, E::Scalar, E::Scalar) {
+      debug_assert_eq!(poly_A.Z.len() % 2, 0);
+      assert_eq!(self.round, 1, "zero-check round-0 skip is only valid at round 0");
+
+      type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
+      let in_first_half = self.round < self.first_half;
+      let half_p = poly_A.Z.len() / 2;
+
+      // Compute only t(inf) = sum E~(x)*(A_1-A_0)(B_1-B_0) -- no Cz needed
+      let t_inf = if in_first_half {
+        let (poly_eq_left, poly_eq_right, second_half) = self.poly_eqs_first_half();
+        let eq_out_len = poly_eq_left.len();
+
+        let acc_inf = (0..eq_out_len)
+          .into_par_iter()
+          .fold(
+            || Acc::<E::Scalar>::default(),
+            |mut outer_acc, x_out| {
+              let e_out = &poly_eq_left[x_out];
+              let mut inner_inf = Acc::<E::Scalar>::default();
+
+              for (x_in, e_in) in poly_eq_right.iter().enumerate() {
+                let id = (x_out << second_half) | x_in;
+
+                let t_inf_elem = (poly_A.Z[id + half_p] - poly_A.Z[id])
+                  * (poly_B.Z[id + half_p] - poly_B.Z[id]);
+
+                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                  &mut inner_inf, e_in, &t_inf_elem,
+                );
+              }
+
+              let inner_inf_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_inf);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut outer_acc, e_out, &inner_inf_red,
+              );
+
+              outer_acc
+            },
+          )
+          .reduce(
+            || Acc::<E::Scalar>::default(),
+            |mut a, b| { a += b; a },
+          );
+
+        <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf)
+      } else {
+        let poly_eq_right = self.poly_eq_right_last_half();
+
+        let acc_inf = (0..half_p)
+          .into_par_iter()
+          .fold(
+            || Acc::<E::Scalar>::default(),
+            |mut acc, id| {
+              let e = &poly_eq_right[id];
+              let t_inf_elem = (poly_A.Z[id + half_p] - poly_A.Z[id])
+                * (poly_B.Z[id + half_p] - poly_B.Z[id]);
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc, e, &t_inf_elem,
+              );
+              acc
+            },
+          )
+          .reduce(
+            || Acc::<E::Scalar>::default(),
+            |mut a, b| { a += b; a },
+          );
+
+        <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf)
+      };
+
+      // t(0) = 0 (binary points -> R1CS satisfied), claim = 0
+      let t_0 = E::Scalar::ZERO;
+      let claim = E::Scalar::ZERO;
+      if let Some(result) = self.derive_from_claim(t_0, t_inf, claim) {
+        result
+      } else {
+        // Fallback: t(-1) = 2*t_inf (since t_0=0, t_1=0)
+        // s(-1) = eq(-1) * p * t(-1) = eq_m1 * p * 2*t_inf
+        let p = self.eval_eq_left;
+        let (eq_0, eq_slope, eq_m1) = self.eq_tau_0_slope_m1[self.round - 1];
+        let s_0 = E::Scalar::ZERO;
+        let s_1 = E::Scalar::ZERO;
+        let s_leading = eq_slope * p * t_inf;
+        let t_m1 = t_inf.double();
+        let s_m1 = eq_m1 * p * t_m1;
+
+        let _ = eq_0; // suppress warning
+        let half = E::Scalar::TWO_INV;
+        let c1 = (s_1 - s_m1) * half - s_leading;
+        let c2 = (s_1 + s_m1) * half - s_0;
+        let inner_2 = c2 + s_leading.double();
+        let eval_2 = s_0 + (c1 + inner_2.double()).double();
+        let c3_3 = s_leading.double() + s_leading;
+        let inner_3 = c2 + c3_3;
+        let mid_3 = c1 + inner_3.double() + inner_3;
+        let eval_3 = s_0 + mid_3.double() + mid_3;
+
+        (s_0, eval_2, eval_3)
+      }
+    }
+
+
+    ///
+    /// Returns `None` when tau=0 (l(1)=0), requiring the caller to fall back
+    /// to computing the third N-scaling sum directly.
+    #[inline]
+    fn derive_from_claim(
+      &self,
+      t_0: E::Scalar,
+      t_inf: E::Scalar,
+      claim: E::Scalar,
+    ) -> Option<(E::Scalar, E::Scalar, E::Scalar)> {
+      let p = self.eval_eq_left;
+      let (eq_0, eq_slope, eq_m1) = self.eq_tau_0_slope_m1[self.round - 1];
+
+      // l(X) = eq(tau_i, X) = eq_0 + eq_slope*X
+      let l_0_p = eq_0 * p;
+      let l_1_p = (eq_0 + eq_slope) * p; // = tau_i * eval_eq_left
+
+      // When tau=0, l(1)=0 and we can't invert
+      let l_1_p_inv: Option<E::Scalar> = l_1_p.invert().into();
+      let l_1_p_inv = l_1_p_inv?;
+
+      // s(0) = l(0) * p * t(0)
+      let s_0 = l_0_p * t_0;
+      let s_1 = claim - s_0;
+      let t_1 = s_1 * l_1_p_inv;
+
+      // Cubic coefficient of s: s_leading = eq_slope * p * t(inf)
+      let s_leading = eq_slope * p * t_inf;
+
+      // t is degree 2, so t(-1) = 2*t(inf) + 2*t(0) - t(1)
+      let t_m1 = t_inf.double() + t_0.double() - t_1;
+      let s_m1 = eq_m1 * p * t_m1;
+
+      // Convert (s(0), s_leading, s(-1)) to (eval_0, eval_2, eval_3)
+      let e0 = s_0;
+      let e1 = s_1;
+      let half: E::Scalar = E::Scalar::TWO_INV;
+      let c1: E::Scalar = (e1 - s_m1) * half - s_leading;
+      let c2: E::Scalar = (e1 + s_m1) * half - e0;
+
+      // p(2) = e0 + 2*c1 + 4*c2 + 8*c3 via Horner: e0 + 2*(c1 + 2*(c2 + 2*c3))
+      let inner_2: E::Scalar = c2 + s_leading.double();
+      let eval_2: E::Scalar = e0 + (c1 + inner_2.double()).double();
+
+      // p(3) = e0 + 3*c1 + 9*c2 + 27*c3 via Horner: e0 + 3*(c1 + 3*(c2 + 3*c3))
+      let c3_3: E::Scalar = s_leading.double() + s_leading;
+      let inner_3: E::Scalar = c2 + c3_3;
+      let mid_3: E::Scalar = c1 + inner_3.double() + inner_3;
+      let eval_3: E::Scalar = e0 + mid_3.double() + mid_3;
+
+      Some((e0, eval_2, eval_3))
+    }
+
+    /// Fallback when derive_from_claim fails (tau=0): compute t(-1) via third N-scaling sum.
+    fn fallback_three_inputs(
+      &self,
+      t_0: E::Scalar,
+      t_inf: E::Scalar,
+      claim: E::Scalar,
+      poly_A: &MultilinearPolynomial<E::Scalar>,
+      poly_B: &MultilinearPolynomial<E::Scalar>,
+      poly_C: &MultilinearPolynomial<E::Scalar>,
+    ) -> (E::Scalar, E::Scalar, E::Scalar) {
+      let p = self.eval_eq_left;
+      let (eq_0, eq_slope, eq_m1) = self.eq_tau_0_slope_m1[self.round - 1];
+      let half_p = poly_A.Z.len() / 2;
+
+      // Compute t(-1) = sum E~(x) * ((2A_0-A_1)(2B_0-B_1) - (2C_0-C_1))
+      let t_m1: E::Scalar = if self.round < self.first_half {
+        let (poly_eq_left, poly_eq_right, second_half) = self.poly_eqs_first_half();
+        let eq_out_len = poly_eq_left.len();
+        (0..eq_out_len)
+          .into_par_iter()
+          .map(|x_out| {
+            let e_out = poly_eq_left[x_out];
+            let inner: E::Scalar = poly_eq_right.iter().enumerate().map(|(x_in, e_in)| {
+              let id = (x_out << second_half) | x_in;
+              let m1_a = poly_A.Z[id].double() - poly_A.Z[id + half_p];
+              let m1_b = poly_B.Z[id].double() - poly_B.Z[id + half_p];
+              let m1_c = poly_C.Z[id].double() - poly_C.Z[id + half_p];
+              *e_in * (m1_a * m1_b - m1_c)
+            }).sum();
+            e_out * inner
+          })
+          .sum()
+      } else {
+        let poly_eq_right = self.poly_eq_right_last_half();
+        (0..half_p)
+          .into_par_iter()
+          .map(|id| {
+            let e = poly_eq_right[id];
+            let m1_a = poly_A.Z[id].double() - poly_A.Z[id + half_p];
+            let m1_b = poly_B.Z[id].double() - poly_B.Z[id + half_p];
+            let m1_c = poly_C.Z[id].double() - poly_C.Z[id + half_p];
+            e * (m1_a * m1_b - m1_c)
+          })
+          .sum()
+      };
+
+      let s_0 = eq_0 * p * t_0;
+      let s_leading = eq_slope * p * t_inf;
+      let s_m1 = eq_m1 * p * t_m1;
+
+      // Convert to (eval_0, eval_2, eval_3)
+      let e0 = s_0;
+      let e1: E::Scalar = claim - s_0;
+      let half: E::Scalar = E::Scalar::TWO_INV;
+      let c1: E::Scalar = (e1 - s_m1) * half - s_leading;
+      let c2: E::Scalar = (e1 + s_m1) * half - e0;
+
+      let inner_2: E::Scalar = c2 + s_leading.double();
+      let eval_2: E::Scalar = e0 + (c1 + inner_2.double()).double();
+
+      let c3_3: E::Scalar = s_leading.double() + s_leading;
+      let inner_3: E::Scalar = c2 + c3_3;
+      let mid_3: E::Scalar = c1 + inner_3.double() + inner_3;
+      let eval_3: E::Scalar = e0 + mid_3.double() + mid_3;
+
+      (e0, eval_2, eval_3)
     }
 
     #[inline]
@@ -1178,20 +1379,6 @@ pub(crate) mod eq_sumcheck {
       let tau = self.taus[self.round - 1];
       self.eval_eq_left *= E::Scalar::ONE - tau - r + (*r * tau).double();
       self.round += 1;
-    }
-
-    #[inline]
-    fn update_evals(&self, eval_0: &mut E::Scalar, eval_2: &mut E::Scalar, eval_3: &mut E::Scalar) {
-      let p = self.eval_eq_left;
-      // Invariant: self.round is always >= 1 when this is called from evaluation_points methods
-      let eq_tau_0_2_3 = self.eq_tau_0_2_3[self.round - 1];
-      let eq_tau_0_p = eq_tau_0_2_3.0 * p;
-      let eq_tau_2_p = eq_tau_0_2_3.1 * p;
-      let eq_tau_3_p = eq_tau_0_2_3.2 * p;
-
-      *eval_0 *= eq_tau_0_p;
-      *eval_2 *= eq_tau_2_p;
-      *eval_3 *= eq_tau_3_p;
     }
 
     #[inline]
@@ -1215,67 +1402,6 @@ pub(crate) mod eq_sumcheck {
       // is init_num_vars (as we do init_num_vars rounds), so the index is always >= 0.
       &self.poly_eq_right[self.init_num_vars - self.round]
     }
-  }
-
-  /// Evaluates a cubic polynomial at points 0, 2, and 3 for three-input case.
-  ///
-  /// Computes evaluation points for the sum-check protocol when combining three
-  /// multilinear polynomials using a cubic combination function. Uses cached
-  /// evaluations at 0 and 1 to efficiently compute the required evaluation points.
-  ///
-  /// # Arguments
-  /// * `round_idx` - Current round index in the sum-check protocol
-  /// * `zero_a`, `one_a` - Evaluations of polynomial A at 0 and 1
-  /// * `zero_b`, `one_b` - Evaluations of polynomial B at 0 and 1
-  /// * `zero_c`, `one_c` - Evaluations of polynomial C at 0 and 1
-  ///
-  /// # Returns
-  /// A tuple `(eval_0, eval_2, eval_3)` containing the evaluation points.
-  #[inline]
-  fn eval_one_case_cubic_three_inputs<Scalar: PrimeField>(
-    round_idx: usize,
-    zero_a: &Scalar,
-    one_a: &Scalar,
-    zero_b: &Scalar,
-    one_b: &Scalar,
-    zero_c: &Scalar,
-    one_c: &Scalar,
-  ) -> (Scalar, Scalar, Scalar) {
-    // Optimization: In the first round (round == 0), eval_0 is always ZERO.
-    // This is mathematically correct because in round 0 of the sumcheck protocol with equality
-    // polynomials, when evaluating at point 0, the equality polynomial factor eq(tau, 0, ...)
-    // evaluates to (1 - tau_0) for the first variable. The sumcheck instance's update_evals
-    // method multiplies eval_0 by eq_tau_0_p, which for round 0 equals (1 - tau_0) * eval_eq_left.
-    // The contribution from eval_0 to the final sum is zero in this case due to the structure of
-    // the equality polynomial and how it combines with the cubic terms in the first round.
-    // This optimization avoids unnecessary computation of zero_a * zero_b - zero_c when the result
-    // will be zeroed out anyway by the equality polynomial evaluation at point 0 in round 0.
-    let eval_0 = if round_idx == 0 {
-      Scalar::ZERO
-    } else {
-      *zero_a * *zero_b - *zero_c
-    };
-
-    let double_one_a = one_a.double();
-    let double_one_b = one_b.double();
-    let double_one_c = one_c.double();
-
-    let eval_2 = {
-      let point_a = double_one_a - *zero_a;
-      let point_b = double_one_b - *zero_b;
-      let point_c = double_one_c - *zero_c;
-
-      point_a * point_b - point_c
-    };
-
-    let eval_3 = {
-      let point_a = double_one_a + one_a - zero_a.double();
-      let point_b = double_one_b + one_b - zero_b.double();
-      let point_c = double_one_c + one_c - zero_c.double();
-      point_a * point_b - point_c
-    };
-
-    (eval_0, eval_2, eval_3)
   }
 }
 
