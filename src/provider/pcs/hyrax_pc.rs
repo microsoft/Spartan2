@@ -319,7 +319,7 @@ where
     // This enables fast fixed-base MSM for commit (table lookup vs runtime MSM).
     if self.ck.len() <= 64 {
       self.ck_tables.get_or_init(|| {
-        self.ck.iter()
+        self.ck.par_iter()
           .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
           .collect()
       });
@@ -407,7 +407,7 @@ where
     if ck.ck.len() <= 64 {
       ck.ck_tables.get_or_init(|| {
         ck.ck
-          .iter()
+          .par_iter()
           .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
           .collect()
       });
@@ -446,7 +446,7 @@ where
     if ck.ck.len() <= 64 {
       ck.ck_tables.get_or_init(|| {
         ck.ck
-          .iter()
+          .par_iter()
           .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
           .collect()
       });
