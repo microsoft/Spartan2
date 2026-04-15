@@ -435,24 +435,37 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       .map(|_| transcript.squeeze(b"challenge"))
       .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
-    // Reset cs to prep-state size before re-synthesis so aux_assignment indices are correct
-    // (without this, 2nd+ prove calls accumulate stale entries)
-    let prep_aux_len = S.num_shared_unpadded + S.num_precommitted_unpadded;
-    ps.cs.aux_assignment.truncate(prep_aux_len);
-    ps.cs.input_assignment.truncate(1);
+    // Fast path: skip circuit synthesis when there are no rest witness variables to compute
+    // and no verifier challenges to process. In this case, the witness W is already fully
+    // populated from the prep phase (shared + precommitted sections), and the rest section
+    // is all zeros (padding only). Public values come directly from circuit.public_values()
+    // rather than from cs.input_assignment, since synthesize is not called.
+    //
+    // Safety invariants:
+    //   1. num_rest_unpadded == 0 ==> no aux variables are allocated during synthesize
+    //   2. challenges.is_empty() ==> no challenge-dependent computation is needed
+    //   3. circuit.public_values() must return the same values that synthesize would inputize
+    let skip_synthesize = S.num_rest_unpadded == 0 && challenges.is_empty();
+    if !skip_synthesize {
+      // Reset cs to prep-state size before re-synthesis so aux_assignment indices are correct
+      // (without this, 2nd+ prove calls accumulate stale entries)
+      let prep_aux_len = S.num_shared_unpadded + S.num_precommitted_unpadded;
+      ps.cs.aux_assignment.truncate(prep_aux_len);
+      ps.cs.input_assignment.truncate(1);
 
-    circuit
-      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize witness: {e}"),
-      })?;
+      circuit
+        .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to synthesize witness: {e}"),
+        })?;
 
-    ps.W
-      [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
-      .copy_from_slice(
-        &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
-          ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
-      );
+      ps.W
+        [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+        .copy_from_slice(
+          &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+            ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+        );
+    }
 
     // commit to the rest with partial commitment.
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_rest_instance");
@@ -477,11 +490,18 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       elapsed_ms = %commit_rest_t.elapsed().as_millis(),
       num_rest = S.num_rest,
       num_rest_unpadded = S.num_rest_unpadded,
+      actual_is_small,
       "commit_rest_instance"
     );
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
-    let public_values = ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
+    let public_values = if skip_synthesize {
+      circuit.public_values().map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })?
+    } else {
+      ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec()
+    };
     let U = SplitR1CSInstance::<E>::new(
       S,
       ps.comm_W_shared.clone(),
