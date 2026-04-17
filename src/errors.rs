@@ -34,7 +34,7 @@ pub enum SpartanError {
     reason: String,
   },
   /// returned if proof verification fails
-  #[error("ProofVerifyError")]
+  #[error("ProofVerifyError: {reason}")]
   ProofVerifyError {
     /// The reason for the proof verification error
     reason: String,
