@@ -126,8 +126,8 @@ impl<Scalar: PrimeField> FromIterator<Scalar> for EqPolynomial<Scalar> {
 
 #[cfg(test)]
 mod tests {
-  use crate::provider::pasta::pallas;
   use super::*;
+  use crate::provider::pasta::pallas;
 
   fn test_eq_polynomial_with<F: PrimeField>() {
     let eq_poly = EqPolynomial::<F>::new(vec![F::ONE, F::ZERO, F::ONE]);

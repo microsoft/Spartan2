@@ -68,9 +68,7 @@ impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
 // =============================================================================
 
 #[cfg(test)]
-pub(crate) fn test_delayed_reduction_sum_impl<
-  F: DelayedReduction<F> + PrimeField + Copy,
->() {
+pub(crate) fn test_delayed_reduction_sum_impl<F: DelayedReduction<F> + PrimeField + Copy>() {
   use rand::{SeedableRng, rngs::StdRng};
 
   let mut rng = StdRng::seed_from_u64(54321);

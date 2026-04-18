@@ -13,8 +13,7 @@
 //! `eq[i] * small_val` using `mul_4_by_1` (4 limb muls instead of 16).
 
 use super::{
-  field_reduction_constants::FieldReductionConstants,
-  limbs::reduce_8_mod_4,
+  field_reduction_constants::FieldReductionConstants, limbs::reduce_8_mod_4,
   montgomery::MontgomeryLimbs,
 };
 use ff::PrimeField;
@@ -136,9 +135,9 @@ impl SmallAccumulator {
       carry = prod >> 64;
     }
     // Propagate carry through remaining limbs
-    for k in 4..7 {
-      let sum = (target[k] as u128) + carry;
-      target[k] = sum as u64;
+    for item in target.iter_mut().take(7).skip(4) {
+      let sum = (*item as u128) + carry;
+      *item = sum as u64;
       carry = sum >> 64;
       if carry == 0 {
         break;
@@ -154,9 +153,9 @@ impl SmallAccumulator {
         target[j + 1] = prod as u64;
         carry = prod >> 64;
       }
-      for k in 5..7 {
-        let sum = (target[k] as u128) + carry;
-        target[k] = sum as u64;
+      for item in target.iter_mut().take(7).skip(5) {
+        let sum = (*item as u128) + carry;
+        *item = sum as u64;
         carry = sum >> 64;
         if carry == 0 {
           break;
@@ -221,6 +220,32 @@ fn reduce_7_to_field<F: MontgomeryLimbs + FieldReductionConstants>(acc: &[u64; 7
   F::from_limbs(reduced)
 }
 
+/// Generate tests for small-value optimization.
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_small_value {
+  ($mod_name:ident, $field:ty) => {
+    mod $mod_name {
+      #[test]
+      fn small_vec_or_zero() {
+        $crate::big_num::small_value::tests::test_small_vec_or_zero_impl::<$field>();
+      }
+      #[test]
+      fn small_accumulator() {
+        $crate::big_num::small_value::tests::test_small_accumulator_impl::<$field>();
+      }
+      #[test]
+      fn small_accumulator_i128() {
+        $crate::big_num::small_value::tests::test_small_accumulator_i128_impl::<$field>();
+      }
+      #[test]
+      fn small_accumulator_few_products() {
+        $crate::big_num::small_value::tests::test_small_accumulator_few_products_impl::<$field>();
+      }
+    }
+  };
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
   use super::*;
@@ -258,10 +283,7 @@ pub(crate) mod tests {
     assert_eq!(large, vec![1, 3]);
 
     // Threshold boundary: values at exactly SMALL_VALUE_MAX should be accepted
-    let boundary = vec![
-      F::from(SMALL_VALUE_MAX),
-      -F::from(SMALL_VALUE_MAX),
-    ];
+    let boundary = vec![F::from(SMALL_VALUE_MAX), -F::from(SMALL_VALUE_MAX)];
     let (small, large) = to_small_vec_or_zero(&boundary);
     assert!(large.is_empty(), "values at threshold should be small");
     assert_eq!(small[0], SMALL_VALUE_MAX as i64);
@@ -378,30 +400,4 @@ pub(crate) mod tests {
       );
     }
   }
-}
-
-/// Generate tests for small-value optimization.
-#[cfg(test)]
-#[macro_export]
-macro_rules! test_small_value {
-  ($mod_name:ident, $field:ty) => {
-    mod $mod_name {
-      #[test]
-      fn small_vec_or_zero() {
-        $crate::big_num::small_value::tests::test_small_vec_or_zero_impl::<$field>();
-      }
-      #[test]
-      fn small_accumulator() {
-        $crate::big_num::small_value::tests::test_small_accumulator_impl::<$field>();
-      }
-      #[test]
-      fn small_accumulator_i128() {
-        $crate::big_num::small_value::tests::test_small_accumulator_i128_impl::<$field>();
-      }
-      #[test]
-      fn small_accumulator_few_products() {
-        $crate::big_num::small_value::tests::test_small_accumulator_few_products_impl::<$field>();
-      }
-    }
-  };
 }

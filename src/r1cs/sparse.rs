@@ -92,11 +92,26 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
       }
     }
     // Sentinel for last row's end
-    debug_assert!(unit_pos_cols.len() <= u32::MAX as usize, "unit_pos_cols exceeds u32 range");
-    debug_assert!(unit_neg_cols.len() <= u32::MAX as usize, "unit_neg_cols exceeds u32 range");
-    debug_assert!(small_cols.len() <= u32::MAX as usize, "small_cols exceeds u32 range");
-    debug_assert!(general_cols.len() <= u32::MAX as usize, "general_cols exceeds u32 range");
-    debug_assert!(m.cols <= u32::MAX as usize, "column count exceeds u32 range");
+    debug_assert!(
+      unit_pos_cols.len() <= u32::MAX as usize,
+      "unit_pos_cols exceeds u32 range"
+    );
+    debug_assert!(
+      unit_neg_cols.len() <= u32::MAX as usize,
+      "unit_neg_cols exceeds u32 range"
+    );
+    debug_assert!(
+      small_cols.len() <= u32::MAX as usize,
+      "small_cols exceeds u32 range"
+    );
+    debug_assert!(
+      general_cols.len() <= u32::MAX as usize,
+      "general_cols exceeds u32 range"
+    );
+    debug_assert!(
+      m.cols <= u32::MAX as usize,
+      "column count exceeds u32 range"
+    );
     off_unit_pos.push(unit_pos_cols.len() as u32);
     off_unit_neg.push(unit_neg_cols.len() as u32);
     off_small.push(small_cols.len() as u32);
@@ -142,25 +157,37 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
   /// Get the range of unit_pos entries for a given row.
   #[inline(always)]
   pub(crate) fn range_unit_pos(&self, row: usize) -> (usize, usize) {
-    (self.off_unit_pos[row] as usize, self.off_unit_pos[row + 1] as usize)
+    (
+      self.off_unit_pos[row] as usize,
+      self.off_unit_pos[row + 1] as usize,
+    )
   }
 
   /// Get the range of unit_neg entries for a given row.
   #[inline(always)]
   pub(crate) fn range_unit_neg(&self, row: usize) -> (usize, usize) {
-    (self.off_unit_neg[row] as usize, self.off_unit_neg[row + 1] as usize)
+    (
+      self.off_unit_neg[row] as usize,
+      self.off_unit_neg[row + 1] as usize,
+    )
   }
 
   /// Get the range of small entries for a given row.
   #[inline(always)]
   pub(crate) fn range_small(&self, row: usize) -> (usize, usize) {
-    (self.off_small[row] as usize, self.off_small[row + 1] as usize)
+    (
+      self.off_small[row] as usize,
+      self.off_small[row + 1] as usize,
+    )
   }
 
   /// Get the range of general entries for a given row.
   #[inline(always)]
   pub(crate) fn range_general(&self, row: usize) -> (usize, usize) {
-    (self.off_general[row] as usize, self.off_general[row + 1] as usize)
+    (
+      self.off_general[row] as usize,
+      self.off_general[row + 1] as usize,
+    )
   }
 
   #[inline(always)]
@@ -219,21 +246,17 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     // For small numbers of vectors or small matrices, just call single-vector multiply
     const BATCH_SIZE: usize = 4;
     if n_vecs <= 1 || self.num_rows <= 256 {
-      return vectors
-        .iter()
-        .map(|v| self.multiply_vec(v))
-        .collect();
+      return vectors.iter().map(|v| self.multiply_vec(v)).collect();
     }
 
-    let mut results: Vec<Vec<F>> = (0..n_vecs)
-      .map(|_| vec![F::ZERO; self.num_rows])
-      .collect();
+    let mut results: Vec<Vec<F>> = (0..n_vecs).map(|_| vec![F::ZERO; self.num_rows]).collect();
 
     // Process vectors in sub-batches to keep working set in L3 cache
     for batch_start in (0..n_vecs).step_by(BATCH_SIZE) {
       let batch_end = (batch_start + BATCH_SIZE).min(n_vecs);
       let batch_len = batch_end - batch_start;
 
+      #[allow(clippy::needless_range_loop)]
       for row in 0..self.num_rows {
         // unit_pos: coefficient = +1
         let (start, end) = self.range_unit_pos(row);
@@ -355,7 +378,6 @@ impl<F: PrimeField> FilteredSpmv<F> {
     }
   }
 }
-
 
 /// CSR format sparse matrix, We follow the names used by scipy.
 /// Detailed explanation here: https://stackoverflow.com/questions/52299420/scipy-csr-matrix-understand-indptr

@@ -11,17 +11,10 @@ use crate::{
   CommitmentKey,
   errors::SpartanError,
   math::Math,
-  polys::{
-    eq::EqPolynomial,
-    multilinear::MultilinearPolynomial,
-  },
+  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
   r1cs::{R1CSShape, RelaxedR1CSInstance, RelaxedR1CSWitness, SparseMatrix},
   sumcheck::SumcheckProof,
-  traits::{
-    Engine,
-    pcs::PCSEngineTrait,
-    transcript::TranscriptEngineTrait,
-  },
+  traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait},
 };
 use ff::Field;
 use serde::{Deserialize, Serialize};
@@ -143,18 +136,16 @@ impl<E: Engine> RelaxedR1CSSpartanProof<E> {
     let mut poly_Bz = MultilinearPolynomial::new(Bz);
     let mut poly_uCzE = MultilinearPolynomial::new(uCz_plus_E);
 
-    let (sc_proof_outer, r_x, claims_outer) =
-      SumcheckProof::prove_cubic_with_three_inputs(
-        &E::Scalar::ZERO,
-        tau,
-        &mut poly_Az,
-        &mut poly_Bz,
-        &mut poly_uCzE,
-        transcript,
-      )?;
+    let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
+      &E::Scalar::ZERO,
+      tau,
+      &mut poly_Az,
+      &mut poly_Bz,
+      &mut poly_uCzE,
+      transcript,
+    )?;
 
-    let (claim_Az, claim_Bz, claim_uCzE) =
-      (claims_outer[0], claims_outer[1], claims_outer[2]);
+    let (claim_Az, claim_Bz, claim_uCzE) = (claims_outer[0], claims_outer[1], claims_outer[2]);
 
     transcript.absorb(
       b"claims_outer",
@@ -278,8 +269,7 @@ impl<E: Engine> RelaxedR1CSSpartanProof<E> {
         .verify(claim_inner_joint, num_rounds_y, 2, transcript)?;
 
     // Verify direct opening of W at r_y[1..] -> gives us eval_W
-    let eval_W =
-      E::PCS::verify_direct(vk_ee, &U.comm_W, &self.v_W, &self.blind_W, &r_y[1..])?;
+    let eval_W = E::PCS::verify_direct(vk_ee, &U.comm_W, &self.v_W, &self.blind_W, &r_y[1..])?;
 
     // Matrix evaluations at (r_x, r_y) -- compute T_y first since we also use it for eval_Z
     let T_x = EqPolynomial::evals_from_points(&r_x);
@@ -359,15 +349,11 @@ mod tests {
 
     // Prove
     let mut transcript_p = E::TE::new(b"test_relaxed_spartan");
-    let proof = RelaxedR1CSSpartanProof::prove(
-      &shape, &ck, &U.u, &U.X, &W, &mut transcript_p,
-    )
-    .unwrap();
+    let proof =
+      RelaxedR1CSSpartanProof::prove(&shape, &ck, &U.u, &U.X, &W, &mut transcript_p).unwrap();
 
     // Verify
     let mut transcript_v = E::TE::new(b"test_relaxed_spartan");
-    proof
-      .verify(&shape, &vk_ee, &U, &mut transcript_v)
-      .unwrap();
+    proof.verify(&shape, &vk_ee, &U, &mut transcript_v).unwrap();
   }
 }

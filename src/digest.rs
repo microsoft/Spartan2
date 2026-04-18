@@ -10,7 +10,7 @@
 //! digests of data structures used in Spartan. It includes the `Digestible` trait
 //! for types that can be converted to byte representations, the `SimpleDigestible`
 //! marker trait for serializable types, and the `DigestComputer` utility for
-//! computing SHA3-256 digests.
+//! computing SHA-256 digests.
 
 use std::io;
 
@@ -44,7 +44,7 @@ impl<T: SimpleDigestible> Digestible for T {
 
 /// A utility for computing cryptographic digests of `Digestible` instances.
 ///
-/// `DigestComputer` provides a way to compute secure hash digests using SHA3-256
+/// `DigestComputer` provides a way to compute secure hash digests using SHA-256
 /// for any type that implements the `Digestible` trait. It serializes the input
 /// data and computes a 32-byte digest that can be used for integrity verification
 /// and identification purposes.

@@ -11,9 +11,7 @@
 //!
 //! Note: This circuit only encodes the algebraic checks of the verifier. It does **not**
 //! encode the Fiat-Shamir challenge generation, so no proof composition is performed here.
-use crate::{
-  traits::{Engine, circuit::MultiRoundCircuit},
-};
+use crate::traits::{Engine, circuit::MultiRoundCircuit};
 use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::Field;
 
@@ -508,7 +506,12 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
 
 impl<E: Engine> NeutronNovaVerifierCircuit<E> {
   /// Creates a default instance of the NeutronNova verifier circuit with zeroed fields.
-  pub fn default(num_rounds_z: usize, num_rounds_x: usize, num_rounds_y: usize, mr_commitment_width: usize) -> Self {
+  pub fn default(
+    num_rounds_z: usize,
+    num_rounds_x: usize,
+    num_rounds_y: usize,
+    mr_commitment_width: usize,
+  ) -> Self {
     Self {
       outer_polys_step: vec![[E::Scalar::ZERO; 4]; num_rounds_x],
       outer_polys_core: vec![[E::Scalar::ZERO; 4]; num_rounds_x],

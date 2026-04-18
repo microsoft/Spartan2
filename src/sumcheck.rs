@@ -520,10 +520,8 @@ impl<E: Engine> SumcheckProof<E> {
       let poly = {
         // Make an iterator returning the contributions to the evaluations
         let (_eval_span, eval_t) = start_span!("compute_eval_points");
-        let (eval_point_0, eval_point_2, eval_point_3) =
-          eq_instance.evaluation_points_cubic_with_three_inputs(
-            poly_A, poly_B, poly_C, claim_per_round,
-          );
+        let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
+          .evaluation_points_cubic_with_three_inputs(poly_A, poly_B, poly_C, claim_per_round);
         if eval_t.elapsed().as_millis() > 0 {
           info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
         }
@@ -593,12 +591,13 @@ impl<E: Engine> SumcheckProof<E> {
       // -------- interpolate coefficients --------
       let (eval0, eval2, eval3) = if i == 0 {
         // Zero-check round 0: t(0) = 0 (binary points -> R1CS satisfied), no Cz needed.
-        eq_instance.evaluation_points_zero_check_round0(
-          poly_Az, poly_Bz,
-        )
+        eq_instance.evaluation_points_zero_check_round0(poly_Az, poly_Bz)
       } else {
         eq_instance.evaluation_points_cubic_with_three_inputs(
-          poly_Az, poly_Bz, poly_Cz, claim_outer_round,
+          poly_Az,
+          poly_Bz,
+          poly_Cz,
+          claim_outer_round,
         )
       };
       let evals = vec![eval0, claim_outer_round - eval0, eval2, eval3];
@@ -668,7 +667,8 @@ impl<E: Engine> SumcheckProof<E> {
       let evals = vec![eval0, claim_current_round - eval0, eval2];
       let poly = UniPoly::from_evals(&evals)?;
 
-      verifier_circuit.inner_polys[inner_poly_offset + j] = [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
+      verifier_circuit.inner_polys[inner_poly_offset + j] =
+        [poly.coeffs[0], poly.coeffs[1], poly.coeffs[2]];
 
       // -------- transcript / witness handling --------
       let chals = SatisfyingAssignment::<E>::process_round(
@@ -925,9 +925,7 @@ pub(crate) mod eq_sumcheck {
   //! The claim-derived evaluation points (computing only 2 N-scaling sums per round
   //! instead of 3) follow BDDT (eprint 2025/1117, Section 6.2).
   use crate::{
-    big_num::DelayedReduction,
-    polys::multilinear::MultilinearPolynomial,
-    traits::Engine,
+    big_num::DelayedReduction, polys::multilinear::MultilinearPolynomial, traits::Engine,
   };
   use ff::{Field, PrimeField};
   use rayon::prelude::*;
@@ -1063,10 +1061,14 @@ pub(crate) mod eq_sumcheck {
                 let t_inf_elem = (*one_a - *zero_a) * (*one_b - *zero_b);
 
                 <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_0, e_in, &t_0_elem,
+                  &mut inner_0,
+                  e_in,
+                  &t_0_elem,
                 );
                 <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_inf, e_in, &t_inf_elem,
+                  &mut inner_inf,
+                  e_in,
+                  &t_inf_elem,
                 );
               }
 
@@ -1074,10 +1076,14 @@ pub(crate) mod eq_sumcheck {
               let inner_inf_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_inf);
 
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc.0, e_out, &inner_0_red,
+                &mut outer_acc.0,
+                e_out,
+                &inner_0_red,
               );
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc.1, e_out, &inner_inf_red,
+                &mut outer_acc.1,
+                e_out,
+                &inner_inf_red,
               );
 
               outer_acc
@@ -1085,7 +1091,11 @@ pub(crate) mod eq_sumcheck {
           )
           .reduce(
             || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
-            |mut a, b| { a.0 += b.0; a.1 += b.1; a },
+            |mut a, b| {
+              a.0 += b.0;
+              a.1 += b.1;
+              a
+            },
           );
 
         (
@@ -1113,7 +1123,9 @@ pub(crate) mod eq_sumcheck {
                 &mut acc.0, e, &t_0_elem,
               );
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc.1, e, &t_inf_elem,
+                &mut acc.1,
+                e,
+                &t_inf_elem,
               );
 
               acc
@@ -1121,7 +1133,11 @@ pub(crate) mod eq_sumcheck {
           )
           .reduce(
             || (Acc::<E::Scalar>::default(), Acc::<E::Scalar>::default()),
-            |mut a, b| { a.0 += b.0; a.1 += b.1; a },
+            |mut a, b| {
+              a.0 += b.0;
+              a.1 += b.1;
+              a
+            },
           );
 
         (
@@ -1149,7 +1165,10 @@ pub(crate) mod eq_sumcheck {
       poly_B: &MultilinearPolynomial<E::Scalar>,
     ) -> (E::Scalar, E::Scalar, E::Scalar) {
       debug_assert_eq!(poly_A.Z.len() % 2, 0);
-      assert_eq!(self.round, 1, "zero-check round-0 skip is only valid at round 0");
+      assert_eq!(
+        self.round, 1,
+        "zero-check round-0 skip is only valid at round 0"
+      );
 
       type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
@@ -1163,35 +1182,36 @@ pub(crate) mod eq_sumcheck {
 
         let acc_inf = (0..eq_out_len)
           .into_par_iter()
-          .fold(
-            || Acc::<E::Scalar>::default(),
-            |mut outer_acc, x_out| {
-              let e_out = &poly_eq_left[x_out];
-              let mut inner_inf = Acc::<E::Scalar>::default();
+          .fold(Acc::<E::Scalar>::default, |mut outer_acc, x_out| {
+            let e_out = &poly_eq_left[x_out];
+            let mut inner_inf = Acc::<E::Scalar>::default();
 
-              for (x_in, e_in) in poly_eq_right.iter().enumerate() {
-                let id = (x_out << second_half) | x_in;
+            for (x_in, e_in) in poly_eq_right.iter().enumerate() {
+              let id = (x_out << second_half) | x_in;
 
-                let t_inf_elem = (poly_A.Z[id + half_p] - poly_A.Z[id])
-                  * (poly_B.Z[id + half_p] - poly_B.Z[id]);
+              let t_inf_elem =
+                (poly_A.Z[id + half_p] - poly_A.Z[id]) * (poly_B.Z[id + half_p] - poly_B.Z[id]);
 
-                <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                  &mut inner_inf, e_in, &t_inf_elem,
-                );
-              }
-
-              let inner_inf_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_inf);
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut outer_acc, e_out, &inner_inf_red,
+                &mut inner_inf,
+                e_in,
+                &t_inf_elem,
               );
+            }
 
-              outer_acc
-            },
-          )
-          .reduce(
-            || Acc::<E::Scalar>::default(),
-            |mut a, b| { a += b; a },
-          );
+            let inner_inf_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_inf);
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut outer_acc,
+              e_out,
+              &inner_inf_red,
+            );
+
+            outer_acc
+          })
+          .reduce(Acc::<E::Scalar>::default, |mut a, b| {
+            a += b;
+            a
+          });
 
         <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf)
       } else {
@@ -1199,22 +1219,21 @@ pub(crate) mod eq_sumcheck {
 
         let acc_inf = (0..half_p)
           .into_par_iter()
-          .fold(
-            || Acc::<E::Scalar>::default(),
-            |mut acc, id| {
-              let e = &poly_eq_right[id];
-              let t_inf_elem = (poly_A.Z[id + half_p] - poly_A.Z[id])
-                * (poly_B.Z[id + half_p] - poly_B.Z[id]);
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc, e, &t_inf_elem,
-              );
-              acc
-            },
-          )
-          .reduce(
-            || Acc::<E::Scalar>::default(),
-            |mut a, b| { a += b; a },
-          );
+          .fold(Acc::<E::Scalar>::default, |mut acc, id| {
+            let e = &poly_eq_right[id];
+            let t_inf_elem =
+              (poly_A.Z[id + half_p] - poly_A.Z[id]) * (poly_B.Z[id + half_p] - poly_B.Z[id]);
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc,
+              e,
+              &t_inf_elem,
+            );
+            acc
+          })
+          .reduce(Acc::<E::Scalar>::default, |mut a, b| {
+            a += b;
+            a
+          });
 
         <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_inf)
       };
@@ -1249,7 +1268,6 @@ pub(crate) mod eq_sumcheck {
         (s_0, eval_2, eval_3)
       }
     }
-
 
     ///
     /// Returns `None` when tau=0 (l(1)=0), requiring the caller to fall back
@@ -1326,13 +1344,17 @@ pub(crate) mod eq_sumcheck {
           .into_par_iter()
           .map(|x_out| {
             let e_out = poly_eq_left[x_out];
-            let inner: E::Scalar = poly_eq_right.iter().enumerate().map(|(x_in, e_in)| {
-              let id = (x_out << second_half) | x_in;
-              let m1_a = poly_A.Z[id].double() - poly_A.Z[id + half_p];
-              let m1_b = poly_B.Z[id].double() - poly_B.Z[id + half_p];
-              let m1_c = poly_C.Z[id].double() - poly_C.Z[id + half_p];
-              *e_in * (m1_a * m1_b - m1_c)
-            }).sum();
+            let inner: E::Scalar = poly_eq_right
+              .iter()
+              .enumerate()
+              .map(|(x_in, e_in)| {
+                let id = (x_out << second_half) | x_in;
+                let m1_a = poly_A.Z[id].double() - poly_A.Z[id + half_p];
+                let m1_b = poly_B.Z[id].double() - poly_B.Z[id + half_p];
+                let m1_c = poly_C.Z[id].double() - poly_C.Z[id + half_p];
+                *e_in * (m1_a * m1_b - m1_c)
+              })
+              .sum();
             e_out * inner
           })
           .sum()

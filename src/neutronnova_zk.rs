@@ -13,8 +13,8 @@ use crate::{
   Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
   bellpepper::{
     r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState,
-      SpartanShape, SpartanWitness,
+      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, SpartanShape,
+      SpartanWitness,
     },
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
@@ -24,7 +24,7 @@ use crate::{
     montgomery::MontgomeryLimbs,
     small_value::{SmallAccumulator, to_small_vec_or_zero},
   },
-  digest::{DigestComputer},
+  digest::DigestComputer,
   errors::SpartanError,
   math::Math,
   nifs::NovaNIFS,
@@ -35,9 +35,8 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{
-    R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance,
-    SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
-    weights_from_r,
+    R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
+    SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
   start_span,
   sumcheck::SumcheckProof,
@@ -97,6 +96,7 @@ where
   /// Uses two-level delayed modular reduction (inner + middle levels).
   /// Note: Outer level (over pairs) uses regular field arithmetic since there are few pairs.
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn prove_helper(
     round: usize,
     (left, right): (usize, usize),
@@ -183,6 +183,7 @@ where
   /// and the quad term sum E[k]*(Az_hi-Az_lo)*(Bz_hi-Bz_lo).
   /// The caller subtracts the precomputed C_val contribution from e0_ab externally.
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn prove_helper_ab_only(
     (left, right): (usize, usize),
     e: &[E::Scalar],
@@ -252,6 +253,7 @@ where
   ///
   /// Returns only quad_coeff (e0 is always zero for round 0).
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn prove_helper_small(
     (left, right): (usize, usize),
     e: &[E::Scalar],
@@ -323,6 +325,7 @@ where
   /// The products decompose as cross-product sums with 3 weight classes:
   ///   c_0_0 = (1-r_0)^2, c_0_1 = (1-r_0)*r_0, c_1_1 = r_0^2
   #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
   fn prove_helper_ab_cross(
     (left, right): (usize, usize),
     e: &[E::Scalar],
@@ -367,7 +370,9 @@ where
         + *c01 * sa_e0_01.reduce::<E::Scalar>()
         + *c11 * sa_e0_11.reduce::<E::Scalar>();
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_e0, &f[i], &e0_inner,
+        &mut acc_e0,
+        &f[i],
+        &e0_inner,
       );
 
       // Process quad cross-product terms ((Az_hi-Az_lo) * (Bz_hi-Bz_lo))
@@ -395,7 +400,9 @@ where
         + *c01 * sa_q_01.reduce::<E::Scalar>()
         + *c11 * sa_q_11.reduce::<E::Scalar>();
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_quad, &f[i], &quad_inner,
+        &mut acc_quad,
+        &f[i],
+        &quad_inner,
       );
     }
 
@@ -589,6 +596,7 @@ where
           let c_i64 = &C_i64_layers[b];
           type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
           let mut acc = Acc::<E::Scalar>::default();
+          #[allow(clippy::needless_range_loop)]
           for i in 0..right {
             let base = i * left;
             let mut inner = SmallAccumulator::zero();
@@ -608,7 +616,9 @@ where
       if !large_positions.is_empty() {
         let total = left * right;
         for &k in large_positions {
-          if k >= total { continue; }
+          if k >= total {
+            continue;
+          }
           let i = k / left;
           let j = k % left;
           let ej_fi = e_left[j] * f[i];
@@ -639,8 +649,7 @@ where
         let c = $e0 * acc_eq;
         let a = $quad_coeff * acc_eq;
         let rho_t_inv: Option<E::Scalar> = rho_t.invert().into();
-        let a_b_c = (T_cur - c * one_minus_rho)
-          * rho_t_inv.ok_or(SpartanError::DivisionByZero)?;
+        let a_b_c = (T_cur - c * one_minus_rho) * rho_t_inv.ok_or(SpartanError::DivisionByZero)?;
         let b = a_b_c - a - c;
         let new_a = a * two_rho_minus_one;
         let new_b = b * two_rho_minus_one + a * one_minus_rho;
@@ -655,9 +664,8 @@ where
         let c = &poly_t.coeffs;
         vc.nifs_polys[$t] = [c[0], c[1], c[2], c[3]];
 
-        let chals = SatisfyingAssignment::<E>::process_round(
-          vc_state, vc_shape, vc_ck, vc, $t, transcript,
-        )?;
+        let chals =
+          SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, $t, transcript)?;
         let r_b = chals[0];
         r_bs.push(r_b);
 
@@ -762,10 +770,9 @@ where
             let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
             (e0 * w, quad_coeff * w)
           })
-          .fold(
-            (E::Scalar::ZERO, E::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1),
-          )
+          .fold((E::Scalar::ZERO, E::Scalar::ZERO), |a, b| {
+            (a.0 + b.0, a.1 + b.1)
+          })
       };
       info!(elapsed_ms = %r0_t.elapsed().as_millis(), has_i64, "nifs_round_0_prove_helper");
 
@@ -781,7 +788,9 @@ where
         }
         A_layers.truncate(pairs);
         B_layers.truncate(pairs);
-        if !has_i64 { C_layers.truncate(pairs); }
+        if !has_i64 {
+          C_layers.truncate(pairs);
+        }
         m = pairs;
       }
     }
@@ -932,7 +941,9 @@ where
 
         A_layers.truncate(fold_pairs);
         B_layers.truncate(fold_pairs);
-        if !has_i64 { C_layers.truncate(fold_pairs); }
+        if !has_i64 {
+          C_layers.truncate(fold_pairs);
+        }
         m = fold_pairs;
 
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
@@ -966,7 +977,9 @@ where
       }
       A_layers.truncate(final_pairs);
       B_layers.truncate(final_pairs);
-      if !has_i64 { C_layers.truncate(final_pairs); }
+      if !has_i64 {
+        C_layers.truncate(final_pairs);
+      }
     }
 
     // Compute final Cz_step from original C_i64 layers using SmallAccumulator
@@ -990,7 +1003,9 @@ where
       // Correct large positions with field arithmetic
       if !large_positions.is_empty() {
         for &k in large_positions {
-          if k >= total { continue; }
+          if k >= total {
+            continue;
+          }
           let mut val = E::Scalar::ZERO;
           for b in 0..n_padded {
             val += final_weights[b] * C_layers[b][k];
@@ -1049,8 +1064,7 @@ where
 
     let comms: Vec<_> = Us.iter().map(|U| U.comm_W.clone()).collect();
     let comm_acc = if use_truncated_fold {
-      let num_data_rows =
-        (S.num_shared + S.num_precommitted + DEFAULT_COMMITMENT_WIDTH - 1) / DEFAULT_COMMITMENT_WIDTH;
+      let num_data_rows = (S.num_shared + S.num_precommitted).div_ceil(DEFAULT_COMMITMENT_WIDTH);
       <E::PCS as FoldingEngineTrait<E>>::fold_commitments_partial(
         &comms,
         &w,
@@ -1110,21 +1124,27 @@ impl<E: Engine> crate::digest::Digestible for NeutronNovaVerifierKey<E> {
     let config = bincode::DefaultOptions::new()
       .with_little_endian()
       .with_fixint_encoding();
-    config.serialize_into(&mut *w, &self.ck)
+    config
+      .serialize_into(&mut *w, &self.ck)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vk_ee)
+    config
+      .serialize_into(&mut *w, &self.vk_ee)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // Use fast raw-byte path for the R1CS shapes
     self.S_step.write_bytes(w)?;
     self.S_core.write_bytes(w)?;
     // Serialize remaining small fields with bincode
-    config.serialize_into(&mut *w, &self.vc_shape)
+    config
+      .serialize_into(&mut *w, &self.vc_shape)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_shape_regular)
+    config
+      .serialize_into(&mut *w, &self.vc_shape_regular)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_ck)
+    config
+      .serialize_into(&mut *w, &self.vc_ck)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_vk)
+    config
+      .serialize_into(&mut *w, &self.vc_vk)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(())
   }
@@ -1191,28 +1211,58 @@ where
     let nifs_bytes = bincode::serialize(&self.nifs).unwrap().len();
     let random_bytes = bincode::serialize(&self.random_U).unwrap().len();
     let relaxed_bytes = bincode::serialize(&self.relaxed_snark).unwrap().len();
-    let total = shared_bytes + step_bytes + core_bytes + eval_bytes + verifier_bytes + nifs_bytes + random_bytes + relaxed_bytes;
+    let total = shared_bytes
+      + step_bytes
+      + core_bytes
+      + eval_bytes
+      + verifier_bytes
+      + nifs_bytes
+      + random_bytes
+      + relaxed_bytes;
 
     // Detailed sub-breakdowns
-    let vc_comms = bincode::serialize(&self.U_verifier.comm_w_per_round).unwrap().len();
-    let vc_pv = bincode::serialize(&self.U_verifier.public_values).unwrap().len();
-    let vc_ch = bincode::serialize(&self.U_verifier.challenges_per_round).unwrap().len();
+    let vc_comms = bincode::serialize(&self.U_verifier.comm_w_per_round)
+      .unwrap()
+      .len();
+    let vc_pv = bincode::serialize(&self.U_verifier.public_values)
+      .unwrap()
+      .len();
+    let vc_ch = bincode::serialize(&self.U_verifier.challenges_per_round)
+      .unwrap()
+      .len();
     let ru_cw = bincode::serialize(&self.random_U.comm_W).unwrap().len();
     let ru_ce = bincode::serialize(&self.random_U.comm_E).unwrap().len();
     let ru_x = bincode::serialize(&self.random_U.X).unwrap().len();
 
-    let rs_outer = bincode::serialize(&self.relaxed_snark.sc_proof_outer).unwrap().len();
-    let rs_inner = bincode::serialize(&self.relaxed_snark.sc_proof_inner).unwrap().len();
+    let rs_outer = bincode::serialize(&self.relaxed_snark.sc_proof_outer)
+      .unwrap()
+      .len();
+    let rs_inner = bincode::serialize(&self.relaxed_snark.sc_proof_inner)
+      .unwrap()
+      .len();
     let rs_vw = bincode::serialize(&self.relaxed_snark.v_W).unwrap().len();
     let rs_ve = bincode::serialize(&self.relaxed_snark.v_E).unwrap().len();
 
     format!(
       "comm_W_shared={} step_instances={} core_instance={} eval_arg={} U_verifier={} (comms={} pv={} ch={}) nifs={} random_U={} (cW={} cE={} X={} u=32) relaxed_snark={} (outer={} inner={} vW={} vE={}) total={}",
-      shared_bytes, step_bytes, core_bytes, eval_bytes,
-      verifier_bytes, vc_comms, vc_pv, vc_ch,
+      shared_bytes,
+      step_bytes,
+      core_bytes,
+      eval_bytes,
+      verifier_bytes,
+      vc_comms,
+      vc_pv,
+      vc_ch,
       nifs_bytes,
-      random_bytes, ru_cw, ru_ce, ru_x,
-      relaxed_bytes, rs_outer, rs_inner, rs_vw, rs_ve,
+      random_bytes,
+      ru_cw,
+      ru_ce,
+      ru_x,
+      relaxed_bytes,
+      rs_outer,
+      rs_inner,
+      rs_vw,
+      rs_ve,
       total
     )
   }
@@ -1369,9 +1419,12 @@ where
         .map(|i| {
           let ps_i = &ps_step[i];
           let circuit = &step_circuits[i];
-          let public_values = circuit.public_values().map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Circuit does not provide public IO: {e}"),
-          })?;
+          let public_values =
+            circuit
+              .public_values()
+              .map_err(|e| SpartanError::SynthesisError {
+                reason: format!("Circuit does not provide public IO: {e}"),
+              })?;
           let mut z = Vec::with_capacity(ps_i.W.len() + 1 + public_values.len());
           z.extend_from_slice(&ps_i.W);
           z.push(E::Scalar::ONE);
@@ -1389,13 +1442,23 @@ where
         let (az_i64, az_large) = to_small_vec_or_zero(az);
         let (bz_i64, bz_large) = to_small_vec_or_zero(bz);
         let (cz_i64, cz_large) = to_small_vec_or_zero(cz);
-        for pos in az_large { large_pos_set.insert(pos); }
-        for pos in bz_large { large_pos_set.insert(pos); }
-        for pos in cz_large { large_pos_set.insert(pos); }
+        for pos in az_large {
+          large_pos_set.insert(pos);
+        }
+        for pos in bz_large {
+          large_pos_set.insert(pos);
+        }
+        for pos in cz_large {
+          large_pos_set.insert(pos);
+        }
         all_i64.push((az_i64, bz_i64, cz_i64));
       }
       let lp: Vec<usize> = large_pos_set.into_iter().collect();
-      info!(n_large = lp.len(), total = matvec[0].0.len(), "i64_conversion_stats");
+      info!(
+        n_large = lp.len(),
+        total = matvec[0].0.len(),
+        "i64_conversion_stats"
+      );
 
       // Zero out i64 values at ALL large_positions in ALL instances.
       if !lp.is_empty() {
@@ -1411,8 +1474,10 @@ where
 
       (Some(matvec), Some(all_i64), lp)
     } else {
-      info!("Step circuit has rest_unpadded={} challenges={}, skipping matvec/i64 caching",
-        pk.S_step.num_rest_unpadded, pk.S_step.num_challenges);
+      info!(
+        "Step circuit has rest_unpadded={} challenges={}, skipping matvec/i64 caching",
+        pk.S_step.num_rest_unpadded, pk.S_step.num_challenges
+      );
       (None, None, Vec::new())
     };
 
@@ -1442,16 +1507,13 @@ where
 
     // rerandomize prep state in-place (we own it, no clone needed)
     let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
-    prep_snark.ps_core.rerandomize_in_place(&pk.ck, &pk.S_core)?;
+    prep_snark
+      .ps_core
+      .rerandomize_in_place(&pk.ck, &pk.S_core)?;
     let comm_W_shared = prep_snark.ps_core.comm_W_shared.clone();
     let r_W_shared = prep_snark.ps_core.r_W_shared.clone();
     for ps_i in prep_snark.ps_step.iter_mut() {
-      ps_i.rerandomize_with_shared_in_place(
-        &pk.ck,
-        &pk.S_step,
-        &comm_W_shared,
-        &r_W_shared,
-      )?;
+      ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)?;
     }
     info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
 
@@ -1460,62 +1522,62 @@ where
       "generate_instances_witnesses",
       step_circuits = step_circuits.len()
     );
-    let res_steps = prep_snark.ps_step
-          .iter_mut()
-          .zip(step_circuits.iter().enumerate())
-          .map(|(pre_state, (i, circuit))| {
-            let mut transcript = E::TE::new(b"neutronnova_prove");
-            transcript.absorb(b"vk", &pk.vk_digest);
-            transcript.absorb(
-              b"num_circuits",
-              &E::Scalar::from(step_circuits.len() as u64),
-            );
-            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-            let public_values =
-              circuit
-                .public_values()
-                .map_err(|e| SpartanError::SynthesisError {
-                  reason: format!("Circuit does not provide public IO: {e}"),
-                })?;
-            transcript.absorb(b"public_values", &public_values.as_slice());
-
-            SatisfyingAssignment::r1cs_instance_and_witness(
-              pre_state,
-              &pk.S_step,
-              &pk.ck,
-              circuit,
-              is_small,
-              &mut transcript,
-            )
-          })
-          .try_fold(
-            (Vec::new(), Vec::new()),
-            |mut acc, res: Result<_, SpartanError>| {
-              let (u, w) = res?;
-              acc.0.push(u);
-              acc.1.push(w);
-              Ok(acc)
-            },
-          );
-    let res_core = {
+    let res_steps = prep_snark
+      .ps_step
+      .iter_mut()
+      .zip(step_circuits.iter().enumerate())
+      .map(|(pre_state, (i, circuit))| {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        let public_values_core =
-          core_circuit
-            .public_values()
-            .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Core circuit does not provide public IO: {e}"),
-            })?;
-        transcript.absorb(b"public_values", &public_values_core.as_slice());
+        transcript.absorb(
+          b"num_circuits",
+          &E::Scalar::from(step_circuits.len() as u64),
+        );
+        transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+
+        let public_values = circuit
+          .public_values()
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Circuit does not provide public IO: {e}"),
+          })?;
+        transcript.absorb(b"public_values", &public_values.as_slice());
+
         SatisfyingAssignment::r1cs_instance_and_witness(
-          &mut prep_snark.ps_core,
-          &pk.S_core,
+          pre_state,
+          &pk.S_step,
           &pk.ck,
-          core_circuit,
+          circuit,
           is_small,
           &mut transcript,
         )
+      })
+      .try_fold(
+        (Vec::new(), Vec::new()),
+        |mut acc, res: Result<_, SpartanError>| {
+          let (u, w) = res?;
+          acc.0.push(u);
+          acc.1.push(w);
+          Ok(acc)
+        },
+      );
+    let res_core = {
+      let mut transcript = E::TE::new(b"neutronnova_prove");
+      transcript.absorb(b"vk", &pk.vk_digest);
+      let public_values_core =
+        core_circuit
+          .public_values()
+          .map_err(|e| SpartanError::SynthesisError {
+            reason: format!("Core circuit does not provide public IO: {e}"),
+          })?;
+      transcript.absorb(b"public_values", &public_values_core.as_slice());
+      SatisfyingAssignment::r1cs_instance_and_witness(
+        &mut prep_snark.ps_core,
+        &pk.S_core,
+        &pk.ck,
+        core_circuit,
+        is_small,
+        &mut transcript,
+      )
     };
 
     let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
@@ -1544,7 +1606,12 @@ where
     let num_rounds_x = pk.S_step.num_cons.log_2();
     let num_rounds_y = num_vars.log_2() + 1;
 
-    let mut vc = NeutronNovaVerifierCircuit::<E>::default(num_rounds_b, num_rounds_x, num_rounds_y, pk.vc_shape.commitment_width);
+    let mut vc = NeutronNovaVerifierCircuit::<E>::default(
+      num_rounds_b,
+      num_rounds_x,
+      num_rounds_y,
+      pk.vc_shape.commitment_width,
+    );
     let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Perform ZK NIFS prove and collect outputs
@@ -1935,10 +2002,7 @@ where
     let mut transcript = E::TE::new(b"neutronnova_prove");
     transcript.absorb(b"vk", &vk.digest()?);
     // absorb the public IO into the transcript
-    transcript.absorb(
-      b"public_values",
-      &core_instance.public_values.as_slice(),
-    );
+    transcript.absorb(b"public_values", &core_instance.public_values.as_slice());
 
     core_instance.validate(&vk.S_core, &mut transcript)?;
     info!(elapsed_ms = %validate_t.elapsed().as_millis(), instances = step_instances.len(), "validate_instances");
@@ -2022,15 +2086,25 @@ where
     // fold_multiple and nifs.verify are independent: overlap them
     let (folded_U_result, folded_U_verifier_result) = rayon::join(
       || R1CSInstance::fold_multiple(&r_b, &step_instances_regular),
-      || self.nifs.verify(&mut transcript, &self.random_U, &U_verifier_regular),
+      || {
+        self
+          .nifs
+          .verify(&mut transcript, &self.random_U, &U_verifier_regular)
+      },
     );
     let folded_U = folded_U_result?;
     let folded_U_verifier = folded_U_verifier_result?;
     info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_and_nifs_verify");
 
     let (_sat_span, sat_t) = start_span!("relaxed_spartan_verify");
-    self.relaxed_snark
-      .verify(&vk.vc_shape_regular, &vk.vc_vk, &folded_U_verifier, &mut transcript)
+    self
+      .relaxed_snark
+      .verify(
+        &vk.vc_shape_regular,
+        &vk.vc_vk,
+        &folded_U_verifier,
+        &mut transcript,
+      )
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Relaxed Spartan verify failed: {e}"),
       })?;

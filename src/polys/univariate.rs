@@ -86,7 +86,9 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     let c = evals[0];
     let a = (evals[0] - evals[1].double() + evals[2]) * Scalar::TWO_INV;
     let b = evals[1] - c - a;
-    Self { coeffs: vec![c, b, a] }
+    Self {
+      coeffs: vec![c, b, a],
+    }
   }
 
   /// Constructs a degree-3 polynomial from evaluations at {0, 1, 2, 3}.
@@ -110,7 +112,9 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     let delta2 = evals[2] - evals[1].double() + evals[0];
     let b = delta2 * Scalar::TWO_INV - (a.double() + a);
     let c = evals[1] - d - b - a;
-    Self { coeffs: vec![d, c, b, a] }
+    Self {
+      coeffs: vec![d, c, b, a],
+    }
   }
 
   /// Returns the degree of the polynomial.
@@ -288,8 +292,8 @@ pub fn div_f<F: PrimeField>(a: F, b: F) -> Result<F, SpartanError> {
 
 #[cfg(test)]
 mod tests {
-  use crate::provider::pasta::pallas;
   use super::*;
+  use crate::provider::pasta::pallas;
 
   fn test_from_evals_quad_with<F: PrimeField>() {
     // polynomial is 2x^2 + 3x + 1

@@ -213,8 +213,8 @@ impl<Scalar: PrimeField> SparsePolynomial<Scalar> {
 mod tests {
   use rand_core::{CryptoRng, OsRng, RngCore};
 
-  use crate::provider::pasta::pallas;
   use super::*;
+  use crate::provider::pasta::pallas;
 
   /// Evaluates the polynomial at the given point.
   /// Returns Z(r) in O(n) time.

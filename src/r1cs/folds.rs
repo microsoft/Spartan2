@@ -38,16 +38,27 @@ impl<E: Engine> R1CSShape<E> {
   ) -> Result<(Vec<E::Scalar>, Commitment<E>), SpartanError> {
     // Form Z = (W1+W2, u1+1, X1+X2) without intermediate allocations.
     let n_w = W1.W.len();
-    let n_x1 = U1.X.len();
-    let n_x2 = U2.X.len();
-    let total = n_w + 1 + n_x1.max(n_x2);
+    if W2.W.len() != n_w {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+    let n_x = U1.X.len();
+    if U2.X.len() != n_x {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "commit_T: U1.X.len() ({}) != U2.X.len() ({})",
+          n_x,
+          U2.X.len()
+        ),
+      });
+    }
+    let total = n_w + 1 + n_x;
     let mut Z = Vec::with_capacity(total);
 
     for i in 0..n_w {
       Z.push(W1.W[i] + W2.W[i]);
     }
     Z.push(U1.u + E::Scalar::ONE);
-    for i in 0..n_x1 {
+    for i in 0..n_x {
       Z.push(U1.X[i] + U2.X[i]);
     }
 

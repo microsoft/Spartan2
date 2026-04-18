@@ -10,6 +10,8 @@
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example sha256`
 #[cfg(feature = "jem")]
+use tikv_jemallocator::Jemalloc;
+#[cfg(feature = "jem")]
 #[global_allocator]
 static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
 use bellpepper::gadgets::sha256::sha256;

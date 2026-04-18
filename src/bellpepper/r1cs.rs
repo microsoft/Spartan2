@@ -459,8 +459,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
           reason: format!("Unable to synthesize witness: {e}"),
         })?;
 
-      ps.W
-        [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+      ps.W[S.num_shared + S.num_precommitted
+        ..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
         .copy_from_slice(
           &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
             ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
@@ -474,17 +474,23 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       // Fast path: rest is entirely zero-padding, skip MSM and auto-detect
       (PCS::<E>::commit_zeros(ck, S.num_rest, &r_W_rest)?, true)
     } else if is_small {
-      let rest_slice = &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
+      let rest_slice =
+        &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
       (PCS::<E>::commit(ck, rest_slice, &r_W_rest, true)?, true)
     } else {
       // Only check non-zero portion for small-value detection (zero padding is trivially small)
-      let rest_nz = &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded];
+      let rest_nz = &ps.W[S.num_shared + S.num_precommitted
+        ..S.num_shared + S.num_precommitted + S.num_rest_unpadded];
       let detected_small = rest_nz.iter().all(|s| {
         let bytes = s.to_repr();
         bytes.as_ref()[8..].iter().all(|&b| b == 0)
       });
-      let rest_slice = &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
-      (PCS::<E>::commit(ck, rest_slice, &r_W_rest, detected_small)?, detected_small)
+      let rest_slice =
+        &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
+      (
+        PCS::<E>::commit(ck, rest_slice, &r_W_rest, detected_small)?,
+        detected_small,
+      )
     };
     info!(
       elapsed_ms = %commit_rest_t.elapsed().as_millis(),
@@ -496,9 +502,11 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
     let public_values = if skip_synthesize {
-      circuit.public_values().map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Circuit does not provide public IO: {e}"),
-      })?
+      circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Circuit does not provide public IO: {e}"),
+        })?
     } else {
       ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec()
     };
@@ -526,10 +534,11 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     // Rest portion will be re-copied from cs.aux_assignment on next call.
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
     let w_vec = std::mem::replace(&mut ps.W, vec![E::Scalar::ZERO; num_vars]);
-    ps.W[..S.num_shared_unpadded]
-      .copy_from_slice(&ps.cs.aux_assignment[..S.num_shared_unpadded]);
-    ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded]
-      .copy_from_slice(&ps.cs.aux_assignment[S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded]);
+    ps.W[..S.num_shared_unpadded].copy_from_slice(&ps.cs.aux_assignment[..S.num_shared_unpadded]);
+    ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
+      &ps.cs.aux_assignment
+        [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
+    );
 
     let W = R1CSWitness::<E>::new_unchecked(w_vec, r_W, actual_is_small)?;
 
@@ -577,8 +586,7 @@ impl<E: Engine> PrecommittedState<E> {
     }
     if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
       let r_new = PCS::<E>::blind(ck, S.num_precommitted);
-      self.comm_W_precommitted =
-        Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
+      self.comm_W_precommitted = Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
       self.r_W_precommitted = Some(r_new);
     }
     Ok(())
@@ -596,8 +604,7 @@ impl<E: Engine> PrecommittedState<E> {
     self.r_W_shared = r_W_shared.clone();
     if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
       let r_new = PCS::<E>::blind(ck, S.num_precommitted);
-      self.comm_W_precommitted =
-        Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
+      self.comm_W_precommitted = Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
       self.r_W_precommitted = Some(r_new);
     }
     Ok(())

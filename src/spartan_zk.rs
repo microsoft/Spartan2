@@ -10,14 +10,14 @@ use crate::{
   CommitmentKey, PCS, VerifierKey,
   bellpepper::{
     r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState,
-      SpartanShape, SpartanWitness,
+      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, SpartanShape,
+      SpartanWitness,
     },
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
   big_num::DelayedReduction,
-  digest::{DigestComputer},
+  digest::DigestComputer,
   errors::SpartanError,
   math::Math,
   nifs::NovaNIFS,
@@ -27,8 +27,8 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{
-    R1CSShape, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
-    SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
+    R1CSShape, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
+    SplitR1CSInstance, SplitR1CSShape,
   },
   start_span,
   sumcheck::SumcheckProof,
@@ -95,18 +95,23 @@ impl<E: Engine> crate::digest::Digestible for SpartanVerifierKey<E> {
     let config = bincode::DefaultOptions::new()
       .with_little_endian()
       .with_fixint_encoding();
-    config.serialize_into(&mut *w, &self.vk_ee)
+    config
+      .serialize_into(&mut *w, &self.vk_ee)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // Use fast raw-byte path for the main shape
     self.S.write_bytes(w)?;
     // Serialize remaining small fields with bincode
-    config.serialize_into(&mut *w, &self.vc_shape)
+    config
+      .serialize_into(&mut *w, &self.vc_shape)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_shape_regular)
+    config
+      .serialize_into(&mut *w, &self.vc_shape_regular)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_ck)
+    config
+      .serialize_into(&mut *w, &self.vc_ck)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.vc_vk)
+    config
+      .serialize_into(&mut *w, &self.vc_vk)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(())
   }
@@ -138,8 +143,8 @@ pub struct SpartanPrepZkSNARK<E: Engine> {
   cached_bz: Vec<E::Scalar>,
   cached_cz: Vec<E::Scalar>,
   // Lazily cached rest-witness commitment (populated on first prove call, deterministic)
-  cached_rest_witness: Option<Vec<E::Scalar>>,  // rest-witness values (unpadded)
-  cached_rest_msm: Option<Vec<E::GE>>,          // raw MSM per row (no blinding)
+  cached_rest_witness: Option<Vec<E::Scalar>>, // rest-witness values (unpadded)
+  cached_rest_msm: Option<Vec<E::GE>>,         // raw MSM per row (no blinding)
   // Pre-allocated scratch buffers (reused across prove calls, avoids mmap + page faults)
   scratch_az: Vec<E::Scalar>,
   scratch_bz: Vec<E::Scalar>,
@@ -253,12 +258,16 @@ where
     // These values are the same across proofs since shared/precommitted witness doesn't change.
     pk.S.precompute();
     let pre_end = pk.S.num_shared + pk.S.num_precommitted;
-    let (cached_az, cached_bz, cached_cz) =
-      pk.S.multiply_vec_precommitted(&ps.W[..pre_end])?;
+    let (cached_az, cached_bz, cached_cz) = pk.S.multiply_vec_precommitted(&ps.W[..pre_end])?;
 
     // Pre-allocate scratch buffers (reused across prove calls to avoid mmap + page faults)
     let num_cons = pk.S.num_cons;
-    let num_z = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest + 1 + pk.S.num_public + pk.S.num_challenges;
+    let num_z = pk.S.num_shared
+      + pk.S.num_precommitted
+      + pk.S.num_rest
+      + 1
+      + pk.S.num_public
+      + pk.S.num_challenges;
     let scratch_az = vec![E::Scalar::ZERO; num_cons];
     let scratch_bz = vec![E::Scalar::ZERO; num_cons];
     let scratch_cz = vec![E::Scalar::ZERO; num_cons];
@@ -267,9 +276,16 @@ where
 
     let prep = SpartanPrepZkSNARK {
       ps,
-      cached_az, cached_bz, cached_cz,
-      cached_rest_witness: None, cached_rest_msm: None,
-      scratch_az, scratch_bz, scratch_cz, z_buffer, evals_rx_buffer,
+      cached_az,
+      cached_bz,
+      cached_cz,
+      cached_rest_witness: None,
+      cached_rest_msm: None,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer,
+      evals_rx_buffer,
     };
 
     Ok(prep)
@@ -324,7 +340,12 @@ where
     // Synthesize rest-witness with real challenges
     let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest");
     circuit
-      .synthesize(&mut prep_snark.ps.cs, &prep_snark.ps.shared, &prep_snark.ps.precommitted, Some(&challenges))
+      .synthesize(
+        &mut prep_snark.ps.cs,
+        &prep_snark.ps.shared,
+        &prep_snark.ps.precommitted,
+        Some(&challenges),
+      )
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
@@ -353,9 +374,8 @@ where
           nonzero_count += 1;
         }
       }
-      let result = PCS::<E>::commit_from_raw_delta_blinding(
-        &pk.ck, cached_msm, &delta, &r_W_rest, None,
-      )?;
+      let result =
+        PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest, None)?;
       info!(
         elapsed_ms = %commit_t.elapsed().as_millis(),
         nonzero_count = nonzero_count,
@@ -365,7 +385,8 @@ where
       result
     } else {
       // First prove: commit normally and cache for next time
-      let rest_witness_unpadded = prep_snark.ps.cs.aux_assignment[rest_src_start..rest_src_end].to_vec();
+      let rest_witness_unpadded =
+        prep_snark.ps.cs.aux_assignment[rest_src_start..rest_src_end].to_vec();
       let mut W_rest_padded = vec![E::Scalar::ZERO; pk.S.num_rest];
       W_rest_padded[..pk.S.num_rest_unpadded].copy_from_slice(&rest_witness_unpadded);
 
@@ -470,7 +491,11 @@ where
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
 
     // Initialize multi-round verifier circuit (will be filled as we go)
-    let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(num_rounds_x, num_rounds_y, pk.vc_shape.commitment_width);
+    let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(
+      num_rounds_x,
+      num_rounds_y,
+      pk.vc_shape.commitment_width,
+    );
     let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Outer sum-check
@@ -546,7 +571,9 @@ where
     let mut acc_eval0 = Acc::<E::Scalar>::default();
     for j in 0..num_vars {
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_eval0, &poly_ABC_vec[j], &z[j],
+        &mut acc_eval0,
+        &poly_ABC_vec[j],
+        &z[j],
       );
     }
     let eval0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_eval0);
@@ -648,8 +675,7 @@ where
 
     // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
     let inv: Option<E::Scalar> = (E::Scalar::ONE - r_y[0]).invert().into();
-    let eval_W =
-      (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
+    let eval_W = (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
 
     // Process the inner-final equality round
     // Set verifier circuit public values before processing inner-final round
@@ -742,16 +768,23 @@ where
       cached_cz: prep_snark.cached_cz,
       cached_rest_witness: prep_snark.cached_rest_witness,
       cached_rest_msm: prep_snark.cached_rest_msm,
-      scratch_az, scratch_bz, scratch_cz, z_buffer, evals_rx_buffer,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer,
+      evals_rx_buffer,
     };
-    Ok((SpartanZkSNARK {
-      U_verifier,
-      nifs,
-      random_U,
-      relaxed_snark,
-      eval_arg,
-      U,
-    }, updated_prep))
+    Ok((
+      SpartanZkSNARK {
+        U_verifier,
+        nifs,
+        random_U,
+        relaxed_snark,
+        eval_arg,
+        U,
+      },
+      updated_prep,
+    ))
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
@@ -877,6 +910,8 @@ mod tests {
 
   use super::*;
 
+  #[cfg(feature = "jem")]
+  use tikv_jemallocator::Jemalloc;
   #[cfg(feature = "jem")]
   #[global_allocator]
   static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;

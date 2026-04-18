@@ -30,9 +30,7 @@ impl<C: CurveAffine> Bucket<C> {
       Bucket::None => Bucket::Affine(*other),
       // Vartime mixed addition (7M+3S vs 11M complete) for bucket accumulation.
       // Safe because generators are never identity and distinct generators have different x-coords.
-      Bucket::Affine(a) => {
-        Bucket::Projective(a.to_curve().add_mixed_vartime(other))
-      }
+      Bucket::Affine(a) => Bucket::Projective(a.to_curve().add_mixed_vartime(other)),
       Bucket::Projective(a) => Bucket::Projective(a.add_mixed_vartime(other)),
     }
   }
@@ -633,8 +631,8 @@ mod tests {
   use halo2curves::{CurveAffine, group::Group};
   use rand_core::OsRng;
 
-  use crate::provider::pasta::{pallas, vesta};
   use super::*;
+  use crate::provider::pasta::{pallas, vesta};
 
   fn test_general_msm_with<F: Field, A: CurveAffine<ScalarExt = F>>() {
     let n = 8;

@@ -69,17 +69,25 @@ where
   /// Returns the number of inputs defined for this `ShapeCS`.
   pub fn num_inputs(&self) -> usize {
     #[cfg(debug_assertions)]
-    { self.inputs.len() }
+    {
+      self.inputs.len()
+    }
     #[cfg(not(debug_assertions))]
-    { self.num_inputs }
+    {
+      self.num_inputs
+    }
   }
 
   /// Returns the number of aux inputs defined for this `ShapeCS`.
   pub fn num_aux(&self) -> usize {
     #[cfg(debug_assertions)]
-    { self.aux.len() }
+    {
+      self.aux.len()
+    }
     #[cfg(not(debug_assertions))]
-    { self.num_aux }
+    {
+      self.num_aux
+    }
   }
 
   /// Associate `NamedObject` with `path`.
@@ -209,7 +217,9 @@ where
 
   fn pop_namespace(&mut self) {
     #[cfg(debug_assertions)]
-    { assert!(self.current_namespace.pop().is_some()); }
+    {
+      assert!(self.current_namespace.pop().is_some());
+    }
     #[cfg(not(debug_assertions))]
     {
       assert!(self.namespace_depth > 0);

@@ -75,7 +75,7 @@ where
 {
   /// Precompute window table for point P using batch affine conversion.
   pub fn precompute(p: &E::GE, window_bits: usize) -> Self {
-    let num_windows = (256 + window_bits - 1) / window_bits;
+    let num_windows = 256_usize.div_ceil(window_bits);
     let entries_per_window = (1usize << window_bits) - 1;
 
     // Collect all projective points, then batch-convert to affine (single field inversion)
@@ -106,7 +106,10 @@ where
       tables.push(all_affine[start..end].to_vec());
     }
 
-    Self { tables, window_bits }
+    Self {
+      tables,
+      window_bits,
+    }
   }
 
   /// Variable-time scalar multiplication using the precomputed table.
@@ -154,7 +157,9 @@ where
       8
     } else {
       debug_assert!(
-        tables.iter().all(|t| t.window_bits == tables[0].window_bits),
+        tables
+          .iter()
+          .all(|t| t.window_bits == tables[0].window_bits),
         "multi_mul: all tables must share the same window_bits"
       );
       tables[0].window_bits
@@ -279,10 +284,10 @@ where
     let d = wnaf[i];
     if d > 0 {
       started = true;
-      acc = acc + table[(d as usize - 1) / 2];
+      acc += table[(d as usize - 1) / 2];
     } else if d < 0 {
       started = true;
-      acc = acc - table[((-d) as usize - 1) / 2];
+      acc -= table[((-d) as usize - 1) / 2];
     }
   }
   acc
@@ -314,12 +319,16 @@ where
   /// Eagerly initialize the h_table for fixed-base scalar multiplication.
   /// Call before cloning to ensure both copies have the precomputed table.
   pub fn ensure_h_table(&self) {
-    self.h_table.get_or_init(|| FixedBaseMul::precompute(&self.h, 8));
+    self
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&self.h, 8));
     // For small ck widths (e.g., VC with 32 bases), precompute tables for all bases.
     // This enables fast fixed-base MSM for commit (table lookup vs runtime MSM).
     if self.ck.len() <= 64 {
       self.ck_tables.get_or_init(|| {
-        self.ck.par_iter()
+        self
+          .ck
+          .par_iter()
           .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
           .collect()
       });
@@ -396,7 +405,13 @@ where
       h,
     };
 
-    let ck = Self::CommitmentKey { num_cols, ck, h, h_table: std::sync::OnceLock::new(), ck_tables: std::sync::OnceLock::new() };
+    let ck = Self::CommitmentKey {
+      num_cols,
+      ck,
+      h,
+      h_table: std::sync::OnceLock::new(),
+      ck_tables: std::sync::OnceLock::new(),
+    };
 
     (ck, vk)
   }
@@ -463,7 +478,9 @@ where
           &v[lower..upper]
         };
 
-        let h_table = ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+        let h_table = ck
+          .h_table
+          .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
 
         // Fast path: skip MSM for rows where all scalars are zero (e.g., zero-padded suffix)
         if scalars.iter().all(|s| *s == E::Scalar::ZERO) {
@@ -532,7 +549,9 @@ where
   ) -> Result<Self::Commitment, SpartanError> {
     let num_cols = ck.num_cols;
     let num_rows = div_ceil(n, num_cols);
-    let h_table = ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
     let comm = (0..num_rows)
       .map(|i| E::GE::zero() + h_table.mul(&r.blind[i]))
       .collect::<Vec<_>>();
@@ -553,7 +572,9 @@ where
     }
 
     // Use precomputed fixed-base table for h to speed up scalar muls
-    let h_table = ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
 
     let new_comm = (0..comm.comm.len())
       .map(|i| comm.comm[i] + h_table.mul(&(r_new.blind[i] - r_old.blind[i])))
@@ -657,12 +678,16 @@ where
 
       let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
 
-      let r_LZ = L.iter()
+      let r_LZ = L
+        .iter()
         .zip(blind.blind.iter())
         .map(|(l, b)| *l * *b)
         .fold(E::Scalar::ZERO, |acc, x| acc + x);
-      let h_table = ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
-      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + h_table.mul(&r_LZ);
+      let h_table = ck
+        .h_table
+        .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+      let comm_LZ =
+        E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + h_table.mul(&r_LZ);
 
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
@@ -799,7 +824,10 @@ where
     let n = delta.len();
     let num_rows = div_ceil(n, num_cols);
     let h_table = if blinding_points.is_none() {
-      Some(ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8)))
+      Some(
+        ck.h_table
+          .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8)),
+      )
     } else {
       None
     };
@@ -890,7 +918,9 @@ where
     if v.len() != num_cols {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
-          "Direct opening: v.len() ({}) != num_cols ({})", v.len(), num_cols
+          "Direct opening: v.len() ({}) != num_cols ({})",
+          v.len(),
+          num_cols
         ),
       });
     }
@@ -915,8 +945,8 @@ where
     };
 
     // Recompute commitment from v and combined_blind
-    let expected = E::GE::vartime_multiscalar_mul(v, &vk.ck[..v.len()], false)?
-      + vk.h * *combined_blind;
+    let expected =
+      E::GE::vartime_multiscalar_mul(v, &vk.ck[..v.len()], false)? + vk.h * *combined_blind;
 
     if comm_LZ != expected {
       return Err(SpartanError::ProofVerifyError {
@@ -992,7 +1022,11 @@ where
       };
       if unit_idx != usize::MAX {
         let mut folded_comm = Vec::with_capacity(n);
-        for (p, q) in comms[unit_idx].comm.iter().zip(comms[scalar_idx].comm.iter()) {
+        for (p, q) in comms[unit_idx]
+          .comm
+          .iter()
+          .zip(comms[scalar_idx].comm.iter())
+        {
           folded_comm.push(*p + vartime_scalar_mul::<E>(*q, &scalar_w));
         }
         return Ok(Self::Commitment { comm: folded_comm });
@@ -1082,7 +1116,9 @@ where
     // Step 2: Compute rest rows from folded blind + h
     // For rest rows, each comm_k[row] = blind_k[row] * h, so:
     //   folded[row] = sum_k w[k] * blind_k[row] * h = folded_blind[row] * h
-    let h_table = ck.h_table.get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
     let num_rest_rows = total_rows - num_data_rows;
     let mut comm = data_folded.comm;
     comm.reserve(num_rest_rows);

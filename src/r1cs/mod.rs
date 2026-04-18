@@ -5,9 +5,10 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! This module defines R1CS related types
+#[allow(unused_imports)]
+use crate::polys::eq::EqPolynomial;
 use crate::{
-  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS,
-  VerifierKey,
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey,
   big_num::DelayedReduction,
   big_num::montgomery::MontgomeryLimbs,
   digest::SimpleDigestible,
@@ -19,8 +20,6 @@ use crate::{
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
-#[allow(unused_imports)]
-use crate::polys::eq::EqPolynomial;
 use core::cmp::max;
 use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
@@ -30,8 +29,8 @@ use tracing::info;
 
 mod folds;
 mod sparse;
-pub(crate) use sparse::PrecomputedSparseMatrix;
 pub(crate) use sparse::FilteredSpmv;
+pub(crate) use sparse::PrecomputedSparseMatrix;
 pub(crate) use sparse::SparseMatrix;
 
 /// Fused evaluation of three sparse matrices at (T_x, T_y).
@@ -39,7 +38,9 @@ pub(crate) use sparse::SparseMatrix;
 /// Hoists T_x[row] out of inner loop and uses delayed reduction.
 #[inline(never)]
 #[allow(dead_code)]
-fn evaluate_three_matrices_fused<F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F> + Send + Sync>(
+fn evaluate_three_matrices_fused<
+  F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F> + Send + Sync,
+>(
   pa: &PrecomputedSparseMatrix<F>,
   pb: &PrecomputedSparseMatrix<F>,
   pc: &PrecomputedSparseMatrix<F>,
@@ -53,7 +54,7 @@ fn evaluate_three_matrices_fused<F: PrimeField + MontgomeryLimbs + Copy + Delaye
   } else {
     use rayon::prelude::*;
     let num_threads = rayon::current_num_threads();
-    let chunk_size = (num_rows + num_threads - 1) / num_threads;
+    let chunk_size = num_rows.div_ceil(num_threads);
 
     let partials: Vec<(F, F, F)> = (0..num_threads)
       .into_par_iter()
@@ -67,15 +68,18 @@ fn evaluate_three_matrices_fused<F: PrimeField + MontgomeryLimbs + Copy + Delaye
       })
       .collect();
 
-    partials.into_iter().fold(
-      (F::ZERO, F::ZERO, F::ZERO),
-      |(a, b, c), (pa, pb, pc)| (a + pa, b + pb, c + pc),
-    )
+    partials
+      .into_iter()
+      .fold((F::ZERO, F::ZERO, F::ZERO), |(a, b, c), (pa, pb, pc)| {
+        (a + pa, b + pb, c + pc)
+      })
   }
 }
 
 #[inline(never)]
-fn evaluate_three_matrices_sequential<F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F>>(
+fn evaluate_three_matrices_sequential<
+  F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F>,
+>(
   pa: &PrecomputedSparseMatrix<F>,
   pb: &PrecomputedSparseMatrix<F>,
   pc: &PrecomputedSparseMatrix<F>,
@@ -89,6 +93,7 @@ fn evaluate_three_matrices_sequential<F: PrimeField + MontgomeryLimbs + Copy + D
   let mut acc_b = Acc::<F>::default();
   let mut acc_c = Acc::<F>::default();
 
+  #[allow(clippy::needless_range_loop)]
   for row in start_row..end_row {
     let row_sum_a = row_dot_ty(pa, row, t_y);
     let row_sum_b = row_dot_ty(pb, row, t_y);
@@ -106,7 +111,11 @@ fn evaluate_three_matrices_sequential<F: PrimeField + MontgomeryLimbs + Copy + D
 /// Compute dot product of a single matrix row with T_y: sum val * T_y[col].
 /// Uses delayed reduction for general entries to avoid per-multiply Montgomery REDC.
 #[inline(always)]
-fn row_dot_ty<F: PrimeField + DelayedReduction<F>>(pm: &PrecomputedSparseMatrix<F>, row: usize, t_y: &[F]) -> F {
+fn row_dot_ty<F: PrimeField + DelayedReduction<F>>(
+  pm: &PrecomputedSparseMatrix<F>,
+  row: usize,
+  t_y: &[F],
+) -> F {
   // Unit and small entries: regular field arithmetic (additions are cheap)
   let mut sum = F::ZERO;
 
@@ -129,7 +138,11 @@ fn row_dot_ty<F: PrimeField + DelayedReduction<F>>(pm: &PrecomputedSparseMatrix<
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
     let mut acc = Acc::<F>::default();
     for i in gs..ge {
-      F::unreduced_multiply_accumulate(&mut acc, &pm.general_vals[i], &t_y[pm.general_cols[i] as usize]);
+      F::unreduced_multiply_accumulate(
+        &mut acc,
+        &pm.general_vals[i],
+        &t_y[pm.general_cols[i] as usize],
+      );
     }
     sum += F::reduce(&acc);
   }
@@ -226,8 +239,8 @@ impl<E: Engine> RelaxedR1CSWitness<E> {
 mod tests_relaxed_sample {
   use ff::Field;
 
-  use crate::{provider::P256HyraxEngine, traits::Engine};
   use super::*;
+  use crate::{provider::P256HyraxEngine, traits::Engine};
 
   fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
     let one = <E::Scalar as Field>::ONE;
@@ -629,7 +642,7 @@ impl<E: Engine> R1CSWitness<E> {
           // General path: delayed reduction with element-major access.
           // Uses a single accumulator (in registers) per element instead of a large buffer.
           type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-          for j in 0..acc_blk.len() {
+          for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
             let mut acc = Acc::<E::Scalar>::default();
             for (i, &wi) in w.iter().enumerate() {
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
@@ -638,7 +651,7 @@ impl<E: Engine> R1CSWitness<E> {
                 &Ws[i].W[start + j],
               );
             }
-            acc_blk[j] = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
+            *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
           }
         }
       });
@@ -1040,9 +1053,15 @@ impl<E: Engine> SplitR1CSShape<E> {
 
   /// Lazily build precomputed matrices for fast SpMV.
   fn ensure_precomputed(&self) {
-    self.precomp_A.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.A));
-    self.precomp_B.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.B));
-    self.precomp_C.get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.C));
+    self
+      .precomp_A
+      .get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.A));
+    self
+      .precomp_B
+      .get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.B));
+    self
+      .precomp_C
+      .get_or_init(|| PrecomputedSparseMatrix::from_sparse(&self.C));
   }
 
   /// Eagerly build precomputed matrices during setup.
@@ -1051,9 +1070,15 @@ impl<E: Engine> SplitR1CSShape<E> {
     // Also build filtered entries for incremental SpMV
     let col_min = self.num_shared + self.num_precommitted;
     let nr = self.num_cons_unpadded;
-    self.filtered_A.get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
-    self.filtered_B.get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
-    self.filtered_C.get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_A
+      .get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_B
+      .get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_C
+      .get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
   }
 
   pub fn multiply_vec(
@@ -1098,12 +1123,14 @@ impl<E: Engine> SplitR1CSShape<E> {
     z_cached: &[E::Scalar],
   ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let cached_len = self.num_shared + self.num_precommitted;
-    assert_eq!(z_cached.len(), cached_len,
+    assert_eq!(
+      z_cached.len(),
+      cached_len,
       "multiply_vec_precommitted expects shared + precommitted ({cached_len}), got {}",
-      z_cached.len());
+      z_cached.len()
+    );
     // Build a full-size z vector with shared + precommitted values at correct positions
-    let total_len = cached_len + self.num_rest
-      + 1 + self.num_public + self.num_challenges;
+    let total_len = cached_len + self.num_rest + 1 + self.num_public + self.num_challenges;
     let mut z_full = vec![E::Scalar::ZERO; total_len];
     z_full[..cached_len].copy_from_slice(z_cached);
     self.multiply_vec(&z_full)
@@ -1115,8 +1142,12 @@ impl<E: Engine> SplitR1CSShape<E> {
     &self,
     zs: &[Vec<E::Scalar>],
   ) -> Result<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>, SpartanError> {
-    let expected_len = self.num_public + self.num_challenges + 1
-      + self.num_shared + self.num_precommitted + self.num_rest;
+    let expected_len = self.num_public
+      + self.num_challenges
+      + 1
+      + self.num_shared
+      + self.num_precommitted
+      + self.num_rest;
     for z in zs {
       if z.len() != expected_len {
         return Err(SpartanError::InvalidWitnessLength);
@@ -1136,8 +1167,8 @@ impl<E: Engine> SplitR1CSShape<E> {
     Ok(
       a_results
         .into_iter()
-        .zip(b_results.into_iter())
-        .zip(c_results.into_iter())
+        .zip(b_results)
+        .zip(c_results)
         .map(|((a, b), c)| (a, b, c))
         .collect(),
     )
@@ -1159,9 +1190,15 @@ impl<E: Engine> SplitR1CSShape<E> {
     let col_min = self.num_shared + self.num_precommitted;
     let nr = self.num_cons_unpadded;
     self.ensure_precomputed();
-    self.filtered_A.get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
-    self.filtered_B.get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
-    self.filtered_C.get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_A
+      .get_or_init(|| self.precomp_A.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_B
+      .get_or_init(|| self.precomp_B.get().unwrap().build_filtered(col_min, nr));
+    self
+      .filtered_C
+      .get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
 
     let fa = self.filtered_A.get().unwrap();
     let fb = self.filtered_B.get().unwrap();
@@ -1266,7 +1303,7 @@ impl<E: Engine> SplitR1CSShape<E> {
       // Parallel path: per-thread accumulators + reduce
       use rayon::prelude::*;
       let num_threads = rayon::current_num_threads();
-      let chunk_size = (num_rows + num_threads - 1) / num_threads;
+      let chunk_size = num_rows.div_ceil(num_threads);
 
       (0..num_threads)
         .into_par_iter()
@@ -1304,6 +1341,7 @@ impl<E: Engine> SplitR1CSShape<E> {
     end_row: usize,
     poly_abc: &mut [E::Scalar],
   ) {
+    #[allow(clippy::needless_range_loop)]
     for row in start_row..end_row {
       let rx_row = rx[row];
       let r_rx_row = rx_row * *r;
@@ -1320,7 +1358,8 @@ impl<E: Engine> SplitR1CSShape<E> {
       }
       let (start, end) = pa.range_small(row);
       for i in start..end {
-        poly_abc[pa.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pa.small_coeffs[i], rx_row);
+        poly_abc[pa.small_cols[i] as usize] +=
+          PrecomputedSparseMatrix::small_mul(pa.small_coeffs[i], rx_row);
       }
       let (start, end) = pa.range_general(row);
       for i in start..end {
@@ -1338,7 +1377,8 @@ impl<E: Engine> SplitR1CSShape<E> {
       }
       let (start, end) = pb.range_small(row);
       for i in start..end {
-        poly_abc[pb.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pb.small_coeffs[i], r_rx_row);
+        poly_abc[pb.small_cols[i] as usize] +=
+          PrecomputedSparseMatrix::small_mul(pb.small_coeffs[i], r_rx_row);
       }
       let (start, end) = pb.range_general(row);
       for i in start..end {
@@ -1356,7 +1396,8 @@ impl<E: Engine> SplitR1CSShape<E> {
       }
       let (start, end) = pc.range_small(row);
       for i in start..end {
-        poly_abc[pc.small_cols[i] as usize] += PrecomputedSparseMatrix::small_mul(pc.small_coeffs[i], r2_rx_row);
+        poly_abc[pc.small_cols[i] as usize] +=
+          PrecomputedSparseMatrix::small_mul(pc.small_coeffs[i], r2_rx_row);
       }
       let (start, end) = pc.range_general(row);
       for i in start..end {
@@ -1531,6 +1572,14 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     C: SparseMatrix<E::Scalar>,
   ) -> Result<SplitMultiRoundR1CSShape<E>, SpartanError> {
     let num_rounds = num_vars_per_round.len();
+    if width == 0 || !width.is_power_of_two() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SplitMultiRoundR1CSShape: width must be a non-zero power of two, got {}",
+          width
+        ),
+      });
+    }
     if num_challenges_per_round.len() != num_rounds {
       return Err(SpartanError::InvalidInputLength {
         reason: format!(
@@ -1720,11 +1769,7 @@ impl<E: Engine> SplitMultiRoundR1CSInstance<E> {
 
     // Validate commitments per round
     for (round, comm) in comm_w_per_round.iter().enumerate() {
-      E::PCS::check_commitment(
-        comm,
-        s.num_vars_per_round[round],
-        s.commitment_width,
-      )?;
+      E::PCS::check_commitment(comm, s.num_vars_per_round[round], s.commitment_width)?;
     }
 
     Ok(SplitMultiRoundR1CSInstance {

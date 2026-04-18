@@ -14,7 +14,7 @@ use crate::{
     solver::SatisfyingAssignment,
   },
   big_num::DelayedReduction,
-  digest::{DigestComputer},
+  digest::DigestComputer,
   errors::SpartanError,
   math::Math,
   polys::{
@@ -76,9 +76,11 @@ impl<E: Engine> crate::digest::Digestible for SpartanVerifierKey<E> {
     let config = bincode::DefaultOptions::new()
       .with_little_endian()
       .with_fixint_encoding();
-    config.serialize_into(&mut *w, &self.vk_ee)
+    config
+      .serialize_into(&mut *w, &self.vk_ee)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    config.serialize_into(&mut *w, &self.ck_s)
+    config
+      .serialize_into(&mut *w, &self.ck_s)
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     self.S.write_bytes(w)?;
     Ok(())
@@ -197,12 +199,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     // Pre-compute partial matrix-vector products for shared + precommitted witness columns.
     pk.S.precompute();
     let pre_end = pk.S.num_shared + pk.S.num_precommitted;
-    let (cached_az, cached_bz, cached_cz) =
-      pk.S.multiply_vec_precommitted(&ps.W[..pre_end])?;
+    let (cached_az, cached_bz, cached_cz) = pk.S.multiply_vec_precommitted(&ps.W[..pre_end])?;
 
     // Pre-allocate scratch buffers (reused across prove calls to avoid mmap + page faults)
     let num_cons = pk.S.num_cons;
-    let num_z = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest + 1 + pk.S.num_public + pk.S.num_challenges;
+    let num_z = pk.S.num_shared
+      + pk.S.num_precommitted
+      + pk.S.num_rest
+      + 1
+      + pk.S.num_public
+      + pk.S.num_challenges;
     let scratch_az = vec![E::Scalar::ZERO; num_cons];
     let scratch_bz = vec![E::Scalar::ZERO; num_cons];
     let scratch_cz = vec![E::Scalar::ZERO; num_cons];
@@ -211,9 +217,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
     Ok(SpartanPrepSNARK {
       ps,
-      cached_az, cached_bz, cached_cz,
-      cached_rest_witness: None, cached_rest_msm: None,
-      scratch_az, scratch_bz, scratch_cz, z_buffer, evals_rx_buffer,
+      cached_az,
+      cached_bz,
+      cached_cz,
+      cached_rest_witness: None,
+      cached_rest_msm: None,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer,
+      evals_rx_buffer,
     })
   }
 
@@ -340,7 +353,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let mut acc_eval0 = Acc::<E::Scalar>::default();
     for j in 0..num_vars {
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_eval0, &poly_ABC_vec[j], &z[j],
+        &mut acc_eval0,
+        &poly_ABC_vec[j],
+        &z[j],
       );
     }
     let eval0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_eval0);
@@ -418,8 +433,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
     };
     let inv: Option<E::Scalar> = (E::Scalar::ONE - r_y[0]).invert().into();
-    let eval_W =
-      (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
+    let eval_W = (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
 
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
@@ -449,17 +463,24 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       cached_cz: prep_snark.cached_cz,
       cached_rest_witness: prep_snark.cached_rest_witness,
       cached_rest_msm: prep_snark.cached_rest_msm,
-      scratch_az, scratch_bz, scratch_cz, z_buffer: Vec::new(), evals_rx_buffer,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer: Vec::new(),
+      evals_rx_buffer,
     };
-    Ok((SpartanSNARK {
-      U,
-      sc_proof_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
-      sc_proof_inner,
-      eval_W,
-      blind_eval_W,
-      eval_arg,
-    }, updated_prep))
+    Ok((
+      SpartanSNARK {
+        U,
+        sc_proof_outer,
+        claims_outer: (claim_Az, claim_Bz, claim_Cz),
+        sc_proof_inner,
+        eval_W,
+        blind_eval_W,
+        eval_arg,
+      },
+      updated_prep,
+    ))
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance

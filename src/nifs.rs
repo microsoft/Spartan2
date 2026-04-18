@@ -5,6 +5,7 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! Nova's non-Interactive Folding Scheme (NIFS)
+use crate::start_span;
 use crate::{
   Blind, Commitment, CommitmentKey, PCS,
   errors::SpartanError,
@@ -17,7 +18,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use crate::start_span;
 
 /// Nova NIFS proof containing the commitment to the cross-term `T`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,12 +60,7 @@ where
     let W = W1.fold(W2, &T, &r_T, &r)?;
     // Fold scalar fields only (no commitment arithmetic)
     let u_folded = U1.u + r;
-    let X_folded: Vec<E::Scalar> = U1
-      .X
-      .iter()
-      .zip(&U2.X)
-      .map(|(a, b)| *a + r * *b)
-      .collect();
+    let X_folded: Vec<E::Scalar> = U1.X.iter().zip(&U2.X).map(|(a, b)| *a + r * *b).collect();
     info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_fold");
 
     Ok((Self { comm_T }, W, u_folded, X_folded))
