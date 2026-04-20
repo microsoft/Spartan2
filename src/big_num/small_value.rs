@@ -89,8 +89,9 @@ pub(crate) fn to_small_vec_or_zero<F: PrimeField + FieldReductionConstants>(
 /// Accumulates `field_element * small_integer` products using separate
 /// positive and negative buckets, reducing only at the end.
 ///
-/// Uses 7 limbs (448 bits) per bucket, sufficient for 2^17 products of
-/// field (256 bits) * i128 (128 bits) = 384 bits per product.
+/// Uses 7 limbs (448 bits) per bucket. Each product of
+/// field (256 bits) * i128 (128 bits) = 384 bits, leaving 64 bits of
+/// headroom -- sufficient for up to 2^64 accumulations per bucket.
 #[derive(Clone, Copy)]
 pub(crate) struct SmallAccumulator {
   pos: [u64; 7],

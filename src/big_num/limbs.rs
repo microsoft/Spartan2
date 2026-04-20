@@ -199,6 +199,7 @@ pub const fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
 /// Falls back to portable Rust on other architectures or when BMI2+ADX are unavailable.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
+#[allow(unsafe_code)]
 pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
   if std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx") {
     // Safety: we have verified BMI2+ADX are available at runtime.
@@ -220,7 +221,8 @@ pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
 #[target_feature(enable = "bmi2", enable = "adx")]
 #[allow(unsafe_code)]
 unsafe fn mul_acc_4_by_4_asm(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
-  core::arch::asm!(
+  unsafe {
+    core::arch::asm!(
     // Phase 1: Schoolbook multiply a*b into r8..r15
 
     // Row 0: r8..r12 = a[0] * b[0..4]
@@ -325,6 +327,7 @@ unsafe fn mul_acc_4_by_4_asm(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
     out("r15") _,
     options(nostack)
   );
+  }
 }
 
 /// Portable fallback implementation.
