@@ -37,7 +37,6 @@ pub(crate) use sparse::SparseMatrix;
 /// Processes all three matrices per row to improve T_y cache reuse.
 /// Hoists T_x[row] out of inner loop and uses delayed reduction.
 #[inline(never)]
-#[allow(dead_code)]
 fn evaluate_three_matrices_fused<
   F: PrimeField + MontgomeryLimbs + Copy + DelayedReduction<F> + Send + Sync,
 >(
