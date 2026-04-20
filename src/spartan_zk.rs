@@ -342,7 +342,7 @@ where
       for i in 0..pk.S.num_rest_unpadded {
         delta[i] = prep_snark.ps.W[rest_dst_start + i] - cached_witness[i];
       }
-      PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest, None)?
+      PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest)?
     } else {
       // First prove: commit normally and cache for next time
       let rest_witness_unpadded =
@@ -361,7 +361,6 @@ where
         &raw_msms,
         &vec![E::Scalar::ZERO; pk.S.num_rest],
         &r_W_rest,
-        None,
       )?
     };
     transcript.absorb(b"comm_W_rest", &comm_W_rest);

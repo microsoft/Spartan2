@@ -29,6 +29,7 @@ use tracing::info;
 
 use crate::big_num::delayed_reduction::DelayedReduction;
 use crate::big_num::montgomery::MontgomeryLimbs;
+use crate::provider::msm::{AffineGroupElement, FixedBaseMul, vartime_scalar_mul};
 
 /// Bind polynomial top variables using delayed reduction for Montgomery multiply.
 /// Avoids per-product REDC, reducing multiply cost by ~50%.
@@ -50,244 +51,6 @@ fn bind_with_delayed<F: PrimeField + MontgomeryLimbs + Copy>(
     }
   }
   acc.iter().map(|a| F::reduce(a)).collect()
-}
-
-type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
-
-/// Precomputed table for fast fixed-base scalar multiplication of a single point.
-/// Uses windowed method: precomputes multiples [1*P, 2*P, ..., (2^w-1)*P] for each window.
-#[derive(Clone, Debug)]
-pub struct FixedBaseMul<E: Engine>
-where
-  E::GE: DlogGroup,
-{
-  /// tables[j][d-1] = d * (2^(j*w)) * P for d in 1..2^w, j in 0..num_windows
-  tables: Vec<Vec<AffineGroupElement<E>>>,
-  window_bits: usize,
-}
-
-impl<E: Engine> FixedBaseMul<E>
-where
-  E::GE: DlogGroupExt,
-{
-  /// Precompute window table for point P using batch affine conversion.
-  pub fn precompute(p: &E::GE, window_bits: usize) -> Self {
-    let num_windows = 256_usize.div_ceil(window_bits);
-    let entries_per_window = (1usize << window_bits) - 1;
-
-    // Collect all projective points, then batch-convert to affine (single field inversion)
-    let total_entries = num_windows * entries_per_window;
-    let mut all_proj = Vec::with_capacity(total_entries);
-
-    let mut base = *p; // base = 2^(j*w) * P
-    for _ in 0..num_windows {
-      let mut acc = base;
-      all_proj.push(acc); // 1 * base
-      for _ in 1..entries_per_window {
-        acc += base;
-        all_proj.push(acc); // d * base
-      }
-      // Advance base by 2^w
-      for _ in 0..window_bits {
-        base = base + base;
-      }
-    }
-
-    let all_affine = E::GE::batch_affine(&all_proj);
-
-    // Split flat affine array into per-window tables
-    let mut tables = Vec::with_capacity(num_windows);
-    for w in 0..num_windows {
-      let start = w * entries_per_window;
-      let end = start + entries_per_window;
-      tables.push(all_affine[start..end].to_vec());
-    }
-
-    Self {
-      tables,
-      window_bits,
-    }
-  }
-
-  /// Variable-time scalar multiplication using the precomputed table.
-  #[inline(always)]
-  pub fn mul(&self, scalar: &E::Scalar) -> E::GE {
-    let repr = scalar.to_repr();
-    let bytes = repr.as_ref();
-    let w = self.window_bits;
-    let mask = (1u64 << w) - 1;
-    let mut acc = E::GE::zero();
-
-    for (j, table) in self.tables.iter().enumerate() {
-      let bit_offset = j * w;
-      let byte_idx = bit_offset / 8;
-      let bit_idx = bit_offset % 8;
-
-      if byte_idx >= bytes.len() {
-        break;
-      }
-
-      // Extract w bits starting at bit_offset
-      let mut val = bytes[byte_idx] as u64 >> bit_idx;
-      if bit_idx + w > 8 && byte_idx + 1 < bytes.len() {
-        val |= (bytes[byte_idx + 1] as u64) << (8 - bit_idx);
-      }
-      if bit_idx + w > 16 && byte_idx + 2 < bytes.len() {
-        val |= (bytes[byte_idx + 2] as u64) << (16 - bit_idx);
-      }
-      let digit = (val & mask) as usize;
-
-      if digit != 0 {
-        acc = acc.add_affine_vartime(&table[digit - 1]);
-      }
-    }
-
-    acc
-  }
-
-  /// Multi-scalar multiplication: sum tables[i].mul(scalars[i])
-  /// Uses a single accumulator to avoid intermediate projective additions.
-  #[inline(always)]
-  pub fn multi_mul(tables: &[Self], scalars: &[E::Scalar]) -> E::GE {
-    debug_assert_eq!(tables.len(), scalars.len());
-    let w = if tables.is_empty() {
-      8
-    } else {
-      debug_assert!(
-        tables
-          .iter()
-          .all(|t| t.window_bits == tables[0].window_bits),
-        "multi_mul: all tables must share the same window_bits"
-      );
-      tables[0].window_bits
-    };
-    let mask = (1u64 << w) - 1;
-
-    // Pre-convert all scalars to bytes
-    let reprs: Vec<_> = scalars.iter().map(|s| s.to_repr()).collect();
-
-    let mut acc = E::GE::zero();
-    for (repr, table) in reprs.iter().zip(tables.iter()) {
-      let bytes = repr.as_ref();
-      for (j, table_j) in table.tables.iter().enumerate() {
-        let bit_offset = j * w;
-        let byte_idx = bit_offset / 8;
-        let bit_idx = bit_offset % 8;
-
-        if byte_idx >= bytes.len() {
-          break;
-        }
-
-        let mut val = bytes[byte_idx] as u64 >> bit_idx;
-        if bit_idx + w > 8 && byte_idx + 1 < bytes.len() {
-          val |= (bytes[byte_idx + 1] as u64) << (8 - bit_idx);
-        }
-        if bit_idx + w > 16 && byte_idx + 2 < bytes.len() {
-          val |= (bytes[byte_idx + 2] as u64) << (16 - bit_idx);
-        }
-        let digit = (val & mask) as usize;
-
-        if digit != 0 {
-          acc = acc.add_affine_vartime(&table_j[digit - 1]);
-        }
-      }
-    }
-    acc
-  }
-}
-
-/// Variable-time scalar multiplication using wNAF-5 (width-5 non-adjacent form).
-/// ONLY safe when `scalar` is public (e.g., Fiat-Shamir challenge).
-/// ~40% faster than constant-time scalar mul for random 256-bit scalars.
-#[inline(always)]
-fn vartime_scalar_mul<E: Engine>(base: E::GE, scalar: &E::Scalar) -> E::GE
-where
-  E::GE: DlogGroup,
-{
-  const W: usize = 5;
-  const TABLE_SIZE: usize = 1 << (W - 1); // 16 entries
-
-  // Build table of odd multiples: [P, 3P, 5P, 7P, ..., 31P]
-  let double = base + base;
-  let mut table = [E::GE::zero(); TABLE_SIZE];
-  table[0] = base;
-  for i in 1..TABLE_SIZE {
-    table[i] = table[i - 1] + double;
-  }
-
-  // Convert scalar to wNAF-5 form
-  let repr = scalar.to_repr();
-  let bytes = repr.as_ref();
-  let mut wnaf = [0i8; 257]; // wNAF digits (at most 257 for 256-bit scalar)
-  let mut wnaf_len = 0;
-
-  // Convert to a working big-integer (u64 limbs)
-  let mut limbs = [0u64; 4];
-  for (i, chunk) in bytes.chunks(8).enumerate() {
-    if i < 4 {
-      let mut buf = [0u8; 8];
-      buf[..chunk.len()].copy_from_slice(chunk);
-      limbs[i] = u64::from_le_bytes(buf);
-    }
-  }
-
-  // Generate wNAF digits
-  let half = 1i16 << W; // 32
-  let mask = half - 1; // 31
-  while limbs[0] != 0 || limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0 {
-    if limbs[0] & 1 == 1 {
-      // Odd: extract a signed digit
-      let digit = (limbs[0] & mask as u64) as i16;
-      let signed = if digit >= half / 2 {
-        // Borrow from higher bits
-        let d = digit - half;
-        // Subtract d (which is negative, so add |d|)
-        let borrow = (-(d as i64)) as u64;
-        let (v, carry) = limbs[0].overflowing_add(borrow);
-        limbs[0] = v;
-        if carry {
-          for limb in limbs.iter_mut().skip(1) {
-            let (v2, c2) = limb.overflowing_add(1);
-            *limb = v2;
-            if !c2 {
-              break;
-            }
-          }
-        }
-        d as i8
-      } else {
-        limbs[0] -= digit as u64;
-        digit as i8
-      };
-      wnaf[wnaf_len] = signed;
-    } else {
-      wnaf[wnaf_len] = 0;
-    }
-    wnaf_len += 1;
-    // Right shift by 1
-    for i in 0..3 {
-      limbs[i] = (limbs[i] >> 1) | (limbs[i + 1] << 63);
-    }
-    limbs[3] >>= 1;
-  }
-
-  // Process wNAF from most significant digit
-  let mut acc = E::GE::zero();
-  let mut started = false;
-  for i in (0..wnaf_len).rev() {
-    if started {
-      acc = acc + acc;
-    }
-    let d = wnaf[i];
-    if d > 0 {
-      started = true;
-      acc += table[(d as usize - 1) / 2];
-    } else if d < 0 {
-      started = true;
-      acc -= table[((-d) as usize - 1) / 2];
-    }
-  }
-  acc
 }
 
 /// A type that holds commitment generators for Hyrax commitments
@@ -809,30 +572,22 @@ where
     delta: &[E::Scalar],
     blind: &Self::Blind,
   ) -> Result<Self::Commitment, SpartanError> {
-    Self::commit_from_raw_delta_blinding(ck, raw, delta, blind, None)
+    Self::commit_from_raw_delta_blinding(ck, raw, delta, blind)
   }
 
-  /// Like commit_from_raw_and_delta but accepts optional precomputed blinding points.
-  /// When blinding_points is Some, skips the 88 fixed-base muls (~14ms savings).
   fn commit_from_raw_delta_blinding(
     ck: &Self::CommitmentKey,
     raw: &[E::GE],
     delta: &[E::Scalar],
     blind: &Self::Blind,
-    blinding_points: Option<&[E::GE]>,
   ) -> Result<Self::Commitment, SpartanError> {
     use ff::Field;
     let num_cols = ck.ck.len();
     let n = delta.len();
     let num_rows = div_ceil(n, num_cols);
-    let h_table = if blinding_points.is_none() {
-      Some(
-        ck.h_table
-          .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8)),
-      )
-    } else {
-      None
-    };
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
 
     let comm: Result<Vec<E::GE>, SpartanError> = (0..num_rows)
       .into_par_iter()
@@ -853,11 +608,7 @@ where
         };
 
         // Add blinding factor
-        Ok(if let Some(bp) = blinding_points {
-          point + bp[i]
-        } else {
-          point + h_table.unwrap().mul(&blind.blind[i])
-        })
+        Ok(point + h_table.mul(&blind.blind[i]))
       })
       .collect();
 
@@ -1013,7 +764,6 @@ where
     let num_comms = comms.len();
 
     // Fast path: fold 2 commitments where one weight is ONE.
-    // Uses variable-time scalar mul (safe: scalar is a public Fiat-Shamir challenge).
     if num_comms == 2 {
       let (unit_idx, scalar_idx, scalar_w) = if weights[0] == E::Scalar::ONE {
         (0, 1, weights[1])

@@ -164,16 +164,14 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     })
   }
 
-  /// Like commit_from_raw_and_delta but accepts optional precomputed blinding points.
-  /// When blinding_points is Some, uses point addition instead of fixed-base mul.
+  /// Build commitment from precomputed raw MSMs plus a delta vector and blinding.
   fn commit_from_raw_delta_blinding(
     ck: &Self::CommitmentKey,
     raw: &[E::GE],
     delta: &[E::Scalar],
     blind: &Self::Blind,
-    _blinding_points: Option<&[E::GE]>,
   ) -> Result<Self::Commitment, SpartanError> {
-    // Default: ignore blinding_points, fall back to regular commit
+    // Default: fall back to regular commit
     Self::commit_from_raw_and_delta(ck, raw, delta, blind)
   }
 
