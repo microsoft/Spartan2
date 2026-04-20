@@ -62,13 +62,11 @@ crate::impl_montgomery_limbs!(vesta::Scalar);
 
 #[cfg(test)]
 mod tests {
-  use std::io::Read;
-
+  use crate::provider::{pasta::pallas, traits::DlogGroup};
   use digest::{ExtendableOutput, Update};
   use halo2curves::{CurveExt, group::Curve};
   use sha3::Shake256;
-
-  use crate::provider::{pasta::pallas, traits::DlogGroup};
+  use std::io::Read;
 
   macro_rules! impl_cycle_pair_test {
     ($curve:ident) => {

@@ -4,7 +4,7 @@
 //! DelayedReduction trait for accumulating unreduced field products.
 //!
 //! Modular reduction (Montgomery REDC) is expensive. When summing many
-//! products `sum (field_i * field_j)`, the standard approach does N reductions.
+//! products `Σ (field_i × field_j)`, the standard approach does N reductions.
 //! Delayed reduction accumulates unreduced products in wide integers, reducing
 //! only once at the end.
 //!
@@ -22,7 +22,7 @@ pub trait DelayedReduction<Value>: Sized {
   /// Wide accumulator type for unreduced products.
   type Accumulator: Copy + Clone + Default + AddAssign + Send + Sync;
 
-  /// Accumulate: `acc += field * value` without modular reduction.
+  /// Accumulate: `acc += field × value` without modular reduction.
   fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &Value);
 
   /// Reduce the accumulator to a field element.
@@ -38,16 +38,16 @@ use crate::big_num::{
   montgomery::{MontgomeryLimbs, montgomery_reduce_9},
 };
 
-/// DelayedReduction<F> for field * field products using wide integers.
+/// DelayedReduction<F> for field × field products using wide integers.
 ///
 /// Uses WideLimbs<9> (576 bits) as accumulator, supporting up to 2^64 products.
 ///
 /// # Capacity Invariant
 ///
 /// The 9th limb (index 8) accumulates carries from the lower 8 limbs. Each
-/// field*field product contributes at most 1 to the carry chain into limb 8.
+/// field×field product contributes at most 1 to the carry chain into limb 8.
 /// With a u64 limb, we can accumulate up to 2^64 products before overflow.
-/// In practice, sumcheck rounds are bounded by polynomial size (<= 2^40),
+/// In practice, sumcheck rounds are bounded by polynomial size (≤ 2^40),
 /// so this limit is never approached.
 impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
   type Accumulator = WideLimbs<9>;

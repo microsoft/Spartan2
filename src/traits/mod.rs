@@ -6,7 +6,6 @@
 
 //! This module defines various traits required by the users of the library to implement.
 use core::fmt::Debug;
-
 use ff::{PrimeField, PrimeFieldBits};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};

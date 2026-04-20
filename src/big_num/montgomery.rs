@@ -21,14 +21,14 @@ pub trait MontgomeryLimbs: FieldReductionConstants {
 
 /// Montgomery REDC for 9-limb input (optimized single-fold algorithm).
 ///
-/// Reduces a 2R-scaled value (sum of field*field products) to 1R-scaled.
-/// Input: T representing x*R^2 (up to 9 limbs)
+/// Reduces a 2R-scaled value (sum of field×field products) to 1R-scaled.
+/// Input: T representing x*R² (up to 9 limbs)
 /// Output: x*R mod p (4 limbs, canonical Montgomery form in [0, p))
 ///
 /// # Algorithm
 ///
 /// 1. **Fold**: Compute `low8 += h * R512_MOD` where h = c[8].
-///    Track the carry c in {0,1} from this fold.
+///    Track the carry c ∈ {0,1} from this fold.
 ///
 /// 2. **REDC**: Call `montgomery_reduce_8` which returns canonical [0, p).
 ///
@@ -37,17 +37,17 @@ pub trait MontgomeryLimbs: FieldReductionConstants {
 pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [u64; 4] {
   // STEP 1: Fold 9 limbs to 8 limbs + carry bit
   //
-  // Input: C = c[0..8] + c[8]*2^512  (9 limbs representing a value up to ~2^576)
+  // Input: C = c[0..8] + c[8]·2^512  (9 limbs representing a value up to ~2^576)
   // Goal:  Compute C mod p, but first reduce to 8 limbs for montgomery_reduce_8.
   //
-  // Key insight: 2^512 = R512_MOD (mod p), where R512_MOD = 2^512 mod p < p < 2^256.
-  // So: C = c[0..8] + c[8]*R512_MOD (mod p)
+  // Key insight: 2^512 ≡ R512_MOD (mod p), where R512_MOD = 2^512 mod p < p < 2^256.
+  // So: C ≡ c[0..8] + c[8]·R512_MOD (mod p)
   //
-  // Since R512_MOD has only 4 limbs, h*R512_MOD has at most 5 limbs.
+  // Since R512_MOD has only 4 limbs, h·R512_MOD has at most 5 limbs.
   // We add this 5-limb value to c[0..8]:
   //   - First 4 limbs: low8[0..4] += h * R512_MOD[0..4] (with carry chain)
   //   - 5th limb (carry from above): propagate through low8[4..8]
-  //   - Final carry: fold_carry in {0,1} (bounded because h < 2^64, R512_MOD < 2^256)
+  //   - Final carry: fold_carry ∈ {0,1} (bounded because h < 2^64, R512_MOD < 2^256)
 
   let mut low8 = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]];
   let h = c[8];
@@ -74,19 +74,19 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
 
   // Proof of bound: h < 2^64, R512_MOD < p < R = 2^256
   // So h * R512_MOD < 2^64 * 2^256 = 2^320
-  // And low8 + h * R512_MOD < 2^512 + 2^320 < 2 * 2^512 = 2R^2
-  // Therefore fold_carry = floor(result / R^2) in {0, 1}
+  // And low8 + h * R512_MOD < 2^512 + 2^320 < 2 * 2^512 = 2R²
+  // Therefore fold_carry = ⌊result / R²⌋ ∈ {0, 1}
   debug_assert!(
     fold_carry <= 1,
     "fold carry must be 0 or 1, got {}",
     fold_carry
   );
 
-  // STEP 2: Montgomery REDC on 8 limbs -> canonical result in [0, p)
+  // STEP 2: Montgomery REDC on 8 limbs → canonical result in [0, p)
   let mut out = montgomery_reduce_8::<F>(&low8);
 
   // STEP 3: Carry correction
-  // If fold_carry == 1, we have an extra R^2 term that REDC turns into R.
+  // If fold_carry == 1, we have an extra R² term that REDC turns into R.
   // In Montgomery form, R mod p = R_MOD. So: out += R_MOD, then canonicalize.
   if fold_carry == 1 {
     let (sum, carry) = add::<4>(&out, &F::R_MOD);
@@ -104,15 +104,15 @@ pub(crate) fn montgomery_reduce_9<F: FieldReductionConstants>(c: &[u64; 9]) -> [
 
 /// Montgomery REDC for 8-limb input.
 ///
-/// Input: T[8] limbs representing an integer in [0, R^2)
+/// Input: T[8] limbs representing an integer in [0, R²)
 /// Output: canonical 4-limb result in [0, p)
 ///
 /// # Algorithm
 ///
 /// 1. 4 Montgomery elimination rounds with fused multiply+add
 /// 2. Extract 5-limb result x5 = [r[4]..r[8]] in [0, R+p)
-/// 3. If x5[4] == 1: subtract p once -> value now in [0, R)
-/// 4. Canonicalize from [0, R) -> [0, p) via Q = floor(R/p) conditional subtracts
+/// 3. If x5[4] == 1: subtract p once → value now in [0, R)
+/// 4. Canonicalize from [0, R) → [0, p) via Q = ⌊R/p⌋ conditional subtracts
 ///
 /// **Key insight**: Standard REDC produces a value in [0, R), NOT [0, p).
 /// Since R > p for 256-bit primes, we need Q subtractions to canonicalize.
@@ -122,7 +122,7 @@ fn montgomery_reduce_8<F: FieldReductionConstants>(t: &[u64; 8]) -> [u64; 4] {
 
   // Montgomery reduction: eliminate low 4 limbs (exactly 4 iterations)
   for i in 0..4 {
-    // Compute multiplier q that zeros out r[i]: q = r[i] * (-p^-1) mod 2^64
+    // Compute multiplier q that zeros out r[i]: q ≡ r[i] * (-p⁻¹) mod 2^64
     let q = r[i].wrapping_mul(F::MONT_INV);
 
     // Fused: r[i..i+5] += q * MODULUS[0..4] with carry chain

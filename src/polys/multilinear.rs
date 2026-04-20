@@ -8,13 +8,11 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
+use crate::{math::Math, polys::eq::EqPolynomial};
 use core::ops::Index;
-
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-
-use crate::{math::Math, polys::eq::EqPolynomial};
 
 /// A multilinear extension of a polynomial $Z(\cdot)$, denote it as $\tilde{Z}(x_1, ..., x_m)$
 /// where the degree of each variable is at most one.

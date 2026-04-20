@@ -98,6 +98,7 @@ where
       !self.named_objects.contains_key(&path),
       "tried to create object at existing path: {path}"
     );
+
     self.named_objects.insert(path, to);
   }
 }
@@ -243,7 +244,9 @@ fn compute_path(ns: &[String], this: &str) -> String {
   if !name.is_empty() {
     name.push('/');
   }
+
   name.push_str(this);
+
   name
 }
 

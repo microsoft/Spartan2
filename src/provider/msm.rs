@@ -7,6 +7,7 @@
 //! This module provides a multi-scalar multiplication routine
 //! The generic implementation is adapted from halo2; we add an optimization to commit to bits more efficiently
 //! The specialized implementations are adapted from jolt, with additional optimizations and parallelization.
+use crate::{errors::SpartanError, start_span};
 use ff::{Field, PrimeField};
 use halo2curves::CurveExt;
 use halo2curves::{CurveAffine, group::Group};
@@ -14,8 +15,6 @@ use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
 use rayon::{current_num_threads, prelude::*};
 use tracing::info;
-
-use crate::{errors::SpartanError, start_span};
 
 #[derive(Clone, Copy)]
 enum Bucket<C: CurveAffine> {

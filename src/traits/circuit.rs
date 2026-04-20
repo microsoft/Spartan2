@@ -5,9 +5,8 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! This module defines traits that a circuit provider must implement to be used with Spartan.
-use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
-
 use crate::traits::Engine;
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 
 /// A helper trait for defining a randomized circuit that Spartan proves.
 /// The circuit contains a set of variables that are shared with other circuits.

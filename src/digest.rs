@@ -12,13 +12,11 @@
 //! marker trait for serializable types, and the `DigestComputer` utility for
 //! computing SHA-256 digests.
 
-use std::io;
-
+use crate::traits::snark::SpartanDigest;
 use bincode::Options;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-use crate::traits::snark::SpartanDigest;
+use std::io;
 
 /// Trait for components with potentially discrete digests to be included in their container's digest.
 pub trait Digestible {
@@ -77,10 +75,9 @@ impl<'a, T: Digestible> DigestComputer<'a, T> {
 
 #[cfg(test)]
 mod tests {
+  use super::{DigestComputer, SimpleDigestible};
   use once_cell::sync::OnceCell;
   use serde::{Deserialize, Serialize};
-
-  use super::{DigestComputer, SimpleDigestible};
 
   #[derive(Serialize, Deserialize)]
   struct S {

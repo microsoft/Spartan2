@@ -598,10 +598,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
 #[cfg(test)]
 mod tests {
+  use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
-
-  use super::*;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}

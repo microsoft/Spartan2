@@ -7,7 +7,7 @@
 //!
 //! ## The Problem
 //!
-//! When summing many field*field products `sum (a_i * b_i)`, the standard approach
+//! When summing many field×field products `Σ (a_i × b_i)`, the standard approach
 //! reduces each product immediately. Montgomery REDC is expensive (~100+ cycles),
 //! so N products = N REDCs. Delayed reduction accumulates unreduced 512-bit products
 //! in a 576-bit accumulator, reducing only once at the end: N products = 1 REDC.
@@ -57,7 +57,7 @@
 //!                                      Direct limb access for carry chains
 //! ```
 //!
-//! Used as `WideLimbs<9>` (576 bits) to accumulate up to 2^64 field*field products
+//! Used as `WideLimbs<9>` (576 bits) to accumulate up to 2^64 field×field products
 //! before a single Montgomery reduction back to a 4-limb field element.
 
 use std::ops::AddAssign;
@@ -383,7 +383,7 @@ pub(super) const fn sub_5_4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 5] {
 /// Reduce an 8-limb value modulo a 4-limb prime using old-school binary long division.
 ///
 /// Aligns p with x's MSB, then iteratively trial-subtracts at each bit position.
-/// Slow (O(n^2) in bits) but works in `const fn` context where Montgomery reduction
+/// Slow (O(n²) in bits) but works in `const fn` context where Montgomery reduction
 /// isn't available. Result fits in 4 limbs because `x mod p < p`.
 #[inline(always)]
 pub(crate) const fn reduce_8_mod_4(x: &[u64; 8], p: &[u64; 4]) -> [u64; 4] {

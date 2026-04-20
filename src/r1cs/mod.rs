@@ -234,10 +234,9 @@ impl<E: Engine> RelaxedR1CSWitness<E> {
 
 #[cfg(test)]
 mod tests_relaxed_sample {
-  use ff::Field;
-
   use super::*;
   use crate::{provider::P256HyraxEngine, traits::Engine};
+  use ff::Field;
 
   fn tiny_r1cs<E: Engine>(num_vars: usize) -> R1CSShape<E> {
     let one = <E::Scalar as Field>::ONE;

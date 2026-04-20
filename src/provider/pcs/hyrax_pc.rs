@@ -10,8 +10,7 @@ use crate::{
   math::Math,
   polys::eq::EqPolynomial,
   provider::{
-    pcs::ipa::InnerProductInstance,
-    pcs::ipa::InnerProductWitness,
+    pcs::ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -30,8 +29,6 @@ use tracing::info;
 
 use crate::big_num::delayed_reduction::DelayedReduction;
 use crate::big_num::montgomery::MontgomeryLimbs;
-
-use crate::provider::pcs::ipa::InnerProductArgumentLinear;
 
 /// Bind polynomial top variables using delayed reduction for Montgomery multiply.
 /// Avoids per-product REDC, reducing multiply cost by ~50%.

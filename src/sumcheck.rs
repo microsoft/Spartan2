@@ -98,6 +98,7 @@ impl<E: Engine> SumcheckProof<E> {
 
       //derive the verifier's challenge for the next round
       let r_i = transcript.squeeze(b"c")?;
+
       r.push(r_i);
 
       // evaluate the claimed degree-ell polynomial at r_i
@@ -114,7 +115,7 @@ impl<E: Engine> SumcheckProof<E> {
 
   /// Computes evaluation points for a quadratic polynomial using delayed modular reduction.
   ///
-  /// Accumulates a*b products in wide limbs (no intermediate reductions),
+  /// Accumulates a·b products in wide limbs (no intermediate reductions),
   /// reducing only once at the end. This saves N-1 Montgomery reductions per round.
   ///
   /// # Arguments
@@ -753,7 +754,7 @@ impl<E: Engine> SumcheckProof<E> {
       let r_j = chals[0];
       r_y.push(r_j);
 
-      // bind polynomials to the verifier's challenge
+      // -------- bind polys --------
       rayon::join(
         || {
           rayon::join(

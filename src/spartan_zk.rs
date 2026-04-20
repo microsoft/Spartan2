@@ -905,10 +905,9 @@ where
 
 #[cfg(test)]
 mod tests {
+  use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
   use tracing_subscriber::EnvFilter;
-
-  use super::*;
 
   #[cfg(feature = "jem")]
   use tikv_jemallocator::Jemalloc;
