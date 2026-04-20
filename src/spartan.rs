@@ -145,7 +145,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
     E::PCS::precompute_ck(&ck);
@@ -222,7 +221,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     mut prep_snark: Self::PrepSNARK,
     is_small: bool,
   ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
-
     let mut transcript = E::TE::new(b"SpartanSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
 

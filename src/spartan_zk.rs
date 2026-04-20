@@ -185,7 +185,6 @@ where
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
     E::PCS::precompute_ck(&ck);
@@ -278,7 +277,6 @@ where
     mut prep_snark: Self::PrepSNARK,
     is_small: bool,
   ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
-
     // rerandomize the prep state in-place (we own it)
     prep_snark.ps.rerandomize_in_place(&pk.ck, &pk.S)?;
     let mut transcript = E::TE::new(b"SpartanZkSNARK");
@@ -340,9 +338,7 @@ where
       for i in 0..pk.S.num_rest_unpadded {
         delta[i] = prep_snark.ps.W[rest_dst_start + i] - cached_witness[i];
       }
-      let result =
-        PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest, None)?;
-      result
+      PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest, None)?
     } else {
       // First prove: commit normally and cache for next time
       let rest_witness_unpadded =
@@ -356,14 +352,13 @@ where
       prep_snark.cached_rest_msm = Some(raw_msms.clone());
 
       // Commit normally (raw + blinding)
-      let result = PCS::<E>::commit_from_raw_delta_blinding(
+      PCS::<E>::commit_from_raw_delta_blinding(
         &pk.ck,
         &raw_msms,
         &vec![E::Scalar::ZERO; pk.S.num_rest],
         &r_W_rest,
         None,
-      )?;
-      result
+      )?
     };
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
 

@@ -1189,7 +1189,6 @@ where
     core_circuit: &C2,
     num_steps: usize,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-
     debug!("Synthesizing step circuit");
     let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
@@ -1260,7 +1259,6 @@ where
     core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
-
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
@@ -1376,7 +1374,6 @@ where
     mut prep_snark: NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError> {
-
     // rerandomize prep state in-place (we own it, no clone needed)
     prep_snark
       .ps_core
