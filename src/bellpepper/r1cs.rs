@@ -145,6 +145,7 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     // determine the number of shared variables
     let num_shared = cs.num_aux();
+    debug!("num_shared: {}", num_shared);
     debug!("shared.len(): {}", shared.len());
     if shared.len() > num_shared {
       return Err(SpartanError::SynthesisError {
@@ -161,6 +162,7 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
         })?;
 
     let num_precommitted = cs.num_aux() - num_shared;
+    debug!("num_precommitted: {}", num_precommitted);
     debug!("precommitted.len(): {}", precommitted.len());
     if precommitted.len() > num_precommitted {
       return Err(SpartanError::SynthesisError {
@@ -196,6 +198,7 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     }
     assert_eq!(num_cons_added, num_constraints);
     assert!(num_inputs > num_challenges);
+
     A.cols = num_vars + num_inputs;
     B.cols = num_vars + num_inputs;
     C.cols = num_vars + num_inputs;
