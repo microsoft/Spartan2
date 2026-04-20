@@ -30,6 +30,7 @@ use crate::{
     R1CSShape, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
     SplitR1CSInstance, SplitR1CSShape,
   },
+  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -277,8 +278,11 @@ where
     mut prep_snark: Self::PrepSNARK,
     is_small: bool,
   ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
+    let (_prove_span, prove_t) = start_span!("spartan_zk_prove");
     // rerandomize the prep state in-place (we own it)
+    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
     prep_snark.ps.rerandomize_in_place(&pk.ck, &pk.S)?;
+    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
     let mut transcript = E::TE::new(b"SpartanZkSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
     // absorb public IO before
@@ -406,10 +410,13 @@ where
     );
 
     // Sample tau challenges used for the outer equality polynomial
+    let (_taus_span, taus_t) = start_span!("sample_taus");
     let taus = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
       .collect::<Result<Vec<_>, SpartanError>>()?;
+    info!(elapsed_ms = %taus_t.elapsed().as_millis(), "sample_taus");
     // Use pre-allocated scratch buffers (avoids 96MB mmap + page faults after first prove)
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     let mut scratch_az = std::mem::take(&mut prep_snark.scratch_az);
     let mut scratch_bz = std::mem::take(&mut prep_snark.scratch_bz);
     let mut scratch_cz = std::mem::take(&mut prep_snark.scratch_cz);
@@ -422,9 +429,16 @@ where
       &mut scratch_bz,
       &mut scratch_cz,
     )?;
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      "matrix_vector_multiply"
+    );
+
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let mut poly_Az = MultilinearPolynomial::new(scratch_az);
     let mut poly_Bz = MultilinearPolynomial::new(scratch_bz);
     let mut poly_Cz = MultilinearPolynomial::new(scratch_cz);
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
     // Initialize multi-round verifier circuit (will be filled as we go)
     let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(
       num_rounds_x,
@@ -434,6 +448,7 @@ where
     let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_zk(
       num_rounds_x,
       &taus,
@@ -446,6 +461,7 @@ where
       &pk.vc_ck,
       &mut transcript,
     )?;
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
     // Outer final round data
     verifier_circuit.claim_Az = poly_Az[0];
     verifier_circuit.claim_Bz = poly_Bz[0];
@@ -473,10 +489,13 @@ where
     //   poly_ABC[0..num_vars]: witness column contributions (the "low" half)
     //   poly_ABC[num_vars..num_vars+num_extra]: 1/public/challenge column contributions
     //   positions num_vars+num_extra..2*num_vars: implicitly zero
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
     let mut evals_rx_buffer = std::mem::take(&mut prep_snark.evals_rx_buffer);
     EqPolynomial::evals_from_points_into(&r_x, &mut evals_rx_buffer);
     let mut poly_ABC_vec = pk.S.bind_and_prepare_poly_ABC(&evals_rx_buffer, &r);
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
     // Inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
     let claim_inner_joint =
       verifier_circuit.claim_Az + r * verifier_circuit.claim_Bz + r * r * verifier_circuit.claim_Cz;
 
@@ -586,6 +605,7 @@ where
     r_y.extend_from_slice(&r_y_rest);
 
     let eval_Z = evals[1]; // evaluation of Z at r_y
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
     // Recover scratch buffers from sumcheck (allocation preserved, contents destroyed)
     let z_buffer = poly_z.into_vec();
     drop(poly_ABC);
@@ -628,6 +648,7 @@ where
     )?;
 
     // Finalize multi-round witness and construct NIFS proof
+    let (_nifs_span, nifs_t) = start_span!("finalize_and_nifs");
     let (U_verifier, W_verifier) =
       SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &pk.vc_shape)?;
     // Use the instance as produced by witness finalization; its public values
@@ -655,7 +676,10 @@ where
       &folded_W,
       &mut transcript,
     )?;
+    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "finalize_and_nifs");
+
     // prove the claimed polynomial evaluation at point r_y[1..]
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let eval_arg = E::PCS::prove(
       &pk.ck,
       &pk.vc_ck,
@@ -667,6 +691,9 @@ where
       &U_verifier.comm_w_per_round[eval_w_commit_round],
       &state.r_w_per_round[eval_w_commit_round],
     )?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
+
+    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_zk_prove");
     // Return proof and updated prep state (deterministic caches only)
     let updated_prep = SpartanPrepZkSNARK {
       ps: prep_snark.ps,
@@ -697,6 +724,7 @@ where
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     // Verify by checking the multi-round verifier instance via NIFS folding
+    let (_verify_span, verify_t) = start_span!("spartan_zk_verify");
     let mut transcript = E::TE::new(b"SpartanZkSNARK");
     transcript.absorb(b"vk", &vk.digest()?);
     transcript.absorb(b"public_values", &self.U.public_values.as_slice());
@@ -705,10 +733,12 @@ where
     self.U.validate(&vk.S, &mut transcript)?;
 
     // Recreate tau polynomial coefficients via Fiat-Shamir and advance transcript
+    let (_tau_span, tau_t) = start_span!("compute_tau_verify");
     let num_rounds_x = vk.S.num_cons.log_2();
     let tau = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
     // validate the provided multi-round verifier instance and advance transcript
     self.U_verifier.validate(&vk.vc_shape, &mut transcript)?;
 
@@ -739,10 +769,12 @@ where
     let r_y = challenges[num_rounds_x + 1..].to_vec();
 
     // compute eval_A, eval_B, eval_C at (r_x, r_y)
+    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let T_x = EqPolynomial::evals_from_points(&r_x);
     let T_y = EqPolynomial::evals_from_points(&r_y);
     let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables_fast(&T_x, &T_y);
     let quotient = eval_A + r * eval_B + r * r * eval_C;
+    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
     // Recompute eval_X from original circuit public IO at r_y[1..]
     let U_regular = self.U.to_regular_instance()?;
 
@@ -768,6 +800,7 @@ where
     }
 
     // Finally, run NIFS verification using the same transcript
+    let (_nifs_verify_span, nifs_verify_t) = start_span!("nifs_verify");
     let folded_U = self
       .nifs
       .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
@@ -779,8 +812,11 @@ where
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Relaxed Spartan verify failed: {e}"),
       })?;
+    info!(elapsed_ms = %nifs_verify_t.elapsed().as_millis(), "nifs_verify");
+
     // Continue with PCS verification on the same transcript
     // Use the commitment from the dedicated eval_W commit-only last round
+    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
     E::PCS::verify(
       &vk.vk_ee,
@@ -791,6 +827,9 @@ where
       &self.U_verifier.comm_w_per_round[eval_w_commit_round],
       &self.eval_arg,
     )?;
+    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
+
+    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "spartan_zk_verify");
     // Return original circuit public IO carried in the proof
     Ok(self.U.public_values.clone())
   }

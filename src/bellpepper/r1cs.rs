@@ -5,6 +5,7 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! Support for generating R1CS using bellpepper.
+use crate::start_span;
 use crate::{
   Blind, Commitment, CommitmentKey, PCS, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
@@ -24,7 +25,7 @@ use bellpepper::gadgets::num::AllocatedNum;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
 use ff::{Field, PrimeField};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// `SpartanShape` provides methods for acquiring `SplitR1CSShape` from implementers.
 pub trait SpartanShape<E: Engine> {
@@ -308,6 +309,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     circuit: &C,
     is_small: bool,
   ) -> Result<Self::PrecommittedState, SpartanError> {
+    let (_synth_span, synth_t) = start_span!("shared_witness_synthesize");
     let mut cs: Self = Self::new();
 
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
@@ -331,6 +333,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
     // partial commitment to shared witness variables
+    let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
       let comm_W_shared = PCS::<E>::commit(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
@@ -338,6 +341,9 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     } else {
       (None, None)
     };
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "shared_witness_synthesize");
+
     Ok(PrecommittedState {
       cs,
       shared,
@@ -357,6 +363,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     circuit: &C,
     is_small: bool,
   ) -> Result<(), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("precommitted_witness_synthesize");
     // produce precommitted witness variables
     let precommitted =
       circuit
@@ -376,6 +383,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     );
 
     // partial commitment to precommitted witness variables
+    let (_commit_precommitted_span, commit_precommitted_t) =
+      start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
       let comm_W_precommitted = PCS::<E>::commit(
@@ -388,10 +397,14 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     } else {
       (None, None)
     };
+    info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
+
     // update the preprocessed state
     ps.comm_W_precommitted = comm_W_precommitted;
     ps.r_W_precommitted = r_W_precommitted;
     ps.precommitted = precommitted;
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
+
     Ok(())
   }
 
@@ -403,6 +416,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     is_small: bool,
     transcript: &mut E::TE,
   ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest");
+
     // partial commitment to precommitted witness variables
     if let Some(comm_W_shared) = &ps.comm_W_shared {
       transcript.absorb(b"comm_W_shared", comm_W_shared);
@@ -448,6 +463,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     }
 
     // commit to the rest with partial commitment.
+    let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
     let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
       // Fast path: rest is entirely zero-padding, skip MSM and auto-detect
@@ -471,6 +487,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         detected_small,
       )
     };
+    info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
     let public_values = if skip_synthesize {
@@ -513,6 +530,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     );
 
     let W = R1CSWitness::<E>::new_unchecked(w_vec, r_W, actual_is_small)?;
+
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
   }
