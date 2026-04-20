@@ -5,8 +5,6 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! This module defines R1CS related types
-#[allow(unused_imports)]
-use crate::polys::eq::EqPolynomial;
 use crate::{
   Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey,
   big_num::DelayedReduction,
@@ -508,8 +506,17 @@ impl<E: Engine> R1CSShape<E> {
       .collect::<Vec<E::Scalar>>();
 
     // compute commitments to W,E
-    let comm_W_res = PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false);
-    let comm_E_res = PCS::<E>::commit(ck, &E_vec, &r_E, false);
+    let (comm_W_res, comm_E_res) = if rayon::current_num_threads() > 1 {
+      rayon::join(
+        || PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false),
+        || PCS::<E>::commit(ck, &E_vec, &r_E, false),
+      )
+    } else {
+      (
+        PCS::<E>::commit(ck, &Z[..self.num_vars], &r_W, false),
+        PCS::<E>::commit(ck, &E_vec, &r_E, false),
+      )
+    };
     info!(
       elapsed_ms = %sample_t.elapsed().as_millis(),
       num_vars = %self.num_vars,

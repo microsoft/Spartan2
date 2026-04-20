@@ -86,8 +86,6 @@ fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &
   w
 }
 
-// mul_opt removed -- direct r_b * (*h - *l) is simpler and equally fast
-
 impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,

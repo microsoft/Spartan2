@@ -662,7 +662,12 @@ where
 
       (comm_LZ, R, LZ, r_LZ)
     } else {
-      let (L, R) = {
+      let (L, R) = if rayon::current_num_threads() > 1 {
+        rayon::join(
+          || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
+          || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
+        )
+      } else {
         let l = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
         let r = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
         (l, r)
