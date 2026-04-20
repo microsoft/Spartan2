@@ -46,6 +46,8 @@ mod sumcheck;
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_zk; // Spartan with zero-knowledge
+/// Public Utils
+pub mod utils;
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

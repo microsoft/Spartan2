@@ -33,7 +33,7 @@ Both Spartan and NeutronNova's SNARKs are made zero-knowledge (i.e., they are bo
 - [ ] Hash-based schemes
   - [ ] Basefold
   - [ ] WHIR
-  - [ ] Brakedown
+  - [x] Brakedown
   - [ ] Binius
   - [ ] Ligero
 - [ ] Lattice-based schemes

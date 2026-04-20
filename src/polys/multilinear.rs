@@ -8,7 +8,7 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{math::Math, polys::eq::EqPolynomial};
+use crate::{math::Math, polys::eq::EqPolynomial, zip_with_for_each};
 use core::ops::Index;
 use ff::PrimeField;
 use rayon::prelude::*;
@@ -42,6 +42,21 @@ impl<Scalar: PrimeField> MultilinearPolynomial<Scalar> {
   /// The number of evaluations must be a power of two.
   pub fn new(Z: Vec<Scalar>) -> Self {
     MultilinearPolynomial { Z }
+  }
+
+  /// Number of variables in the polynomial.
+  pub fn num_vars(&self) -> usize {
+    if self.Z.is_empty() {
+      0
+    } else {
+      let num_vars = self.Z.len().ilog2() as usize;
+      assert_eq!(self.Z.len(), 1 << num_vars);
+      num_vars
+    }
+  }
+
+  pub fn evals(&self) -> &[Scalar] {
+    self.Z.as_slice()
   }
 
   /// Binds the polynomial's top variable using the given scalar.
