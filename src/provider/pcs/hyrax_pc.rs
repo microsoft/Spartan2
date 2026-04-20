@@ -530,7 +530,7 @@ where
     result
   }
 
-  fn commit_raw(
+  fn commit_without_blind(
     ck: &Self::CommitmentKey,
     v: &[E::Scalar],
     is_small: bool,

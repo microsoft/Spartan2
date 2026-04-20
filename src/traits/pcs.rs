@@ -140,13 +140,13 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
 
   /// Compute raw (unblinded) commitment. Returns per-row group elements.
   /// Default: not supported (panics). Override for schemes that support this.
-  fn commit_raw(
+  fn commit_without_blind(
     _ck: &Self::CommitmentKey,
     _v: &[E::Scalar],
     _is_small: bool,
   ) -> Result<Vec<E::GE>, SpartanError> {
     Err(SpartanError::InternalError {
-      reason: "commit_raw not supported for this PCS".to_string(),
+      reason: "commit_without_blind not supported for this PCS".to_string(),
     })
   }
 

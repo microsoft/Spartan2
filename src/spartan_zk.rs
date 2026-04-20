@@ -351,7 +351,7 @@ where
       W_rest_padded[..pk.S.num_rest_unpadded].copy_from_slice(&rest_witness_unpadded);
 
       // Cache the raw MSMs (deterministic, no randomness)
-      let raw_msms = E::PCS::commit_raw(&pk.ck, &W_rest_padded, is_small)?;
+      let raw_msms = E::PCS::commit_without_blind(&pk.ck, &W_rest_padded, is_small)?;
       prep_snark.cached_rest_witness = Some(rest_witness_unpadded);
       prep_snark.cached_rest_msm = Some(raw_msms.clone());
 
