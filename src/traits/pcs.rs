@@ -152,7 +152,7 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
 
   /// Build commitment from precomputed raw MSMs plus a delta vector.
   /// For each row: final = raw[i] + MSM(delta[row_i], gens) + blind[i] * H
-  /// Default: not supported (panics). Override for schemes that support this.
+  /// Default: not supported. Override for schemes that support this.
   fn commit_from_raw_and_delta(
     _ck: &Self::CommitmentKey,
     _raw: &[E::GE],
@@ -162,17 +162,6 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     Err(SpartanError::InternalError {
       reason: "commit_from_raw_and_delta not supported for this PCS".to_string(),
     })
-  }
-
-  /// Build commitment from precomputed raw MSMs plus a delta vector and blinding.
-  fn commit_from_raw_delta_blinding(
-    ck: &Self::CommitmentKey,
-    raw: &[E::GE],
-    delta: &[E::Scalar],
-    blind: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError> {
-    // Default: fall back to regular commit
-    Self::commit_from_raw_and_delta(ck, raw, delta, blind)
   }
 
   /// Direct polynomial opening (prover side).

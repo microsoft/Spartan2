@@ -572,15 +572,6 @@ where
     delta: &[E::Scalar],
     blind: &Self::Blind,
   ) -> Result<Self::Commitment, SpartanError> {
-    Self::commit_from_raw_delta_blinding(ck, raw, delta, blind)
-  }
-
-  fn commit_from_raw_delta_blinding(
-    ck: &Self::CommitmentKey,
-    raw: &[E::GE],
-    delta: &[E::Scalar],
-    blind: &Self::Blind,
-  ) -> Result<Self::Commitment, SpartanError> {
     use ff::Field;
     let num_cols = ck.ck.len();
     let n = delta.len();

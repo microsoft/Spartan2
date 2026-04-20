@@ -15,7 +15,9 @@ use super::{
 ///
 /// Field elements are stored as `value * R mod p` where R = 2^256.
 pub trait MontgomeryLimbs: FieldReductionConstants {
+  /// Construct a field element from its raw Montgomery-form limbs.
   fn from_limbs(limbs: [u64; 4]) -> Self;
+  /// Access the raw Montgomery-form limbs of this field element.
   fn to_limbs(&self) -> &[u64; 4];
 }
 
