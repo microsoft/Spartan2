@@ -3,7 +3,7 @@
 
 //! Small-value optimization for sumcheck inner products.
 //!
-//! When polynomial values are small integers (e.g., 0/1 from SHA-256 circuits),
+//! When polynomial values are small integers (e.g., 0/1 from boolean circuits),
 //! we can compute inner products using integer arithmetic instead of field
 //! multiplication, then multiply by the equality polynomial coefficient.
 //!
@@ -27,7 +27,7 @@ use ff::PrimeField;
 ///   - Cross-product diff sums:  2*(2V)^2 = 8V^2 ~ 2^127      fits i128
 ///     Exact: 8*(2^62-1)^2 = 2^127-2^66+8 < 2^127-1 = i128::MAX
 ///
-/// Practical impact: zero. SHA-256 witness values are <= 2^40.
+/// Practical impact: zero. Typical boolean-circuit witness values are well within this bound.
 const SMALL_VALUE_MAX: u64 = (1u64 << 62) - 1;
 
 /// Try to convert field elements to i64 values.
