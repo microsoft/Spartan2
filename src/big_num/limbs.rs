@@ -195,129 +195,141 @@ pub const fn mul_4_by_4(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
 
 /// Fused multiply-accumulate: acc[0..9] += a[0..4] * b[0..4]
 ///
+/// On x86_64 with BMI2+ADX, uses an optimized inline-asm path with mulx/adcx/adox.
+/// Falls back to portable Rust on other architectures or when BMI2+ADX are unavailable.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
+  if std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx") {
+    // Safety: we have verified BMI2+ADX are available at runtime.
+    unsafe { mul_acc_4_by_4_asm(acc, a, b) }
+  } else {
+    mul_acc_4_by_4_portable(acc, a, b)
+  }
+}
+
+/// x86_64 BMI2+ADX implementation.
+///
 /// Two-phase approach using x86_64 BMI2 (mulx) and ADX (adcx/adox):
-/// Phase 1: Schoolbook 4*4 multiply into r8..r15 using adcx/adox dual carry chains
+/// Phase 1: Schoolbook 4×4 multiply into r8..r15 using adcx/adox dual carry chains
 ///          for rows 1-3 (OF carries high-word additions, CF carries low-word additions)
 /// Phase 2: Single adc chain to add the 8-limb product into the 9-limb accumulator
 ///
 /// ~25% faster than the Rust reference (9.2ns vs 12.4ns per call on AMD Zen3).
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
+#[target_feature(enable = "bmi2", enable = "adx")]
 #[allow(unsafe_code)]
-pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
-  unsafe {
-    core::arch::asm!(
-      // Phase 1: Schoolbook multiply a*b into r8..r15
+unsafe fn mul_acc_4_by_4_asm(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
+  core::arch::asm!(
+    // Phase 1: Schoolbook multiply a*b into r8..r15
 
-      // Row 0: r8..r12 = a[0] * b[0..4]
-      "mov rdx, [{a_ptr}]",
-      "mulx r9,  r8,  [{b_ptr}]",
-      "mulx r10, rax, [{b_ptr} + 8]",
-      "add  r9, rax",
-      "mulx r11, rax, [{b_ptr} + 16]",
-      "adc  r10, rax",
-      "mulx r12, rax, [{b_ptr} + 24]",
-      "adc  r11, rax",
-      "adc  r12, 0",
-      "xor  r13d, r13d",
+    // Row 0: r8..r12 = a[0] * b[0..4]
+    "mov rdx, [{a_ptr}]",
+    "mulx r9,  r8,  [{b_ptr}]",
+    "mulx r10, rax, [{b_ptr} + 8]",
+    "add  r9, rax",
+    "mulx r11, rax, [{b_ptr} + 16]",
+    "adc  r10, rax",
+    "mulx r12, rax, [{b_ptr} + 24]",
+    "adc  r11, rax",
+    "adc  r12, 0",
+    "xor  r13d, r13d",
 
-      // Row 1: += a[1] * b[0..4] << 64 (adcx=lo/CF, adox=hi/OF)
-      "mov rdx, [{a_ptr} + 8]",
-      "xor  r14d, r14d",
-      "mulx rcx, rax, [{b_ptr}]",
-      "adcx r9,  rax",
-      "adox r10, rcx",
-      "mulx rcx, rax, [{b_ptr} + 8]",
-      "adcx r10, rax",
-      "adox r11, rcx",
-      "mulx rcx, rax, [{b_ptr} + 16]",
-      "adcx r11, rax",
-      "adox r12, rcx",
-      "mulx rcx, rax, [{b_ptr} + 24]",
-      "adcx r12, rax",
-      "adox r13, rcx",
-      "adcx r13, r14",
+    // Row 1: += a[1] * b[0..4] << 64 (adcx=lo/CF, adox=hi/OF)
+    "mov rdx, [{a_ptr} + 8]",
+    "xor  r14d, r14d",
+    "mulx rcx, rax, [{b_ptr}]",
+    "adcx r9,  rax",
+    "adox r10, rcx",
+    "mulx rcx, rax, [{b_ptr} + 8]",
+    "adcx r10, rax",
+    "adox r11, rcx",
+    "mulx rcx, rax, [{b_ptr} + 16]",
+    "adcx r11, rax",
+    "adox r12, rcx",
+    "mulx rcx, rax, [{b_ptr} + 24]",
+    "adcx r12, rax",
+    "adox r13, rcx",
+    "adcx r13, r14",
 
-      // Row 2: += a[2] * b[0..4] << 128
-      "mov rdx, [{a_ptr} + 16]",
-      "xor  r14d, r14d",
-      "mulx rcx, rax, [{b_ptr}]",
-      "adcx r10, rax",
-      "adox r11, rcx",
-      "mulx rcx, rax, [{b_ptr} + 8]",
-      "adcx r11, rax",
-      "adox r12, rcx",
-      "mulx rcx, rax, [{b_ptr} + 16]",
-      "adcx r12, rax",
-      "adox r13, rcx",
-      "mulx rcx, rax, [{b_ptr} + 24]",
-      "adcx r13, rax",
-      "mov  r15d, 0",
-      "adox r14, rcx",
-      "adcx r14, r15",
+    // Row 2: += a[2] * b[0..4] << 128
+    "mov rdx, [{a_ptr} + 16]",
+    "xor  r14d, r14d",
+    "mulx rcx, rax, [{b_ptr}]",
+    "adcx r10, rax",
+    "adox r11, rcx",
+    "mulx rcx, rax, [{b_ptr} + 8]",
+    "adcx r11, rax",
+    "adox r12, rcx",
+    "mulx rcx, rax, [{b_ptr} + 16]",
+    "adcx r12, rax",
+    "adox r13, rcx",
+    "mulx rcx, rax, [{b_ptr} + 24]",
+    "adcx r13, rax",
+    "mov  r15d, 0",
+    "adox r14, rcx",
+    "adcx r14, r15",
 
-      // Row 3: += a[3] * b[0..4] << 192
-      "mov rdx, [{a_ptr} + 24]",
-      "xor  r15d, r15d",
-      "mulx rcx, rax, [{b_ptr}]",
-      "adcx r11, rax",
-      "adox r12, rcx",
-      "mulx rcx, rax, [{b_ptr} + 8]",
-      "adcx r12, rax",
-      "adox r13, rcx",
-      "mulx rcx, rax, [{b_ptr} + 16]",
-      "adcx r13, rax",
-      "adox r14, rcx",
-      "mulx rcx, rax, [{b_ptr} + 24]",
-      "adcx r14, rax",
-      "mov  rax, 0",
-      "adox r15, rcx",
-      "adcx r15, rax",
+    // Row 3: += a[3] * b[0..4] << 192
+    "mov rdx, [{a_ptr} + 24]",
+    "xor  r15d, r15d",
+    "mulx rcx, rax, [{b_ptr}]",
+    "adcx r11, rax",
+    "adox r12, rcx",
+    "mulx rcx, rax, [{b_ptr} + 8]",
+    "adcx r12, rax",
+    "adox r13, rcx",
+    "mulx rcx, rax, [{b_ptr} + 16]",
+    "adcx r13, rax",
+    "adox r14, rcx",
+    "mulx rcx, rax, [{b_ptr} + 24]",
+    "adcx r14, rax",
+    "mov  rax, 0",
+    "adox r15, rcx",
+    "adcx r15, rax",
 
-      // Phase 2: Add product r8..r15 to accumulator in one adc chain
-      "add  r8,  [{acc_ptr}]",
-      "adc  r9,  [{acc_ptr} + 8]",
-      "adc  r10, [{acc_ptr} + 16]",
-      "adc  r11, [{acc_ptr} + 24]",
-      "adc  r12, [{acc_ptr} + 32]",
-      "adc  r13, [{acc_ptr} + 40]",
-      "adc  r14, [{acc_ptr} + 48]",
-      "adc  r15, [{acc_ptr} + 56]",
-      "mov [{acc_ptr}], r8",
-      "mov [{acc_ptr} + 8], r9",
-      "mov [{acc_ptr} + 16], r10",
-      "mov [{acc_ptr} + 24], r11",
-      "mov [{acc_ptr} + 32], r12",
-      "mov [{acc_ptr} + 40], r13",
-      "mov [{acc_ptr} + 48], r14",
-      "mov [{acc_ptr} + 56], r15",
-      "mov rax, 0",
-      "adc rax, [{acc_ptr} + 64]",
-      "mov [{acc_ptr} + 64], rax",
+    // Phase 2: Add product r8..r15 to accumulator in one adc chain
+    "add  r8,  [{acc_ptr}]",
+    "adc  r9,  [{acc_ptr} + 8]",
+    "adc  r10, [{acc_ptr} + 16]",
+    "adc  r11, [{acc_ptr} + 24]",
+    "adc  r12, [{acc_ptr} + 32]",
+    "adc  r13, [{acc_ptr} + 40]",
+    "adc  r14, [{acc_ptr} + 48]",
+    "adc  r15, [{acc_ptr} + 56]",
+    "mov [{acc_ptr}], r8",
+    "mov [{acc_ptr} + 8], r9",
+    "mov [{acc_ptr} + 16], r10",
+    "mov [{acc_ptr} + 24], r11",
+    "mov [{acc_ptr} + 32], r12",
+    "mov [{acc_ptr} + 40], r13",
+    "mov [{acc_ptr} + 48], r14",
+    "mov [{acc_ptr} + 56], r15",
+    "mov rax, 0",
+    "adc rax, [{acc_ptr} + 64]",
+    "mov [{acc_ptr} + 64], rax",
 
-      acc_ptr = in(reg) acc.as_mut_ptr(),
-      a_ptr = in(reg) a.as_ptr(),
-      b_ptr = in(reg) b.as_ptr(),
-      out("rax") _,
-      out("rcx") _,
-      out("rdx") _,
-      out("r8") _,
-      out("r9") _,
-      out("r10") _,
-      out("r11") _,
-      out("r12") _,
-      out("r13") _,
-      out("r14") _,
-      out("r15") _,
-      options(nostack)
-    );
-  }
+    acc_ptr = in(reg) acc.as_mut_ptr(),
+    a_ptr = in(reg) a.as_ptr(),
+    b_ptr = in(reg) b.as_ptr(),
+    out("rax") _,
+    out("rcx") _,
+    out("rdx") _,
+    out("r8") _,
+    out("r9") _,
+    out("r10") _,
+    out("r11") _,
+    out("r12") _,
+    out("r13") _,
+    out("r14") _,
+    out("r15") _,
+    options(nostack)
+  );
 }
 
-/// Fallback for non-x86_64 targets.
-#[cfg(not(target_arch = "x86_64"))]
+/// Portable fallback implementation.
 #[inline(always)]
-pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
+fn mul_acc_4_by_4_portable(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
   let product = mul_4_by_4(a, b);
   let mut carry = 0u128;
   for i in 0..8 {
@@ -331,6 +343,13 @@ pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
     "mul_acc_4_by_4: acc[8] overflow ({new_val} > u64::MAX)"
   );
   acc[8] = new_val as u64;
+}
+
+/// Fused multiply-accumulate for non-x86_64 targets.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub fn mul_acc_4_by_4(acc: &mut [u64; 9], a: &[u64; 4], b: &[u64; 4]) {
+  mul_acc_4_by_4_portable(acc, a, b)
 }
 
 // =============================================================================
