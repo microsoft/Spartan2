@@ -10,7 +10,6 @@ use crate::{
   Blind, Commitment, CommitmentKey, PCS,
   errors::SpartanError,
   r1cs::{R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, RelaxedR1CSWitness},
-  start_span,
   traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
@@ -19,7 +18,6 @@ use crate::{
 };
 use ff::{Field, PrimeField};
 use rayon::prelude::*;
-use tracing::info;
 
 // ------------------------------------------------------------------------------------------------
 // Cross-term commitment helpers on the R1CS shape
@@ -65,11 +63,8 @@ impl<E: Engine> R1CSShape<E> {
     // Effective relaxation parameter.
     let u = U1.u + E::Scalar::ONE;
 
-    let (_mv_span, mv_t) = start_span!("commit_T_multiply_vec");
     let (AZ, BZ, CZ) = self.multiply_vec(&Z)?;
-    info!(elapsed_ms = %mv_t.elapsed().as_millis(), "commit_T_multiply_vec");
 
-    let (_cross_span, cross_t) = start_span!("commit_T_cross_term");
     let T: Vec<E::Scalar> = if rayon::current_num_threads() <= 1 {
       (0..AZ.len())
         .map(|i| AZ[i] * BZ[i] - u * CZ[i] - W1.E[i])
@@ -82,16 +77,13 @@ impl<E: Engine> R1CSShape<E> {
         .map(|(((az, bz), cz), e)| *az * *bz - u * *cz - *e)
         .collect()
     };
-    info!(elapsed_ms = %cross_t.elapsed().as_millis(), size = %T.len(), "commit_T_cross_term");
 
-    let (_comm_span, comm_t) = start_span!("commit_T_commit");
     // Auto-detect if T has small values for faster MSM
     let t_is_small = T.iter().all(|s| {
       let bytes = s.to_repr();
       bytes.as_ref()[8..].iter().all(|&b| b == 0)
     });
     let comm_T = PCS::<E>::commit(ck, &T, r_T, t_is_small)?;
-    info!(elapsed_ms = %comm_t.elapsed().as_millis(), "commit_T_commit");
     Ok((T, comm_T))
   }
 }

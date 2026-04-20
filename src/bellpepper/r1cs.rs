@@ -13,7 +13,6 @@ use crate::{
     R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
     SplitR1CSInstance, SplitR1CSShape,
   },
-  start_span,
   traits::{
     Engine,
     circuit::{MultiRoundCircuit, SpartanCircuit},
@@ -25,7 +24,7 @@ use bellpepper::gadgets::num::AllocatedNum;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
 use ff::{Field, PrimeField};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// `SpartanShape` provides methods for acquiring `SplitR1CSShape` from implementers.
 pub trait SpartanShape<E: Engine> {
@@ -138,7 +137,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     let mut cs: Self = Self::new();
 
     // allocate shared variables
-    let (_shared_span, shared_t) = start_span!("shape_shared");
     let shared = circuit
       .shared(&mut cs)
       .map_err(|e| SpartanError::SynthesisError {
@@ -147,7 +145,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
 
     // determine the number of shared variables
     let num_shared = cs.num_aux();
-    info!(elapsed_ms = %shared_t.elapsed().as_millis(), num_shared, "shape_shared");
     debug!("shared.len(): {}", shared.len());
     if shared.len() > num_shared {
       return Err(SpartanError::SynthesisError {
@@ -156,7 +153,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     }
 
     // allocate precommitted variables
-    let (_precommit_span, precommit_t) = start_span!("shape_precommitted");
     let precommitted =
       circuit
         .precommitted(&mut cs, &shared)
@@ -165,7 +161,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
         })?;
 
     let num_precommitted = cs.num_aux() - num_shared;
-    info!(elapsed_ms = %precommit_t.elapsed().as_millis(), num_precommitted, "shape_precommitted");
     debug!("precommitted.len(): {}", precommitted.len());
     if precommitted.len() > num_precommitted {
       return Err(SpartanError::SynthesisError {
@@ -174,15 +169,11 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     }
 
     // synthesize the circuit
-    let (_synth_span, synth_t) = start_span!("shape_synthesize");
     circuit
       .synthesize(&mut cs, &shared, &precommitted, None)
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize circuit: {e}"),
       })?;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "shape_synthesize");
-
-    let (_matrix_span, matrix_t) = start_span!("shape_build_matrices");
 
     let mut A = SparseMatrix::<E::Scalar>::empty();
     let mut B = SparseMatrix::<E::Scalar>::empty();
@@ -205,8 +196,6 @@ impl<E: Engine> SpartanShape<E> for ShapeCS<E> {
     }
     assert_eq!(num_cons_added, num_constraints);
     assert!(num_inputs > num_challenges);
-    info!(elapsed_ms = %matrix_t.elapsed().as_millis(), num_constraints, "shape_build_matrices");
-
     A.cols = num_vars + num_inputs;
     B.cols = num_vars + num_inputs;
     C.cols = num_vars + num_inputs;
@@ -316,7 +305,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     circuit: &C,
     is_small: bool,
   ) -> Result<Self::PrecommittedState, SpartanError> {
-    let (_synth_span, synth_t) = start_span!("shared_witness_synthesize");
     let mut cs: Self = Self::new();
 
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
@@ -340,7 +328,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
     // partial commitment to shared witness variables
-    let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
       let comm_W_shared = PCS::<E>::commit(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
@@ -348,9 +335,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     } else {
       (None, None)
     };
-    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness_shared");
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "shared_witness_synthesize");
-
     Ok(PrecommittedState {
       cs,
       shared,
@@ -370,7 +354,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     circuit: &C,
     is_small: bool,
   ) -> Result<(), SpartanError> {
-    let (_synth_span, synth_t) = start_span!("precommitted_witness_synthesize");
     // produce precommitted witness variables
     let precommitted =
       circuit
@@ -390,8 +373,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     );
 
     // partial commitment to precommitted witness variables
-    let (_commit_precommitted_span, commit_precommitted_t) =
-      start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
       let comm_W_precommitted = PCS::<E>::commit(
@@ -404,14 +385,10 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     } else {
       (None, None)
     };
-    info!(elapsed_ms = %commit_precommitted_t.elapsed().as_millis(), "commit_witness_precommitted");
-
     // update the preprocessed state
     ps.comm_W_precommitted = comm_W_precommitted;
     ps.r_W_precommitted = r_W_precommitted;
     ps.precommitted = precommitted;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "precommitted_witness_synthesize");
-
     Ok(())
   }
 
@@ -468,7 +445,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     }
 
     // commit to the rest with partial commitment.
-    let (_commit_rest_span, commit_rest_t) = start_span!("commit_rest_instance");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
     let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
       // Fast path: rest is entirely zero-padding, skip MSM and auto-detect
@@ -492,13 +468,6 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
         detected_small,
       )
     };
-    info!(
-      elapsed_ms = %commit_rest_t.elapsed().as_millis(),
-      num_rest = S.num_rest,
-      num_rest_unpadded = S.num_rest_unpadded,
-      actual_is_small,
-      "commit_rest_instance"
-    );
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
     let public_values = if skip_synthesize {

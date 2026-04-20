@@ -23,7 +23,6 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{SplitR1CSInstance, SplitR1CSShape},
-  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -146,17 +145,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let (_setup_span, setup_t) = start_span!("spartan_setup");
 
-    let (_shape_span, shape_t) = start_span!("r1cs_shape");
     let S = ShapeCS::r1cs_shape(&circuit)?;
-    info!(elapsed_ms = %shape_t.elapsed().as_millis(), "r1cs_shape");
-
-    let (_ck_span, ck_t) = start_span!("commitment_key_gen");
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
     E::PCS::precompute_ck(&ck);
-    info!(elapsed_ms = %ck_t.elapsed().as_millis(), "commitment_key_gen");
-
     let (ck_s, _) = E::PCS::setup(b"ck_s", 1, 1); // 1 base for committing a single scalar
     E::PCS::precompute_ck(&ck_s);
 
@@ -167,10 +159,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       digest: OnceCell::new(),
     };
 
-    let (_digest_span, digest_t) = start_span!("vk_digest");
     let vk_digest = vk.digest()?;
-    info!(elapsed_ms = %digest_t.elapsed().as_millis(), "vk_digest");
-
     let pk = Self::ProverKey {
       ck,
       ck_s,
@@ -178,12 +167,8 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       vk_digest,
     };
 
-    let (_precomp_span, precomp_t) = start_span!("precompute_matrices");
     pk.S.precompute();
     vk.S.precompute();
-    info!(elapsed_ms = %precomp_t.elapsed().as_millis(), "precompute_matrices");
-
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "spartan_setup_total");
     Ok((pk, vk))
   }
 
@@ -237,7 +222,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     mut prep_snark: Self::PrepSNARK,
     is_small: bool,
   ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
-    let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
 
     let mut transcript = E::TE::new(b"SpartanSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
@@ -283,7 +267,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let mut scratch_az = std::mem::take(&mut prep_snark.scratch_az);
     let mut scratch_bz = std::mem::take(&mut prep_snark.scratch_bz);
     let mut scratch_cz = std::mem::take(&mut prep_snark.scratch_cz);
-    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     pk.S.multiply_vec_incremental_into(
       &z,
       &prep_snark.cached_az,
@@ -293,21 +276,10 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       &mut scratch_bz,
       &mut scratch_cz,
     )?;
-    info!(
-      elapsed_ms = %mv_t.elapsed().as_millis(),
-      constraints = %pk.S.num_cons,
-      vars = %num_vars,
-      "matrix_vector_multiply"
-    );
-
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let mut poly_Az = MultilinearPolynomial::new(scratch_az);
     let mut poly_Bz = MultilinearPolynomial::new(scratch_bz);
     let mut poly_Cz = MultilinearPolynomial::new(scratch_cz);
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-
     // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
     let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
       &E::Scalar::ZERO, // claim is zero
@@ -326,21 +298,15 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let scratch_az = poly_Az.into_vec();
     let scratch_bz = poly_Bz.into_vec();
     let scratch_cz = poly_Cz.into_vec();
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
-
     // inner sum-check preparation
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
 
     // Merged: compute eq(r_x), bind row variables, and prepare poly_ABC in a single pipeline
-    let (_merged_span, merged_t) = start_span!("merged_bind_prepare_poly_ABC");
     let mut evals_rx_buffer = std::mem::take(&mut prep_snark.evals_rx_buffer);
     EqPolynomial::evals_from_points_into(&r_x, &mut evals_rx_buffer);
     let mut poly_ABC_vec = pk.S.bind_and_prepare_poly_ABC(&evals_rx_buffer, &r);
-    info!(elapsed_ms = %merged_t.elapsed().as_millis(), "merged_bind_prepare_poly_ABC");
-
     // inner sum-check with manual first round (BDDT optimization)
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
 
     // Manual first round: the "virtual" polynomial pair is:
     //   ABC_low[j] = poly_ABC_vec[j] for j=0..num_vars-1
@@ -435,9 +401,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let inv: Option<E::Scalar> = (E::Scalar::ONE - r_y[0]).invert().into();
     let eval_W = (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
 
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
-
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let blind_eval_W = E::PCS::blind(&pk.ck_s, 1);
     let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?;
     let eval_arg = E::PCS::prove(
@@ -451,10 +414,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       &comm_eval_W,
       &blind_eval_W,
     )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
-    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
-
     // Return proof and updated prep state with preserved scratch buffers
     let updated_prep = SpartanPrepSNARK {
       ps: prep_snark.ps,
@@ -485,7 +444,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
-    let (_verify_span, verify_t) = start_span!("spartan_snark_verify");
     let mut transcript = E::TE::new(b"SpartanSNARK");
 
     // append the digest of R1CS matrices
@@ -509,13 +467,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     );
 
     // outer sum-check
-    let (_tau_span, tau_t) = start_span!("compute_tau_verify");
     let tau = (0..num_rounds_x)
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
-
-    let (_outer_sumcheck_span, outer_sumcheck_t) = start_span!("outer_sumcheck_verify");
     let (claim_outer_final, r_x) =
       self
         .sc_proof_outer
@@ -528,8 +482,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     if claim_outer_final != claim_outer_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
-    info!(elapsed_ms = %outer_sumcheck_t.elapsed().as_millis(), "outer_sumcheck_verify");
-
     transcript.absorb(
       b"claims_outer",
       &[
@@ -541,7 +493,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     );
 
     // inner sum-check
-    let (_inner_sumcheck_span, inner_sumcheck_t) = start_span!("inner_sumcheck_verify");
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint =
       self.claims_outer.0 + r * self.claims_outer.1 + r * r * self.claims_outer.2;
@@ -565,7 +516,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     };
 
     // compute evaluations of R1CS matrices
-    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let T_x = EqPolynomial::evals_from_points(&r_x);
     let T_y = EqPolynomial::evals_from_points(&r_y);
     let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables_fast(&T_x, &T_y);
@@ -574,11 +524,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     if claim_inner_final != claim_inner_final_expected {
       return Err(SpartanError::InvalidSumcheckProof);
     }
-    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
-    info!(elapsed_ms = %inner_sumcheck_t.elapsed().as_millis(), "inner_sumcheck_verify");
-
     // verify
-    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     let comm_eval_W = E::PCS::commit(&vk.ck_s, &[self.eval_W], &self.blind_eval_W, false)?; // commitment to eval_W
     E::PCS::verify(
       &vk.vk_ee,
@@ -589,9 +535,6 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       &comm_eval_W,
       &self.eval_arg,
     )?;
-    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
-
-    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "spartan_snark_verify");
     Ok(self.U.public_values.clone())
   }
 }

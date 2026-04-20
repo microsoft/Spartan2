@@ -5,7 +5,6 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! Nova's non-Interactive Folding Scheme (NIFS)
-use crate::start_span;
 use crate::{
   Blind, Commitment, CommitmentKey, PCS,
   errors::SpartanError,
@@ -17,7 +16,6 @@ use crate::{
   },
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 /// Nova NIFS proof containing the commitment to the cross-term `T`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,21 +45,17 @@ where
     transcript.absorb(b"U2", U2);
 
     // Compute the cross-term commitment.
-    let (_ct_span, ct_t) = start_span!("nifs_commit_T");
     let r_T: Blind<E> = PCS::<E>::blind(ck, S.num_cons);
     let (T, comm_T) = S.commit_T(ck, U1, W1, U2, W2, &r_T)?;
-    info!(elapsed_ms = %ct_t.elapsed().as_millis(), num_cons = %S.num_cons, "nifs_commit_T");
 
     // Continue transcript with the cross-term commitment and derive the challenge `r`.
     transcript.absorb(b"comm_T", &comm_T);
     let r = transcript.squeeze(b"r")?;
 
-    let (_fold_span, fold_t) = start_span!("nifs_fold");
     let W = W1.fold(W2, &T, &r_T, &r)?;
     // Fold scalar fields only (no commitment arithmetic)
     let u_folded = U1.u + r;
     let X_folded: Vec<E::Scalar> = U1.X.iter().zip(&U2.X).map(|(a, b)| *a + r * *b).collect();
-    info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_fold");
 
     Ok((Self { comm_T }, W, u_folded, X_folded))
   }

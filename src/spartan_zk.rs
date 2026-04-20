@@ -30,7 +30,6 @@ use crate::{
     R1CSShape, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
     SplitR1CSInstance, SplitR1CSShape,
   },
-  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -160,19 +159,19 @@ pub struct SpartanPrepZkSNARK<E: Engine> {
 #[serde(bound = "")]
 pub struct SpartanZkSNARK<E: Engine> {
   /// Original R1CS instance
-  pub(crate) U: SplitR1CSInstance<E>,
+  U: SplitR1CSInstance<E>,
 
   /// Multi-round verifier instance capturing the non-ZK verification trace
-  pub(crate) U_verifier: SplitMultiRoundR1CSInstance<E>,
+  U_verifier: SplitMultiRoundR1CSInstance<E>,
   /// The random relaxed instance used for folding
-  pub(crate) random_U: RelaxedR1CSInstance<E>,
+  random_U: RelaxedR1CSInstance<E>,
   /// NIFS proof for folding a random relaxed instance with the verifier instance
-  pub(crate) nifs: NovaNIFS<E>,
+  nifs: NovaNIFS<E>,
   /// Relaxed R1CS Spartan proof of the folded instance (replaces raw folded witness)
-  pub(crate) relaxed_snark: crate::spartan_relaxed::RelaxedR1CSSpartanProof<E>,
+  relaxed_snark: crate::spartan_relaxed::RelaxedR1CSSpartanProof<E>,
 
   /// PCS evaluation argument
-  pub(crate) eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
+  eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
 impl<E: Engine> R1CSSNARKTrait<E> for SpartanZkSNARK<E>
@@ -186,33 +185,20 @@ where
   fn setup<C: SpartanCircuit<E>>(
     circuit: C,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
-    let (_setup_span, setup_t) = start_span!("spartan_zk_setup");
 
-    let (_shape_span, shape_t) = start_span!("r1cs_shape");
     let S = ShapeCS::r1cs_shape(&circuit)?;
-    info!(elapsed_ms = %shape_t.elapsed().as_millis(), "r1cs_shape");
-
-    let (_ck_span, ck_t) = start_span!("commitment_key_gen");
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
     E::PCS::precompute_ck(&ck);
-    info!(elapsed_ms = %ck_t.elapsed().as_millis(), "commitment_key_gen");
-
     // Derive verifier-circuit (multi-round) shape based on outer/inner rounds
     let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
     let num_rounds_x = S.num_cons.log_2();
     let num_rounds_y = num_vars.log_2() + 1;
-    let (_vc_span, vc_t) = start_span!("verifier_circuit_shape");
     let vc = SpartanVerifierCircuit::<E>::default(num_rounds_x, num_rounds_y, 16);
     let (vc_shape, vc_ck, vc_vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
     let vc_shape_regular = vc_shape.to_regular_shape();
-    info!(elapsed_ms = %vc_t.elapsed().as_millis(), "verifier_circuit_shape");
-
     // Eagerly init FixedBaseMul table before cloning so both pk/vk get it
-    let (_fbt_span, fbt_t) = start_span!("fixedbase_precompute");
     E::PCS::precompute_ck(&vc_ck);
-    info!(elapsed_ms = %fbt_t.elapsed().as_millis(), "fixedbase_precompute");
-
     let vk = Self::VerifierKey {
       S: S.clone(),
       vk_ee,
@@ -223,10 +209,7 @@ where
       digest: OnceCell::new(),
     };
 
-    let (_digest_span, digest_t) = start_span!("vk_digest");
     let vk_digest = vk.digest()?;
-    info!(elapsed_ms = %digest_t.elapsed().as_millis(), "vk_digest");
-
     let pk = Self::ProverKey {
       ck,
       S,
@@ -236,12 +219,8 @@ where
       vk_digest,
     };
     // Eagerly build precomputed matrices so prove()/verify() don't pay the cost
-    let (_precomp_span, precomp_t) = start_span!("precompute_matrices");
     pk.S.precompute();
     vk.S.precompute();
-    info!(elapsed_ms = %precomp_t.elapsed().as_millis(), "precompute_matrices");
-
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "spartan_zk_setup_total");
     Ok((pk, vk))
   }
 
@@ -299,13 +278,9 @@ where
     mut prep_snark: Self::PrepSNARK,
     is_small: bool,
   ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
-    let (_prove_span, prove_t) = start_span!("spartan_zk_prove");
 
     // rerandomize the prep state in-place (we own it)
-    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
     prep_snark.ps.rerandomize_in_place(&pk.ck, &pk.S)?;
-    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
-
     let mut transcript = E::TE::new(b"SpartanZkSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
     // absorb public IO before
@@ -318,7 +293,6 @@ where
 
     // Original R1CS instance and witness (used for PCS evaluation only)
     // Uses precomputed rest-witness MSMs from prep_prove -- only the delta needs new MSMs.
-    let (_instance_span, instance_t) = start_span!("r1cs_instance_and_witness");
 
     // Absorb precommitted commitments
     if let Some(comm_W_shared) = &prep_snark.ps.comm_W_shared {
@@ -338,7 +312,6 @@ where
     prep_snark.ps.cs.input_assignment.truncate(1);
 
     // Synthesize rest-witness with real challenges
-    let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest");
     circuit
       .synthesize(
         &mut prep_snark.ps.cs,
@@ -349,8 +322,6 @@ where
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
-    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
-
     // Copy rest-witness into W
     let rest_src_start = pk.S.num_shared_unpadded + pk.S.num_precommitted_unpadded;
     let rest_src_end = rest_src_start + pk.S.num_rest_unpadded;
@@ -359,7 +330,6 @@ where
       .copy_from_slice(&prep_snark.ps.cs.aux_assignment[rest_src_start..rest_src_end]);
 
     // Commit rest-witness -- use delta-based approach if we have a cache from a prior prove
-    let (_commit_span, commit_t) = start_span!("commit_rest");
     let r_W_rest = PCS::<E>::blind(&pk.ck, pk.S.num_rest);
 
     let comm_W_rest = if let (Some(cached_msm), Some(cached_witness)) =
@@ -367,21 +337,11 @@ where
     {
       // Delta-based: only MSM the changed entries
       let mut delta = vec![E::Scalar::ZERO; pk.S.num_rest];
-      let mut nonzero_count = 0usize;
       for i in 0..pk.S.num_rest_unpadded {
         delta[i] = prep_snark.ps.W[rest_dst_start + i] - cached_witness[i];
-        if delta[i] != E::Scalar::ZERO {
-          nonzero_count += 1;
-        }
       }
       let result =
         PCS::<E>::commit_from_raw_delta_blinding(&pk.ck, cached_msm, &delta, &r_W_rest, None)?;
-      info!(
-        elapsed_ms = %commit_t.elapsed().as_millis(),
-        nonzero_count = nonzero_count,
-        total = pk.S.num_rest_unpadded,
-        "delta_commit_rest"
-      );
       result
     } else {
       // First prove: commit normally and cache for next time
@@ -403,10 +363,6 @@ where
         &r_W_rest,
         None,
       )?;
-      info!(
-        elapsed_ms = %commit_t.elapsed().as_millis(),
-        "commit_rest_first_call"
-      );
       result
     };
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
@@ -431,8 +387,6 @@ where
     }
     blinds.push(r_W_rest);
     let r_W = PCS::<E>::combine_blinds(&blinds)?;
-    info!(elapsed_ms = %instance_t.elapsed().as_millis(), "r1cs_instance_and_witness");
-
     // Prepare vectors and polynomials for building the verifier-circuit trace
     // Build z using pre-allocated buffer (avoids 32MB mmap + page faults after first prove)
     let mut z = std::mem::take(&mut prep_snark.z_buffer);
@@ -457,17 +411,13 @@ where
     );
 
     // Sample tau challenges used for the outer equality polynomial
-    let (_taus_span, taus_t) = start_span!("sample_taus");
     let taus = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
       .collect::<Result<Vec<_>, SpartanError>>()?;
-    info!(elapsed_ms = %taus_t.elapsed().as_millis(), "sample_taus");
-
     // Use pre-allocated scratch buffers (avoids 96MB mmap + page faults after first prove)
     let mut scratch_az = std::mem::take(&mut prep_snark.scratch_az);
     let mut scratch_bz = std::mem::take(&mut prep_snark.scratch_bz);
     let mut scratch_cz = std::mem::take(&mut prep_snark.scratch_cz);
-    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
     pk.S.multiply_vec_incremental_into(
       &z,
       &prep_snark.cached_az,
@@ -477,19 +427,9 @@ where
       &mut scratch_bz,
       &mut scratch_cz,
     )?;
-    info!(
-      elapsed_ms = %mv_t.elapsed().as_millis(),
-      constraints = %pk.S.num_cons,
-      vars = %num_vars,
-      "matrix_vector_multiply"
-    );
-
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let mut poly_Az = MultilinearPolynomial::new(scratch_az);
     let mut poly_Bz = MultilinearPolynomial::new(scratch_bz);
     let mut poly_Cz = MultilinearPolynomial::new(scratch_cz);
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-
     // Initialize multi-round verifier circuit (will be filled as we go)
     let mut verifier_circuit = SpartanVerifierCircuit::<E>::default(
       num_rounds_x,
@@ -499,7 +439,6 @@ where
     let mut state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_zk(
       num_rounds_x,
       &taus,
@@ -512,8 +451,6 @@ where
       &pk.vc_ck,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
-
     // Outer final round data
     verifier_circuit.claim_Az = poly_Az[0];
     verifier_circuit.claim_Bz = poly_Bz[0];
@@ -541,14 +478,10 @@ where
     //   poly_ABC[0..num_vars]: witness column contributions (the "low" half)
     //   poly_ABC[num_vars..num_vars+num_extra]: 1/public/challenge column contributions
     //   positions num_vars+num_extra..2*num_vars: implicitly zero
-    let (_merged_span, merged_t) = start_span!("merged_bind_prepare_poly_ABC");
     let mut evals_rx_buffer = std::mem::take(&mut prep_snark.evals_rx_buffer);
     EqPolynomial::evals_from_points_into(&r_x, &mut evals_rx_buffer);
     let mut poly_ABC_vec = pk.S.bind_and_prepare_poly_ABC(&evals_rx_buffer, &r);
-    info!(elapsed_ms = %merged_t.elapsed().as_millis(), "merged_bind_prepare_poly_ABC");
-
     // Inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
     let claim_inner_joint =
       verifier_circuit.claim_Az + r * verifier_circuit.claim_Bz + r * r * verifier_circuit.claim_Cz;
 
@@ -661,8 +594,6 @@ where
     // Recover scratch buffers from sumcheck (allocation preserved, contents destroyed)
     let z_buffer = poly_z.into_vec();
     drop(poly_ABC);
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
-
     // Compute final evaluations needed for the inner-final round
     let U_regular = U.to_regular_instance()?;
     let eval_X = {
@@ -702,23 +633,15 @@ where
     )?;
 
     // Finalize multi-round witness and construct NIFS proof
-    let (_nifs_span, nifs_t) = start_span!("finalize_and_nifs");
-    let (_fin_span, fin_t) = start_span!("finalize_witness");
     let (U_verifier, W_verifier) =
       SatisfyingAssignment::<E>::finalize_multiround_witness(&mut state, &pk.vc_shape)?;
-    info!(elapsed_ms = %fin_t.elapsed().as_millis(), "finalize_witness");
-
     // Use the instance as produced by witness finalization; its public values
     // are exactly those absorbed during round 0 by the prover.
     let U_verifier_regular = U_verifier.to_regular_instance()?;
     let S_verifier = &pk.vc_shape_regular;
 
     // Sample fresh random instance/witness for ZK (must be done per-prove to preserve zero-knowledge).
-    let (_sample_span, sample_t) = start_span!("sample_random_instance");
     let (random_U, random_W) = S_verifier.sample_random_instance_witness(&pk.vc_ck)?;
-    info!(elapsed_ms = %sample_t.elapsed().as_millis(), "sample_random_instance");
-
-    let (_nifs_prove_span, nifs_prove_t) = start_span!("nifs_prove");
     let (nifs, folded_W, folded_u, folded_X) = NovaNIFS::<E>::prove(
       &pk.vc_ck,
       S_verifier,
@@ -728,10 +651,7 @@ where
       &W_verifier,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %nifs_prove_t.elapsed().as_millis(), "nifs_prove");
-
     // Prove satisfiability of the folded VC instance via relaxed R1CS Spartan
-    let (_relaxed_span, relaxed_t) = start_span!("relaxed_spartan_prove");
     let relaxed_snark = crate::spartan_relaxed::RelaxedR1CSSpartanProof::prove(
       S_verifier,
       &pk.vc_ck,
@@ -740,11 +660,7 @@ where
       &folded_W,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %relaxed_t.elapsed().as_millis(), "relaxed_spartan_prove");
-    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "finalize_and_nifs");
-
     // prove the claimed polynomial evaluation at point r_y[1..]
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let eval_arg = E::PCS::prove(
       &pk.ck,
       &pk.vc_ck,
@@ -756,10 +672,6 @@ where
       &U_verifier.comm_w_per_round[eval_w_commit_round],
       &state.r_w_per_round[eval_w_commit_round],
     )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
-    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_zk_prove");
-
     // Return proof and updated prep state (deterministic caches only)
     let updated_prep = SpartanPrepZkSNARK {
       ps: prep_snark.ps,
@@ -790,7 +702,6 @@ where
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     // Verify by checking the multi-round verifier instance via NIFS folding
-    let (_verify_span, verify_t) = start_span!("spartan_zk_verify");
     let mut transcript = E::TE::new(b"SpartanZkSNARK");
     transcript.absorb(b"vk", &vk.digest()?);
     transcript.absorb(b"public_values", &self.U.public_values.as_slice());
@@ -799,13 +710,10 @@ where
     self.U.validate(&vk.S, &mut transcript)?;
 
     // Recreate tau polynomial coefficients via Fiat-Shamir and advance transcript
-    let (_tau_span, tau_t) = start_span!("compute_tau_verify");
     let num_rounds_x = vk.S.num_cons.log_2();
     let tau = (0..num_rounds_x)
       .map(|_| transcript.squeeze(b"t"))
       .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-    info!(elapsed_ms = %tau_t.elapsed().as_millis(), "compute_tau_verify");
-
     // validate the provided multi-round verifier instance and advance transcript
     self.U_verifier.validate(&vk.vc_shape, &mut transcript)?;
 
@@ -836,13 +744,10 @@ where
     let r_y = challenges[num_rounds_x + 1..].to_vec();
 
     // compute eval_A, eval_B, eval_C at (r_x, r_y)
-    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let T_x = EqPolynomial::evals_from_points(&r_x);
     let T_y = EqPolynomial::evals_from_points(&r_y);
     let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables_fast(&T_x, &T_y);
     let quotient = eval_A + r * eval_B + r * r * eval_C;
-    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
-
     // Recompute eval_X from original circuit public IO at r_y[1..]
     let U_regular = self.U.to_regular_instance()?;
 
@@ -868,7 +773,6 @@ where
     }
 
     // Finally, run NIFS verification using the same transcript
-    let (_nifs_verify_span, nifs_verify_t) = start_span!("nifs_verify");
     let folded_U = self
       .nifs
       .verify(&mut transcript, &self.random_U, &U_verifier_regular)?;
@@ -880,11 +784,8 @@ where
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Relaxed Spartan verify failed: {e}"),
       })?;
-    info!(elapsed_ms = %nifs_verify_t.elapsed().as_millis(), "nifs_verify");
-
     // Continue with PCS verification on the same transcript
     // Use the commitment from the dedicated eval_W commit-only last round
-    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     let eval_w_commit_round = num_rounds_x + 1 + num_rounds_y + 1;
     E::PCS::verify(
       &vk.vk_ee,
@@ -895,9 +796,6 @@ where
       &self.U_verifier.comm_w_per_round[eval_w_commit_round],
       &self.eval_arg,
     )?;
-    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
-
-    info!(elapsed_ms = %verify_t.elapsed().as_millis(), "spartan_zk_verify");
     // Return original circuit public IO carried in the proof
     Ok(self.U.public_values.clone())
   }

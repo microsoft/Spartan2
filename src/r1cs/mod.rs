@@ -11,7 +11,6 @@ use crate::{
   big_num::montgomery::MontgomeryLimbs,
   digest::SimpleDigestible,
   errors::SpartanError,
-  start_span,
   traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
@@ -23,7 +22,6 @@ use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 mod folds;
 mod sparse;
@@ -477,7 +475,6 @@ impl<E: Engine> R1CSShape<E> {
     &self,
     ck: &CommitmentKey<E>,
   ) -> Result<(RelaxedR1CSInstance<E>, RelaxedR1CSWitness<E>), SpartanError> {
-    let (_sample_span, sample_t) = start_span!("sample_random_details");
     // Bulk random generation: generate all random bytes at once via ChaCha CSPRNG,
     // then reduce each 64-byte chunk mod p via from_uniform (wide reduction).
     use crate::traits::PrimeFieldExt;
@@ -516,13 +513,6 @@ impl<E: Engine> R1CSShape<E> {
         PCS::<E>::commit(ck, &E_vec, &r_E, false),
       )
     };
-    info!(
-      elapsed_ms = %sample_t.elapsed().as_millis(),
-      num_vars = %self.num_vars,
-      num_cons = %self.num_cons,
-      num_io = %self.num_io,
-      "sample_random_details"
-    );
 
     Ok((
       RelaxedR1CSInstance {
@@ -552,15 +542,11 @@ impl<E: Engine> R1CSWitness<E> {
     let r_W = PCS::<E>::blind(ck, W.len());
 
     // pad with zeros
-    let (_pad_span, pad_t) = start_span!("pad_witness");
     if W.len() < S.num_vars {
       W.resize(S.num_vars, E::Scalar::ZERO);
     }
-    info!(elapsed_ms = %pad_t.elapsed().as_millis(), "pad_witness");
 
-    let (_commit_span, commit_t) = start_span!("commit_witness");
     let comm_W = PCS::<E>::commit(ck, W, &r_W, is_small)?;
-    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "commit_witness");
 
     let W = R1CSWitness {
       W: W.to_vec(),

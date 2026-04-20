@@ -38,7 +38,6 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
-  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -500,8 +499,6 @@ where
     }
 
     // Build Az, Bz, Cz tables for each (possibly padded) instance
-    let (_matrix_span, matrix_t) =
-      start_span!("matrix_vector_multiply_instances", instances = n_padded);
 
     // Split cached matvec: consume owned triples for cached instances, compute rest
     let mut A_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
@@ -529,8 +526,6 @@ where
       B_layers.push(b);
       C_layers.push(c);
     }
-    info!(elapsed_ms = %matrix_t.elapsed().as_millis(), instances = n_padded, cached = n_cached, "matrix_vector_multiply_instances");
-
     // Build i64 layers for small-value NIFS optimization
     let n_i64_cached = cached_i64.as_ref().map_or(0, |c| c.len());
     let mut A_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
@@ -578,14 +573,12 @@ where
     }
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
-    let (_nifs_rounds_span, nifs_rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
 
     // Precompute C_val[b] = sum_k E_eq[k] * Cz_b[k] for each instance b.
     // This lets us skip C in fold_abc_pair and prove_helper, computing
     // the C contribution to e0 as a weighted sum of these scalars instead.
     // Uses two-level structure: E[k] = e_left[j] * f[i] where k = i*left + j.
     let c_vals: Vec<E::Scalar> = if has_i64 {
-      let (_cval_span, cval_t) = start_span!("precompute_c_vals", instances = n_padded);
       let e_left = &E_eq[..left];
       let f = &E_eq[left..];
 
@@ -625,7 +618,6 @@ where
           }
         }
       }
-      info!(elapsed_ms = %cval_t.elapsed().as_millis(), "precompute_c_vals");
       vals
     } else {
       vec![]
@@ -718,7 +710,6 @@ where
     // Uses small-value integer arithmetic when i64 data is available.
     {
       let pairs = m / 2;
-      let (_r0_span, r0_t) = start_span!("nifs_round_0_prove_helper");
 
       let (e0, quad_coeff) = if has_i64 {
         // Small-value fast path: i64 subtraction + i128 multiplication
@@ -772,8 +763,6 @@ where
             (a.0 + b.0, a.1 + b.1)
           })
       };
-      info!(elapsed_ms = %r0_t.elapsed().as_millis(), has_i64, "nifs_round_0_prove_helper");
-
       let r_b = finish_round!(0, e0, quad_coeff);
 
       if ell_b == 1 {
@@ -982,7 +971,6 @@ where
 
     // Compute final Cz_step from original C_i64 layers using SmallAccumulator
     if has_i64 {
-      let (_cz_fold_span, cz_fold_t) = start_span!("compute_cz_step_from_i64");
       let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
       let total = left * right;
       let mut cz_step = vec![E::Scalar::ZERO; total];
@@ -1013,10 +1001,7 @@ where
       }
 
       C_layers = vec![cz_step];
-      info!(elapsed_ms = %cz_fold_t.elapsed().as_millis(), "compute_cz_step_from_i64");
     }
-    info!(elapsed_ms = %nifs_rounds_t.elapsed().as_millis(), rounds = ell_b, "nifs_folding_rounds");
-
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let acc_eq_inv: Option<E::Scalar> = acc_eq.invert().into();
     let T_out = T_cur * acc_eq_inv.ok_or(SpartanError::DivisionByZero)?;
@@ -1037,18 +1022,14 @@ where
       }
     }
 
-    let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
     let mut folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
     if use_truncated_fold {
       let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
       folded_W.W.resize(full_dim, E::Scalar::ZERO);
     }
-    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_witnesses");
-
     // Optimized instance fold: only MSM data rows (shared+precommitted),
     // compute rest rows from folded blind + h (field arithmetic instead of MSM).
     // Fall back to full fold when shared+precommitted=0.
-    let (_fold_final_span, fold_final_t) = start_span!("fold_instances");
     let w = weights_from_r::<E::Scalar>(&r_bs, Us.len());
     let d = Us[0].X.len();
 
@@ -1074,8 +1055,6 @@ where
       <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?
     };
     let folded_U = R1CSInstance::<E>::new_unchecked(comm_acc, X_acc)?;
-    info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
-
     Ok((
       E_eq,
       std::mem::take(&mut A_layers[0]),
@@ -1210,9 +1189,7 @@ where
     core_circuit: &C2,
     num_steps: usize,
   ) -> Result<(NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>), SpartanError> {
-    let (_setup_span, setup_t) = start_span!("neutronnova_setup");
 
-    let (_r1cs_span, r1cs_t) = start_span!("r1cs_shape_generation");
     debug!("Synthesizing step circuit");
     let mut S_step = ShapeCS::r1cs_shape(step_circuit)?;
     debug!("Finished synthesizing step circuit");
@@ -1231,15 +1208,9 @@ where
       "Core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
       S_core.num_shared, S_core.num_precommitted, S_core.num_rest
     );
-    info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "r1cs_shape_generation");
-
-    let (_ck_span, ck_t) = start_span!("commitment_key_generation");
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
     E::PCS::precompute_ck(&ck);
-    info!(elapsed_ms = %ck_t.elapsed().as_millis(), "commitment_key_generation");
-
     // Calculate num_rounds_b from num_steps by padding to next power of two
-    let (_vc_span, vc_t) = start_span!("verifier_circuit_setup");
     let num_rounds_b = num_steps.next_power_of_two().log_2();
 
     let num_vars = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
@@ -1249,13 +1220,8 @@ where
     let (vc_shape, vc_ck, vc_vk) =
       <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
     let vc_shape_regular = vc_shape.to_regular_shape();
-    info!(elapsed_ms = %vc_t.elapsed().as_millis(), "verifier_circuit_setup");
-
     // Eagerly init FixedBaseMul table before cloning so both pk/vk get it
-    let (_fbt_span, fbt_t) = start_span!("fixedbase_precompute");
     E::PCS::precompute_ck(&vc_ck);
-    info!(elapsed_ms = %fbt_t.elapsed().as_millis(), "fixedbase_precompute");
-
     let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
       ck: ck.clone(),
       S_step: S_step.clone(),
@@ -1268,10 +1234,7 @@ where
       digest: OnceCell::new(),
     };
 
-    let (_digest_span, digest_t) = start_span!("vk_digest");
     let vk_digest = vk.digest()?;
-    info!(elapsed_ms = %digest_t.elapsed().as_millis(), "vk_digest");
-
     let pk = NeutronNovaProverKey {
       ck,
       S_step,
@@ -1283,14 +1246,10 @@ where
     };
 
     // Eagerly precompute sparse matrix data for the step and core circuits
-    let (_precomp_span, precomp_t) = start_span!("precompute_matrices");
     pk.S_step.precompute();
     pk.S_core.precompute();
     vk.S_step.precompute();
     vk.S_core.precompute();
-    info!(elapsed_ms = %precomp_t.elapsed().as_millis(), "precompute_matrices");
-
-    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "neutronnova_setup");
     Ok((pk, vk))
   }
 
@@ -1301,18 +1260,10 @@ where
     core_circuit: &C2,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
-    let (_prep_span, prep_t) = start_span!("neutronnova_prep_prove");
 
     // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
-    let (_shared_span, shared_t) = start_span!("generate_shared_witness");
     let mut ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
-    info!(elapsed_ms = %shared_t.elapsed().as_millis(), "generate_shared_witness");
-
-    let (_precommit_span, precommit_t) = start_span!(
-      "generate_precommitted_witnesses",
-      circuits = step_circuits.len() + 1
-    );
     let ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
@@ -1337,15 +1288,12 @@ where
       core_circuit,
       is_small,
     )?;
-    info!(elapsed_ms = %precommit_t.elapsed().as_millis(), circuits = step_circuits.len() + 1, "generate_precommitted_witnesses");
-
     // Precompute full matrix-vector products for step circuits (deterministic).
     // Only valid when step circuits have no rest variables and no challenges,
     // meaning z = [shared_W, precommitted_W, 0..., 1, public_values] is fully known during prep.
     let can_cache_matvec = pk.S_step.num_challenges == 0 && pk.S_step.num_rest_unpadded == 0;
 
     let (cached_step_matvec, cached_step_i64, large_positions) = if can_cache_matvec {
-      let (_matvec_span, matvec_t) = start_span!("precompute_step_matvec");
       let matvec: Vec<_> = (0..ps_step.len())
         .into_par_iter()
         .map(|i| {
@@ -1364,10 +1312,7 @@ where
           pk.S_step.multiply_vec(&z)
         })
         .collect::<Result<Vec<_>, _>>()?;
-      info!(elapsed_ms = %matvec_t.elapsed().as_millis(), circuits = step_circuits.len(), "precompute_step_matvec");
-
       // Convert Az/Bz to i64 for small-value NIFS round 0 optimization.
-      let (_i64_span, i64_t) = start_span!("convert_matvec_to_i64");
       let mut all_i64 = Vec::with_capacity(matvec.len());
       let mut large_pos_set = std::collections::BTreeSet::new();
       for (az, bz, cz) in &matvec {
@@ -1402,8 +1347,6 @@ where
           }
         }
       }
-      info!(elapsed_ms = %i64_t.elapsed().as_millis(), "convert_matvec_to_i64");
-
       (Some(matvec), Some(all_i64), lp)
     } else {
       info!(
@@ -1412,8 +1355,6 @@ where
       );
       (None, None, Vec::new())
     };
-
-    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_prep_prove");
 
     Ok(NeutronNovaPrepZkSNARK {
       ps_step,
@@ -1435,10 +1376,8 @@ where
     mut prep_snark: NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError> {
-    let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
     // rerandomize prep state in-place (we own it, no clone needed)
-    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
     prep_snark
       .ps_core
       .rerandomize_in_place(&pk.ck, &pk.S_core)?;
@@ -1447,13 +1386,7 @@ where
     for ps_i in prep_snark.ps_step.iter_mut() {
       ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)?;
     }
-    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
-
     // Sequential generation of instances and witnesses (faster for single-threaded)
-    let (_gen_span, gen_t) = start_span!(
-      "generate_instances_witnesses",
-      step_circuits = step_circuits.len()
-    );
     let res_steps = prep_snark
       .ps_step
       .iter_mut()
@@ -1513,17 +1446,12 @@ where
     };
 
     let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
-    info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
-
-    let (_reg_span, reg_t) = start_span!("convert_to_regular_instances");
     let step_instances_regular = step_instances
       .iter()
       .map(|u| u.to_regular_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
     let core_instance_regular = core_instance.to_regular_instance()?;
-    info!(elapsed_ms = %reg_t.elapsed().as_millis(), "convert_to_regular_instances");
-
     // We start a new transcript for the NeutronNova NIFS proof
     // All instances will be absorbed into the transcript
     let mut transcript = E::TE::new(b"neutronnova_prove");
@@ -1547,7 +1475,6 @@ where
     let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
     // Perform ZK NIFS prove and collect outputs
-    let (_nifs_span, nifs_t) = start_span!("NIFS");
     let cached_matvec = prep_snark.cached_step_matvec.take();
     let cached_i64 = prep_snark.cached_step_i64.take();
     let large_positions = std::mem::take(&mut prep_snark.large_positions);
@@ -1567,9 +1494,6 @@ where
     )?;
     // Restore large_positions for potential re-use
     prep_snark.large_positions = large_positions;
-    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
-
-    let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
     let (_ell, left, _right) = compute_tensor_decomp(pk.S_step.num_cons);
     let mut E1 = E_eq;
     let E2 = E1.split_off(left);
@@ -1577,10 +1501,7 @@ where
     let mut poly_tau_left = MultilinearPolynomial::new(E1);
     let poly_tau_right = MultilinearPolynomial::new(E2);
 
-    info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "compute_tensor_and_poly_tau");
-
     // outer sum-check preparation
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let (mut poly_Az_step, mut poly_Bz_step, mut poly_Cz_step) = (
       MultilinearPolynomial::new(Az_step),
       MultilinearPolynomial::new(Bz_step),
@@ -1588,7 +1509,6 @@ where
     );
 
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
-      let (_core_span, core_t) = start_span!("compute_core_polys");
       let z = [
         core_witness.W.clone(),
         vec![E::Scalar::ONE],
@@ -1598,7 +1518,6 @@ where
       .concat();
 
       let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
-      info!(elapsed_ms = %core_t.elapsed().as_millis(), "compute_core_polys");
       (
         MultilinearPolynomial::new(Az),
         MultilinearPolynomial::new(Bz),
@@ -1606,10 +1525,8 @@ where
       )
     };
 
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
     let outer_start_index = num_rounds_b + 1;
     // outer sum-check (batched)
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck_batched");
     let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_batched_zk(
       num_rounds_x,
       &mut poly_tau_left,
@@ -1627,8 +1544,6 @@ where
       &mut transcript,
       outer_start_index,
     )?;
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck_batched");
-
     vc.claim_Az_step = poly_Az_step[0];
     vc.claim_Bz_step = poly_Bz_step[0];
     vc.claim_Cz_step = poly_Cz_step[0];
@@ -1651,16 +1566,12 @@ where
     let claim_inner_joint_step = vc.claim_Az_step + r * vc.claim_Bz_step + r * r * vc.claim_Cz_step;
     let claim_inner_joint_core = vc.claim_Az_core + r * vc.claim_Bz_core + r * r * vc.claim_Cz_core;
 
-    let (_merged_span, merged_t) = start_span!("merged_bind_prepare_poly_ABC");
     let evals_rx = EqPolynomial::evals_from_points(&r_x);
     let (poly_ABC_step, step_lo_eff, step_hi_eff) =
       pk.S_step.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
     let (poly_ABC_core, core_lo_eff, core_hi_eff) =
       pk.S_core.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
-    info!(elapsed_ms = %merged_t.elapsed().as_millis(), "merged_bind_prepare_poly_ABC");
-
     // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck_batched");
 
     debug!("Proving inner sum-check with {} rounds", num_rounds_y);
     debug!(
@@ -1710,8 +1621,6 @@ where
       &mut transcript,
       outer_start_index + num_rounds_x + 1,
     )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck_batched");
-
     let eval_Z_step = evals[2];
     let eval_Z_core = evals[3];
 
@@ -1778,12 +1687,9 @@ where
     let U_verifier_regular = U_verifier.to_regular_instance()?;
 
     // Sample fresh random instance/witness for ZK (must be done per-prove to preserve zero-knowledge).
-    let (_sample_span, sample_t) = start_span!("sample_random_instance");
     let (random_U, random_W) = pk
       .vc_shape_regular
       .sample_random_instance_witness(&pk.vc_ck)?;
-    info!(elapsed_ms = %sample_t.elapsed().as_millis(), "sample_random_instance");
-
     let (nifs, folded_W_verifier, folded_u, folded_X) = NovaNIFS::<E>::prove(
       &pk.vc_ck,
       &pk.vc_shape_regular,
@@ -1795,7 +1701,6 @@ where
     )?;
 
     // Prove satisfiability of the folded VC instance via relaxed R1CS Spartan
-    let (_relaxed_span, relaxed_t) = start_span!("relaxed_spartan_prove");
     let relaxed_snark = crate::spartan_relaxed::RelaxedR1CSSpartanProof::prove(
       &pk.vc_shape_regular,
       &pk.vc_ck,
@@ -1804,8 +1709,6 @@ where
       &folded_W_verifier,
       &mut transcript,
     )?;
-    info!(elapsed_ms = %relaxed_t.elapsed().as_millis(), "relaxed_spartan_prove");
-
     // access two claimed commitments to evaluations of W_step and W_core
     let comm_eval_W_step = U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
     let blind_eval_W_step = vc_state.r_w_per_round[eval_w_step_commit_round].clone();
@@ -1817,7 +1720,6 @@ where
     let c_eval = transcript.squeeze(b"c_eval")?;
 
     // fold evaluation claims into one
-    let (_fold_eval_span, fold_eval_t) = start_span!("fold_evaluation_claims");
     let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &[folded_U.comm_W, core_instance_regular.comm_W],
       &[E::Scalar::ONE, c_eval],
@@ -1840,9 +1742,6 @@ where
       &[blind_eval_W_step, blind_eval_W_core],
       &[E::Scalar::ONE, c_eval],
     )?;
-    info!(elapsed_ms = %fold_eval_t.elapsed().as_millis(), "fold_evaluation_claims");
-
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let eval_arg = E::PCS::prove(
       &pk.ck,
       &pk.vc_ck,
@@ -1854,8 +1753,6 @@ where
       &comm_eval,
       &blind_eval,
     )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
     // Extract shared commitment (same for all step instances and core) and strip from instances
     let comm_W_shared = step_instances.first().and_then(|u| u.comm_W_shared.clone());
     let step_instances = step_instances
@@ -1879,7 +1776,6 @@ where
       relaxed_snark,
     };
 
-    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_prove");
     Ok((result, prep_snark))
   }
 
@@ -1889,7 +1785,6 @@ where
     vk: &NeutronNovaVerifierKey<E>,
     num_instances: usize,
   ) -> Result<(Vec<Vec<E::Scalar>>, Vec<E::Scalar>), SpartanError> {
-    let (_verify_span, _verify_t) = start_span!("neutronnova_verify");
     if num_instances == 0 || num_instances != self.step_instances.len() {
       return Err(SpartanError::ProofVerifyError {
         reason: format!(
@@ -1914,8 +1809,6 @@ where
     core_instance.comm_W_shared = self.comm_W_shared.clone();
 
     // validate the step instances
-    let (_validate_span, validate_t) =
-      start_span!("validate_instances", instances = step_instances.len());
     for (i, u) in step_instances.iter().enumerate() {
       let mut transcript = E::TE::new(b"neutronnova_prove");
       transcript.absorb(b"vk", &vk.digest()?);
@@ -1937,8 +1830,6 @@ where
     transcript.absorb(b"public_values", &core_instance.public_values.as_slice());
 
     core_instance.validate(&vk.S_core, &mut transcript)?;
-    info!(elapsed_ms = %validate_t.elapsed().as_millis(), instances = step_instances.len(), "validate_instances");
-
     // shared commitment consistency was enforced at construction -- all step instances share comm_W_shared
     // also verify it matches the core instance
     for u in &step_instances {
@@ -1949,7 +1840,6 @@ where
       }
     }
 
-    let (_convert_span, convert_t) = start_span!("convert_to_regular_verify");
     let mut step_instances_padded = step_instances.clone();
     if step_instances_padded.len() != step_instances_padded.len().next_power_of_two() {
       step_instances_padded.extend(std::iter::repeat_n(
@@ -1963,8 +1853,6 @@ where
       .collect::<Result<Vec<_>, _>>()?;
 
     let core_instance_regular = core_instance.to_regular_instance()?;
-    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_regular_verify");
-
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
 
@@ -2014,7 +1902,6 @@ where
     let r = challenges[num_rounds_b + num_rounds_x]; // r for combining inner claims
     let r_y = challenges[num_rounds_b + num_rounds_x + 1..].to_vec();
 
-    let (_fold_span, fold_t) = start_span!("fold_and_nifs_verify");
     // fold_multiple and nifs.verify are independent: overlap them
     let (folded_U_result, folded_U_verifier_result) = rayon::join(
       || R1CSInstance::fold_multiple(&r_b, &step_instances_regular),
@@ -2026,9 +1913,6 @@ where
     );
     let folded_U = folded_U_result?;
     let folded_U_verifier = folded_U_verifier_result?;
-    info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_and_nifs_verify");
-
-    let (_sat_span, sat_t) = start_span!("relaxed_spartan_verify");
     self
       .relaxed_snark
       .verify(
@@ -2040,9 +1924,6 @@ where
       .map_err(|e| SpartanError::ProofVerifyError {
         reason: format!("Relaxed Spartan verify failed: {e}"),
       })?;
-    info!(elapsed_ms = %sat_t.elapsed().as_millis(), "relaxed_spartan_verify");
-
-    let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let (eval_A_step, eval_B_step, eval_C_step, eval_A_core, eval_B_core, eval_C_core) = {
       let T_x = EqPolynomial::evals_from_points(&r_x);
       let T_y = EqPolynomial::evals_from_points(&r_y);
@@ -2058,8 +1939,6 @@ where
         eval_C_core,
       )
     };
-    info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
-
     let eval_X_step = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
@@ -2113,7 +1992,6 @@ where
       &[E::Scalar::ONE, c_eval],
     )?;
 
-    let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
       &vk.vk_ee,
       &vk.vc_ck,
@@ -2123,10 +2001,6 @@ where
       &comm_eval,
       &self.eval_arg,
     )?;
-    info!(elapsed_ms = %pcs_verify_t.elapsed().as_millis(), "pcs_verify");
-
-    info!(elapsed_ms = %_verify_t.elapsed().as_millis(), "neutronnova_verify");
-
     let public_values_step = step_instances
       .iter()
       .take(num_instances)
