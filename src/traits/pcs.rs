@@ -153,14 +153,14 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   /// Build commitment from precomputed raw MSMs plus a delta vector.
   /// For each row: final = raw[i] + MSM(delta[row_i], gens) + blind[i] * H
   /// Default: not supported. Override for schemes that support this.
-  fn commit_from_raw_and_delta(
+  fn commit_incremental(
     _ck: &Self::CommitmentKey,
     _raw: &[E::GE],
     _delta: &[E::Scalar],
     _blind: &Self::Blind,
   ) -> Result<Self::Commitment, SpartanError> {
     Err(SpartanError::InternalError {
-      reason: "commit_from_raw_and_delta not supported for this PCS".to_string(),
+      reason: "commit_incremental not supported for this PCS".to_string(),
     })
   }
 

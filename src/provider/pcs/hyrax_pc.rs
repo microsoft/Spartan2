@@ -566,7 +566,7 @@ where
     Ok(raw_points)
   }
 
-  fn commit_from_raw_and_delta(
+  fn commit_incremental(
     ck: &Self::CommitmentKey,
     raw: &[E::GE],
     delta: &[E::Scalar],
