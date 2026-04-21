@@ -384,13 +384,16 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     z.truncate(num_vars);
 
     // Continue with remaining rounds of inner sumcheck
+    let mut poly_z = MultilinearPolynomial::new(z);
     let (sc_proof_inner, r_y_rest, _claims_inner) = SumcheckProof::prove_quad(
       &claim_after_r0,
       num_rounds_y - 1,
       &mut MultilinearPolynomial::new(poly_ABC_vec),
-      &mut MultilinearPolynomial::new(z),
+      &mut poly_z,
       &mut transcript,
     )?;
+    // Recover the allocation from poly_z for reuse across prove calls.
+    let z_buffer = poly_z.Z;
 
     // Reconstruct full r_y and prepend round-0 to inner sumcheck proof
     let mut r_y = Vec::with_capacity(num_rounds_y);
@@ -445,7 +448,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       scratch_az,
       scratch_bz,
       scratch_cz,
-      z_buffer: Vec::new(),
+      z_buffer,
       evals_rx_buffer,
     };
     Ok((
