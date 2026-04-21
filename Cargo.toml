@@ -65,4 +65,4 @@ debug = 1
 lto = "fat"
 
 [patch.crates-io]
-halo2curves = { git = "https://github.com/srinathsetty/halo2curves.git", branch = "asm_256" }
+halo2curves = { git = "https://github.com/srinathsetty/halo2curves.git", rev = "09622e31d34952697080c952a7b5d26fe4a6c76a" }
