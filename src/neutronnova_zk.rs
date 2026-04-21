@@ -431,6 +431,57 @@ where
     (e0, quad)
   }
 
+  /// Parallel fold of A/B layer chunks of size 4. Each chunk folds
+  /// indices [0,1] into [0] and indices [2,3] into [2] using `r_b`.
+  /// The resulting folded vectors are at positions 4j and 4j+2 after this call.
+  /// Use `compact_folded_layers` to move them to 2j and 2j+1.
+  fn par_fold_ab_chunks(a: &mut [Vec<E::Scalar>], b: &mut [Vec<E::Scalar>], r_b: E::Scalar) {
+    a.par_chunks_mut(4)
+      .zip(b.par_chunks_mut(4))
+      .for_each(|(a_chunk, b_chunk)| {
+        {
+          let (lo, hi) = a_chunk.split_at_mut(1);
+          lo[0]
+            .iter_mut()
+            .zip(hi[0].iter())
+            .for_each(|(l, h)| *l += r_b * (*h - *l));
+        }
+        {
+          let (lo, hi) = a_chunk.split_at_mut(3);
+          lo[2]
+            .iter_mut()
+            .zip(hi[0].iter())
+            .for_each(|(l, h)| *l += r_b * (*h - *l));
+        }
+        {
+          let (lo, hi) = b_chunk.split_at_mut(1);
+          lo[0]
+            .iter_mut()
+            .zip(hi[0].iter())
+            .for_each(|(l, h)| *l += r_b * (*h - *l));
+        }
+        {
+          let (lo, hi) = b_chunk.split_at_mut(3);
+          lo[2]
+            .iter_mut()
+            .zip(hi[0].iter())
+            .for_each(|(l, h)| *l += r_b * (*h - *l));
+        }
+      });
+  }
+
+  /// Compact folded results from positions [4j, 4j+2] (for j in 0..prove_pairs)
+  /// down to positions [2j, 2j+1]. Runs serially but only does O(prove_pairs)
+  /// swaps of `Vec` handles (pointer swaps, not data copies).
+  fn compact_folded_layers(a: &mut [Vec<E::Scalar>], b: &mut [Vec<E::Scalar>], prove_pairs: usize) {
+    for j in 0..prove_pairs {
+      a.swap(2 * j, 4 * j);
+      a.swap(2 * j + 1, 4 * j + 2);
+      b.swap(2 * j, 4 * j);
+      b.swap(2 * j + 1, 4 * j + 2);
+    }
+  }
+
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
   /// rounds while interacting with the multi-round verifier circuit/state to derive
   /// per-round challenges via Fiat-Shamir, and populates the verifier circuit's
@@ -481,7 +532,6 @@ where
       Us.extend(vec![Us[0].clone(); n_padded - n]);
       Ws.extend(vec![Ws[0].clone(); n_padded - n]);
     }
-
     for U in Us.iter() {
       transcript.absorb(b"U", U);
     }
@@ -584,6 +634,7 @@ where
       let f = &E_eq[left..];
 
       let mut vals: Vec<E::Scalar> = (0..n_padded)
+        .into_par_iter()
         .map(|b| {
           let c_i64 = &C_i64_layers[b];
           type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
@@ -711,14 +762,13 @@ where
     // Uses small-value integer arithmetic when i64 data is available.
     {
       let pairs = m / 2;
-
       let (e0, quad_coeff) = if has_i64 {
         // Small-value fast path: i64 subtraction + i128 multiplication
         let quad_coeff = A_layers
-          .chunks(2)
-          .zip(B_layers.chunks(2))
-          .zip(A_i64_layers.chunks(2))
-          .zip(B_i64_layers.chunks(2))
+          .par_chunks(2)
+          .zip(B_layers.par_chunks(2))
+          .zip(A_i64_layers.par_chunks(2))
+          .zip(B_i64_layers.par_chunks(2))
           .enumerate()
           .map(|(pair_idx, (((pair_a, pair_b), pair_a_i64), pair_b_i64))| {
             let qc = Self::prove_helper_small(
@@ -737,14 +787,14 @@ where
             let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
             qc * w
           })
-          .fold(E::Scalar::ZERO, |a, b| a + b);
+          .reduce(|| E::Scalar::ZERO, |a, b| a + b);
         (E::Scalar::ZERO, quad_coeff)
       } else {
         // Standard field arithmetic path
         A_layers
-          .chunks(2)
-          .zip(B_layers.chunks(2))
-          .zip(C_layers.chunks(2))
+          .par_chunks(2)
+          .zip(B_layers.par_chunks(2))
+          .zip(C_layers.par_chunks(2))
           .enumerate()
           .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
             let (e0, quad_coeff) = Self::prove_helper(
@@ -760,9 +810,10 @@ where
             let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
             (e0 * w, quad_coeff * w)
           })
-          .fold((E::Scalar::ZERO, E::Scalar::ZERO), |a, b| {
-            (a.0 + b.0, a.1 + b.1)
-          })
+          .reduce(
+            || (E::Scalar::ZERO, E::Scalar::ZERO),
+            |a, b| (a.0 + b.0, a.1 + b.1),
+          )
       };
       let r_b = finish_round!(0, e0, quad_coeff);
 
@@ -800,7 +851,6 @@ where
       for t in 1..ell_b {
         let fold_pairs = m / 2;
         let prove_pairs = fold_pairs / 2;
-
         let mut e0_acc = E::Scalar::ZERO;
         let mut quad_acc = E::Scalar::ZERO;
 
@@ -815,88 +865,154 @@ where
             let c01 = one_minus_r0 * r0;
             let c11 = r0 * r0;
 
-            // Prove from i64 originals (SA accumulation)
-            for j in 0..prove_pairs {
-              let (e0_ab, qc) = Self::prove_helper_ab_cross(
-                (left, right),
-                &E_eq,
-                [
-                  &A_i64_layers[4 * j],
-                  &A_i64_layers[4 * j + 1],
-                  &A_i64_layers[4 * j + 2],
-                  &A_i64_layers[4 * j + 3],
-                ],
-                [
-                  &B_i64_layers[4 * j],
-                  &B_i64_layers[4 * j + 1],
-                  &B_i64_layers[4 * j + 2],
-                  &B_i64_layers[4 * j + 3],
-                ],
-                [
-                  &A_layers[4 * j],
-                  &A_layers[4 * j + 1],
-                  &A_layers[4 * j + 2],
-                  &A_layers[4 * j + 3],
-                ],
-                [
-                  &B_layers[4 * j],
-                  &B_layers[4 * j + 1],
-                  &B_layers[4 * j + 2],
-                  &B_layers[4 * j + 3],
-                ],
-                &c00,
-                &c01,
-                &c11,
-                &r0,
-                large_positions,
+            // Parallel prove (read-only of A_layers / A_i64_layers etc.)
+            let prefix_coeffs_ref = &prefix_coeffs;
+            let c_vals_ref = &c_vals;
+            let e_eq_ref = &E_eq;
+            let rhos_ref = &rhos;
+            let a_layers_ref = &A_layers;
+            let b_layers_ref = &B_layers;
+            let a_i64_ref = &A_i64_layers;
+            let b_i64_ref = &B_i64_layers;
+            let (e0_sum, qc_sum) = (0..prove_pairs)
+              .into_par_iter()
+              .map(|j| {
+                let (e0_ab, qc) = Self::prove_helper_ab_cross(
+                  (left, right),
+                  e_eq_ref,
+                  [
+                    &a_i64_ref[4 * j],
+                    &a_i64_ref[4 * j + 1],
+                    &a_i64_ref[4 * j + 2],
+                    &a_i64_ref[4 * j + 3],
+                  ],
+                  [
+                    &b_i64_ref[4 * j],
+                    &b_i64_ref[4 * j + 1],
+                    &b_i64_ref[4 * j + 2],
+                    &b_i64_ref[4 * j + 3],
+                  ],
+                  [
+                    &a_layers_ref[4 * j],
+                    &a_layers_ref[4 * j + 1],
+                    &a_layers_ref[4 * j + 2],
+                    &a_layers_ref[4 * j + 3],
+                  ],
+                  [
+                    &b_layers_ref[4 * j],
+                    &b_layers_ref[4 * j + 1],
+                    &b_layers_ref[4 * j + 2],
+                    &b_layers_ref[4 * j + 3],
+                  ],
+                  &c00,
+                  &c01,
+                  &c11,
+                  &r0,
+                  large_positions,
+                );
+                let lo_base = (2 * j) * n_prefix;
+                let mut c_val_lo = E::Scalar::ZERO;
+                for v in 0..n_prefix {
+                  c_val_lo += prefix_coeffs_ref[v] * c_vals_ref[lo_base + v];
+                }
+                let e0 = e0_ab - c_val_lo;
+                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
+                (e0 * w, qc * w)
+              })
+              .reduce(
+                || (E::Scalar::ZERO, E::Scalar::ZERO),
+                |a, b| (a.0 + b.0, a.1 + b.1),
               );
+            e0_acc += e0_sum;
+            quad_acc += qc_sum;
 
-              let lo_base = (2 * j) * n_prefix;
-              let mut c_val_lo = E::Scalar::ZERO;
-              for v in 0..n_prefix {
-                c_val_lo += prefix_coeffs[v] * c_vals[lo_base + v];
-              }
-              let e0 = e0_ab - c_val_lo;
-
-              let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, &rhos);
-              e0_acc += e0 * w;
-              quad_acc += qc * w;
+            // Parallel fold of all prove_pairs chunks (field arithmetic)
+            if prove_pairs > 0 {
+              Self::par_fold_ab_chunks(
+                &mut A_layers[..4 * prove_pairs],
+                &mut B_layers[..4 * prove_pairs],
+                prev_r_b,
+              );
+              // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
+              Self::compact_folded_layers(&mut A_layers, &mut B_layers, prove_pairs);
             }
-
-            // Fold all pairs (field arithmetic, needed for subsequent rounds)
-            for j in 0..prove_pairs {
-              fold_ab_pair!(4 * j, 4 * j + 1, 2 * j, prev_r_b);
-              fold_ab_pair!(4 * j + 2, 4 * j + 3, 2 * j + 1, prev_r_b);
-            }
+            // Tail fold (for odd fold_pairs / non-power-of-two cases)
             for i in (2 * prove_pairs)..fold_pairs {
               fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
             }
           } else {
-            // Rounds 2+: standard merged fold + prove from field data
-            for j in 0..prove_pairs {
-              fold_ab_pair!(4 * j, 4 * j + 1, 2 * j, prev_r_b);
-              fold_ab_pair!(4 * j + 2, 4 * j + 3, 2 * j + 1, prev_r_b);
+            // Rounds 2+: merged parallel fold + prove from field data
+            let prefix_coeffs_ref = &prefix_coeffs;
+            let c_vals_ref = &c_vals;
+            let e_eq_ref = &E_eq;
+            let rhos_ref = &rhos;
 
-              let (e0_ab, qc) = Self::prove_helper_ab_only(
-                (left, right),
-                &E_eq,
-                &A_layers[2 * j],
-                &B_layers[2 * j],
-                &A_layers[2 * j + 1],
-                &B_layers[2 * j + 1],
+            let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
+            let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
+
+            let (e0_sum, qc_sum) = a_head
+              .par_chunks_mut(4)
+              .zip(b_head.par_chunks_mut(4))
+              .enumerate()
+              .map(|(j, (a_chunk, b_chunk))| {
+                // Fold a_chunk[0] += r * (a_chunk[1] - a_chunk[0])
+                {
+                  let (lo, hi) = a_chunk.split_at_mut(1);
+                  lo[0]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                // Fold a_chunk[2] += r * (a_chunk[3] - a_chunk[2])
+                {
+                  let (lo, hi) = a_chunk.split_at_mut(3);
+                  lo[2]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                // Fold b_chunk[0] and b_chunk[2] similarly
+                {
+                  let (lo, hi) = b_chunk.split_at_mut(1);
+                  lo[0]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                {
+                  let (lo, hi) = b_chunk.split_at_mut(3);
+                  lo[2]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                // Prove from folded positions [0] and [2]
+                let (e0_ab, qc) = Self::prove_helper_ab_only(
+                  (left, right),
+                  e_eq_ref,
+                  &a_chunk[0],
+                  &b_chunk[0],
+                  &a_chunk[2],
+                  &b_chunk[2],
+                );
+                let lo_base = (2 * j) * n_prefix;
+                let mut c_val_lo = E::Scalar::ZERO;
+                for v in 0..n_prefix {
+                  c_val_lo += prefix_coeffs_ref[v] * c_vals_ref[lo_base + v];
+                }
+                let e0 = e0_ab - c_val_lo;
+                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
+                (e0 * w, qc * w)
+              })
+              .reduce(
+                || (E::Scalar::ZERO, E::Scalar::ZERO),
+                |a, b| (a.0 + b.0, a.1 + b.1),
               );
+            e0_acc += e0_sum;
+            quad_acc += qc_sum;
 
-              let lo_base = (2 * j) * n_prefix;
-              let mut c_val_lo = E::Scalar::ZERO;
-              for v in 0..n_prefix {
-                c_val_lo += prefix_coeffs[v] * c_vals[lo_base + v];
-              }
-              let e0 = e0_ab - c_val_lo;
-
-              let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, &rhos);
-              e0_acc += e0 * w;
-              quad_acc += qc * w;
-            }
+            // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
+            Self::compact_folded_layers(&mut A_layers, &mut B_layers, prove_pairs);
 
             for i in (2 * prove_pairs)..fold_pairs {
               fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
@@ -933,7 +1049,6 @@ where
           C_layers.truncate(fold_pairs);
         }
         m = fold_pairs;
-
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
 
         // Extend prefix_coeffs: each c splits into c*(1-r_t) and c*r_t
@@ -956,11 +1071,40 @@ where
 
       // Final fold: fold remaining A/B layers
       let final_pairs = m / 2;
-      for i in 0..final_pairs {
-        if has_i64 {
-          fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-        } else {
-          fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
+      if has_i64 && final_pairs > 0 {
+        // Parallel fold over pairs (2*final_pairs elements → final_pairs elements)
+        A_layers[..2 * final_pairs]
+          .par_chunks_mut(2)
+          .zip(B_layers[..2 * final_pairs].par_chunks_mut(2))
+          .for_each(|(a_chunk, b_chunk)| {
+            {
+              let (lo, hi) = a_chunk.split_at_mut(1);
+              lo[0]
+                .iter_mut()
+                .zip(hi[0].iter())
+                .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+            }
+            {
+              let (lo, hi) = b_chunk.split_at_mut(1);
+              lo[0]
+                .iter_mut()
+                .zip(hi[0].iter())
+                .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+            }
+          });
+        // After parallel fold, folded results are at positions 2i (i in 0..final_pairs).
+        // Compact to positions [0..final_pairs].
+        for i in 0..final_pairs {
+          A_layers.swap(i, 2 * i);
+          B_layers.swap(i, 2 * i);
+        }
+      } else {
+        for i in 0..final_pairs {
+          if has_i64 {
+            fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
+          } else {
+            fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
+          }
         }
       }
       A_layers.truncate(final_pairs);
@@ -974,18 +1118,21 @@ where
     if has_i64 {
       let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
       let total = left * right;
-      let mut cz_step = vec![E::Scalar::ZERO; total];
 
       // Precompute weight limbs to avoid repeated to_limbs() calls
       let weight_limbs: Vec<&[u64; 4]> = final_weights.iter().map(|w| w.to_limbs()).collect();
 
-      for k in 0..total {
-        let mut sa = SmallAccumulator::zero();
-        for b in 0..n_padded {
-          sa.accumulate(weight_limbs[b], C_i64_layers[b][k] as i128);
-        }
-        cz_step[k] = sa.reduce::<E::Scalar>();
-      }
+      // Parallel across k: for each k, accumulate across all b serially.
+      let mut cz_step: Vec<E::Scalar> = (0..total)
+        .into_par_iter()
+        .map(|k| {
+          let mut sa = SmallAccumulator::zero();
+          for b in 0..n_padded {
+            sa.accumulate(weight_limbs[b], C_i64_layers[b][k] as i128);
+          }
+          sa.reduce::<E::Scalar>()
+        })
+        .collect();
 
       // Correct large positions with field arithmetic
       if !large_positions.is_empty() {
@@ -1520,8 +1667,16 @@ where
     // so that a subsequent `prove` call on the same prep state reuses them
     // (production reuse scenario). large_positions is also kept intact via `&`.
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let cached_matvec = prep_snark.cached_step_matvec.clone();
-    let cached_i64 = prep_snark.cached_step_i64.clone();
+    // Parallel clone: each inner triple (Vec, Vec, Vec) of size num_cons is
+    // large enough that serial clone becomes a bottleneck at many instances.
+    let cached_matvec = prep_snark
+      .cached_step_matvec
+      .as_ref()
+      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
+    let cached_i64 = prep_snark
+      .cached_step_i64
+      .as_ref()
+      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
       &pk.S_step,
       &pk.ck,
