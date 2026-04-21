@@ -62,14 +62,31 @@ impl<'a, T: Digestible> DigestComputer<'a, T> {
 
   /// Compute the digest of a `Digestible` instance.
   pub fn digest(&self) -> Result<SpartanDigest, io::Error> {
-    // Serialize to buffer first, then hash in one pass.
-    // This is faster than streaming through the hasher because SHA-256
-    // processes large contiguous blocks more efficiently.
-    let mut buf = Vec::with_capacity(128 * 1024 * 1024);
-    self.inner.write_bytes(&mut buf)?;
-    let mut hasher = Self::hasher();
-    hasher.update(&buf);
+    // Stream bytes directly into the hasher via a small buffered adapter.
+    // A 64 KiB buffer is large enough to amortize per-call overhead from
+    // bincode while avoiding the large upfront allocation that a
+    // serialize-then-hash approach would require for big objects.
+    let mut writer = io::BufWriter::with_capacity(64 * 1024, HashWriter(Self::hasher()));
+    self.inner.write_bytes(&mut writer)?;
+    let hasher = writer
+      .into_inner()
+      .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+      .0;
     Ok(hasher.finalize().into())
+  }
+}
+
+/// Adapter that forwards `io::Write` calls into a SHA-256 hasher.
+struct HashWriter(Sha256);
+
+impl io::Write for HashWriter {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    self.0.update(buf);
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    Ok(())
   }
 }
 
