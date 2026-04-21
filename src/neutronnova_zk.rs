@@ -1514,11 +1514,14 @@ where
     );
     let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
-    // Perform ZK NIFS prove and collect outputs
+    // Perform ZK NIFS prove and collect outputs.
+    // Clone caches (matvec/i64) before passing to NIFS, which consumes them.
+    // This keeps `prep_snark.cached_step_matvec` / `cached_step_i64` populated
+    // so that a subsequent `prove` call on the same prep state reuses them
+    // (production reuse scenario). large_positions is also kept intact via `&`.
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let cached_matvec = prep_snark.cached_step_matvec.take();
-    let cached_i64 = prep_snark.cached_step_i64.take();
-    let large_positions = std::mem::take(&mut prep_snark.large_positions);
+    let cached_matvec = prep_snark.cached_step_matvec.clone();
+    let cached_i64 = prep_snark.cached_step_i64.clone();
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
       &pk.S_step,
       &pk.ck,
@@ -1526,7 +1529,7 @@ where
       step_witnesses,
       cached_matvec,
       cached_i64,
-      &large_positions,
+      &prep_snark.large_positions,
       &mut vc,
       &mut vc_state,
       &pk.vc_shape,
@@ -1535,8 +1538,6 @@ where
     )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
-    // Restore large_positions for potential re-use
-    prep_snark.large_positions = large_positions;
     let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
     let (_ell, left, _right) = compute_tensor_decomp(pk.S_step.num_cons);
     let mut E1 = E_eq;
