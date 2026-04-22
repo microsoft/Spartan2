@@ -3,14 +3,19 @@
 
 //! Macros and const fn helpers for implementing field traits.
 //!
-//! This module provides:
-//! - `impl_field_reduction_constants!` - implements `FieldReductionConstants` for a field type
-//! - `impl_montgomery_limbs!` - implements `MontgomeryLimbs` for a field type
+//! This module provides macros for implementing various field-related traits:
+//!
+//! ## Reduction Constants
+//! - [`impl_field_reduction_constants!`] - Montgomery REDC constants (all fields)
+//! - [`impl_barrett_reduction_constants!`] - Generic Barrett constants (all fields)
+//!
+//! ## Limb Access
+//! - [`impl_montgomery_limbs!`] - Montgomery limb access (all fields)
 //!
 //! All constants are computed at compile time from the field's `PrimeField::MODULUS`
 //! and `Field::ONE` values.
 
-use super::limbs::{gte_5_4, mul_4_by_4, reduce_8_mod_4, sub_5_4};
+use super::limbs::{clz, gte, gte_5_4, mul_4_by_4, reduce_8_mod_4, shl, shr, sub, sub_5_4};
 
 // =============================================================================
 // Implementation macros
@@ -46,6 +51,29 @@ macro_rules! impl_field_reduction_constants {
       <$field as $crate::big_num::FieldReductionConstants>::MAX_REDC_SUB_CORRECTIONS <= 8,
       "MAX_REDC_SUB_CORRECTIONS too large for efficient reduction"
     );
+  };
+}
+
+/// Implement `BarrettReductionConstants` for a field type.
+///
+/// This macro computes generic μ-Barrett constants at compile time.
+///
+/// # Example
+/// ```ignore
+/// crate::impl_barrett_reduction_constants!(Bn254Fr);
+/// ```
+#[macro_export]
+macro_rules! impl_barrett_reduction_constants {
+  ($field:ty) => {
+    impl $crate::big_num::BarrettReductionConstants for $field {
+      const MODULUS: [u64; 4] =
+        $crate::big_num::macros::parse_hex_to_limbs(<$field as ff::PrimeField>::MODULUS);
+      const R384_MOD: [u64; 4] =
+        $crate::big_num::macros::compute_r384_mod(Self::MODULUS, <$field as ff::Field>::ONE.0);
+      const BARRETT_MU: [u64; 5] = $crate::big_num::macros::compute_barrett_mu(Self::MODULUS);
+      const BARRETT_REMAINDER_WIDTH: $crate::big_num::BarrettRemainderWidth =
+        $crate::big_num::macros::barrett_remainder_width(Self::MODULUS);
+    }
   };
 }
 
@@ -189,4 +217,111 @@ pub const fn compute_r512_mod(p: [u64; 4], r_mod: [u64; 4]) -> [u64; 4] {
   // R512_MOD = R_MOD * R_MOD mod p = (2^256 mod p)² mod p = 2^512 mod p
   let r_squared = mul_4_by_4(&r_mod, &r_mod);
   reduce_8_mod_4(&r_squared, &p)
+}
+
+// =============================================================================
+// Barrett reduction const fn helpers
+// =============================================================================
+
+/// Compute 2^384 mod p.
+///
+/// This computes R384_MOD = 2^384 mod p by multiplying R_MOD (2^256 mod p) by
+/// 2^128 and then reducing.
+pub const fn compute_r384_mod(p: [u64; 4], r_mod: [u64; 4]) -> [u64; 4] {
+  // 2^384 = 2^256 * 2^128
+  // R384_MOD = (R_MOD * 2^128) mod p
+  // 2^128 as 4 limbs: [0, 0, 1, 0]
+  let two_128 = [0u64, 0, 1, 0];
+  let product = mul_4_by_4(&r_mod, &two_128);
+  reduce_8_mod_4(&product, &p)
+}
+
+/// Compute Barrett reciprocal μ = ⌊2^512 / p⌋ at compile time.
+///
+/// For a 256-bit prime p, μ fits in 5 limbs (up to 320 bits).
+/// Uses binary long division - O(n²) in bits but only runs at compile time.
+pub const fn compute_barrett_mu(p: [u64; 4]) -> [u64; 5] {
+  // 2^512 as 9 limbs: limb[8] = 1, rest = 0
+  let mut dividend: [u64; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+  // Extend p to 9 limbs
+  let divisor: [u64; 9] = [p[0], p[1], p[2], p[3], 0, 0, 0, 0, 0];
+
+  // Quotient accumulator (5 limbs = 320 bits, enough for 2^512 / 2^254 ≈ 2^258)
+  let mut quotient: [u64; 5] = [0; 5];
+
+  // Find alignment: how many bits to shift divisor left
+  let dividend_clz = clz::<9>(&dividend);
+  let divisor_clz = clz::<9>(&divisor);
+
+  if divisor_clz <= dividend_clz {
+    // Divisor already larger than dividend (shouldn't happen for valid primes)
+    return quotient;
+  }
+
+  let shift_bits = divisor_clz - dividend_clz;
+
+  // Shift divisor left to align with dividend.
+  // Batch by whole limbs (64 bits each), then remaining bits.
+  let mut shifted_divisor = divisor;
+  let whole_limbs = (shift_bits / 64) as usize;
+  let rem_bits = shift_bits % 64;
+
+  // Shift by whole limbs (move elements up)
+  if whole_limbs > 0 {
+    let mut i = 8;
+    while i >= whole_limbs {
+      shifted_divisor[i] = shifted_divisor[i - whole_limbs];
+      i -= 1;
+    }
+    // Zero out the vacated low limbs (i is now whole_limbs - 1)
+    let mut j = 0;
+    while j < whole_limbs {
+      shifted_divisor[j] = 0;
+      j += 1;
+    }
+  }
+
+  // Shift remaining bits one at a time
+  let mut i = 0;
+  while i < rem_bits {
+    shifted_divisor = shl::<9>(&shifted_divisor);
+    i += 1;
+  }
+
+  // Binary long division: shift_bits + 1 iterations
+  let mut bit_pos = shift_bits;
+  loop {
+    if gte::<9>(&dividend, &shifted_divisor) {
+      dividend = sub::<9>(&dividend, &shifted_divisor);
+      // Set bit `bit_pos` in quotient
+      let limb_idx = (bit_pos / 64) as usize;
+      let bit_idx = bit_pos % 64;
+      if limb_idx < 5 {
+        quotient[limb_idx] |= 1u64 << bit_idx;
+      }
+    }
+
+    if bit_pos == 0 {
+      break;
+    }
+    bit_pos -= 1;
+
+    // Shift divisor right by 1
+    shifted_divisor = shr::<9>(&shifted_divisor);
+  }
+
+  quotient
+}
+
+/// Choose the Barrett remainder-path width for a 4-limb modulus.
+pub const fn barrett_remainder_width(
+  p: [u64; 4],
+) -> crate::big_num::field_reduction_constants::BarrettRemainderWidth {
+  // 2p < 2^256 iff p < 2^255 iff the MSB of p is 0
+  if p[3] < 0x8000_0000_0000_0000 {
+    crate::big_num::field_reduction_constants::BarrettRemainderWidth::FourLimbs
+  } else {
+    crate::big_num::field_reduction_constants::BarrettRemainderWidth::FiveLimbs
+  }
 }

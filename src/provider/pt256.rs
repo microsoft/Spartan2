@@ -59,8 +59,11 @@ impl_traits!(
 // Implement big_num traits for P256/T256 scalar fields
 crate::impl_field_reduction_constants!(p256::Scalar);
 crate::impl_montgomery_limbs!(p256::Scalar);
+crate::impl_barrett_reduction_constants!(p256::Scalar);
+
 crate::impl_field_reduction_constants!(t256::Scalar);
 crate::impl_montgomery_limbs!(t256::Scalar);
+crate::impl_barrett_reduction_constants!(t256::Scalar);
 
 impl<G: Group> TranscriptReprTrait<G> for t256::Base {
   fn to_transcript_bytes(&self) -> Vec<u8> {
@@ -70,12 +73,31 @@ impl<G: Group> TranscriptReprTrait<G> for t256::Base {
 
 #[cfg(test)]
 mod big_num_tests {
+  // P256 tests
   crate::test_field_reduction_constants!(p256_frc, crate::provider::pt256::p256::Scalar);
   crate::test_montgomery!(p256_mont, crate::provider::pt256::p256::Scalar);
   crate::test_delayed_reduction!(p256_dr, crate::provider::pt256::p256::Scalar);
+  crate::test_barrett_reduction_constants!(p256_brc, crate::provider::pt256::p256::Scalar);
+  crate::test_barrett_reduction!(
+    p256_br,
+    crate::provider::pt256::p256::Scalar,
+    crate::big_num::barrett::barrett_reduce_6::<crate::provider::pt256::p256::Scalar>
+  );
+  crate::test_barrett_reduction_7!(p256_br7, crate::provider::pt256::p256::Scalar);
+  crate::test_delayed_reduction_small!(p256_dr_small, crate::provider::pt256::p256::Scalar);
+  crate::test_small_value_field!(p256_svf, crate::provider::pt256::p256::Scalar);
+
+  // T256 tests
   crate::test_field_reduction_constants!(t256_frc, crate::provider::pt256::t256::Scalar);
   crate::test_montgomery!(t256_mont, crate::provider::pt256::t256::Scalar);
   crate::test_delayed_reduction!(t256_dr, crate::provider::pt256::t256::Scalar);
-  crate::test_small_value!(t256_sv, crate::provider::pt256::t256::Scalar);
-  crate::test_small_value!(p256_sv, crate::provider::pt256::p256::Scalar);
+  crate::test_barrett_reduction_constants!(t256_brc, crate::provider::pt256::t256::Scalar);
+  crate::test_barrett_reduction!(
+    t256_br,
+    crate::provider::pt256::t256::Scalar,
+    crate::big_num::barrett::barrett_reduce_6::<crate::provider::pt256::t256::Scalar>
+  );
+  crate::test_barrett_reduction_7!(t256_br7, crate::provider::pt256::t256::Scalar);
+  crate::test_delayed_reduction_small!(t256_dr_small, crate::provider::pt256::t256::Scalar);
+  crate::test_small_value_field!(t256_svf, crate::provider::pt256::t256::Scalar);
 }
