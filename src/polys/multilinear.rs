@@ -175,6 +175,7 @@ impl<T: Field> MultilinearPolynomial<T> {
   }
 
   /// Binds the polynomial's top variables using the given scalars.
+  #[allow(dead_code)]
   pub fn bind_with(poly: &[T], L: &[T], r_len: usize) -> Vec<T> {
     assert_eq!(
       poly.len(),

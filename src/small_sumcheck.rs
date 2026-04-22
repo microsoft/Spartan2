@@ -128,7 +128,7 @@ where
   // Internally computes eq tables with balanced split and precomputed eq_cache.
   // Uses: small × small → intermediate (for Az·Bz products),
   // then intermediate × field (for eq weighting via DelayedReduction).
-  let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
+  let (accumulators, _e_in_pyramid, _e_xout_pyramid) =
     build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
 
   let mut small_value_sumcheck =
@@ -197,38 +197,20 @@ where
   );
 
   // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
-  let mut eq_instance = if transition_round == l0 {
-    // Pop the top layer from e_in_pyramid. The top layer was used by the accumulator;
-    // EqSumCheckInstance needs the remaining layers (without the first suffix tau τ[l₀]).
-    // This matches the Nova optimization where τ[l₀] is tracked in eval_eq_left.
-    e_in_pyramid.pop();
+  let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
+    &taus[transition_round..],
+    small_value_sumcheck.eq_alpha(),
+  );
 
-    // Reuse the precomputed eq pyramids when all planned small-value rounds succeeded.
-    eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
-      e_in_pyramid,
-      e_xout_pyramid,
-      &taus[l0..],
-      small_value_sumcheck.eq_alpha(),
-    )
-  } else {
-    eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
-      &taus[transition_round..],
-      small_value_sumcheck.eq_alpha(),
-    )
-  };
-
-  // Continue with the remaining rounds using the eq instance built from pyramids.
-  // The eq_instance was created with taus[l0..], so its internal round counter tracks
-  // local rounds. We pass global round index for the round_idx parameter since
-  // eval_one_case_cubic_three_inputs uses it for a round-0 optimization.
+  // Continue with the remaining rounds using the standard eq instance seeded with the
+  // accumulated prefix eq factor from the small-value rounds.
   for round in transition_round..num_rounds {
     let (_round_span, round_t) = start_span!("sumcheck_round", round = round);
 
     let poly = {
       let (_eval_span, eval_t) = start_span!("compute_eval_points");
-      // Pass global round index for round_idx since it's used for the round-0 optimization
-      let (eval_point_0, eval_point_2, eval_point_3) =
-        eq_instance.evaluation_points_cubic_with_three_inputs(round, &poly_A, &poly_B, &poly_C);
+      let (eval_point_0, eval_point_2, eval_point_3) = eq_instance
+        .evaluation_points_cubic_with_three_inputs(&poly_A, &poly_B, &poly_C, claim_per_round);
       if eval_t.elapsed().as_millis() > 0 {
         info!(elapsed_ms = %eval_t.elapsed().as_millis(), "compute_eval_points");
       }
@@ -573,8 +555,8 @@ mod tests {
 
     for (round, &tau_round) in taus.iter().enumerate().take(SMALL_VALUE_ROUNDS) {
       // Get expected evaluations from standard method
-      let (expected_eval_0, expected_eval_2, expected_eval_3) =
-        eq_instance.evaluation_points_cubic_with_three_inputs(round, &poly_A, &poly_B, &poly_C);
+      let (expected_eval_0, expected_eval_2, expected_eval_3) = eq_instance
+        .evaluation_points_cubic_with_three_inputs(&poly_A, &poly_B, &poly_C, claim);
       let expected_eval_1 = claim - expected_eval_0; // s(0) + s(1) = claim
 
       // Build small-value polynomial
