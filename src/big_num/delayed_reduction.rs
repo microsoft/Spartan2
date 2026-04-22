@@ -19,7 +19,7 @@
 use super::{
   BarrettReductionConstants, SignedWideLimbs, SubMagResult,
   barrett::{barrett_reduce_6, barrett_reduce_7},
-  limbs::{WideLimbs, mac, mul_4_by_4},
+  limbs::{WideLimbs, mac, mul_acc_4_by_4},
   montgomery::{MontgomeryLimbs, montgomery_reduce_9},
   sub_mag,
 };
@@ -163,28 +163,7 @@ pub(crate) fn accumulate_field_times_field<F: MontgomeryLimbs + Copy>(
   field_a: &F,
   field_b: &F,
 ) {
-  // Compute field_a × field_b as 8 limbs and add to accumulator
-  let product = mul_4_by_4(field_a.to_limbs(), field_b.to_limbs());
-  let mut carry = 0u128;
-  for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
-    let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
-    *acc_limb = sum as u64;
-    carry = sum >> 64;
-  }
-
-  // Accumulate carry into the 9th limb. Overflow here means we've exceeded
-  // the accumulator's capacity (~2^64 products) - this should never happen
-  // in valid usage since sumcheck polynomials are bounded by practical sizes.
-  let old_limb8 = acc.0[8];
-  acc.0[8] = acc.0[8].wrapping_add(carry as u64);
-  debug_assert!(
-    acc.0[8] >= old_limb8,
-    "DelayedReduction accumulator overflow: limb 8 wrapped from {} to {} (carry={}). \
-     Too many products accumulated without reduction.",
-    old_limb8,
-    acc.0[8],
-    carry
-  );
+  mul_acc_4_by_4(&mut acc.0, field_a.to_limbs(), field_b.to_limbs());
 }
 
 #[inline(always)]

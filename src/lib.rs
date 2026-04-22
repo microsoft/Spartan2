@@ -19,7 +19,7 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 // private modules
 mod digest;
@@ -45,6 +45,7 @@ mod sumcheck;
 // public modules for proof systems
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
+pub mod spartan_relaxed; // Spartan for relaxed R1CS (non-ZK)
 pub mod spartan_zk; // Spartan with zero-knowledge
 
 /// Start a span + timer, return `(Span, Instant)`.
@@ -58,12 +59,8 @@ macro_rules! start_span {
 }
 pub(crate) use start_span;
 
-/// The width used for per-round commitments in the multiround protocol.
-/// This affects the commitment scheme structure and padding calculations.
-pub(crate) const MULTIROUND_COMMITMENT_WIDTH: usize = 4;
-
 // The default width used for monolithic commitments.
-pub(crate) const DEFAULT_COMMITMENT_WIDTH: usize = 1024;
+pub(crate) const DEFAULT_COMMITMENT_WIDTH: usize = 2048;
 
 use traits::{Engine, pcs::PCSEngineTrait};
 type CommitmentKey<E> = <<E as traits::Engine>::PCS as PCSEngineTrait<E>>::CommitmentKey;

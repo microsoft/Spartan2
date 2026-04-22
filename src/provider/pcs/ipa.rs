@@ -15,17 +15,15 @@ use crate::{
 };
 use core::fmt::Debug;
 use ff::Field;
-use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// computes the inner product of two vectors in parallel.
+/// computes the inner product of two vectors.
 pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
   assert_eq!(a.len(), b.len());
-  (0..a.len())
-    .into_par_iter()
-    .map(|i| a[i] * b[i])
-    .reduce(|| T::ZERO, |x, y| x + y)
+  a.iter()
+    .zip(b.iter())
+    .fold(T::ZERO, |acc, (ai, bi)| acc + *ai * *bi)
 }
 
 /// An inner product instance consists of a commitment to a vector `a` and another vector `b`
@@ -138,12 +136,13 @@ where
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
 
-    // produce randomness for the proofs
+    // produce randomness for the proofs using fast CSPRNG
+    let mut rng = rand::thread_rng();
     let d_vec = (0..U.b_vec.len())
-      .map(|_| E::Scalar::random(&mut OsRng))
+      .map(|_| E::Scalar::random(&mut rng))
       .collect::<Vec<E::Scalar>>();
-    let r_delta = E::Scalar::random(&mut OsRng);
-    let r_beta = E::Scalar::random(&mut OsRng);
+    let r_delta = E::Scalar::random(&mut rng);
+    let r_beta = E::Scalar::random(&mut rng);
 
     let delta = E::GE::vartime_multiscalar_mul(&d_vec, &ck[0..d_vec.len()], true)? + *h * r_delta;
     let beta = E::GE::group(ck_c) * inner_product(&U.b_vec, &d_vec) + *h_c * r_beta;

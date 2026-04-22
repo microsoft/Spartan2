@@ -36,13 +36,15 @@ pub trait R1CSSNARKTrait<E: Engine>:
     is_small: bool, // do witness elements fit in machine words?
   ) -> Result<Self::PrepSNARK, SpartanError>;
 
-  /// Produces witness and instance for a given circuit, and proves it
+  /// Produces witness and instance for a given circuit, and proves it.
+  /// Takes ownership of the prep state and returns it alongside the proof
+  /// so it can be rerandomized and reused for subsequent proofs.
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
-    prep_snark: &Self::PrepSNARK,
+    prep_snark: Self::PrepSNARK,
     is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<Self, SpartanError>;
+  ) -> Result<(Self, Self::PrepSNARK), SpartanError>;
 
   /// Verifies a SNARK for a relaxed R1CS and returns the public IO
   fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError>;

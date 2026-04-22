@@ -5,15 +5,15 @@
 // Source repository: https://github.com/Microsoft/Spartan2
 
 //! Support for generating R1CS using bellpepper.
+use crate::start_span;
 use crate::{
-  Blind, Commitment, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH, PCS, VerifierKey,
+  Blind, Commitment, CommitmentKey, PCS, VerifierKey,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
   r1cs::{
     R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
     SplitR1CSInstance, SplitR1CSShape,
   },
-  start_span,
   traits::{
     Engine,
     circuit::{MultiRoundCircuit, SpartanCircuit},
@@ -290,14 +290,14 @@ pub(crate) fn add_constraint<S: PrimeField>(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct PrecommittedState<E: Engine> {
-  cs: SatisfyingAssignment<E>,
-  shared: Vec<AllocatedNum<E::Scalar>>,
-  precommitted: Vec<AllocatedNum<E::Scalar>>,
+  pub(crate) cs: SatisfyingAssignment<E>,
+  pub(crate) shared: Vec<AllocatedNum<E::Scalar>>,
+  pub(crate) precommitted: Vec<AllocatedNum<E::Scalar>>,
   pub(crate) comm_W_shared: Option<Commitment<E>>,
   pub(crate) r_W_shared: Option<Blind<E>>,
-  comm_W_precommitted: Option<Commitment<E>>,
-  r_W_precommitted: Option<Blind<E>>,
-  W: Vec<E::Scalar>,
+  pub(crate) comm_W_precommitted: Option<Commitment<E>>,
+  pub(crate) r_W_precommitted: Option<Blind<E>>,
+  pub(crate) W: Vec<E::Scalar>,
 }
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
@@ -430,32 +430,75 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       .map(|_| transcript.squeeze(b"challenge"))
       .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
 
-    circuit
-      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
-      .map_err(|e| SpartanError::SynthesisError {
-        reason: format!("Unable to synthesize witness: {e}"),
-      })?;
+    // Fast path: skip circuit synthesis when there are no rest witness variables to compute
+    // and no verifier challenges to process. In this case, the witness W is already fully
+    // populated from the prep phase (shared + precommitted sections), and the rest section
+    // is all zeros (padding only). Public values come directly from circuit.public_values()
+    // rather than from cs.input_assignment, since synthesize is not called.
+    //
+    // Safety invariants:
+    //   1. num_rest_unpadded == 0 ==> no aux variables are allocated during synthesize
+    //   2. challenges.is_empty() ==> no challenge-dependent computation is needed
+    //   3. circuit.public_values() must return the same values that synthesize would inputize
+    let skip_synthesize = S.num_rest_unpadded == 0 && challenges.is_empty();
+    if !skip_synthesize {
+      // Reset cs to prep-state size before re-synthesis so aux_assignment indices are correct
+      // (without this, 2nd+ prove calls accumulate stale entries)
+      let prep_aux_len = S.num_shared_unpadded + S.num_precommitted_unpadded;
+      ps.cs.aux_assignment.truncate(prep_aux_len);
+      ps.cs.input_assignment.truncate(1);
 
-    ps.W
-      [S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
-      .copy_from_slice(
-        &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
-          ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
-      );
+      circuit
+        .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to synthesize witness: {e}"),
+        })?;
 
-    // commit to the rest with partial commitment
+      ps.W[S.num_shared + S.num_precommitted
+        ..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+        .copy_from_slice(
+          &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+            ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+        );
+    }
+
+    // commit to the rest with partial commitment.
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
-    let comm_W_rest = PCS::<E>::commit(
-      ck,
-      &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
-      &r_W_rest,
-      is_small,
-    )?;
+    let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
+      // Fast path: rest is entirely zero-padding, skip MSM and auto-detect
+      (PCS::<E>::commit_zeros(ck, S.num_rest, &r_W_rest)?, true)
+    } else if is_small {
+      let rest_slice =
+        &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
+      (PCS::<E>::commit(ck, rest_slice, &r_W_rest, true)?, true)
+    } else {
+      // Only check non-zero portion for small-value detection (zero padding is trivially small)
+      let rest_nz = &ps.W[S.num_shared + S.num_precommitted
+        ..S.num_shared + S.num_precommitted + S.num_rest_unpadded];
+      let detected_small = rest_nz.iter().all(|s| {
+        let bytes = s.to_repr();
+        bytes.as_ref()[8..].iter().all(|&b| b == 0)
+      });
+      let rest_slice =
+        &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
+      (
+        PCS::<E>::commit(ck, rest_slice, &r_W_rest, detected_small)?,
+        detected_small,
+      )
+    };
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
-    transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
+    transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
-    let public_values = ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec();
+    let public_values = if skip_synthesize {
+      circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Circuit does not provide public IO: {e}"),
+        })?
+    } else {
+      ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec()
+    };
     let U = SplitR1CSInstance::<E>::new(
       S,
       ps.comm_W_shared.clone(),
@@ -476,7 +519,17 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
 
     let r_W = PCS::<E>::combine_blinds(&blinds)?;
 
-    let W = R1CSWitness::<E>::new_unchecked(ps.W.clone(), r_W, is_small)?;
+    // Move W into witness; repopulate ps.W from shared+precommitted (which don't change).
+    // Rest portion will be re-copied from cs.aux_assignment on next call.
+    let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
+    let w_vec = std::mem::replace(&mut ps.W, vec![E::Scalar::ZERO; num_vars]);
+    ps.W[..S.num_shared_unpadded].copy_from_slice(&ps.cs.aux_assignment[..S.num_shared_unpadded]);
+    ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
+      &ps.cs.aux_assignment
+        [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
+    );
+
+    let W = R1CSWitness::<E>::new_unchecked(w_vec, r_W, actual_is_small)?;
 
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
@@ -489,38 +542,9 @@ impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
   where
     Self: Sized,
   {
-    // generate new blinds for shared and precommitted commitments and rerandomize commitments
-    let (comm_W_shared_new, r_W_shared_new) =
-      if let (Some(comm), Some(r_old)) = (&self.comm_W_shared, &self.r_W_shared) {
-        let r_new = PCS::<E>::blind(ck, S.num_shared);
-        (
-          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
-          Some(r_new),
-        )
-      } else {
-        (None, None)
-      };
-    let (comm_W_precommitted_new, r_W_precommitted_new) =
-      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
-        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
-        (
-          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
-          Some(r_new),
-        )
-      } else {
-        (None, None)
-      };
-
-    Ok(PrecommittedState {
-      cs: self.cs.clone(),
-      shared: self.shared.clone(),
-      precommitted: self.precommitted.clone(),
-      comm_W_shared: comm_W_shared_new,
-      r_W_shared: r_W_shared_new,
-      comm_W_precommitted: comm_W_precommitted_new,
-      r_W_precommitted: r_W_precommitted_new,
-      W: self.W.clone(),
-    })
+    let mut result = self.clone();
+    result.rerandomize_in_place(ck, S)?;
+    Ok(result)
   }
 
   fn rerandomize_with_shared(
@@ -533,28 +557,48 @@ impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
   where
     Self: Sized,
   {
-    // generate new blinds for precommitted commitments and rerandomize commitments
-    let (comm_W_precommitted_new, r_W_precommitted_new) =
-      if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
-        let r_new = PCS::<E>::blind(ck, S.num_precommitted);
-        (
-          Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?),
-          Some(r_new),
-        )
-      } else {
-        (None, None)
-      };
+    let mut result = self.clone();
+    result.rerandomize_with_shared_in_place(ck, S, comm_W_shared, r_W_shared)?;
+    Ok(result)
+  }
+}
 
-    Ok(PrecommittedState {
-      cs: self.cs.clone(),
-      shared: self.shared.clone(),
-      precommitted: self.precommitted.clone(),
-      comm_W_shared: comm_W_shared.clone(),
-      r_W_shared: r_W_shared.clone(),
-      comm_W_precommitted: comm_W_precommitted_new,
-      r_W_precommitted: r_W_precommitted_new,
-      W: self.W.clone(),
-    })
+impl<E: Engine> PrecommittedState<E> {
+  /// Rerandomize in-place, avoiding a full struct clone when we already own the data.
+  pub fn rerandomize_in_place(
+    &mut self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+  ) -> Result<(), SpartanError> {
+    if let (Some(comm), Some(r_old)) = (&self.comm_W_shared, &self.r_W_shared) {
+      let r_new = PCS::<E>::blind(ck, S.num_shared);
+      self.comm_W_shared = Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
+      self.r_W_shared = Some(r_new);
+    }
+    if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+      let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+      self.comm_W_precommitted = Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
+      self.r_W_precommitted = Some(r_new);
+    }
+    Ok(())
+  }
+
+  /// Rerandomize in-place, reusing shared commitments from another state.
+  pub fn rerandomize_with_shared_in_place(
+    &mut self,
+    ck: &CommitmentKey<E>,
+    S: &SplitR1CSShape<E>,
+    comm_W_shared: &Option<Commitment<E>>,
+    r_W_shared: &Option<Blind<E>>,
+  ) -> Result<(), SpartanError> {
+    self.comm_W_shared = comm_W_shared.clone();
+    self.r_W_shared = r_W_shared.clone();
+    if let (Some(comm), Some(r_old)) = (&self.comm_W_precommitted, &self.r_W_precommitted) {
+      let r_new = PCS::<E>::blind(ck, S.num_precommitted);
+      self.comm_W_precommitted = Some(PCS::<E>::rerandomize_commitment(ck, comm, r_old, &r_new)?);
+      self.r_W_precommitted = Some(r_new);
+    }
+    Ok(())
   }
 }
 
@@ -634,7 +678,7 @@ impl<E: Engine> MultiRoundSpartanShape<E> for ShapeCS<E> {
     // Don't count One as an input for shape's purposes.
     let num_public_values = num_inputs - 1 - num_challenges_per_round.iter().sum::<usize>();
     let S = SplitMultiRoundR1CSShape::new(
-      MULTIROUND_COMMITMENT_WIDTH,
+      circuit.commitment_width(),
       num_constraints,
       num_vars_per_round,
       num_challenges_per_round,
@@ -727,9 +771,9 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     // Update witness with new variables
     // We need to map the *unpadded* auxiliary variables produced by this round
     // into the appropriate *padded* segment of the global witness vector.
-    // 1. `start_idx_unpadded` – offset within `aux_assignment` (contains only the
+    // 1. `start_idx_unpadded` - offset within `aux_assignment` (contains only the
     //    actual variables produced so far).
-    // 2. `start_idx_padded`   – offset within the global witness vector (which
+    // 2. `start_idx_padded`   - offset within the global witness vector (which
     //    has per-round padding applied).
     let start_idx_unpadded: usize = s.num_vars_per_round_unpadded[..round_index].iter().sum();
     let start_idx_padded: usize = s.num_vars_per_round[..round_index].iter().sum();

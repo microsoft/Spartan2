@@ -62,19 +62,58 @@ impl<Scalar: PrimeField> EqPolynomial<Scalar> {
     let mut size = 1;
     evals[0] = Scalar::ONE;
 
-    for r in r.iter().rev() {
-      let (evals_left, evals_right) = evals.split_at_mut(size);
-      let (evals_right, _) = evals_right.split_at_mut(size);
+    if rayon::current_num_threads() <= 1 {
+      for r in r.iter().rev() {
+        let (evals_left, evals_right) = evals.split_at_mut(size);
+        let (evals_right, _) = evals_right.split_at_mut(size);
 
-      zip_with_for_each!(par_iter_mut, (evals_left, evals_right), |x, y| {
-        *y = *x * r;
-        *x -= &*y;
-      });
+        for (x, y) in evals_left.iter_mut().zip(evals_right.iter_mut()) {
+          *y = *x * r;
+          *x -= &*y;
+        }
 
-      size *= 2;
+        size *= 2;
+      }
+    } else {
+      for r in r.iter().rev() {
+        let (evals_left, evals_right) = evals.split_at_mut(size);
+        let (evals_right, _) = evals_right.split_at_mut(size);
+
+        zip_with_for_each!(par_iter_mut, (evals_left, evals_right), |x, y| {
+          *y = *x * r;
+          *x -= &*y;
+        });
+
+        size *= 2;
+      }
     }
 
     evals
+  }
+  /// Like evals_from_points but reuses a pre-allocated buffer.
+  /// Builds the evaluation table incrementally via push (no zeroing needed).
+  #[inline(always)]
+  pub fn evals_from_points_into(r: &[Scalar], out: &mut Vec<Scalar>) {
+    let ell = r.len();
+    let n = (2_usize).pow(ell as u32);
+    out.clear();
+    out.reserve(n);
+    out.push(Scalar::ONE);
+
+    for r_val in r.iter().rev() {
+      let sz = out.len();
+      // Push new right-half values: out[sz+i] = out[i] * r
+      for i in 0..sz {
+        let val = out[i] * r_val;
+        out.push(val);
+      }
+      // Update left-half: out[i] -= out[sz+i] using split_at_mut
+      let (left, right) = out.split_at_mut(sz);
+      for i in 0..sz {
+        left[i] -= right[i];
+      }
+    }
+    debug_assert_eq!(out.len(), n);
   }
 }
 

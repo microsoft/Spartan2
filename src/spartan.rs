@@ -7,18 +7,20 @@
 //! This module implements the Spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
 use crate::{
-  Blind, CommitmentKey, MULTIROUND_COMMITMENT_WIDTH,
+  Blind, CommitmentKey,
   bellpepper::{
     r1cs::{PrecommittedState, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
-  digest::{DigestComputer, SimpleDigestible},
+  big_num::DelayedReduction,
+  digest::DigestComputer,
   errors::SpartanError,
   math::Math,
   polys::{
     eq::EqPolynomial,
     multilinear::{MultilinearPolynomial, SparsePolynomial},
+    univariate::UniPoly,
   },
   r1cs::{SplitR1CSInstance, SplitR1CSShape},
   start_span,
@@ -33,9 +35,8 @@ use crate::{
 };
 use ff::Field;
 use once_cell::sync::OnceCell;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
@@ -69,7 +70,22 @@ pub struct SpartanVerifierKey<E: Engine> {
   digest: OnceCell<SpartanDigest>,
 }
 
-impl<E: Engine> SimpleDigestible for SpartanVerifierKey<E> {}
+impl<E: Engine> crate::digest::Digestible for SpartanVerifierKey<E> {
+  fn write_bytes<W: Sized + std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+    use bincode::Options;
+    let config = bincode::DefaultOptions::new()
+      .with_little_endian()
+      .with_fixint_encoding();
+    config
+      .serialize_into(&mut *w, &self.vk_ee)
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    config
+      .serialize_into(&mut *w, &self.ck_s)
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    self.S.write_bytes(w)?;
+    Ok(())
+  }
+}
 
 impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   /// Returns the digest of the verifier's key.
@@ -92,6 +108,19 @@ impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
 #[serde(bound = "")]
 pub struct SpartanPrepSNARK<E: Engine> {
   ps: PrecommittedState<E>,
+  // Cached partial matrix-vector products for precommitted witness columns (deterministic)
+  cached_az: Vec<E::Scalar>,
+  cached_bz: Vec<E::Scalar>,
+  cached_cz: Vec<E::Scalar>,
+  // Lazily cached rest-witness commitment (populated on first prove call, deterministic)
+  cached_rest_witness: Option<Vec<E::Scalar>>,
+  cached_rest_msm: Option<Vec<E::GE>>,
+  // Pre-allocated scratch buffers (reused across prove calls, avoids mmap + page faults)
+  scratch_az: Vec<E::Scalar>,
+  scratch_bz: Vec<E::Scalar>,
+  scratch_cz: Vec<E::Scalar>,
+  z_buffer: Vec<E::Scalar>,
+  evals_rx_buffer: Vec<E::Scalar>,
 }
 
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
@@ -119,7 +148,9 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
   ) -> Result<(Self::ProverKey, Self::VerifierKey), SpartanError> {
     let S = ShapeCS::r1cs_shape(&circuit)?;
     let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S])?;
-    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, MULTIROUND_COMMITMENT_WIDTH); // for committing to a scalar
+    E::PCS::precompute_ck(&ck);
+    let (ck_s, _) = E::PCS::setup(b"ck_s", 1, 1); // 1 base for committing a single scalar
+    E::PCS::precompute_ck(&ck_s);
 
     let vk: SpartanVerifierKey<E> = SpartanVerifierKey {
       S: S.clone(),
@@ -127,13 +158,17 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       ck_s: ck_s.clone(),
       digest: OnceCell::new(),
     };
+
+    let vk_digest = vk.digest()?;
     let pk = Self::ProverKey {
       ck,
       ck_s,
       S,
-      vk_digest: vk.digest()?,
+      vk_digest,
     };
 
+    pk.S.precompute();
+    vk.S.precompute();
     Ok((pk, vk))
   }
 
@@ -146,19 +181,48 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let mut ps = SatisfyingAssignment::shared_witness(&pk.S, &pk.ck, &circuit, is_small)?;
     SatisfyingAssignment::precommitted_witness(&mut ps, &pk.S, &pk.ck, &circuit, is_small)?;
 
-    Ok(SpartanPrepSNARK { ps })
+    // Pre-compute partial matrix-vector products for shared + precommitted witness columns.
+    pk.S.precompute();
+    let pre_end = pk.S.num_shared + pk.S.num_precommitted;
+    let (cached_az, cached_bz, cached_cz) = pk.S.multiply_vec_precommitted(&ps.W[..pre_end])?;
+
+    // Pre-allocate scratch buffers (reused across prove calls to avoid mmap + page faults)
+    let num_cons = pk.S.num_cons;
+    let num_z = pk.S.num_shared
+      + pk.S.num_precommitted
+      + pk.S.num_rest
+      + 1
+      + pk.S.num_public
+      + pk.S.num_challenges;
+    let scratch_az = vec![E::Scalar::ZERO; num_cons];
+    let scratch_bz = vec![E::Scalar::ZERO; num_cons];
+    let scratch_cz = vec![E::Scalar::ZERO; num_cons];
+    let z_buffer = vec![E::Scalar::ZERO; num_z];
+    let evals_rx_buffer = Vec::with_capacity(num_cons);
+
+    Ok(SpartanPrepSNARK {
+      ps,
+      cached_az,
+      cached_bz,
+      cached_cz,
+      cached_rest_witness: None,
+      cached_rest_msm: None,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer,
+      evals_rx_buffer,
+    })
   }
 
   /// produces a succinct proof of satisfiability of an R1CS instance
   fn prove<C: SpartanCircuit<E>>(
     pk: &Self::ProverKey,
     circuit: C,
-    prep_snark: &Self::PrepSNARK,
+    mut prep_snark: Self::PrepSNARK,
     is_small: bool,
-  ) -> Result<Self, SpartanError> {
+  ) -> Result<(Self, Self::PrepSNARK), SpartanError> {
     let (_prove_span, prove_t) = start_span!("spartan_snark_prove");
-    let mut prep_snark = prep_snark.clone(); // make a copy so we can modify it
-
     let mut transcript = E::TE::new(b"SpartanSNARK");
     transcript.absorb(b"vk", &pk.vk_digest);
 
@@ -180,14 +244,13 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       &mut transcript,
     )?;
 
-    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
-    let mut z = [
-      W.W.clone(),
-      vec![E::Scalar::ONE],
-      U.public_values.clone(),
-      U.challenges.clone(),
-    ]
-    .concat();
+    // Build z using pre-allocated buffer (avoids mmap + page faults after first prove)
+    let mut z = std::mem::take(&mut prep_snark.z_buffer);
+    z.clear();
+    z.extend_from_slice(&W.W);
+    z.push(E::Scalar::ONE);
+    z.extend_from_slice(&U.public_values);
+    z.extend_from_slice(&U.challenges);
 
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
     let (num_rounds_x, num_rounds_y) = (
@@ -200,26 +263,33 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       .map(|_i| transcript.squeeze(b"t"))
       .collect::<Result<Vec<_>, SpartanError>>()?;
 
+    // Use incremental matvec with cached precommitted products and scratch buffers
     let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
-    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
+    let mut scratch_az = std::mem::take(&mut prep_snark.scratch_az);
+    let mut scratch_bz = std::mem::take(&mut prep_snark.scratch_bz);
+    let mut scratch_cz = std::mem::take(&mut prep_snark.scratch_cz);
+    pk.S.multiply_vec_incremental_into(
+      &z,
+      &prep_snark.cached_az,
+      &prep_snark.cached_bz,
+      &prep_snark.cached_cz,
+      &mut scratch_az,
+      &mut scratch_bz,
+      &mut scratch_cz,
+    )?;
     info!(
       elapsed_ms = %mv_t.elapsed().as_millis(),
-      constraints = %pk.S.num_cons,
-      vars = %num_vars,
       "matrix_vector_multiply"
     );
 
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
-      MultilinearPolynomial::new(Az),
-      MultilinearPolynomial::new(Bz),
-      MultilinearPolynomial::new(Cz),
-    );
+    let mut poly_Az = MultilinearPolynomial::new(scratch_az);
+    let mut poly_Bz = MultilinearPolynomial::new(scratch_bz);
+    let mut poly_Cz = MultilinearPolynomial::new(scratch_cz);
     info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-
     // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
     let (sc_proof_outer, r_x, claims_outer) = SumcheckProof::prove_cubic_with_three_inputs(
       &E::Scalar::ZERO, // claim is zero
       tau,
@@ -234,61 +304,111 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
       (claims_outer[0], claims_outer[1], claims_outer[2]);
     transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
     info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
-
+    // Recover scratch buffers (bound down to 1 element, but allocation preserved)
+    let scratch_az = poly_Az.into_vec();
+    let scratch_bz = poly_Bz.into_vec();
+    let scratch_cz = poly_Cz.into_vec();
     // inner sum-check preparation
     let (_r_span, r_t) = start_span!("prepare_inner_claims");
     let r = transcript.squeeze(b"r")?;
     let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
     info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
 
-    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
-    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
-    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
-
-    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = pk.S.bind_row_vars(&evals_rx);
-    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
-
+    // Merged: compute eq(r_x), bind row variables, and prepare poly_ABC in a single pipeline
     let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
-    assert_eq!(evals_A.len(), evals_B.len());
-    assert_eq!(evals_A.len(), evals_C.len());
-    let poly_ABC = (0..evals_A.len())
-      .into_par_iter()
-      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-      .collect::<Vec<E::Scalar>>();
+    let mut evals_rx_buffer = std::mem::take(&mut prep_snark.evals_rx_buffer);
+    EqPolynomial::evals_from_points_into(&r_x, &mut evals_rx_buffer);
+    let mut poly_ABC_vec = pk.S.bind_and_prepare_poly_ABC(&evals_rx_buffer, &r);
     info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
+    // inner sum-check with manual first round (BDDT optimization)
 
-    let (_z_span, z_t) = start_span!("prepare_poly_z");
-    let poly_z = {
-      z.resize(num_vars * 2, E::Scalar::ZERO);
-      z
-    };
-    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
-
-    // inner sum-check
     let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+    // Manual first round: the "virtual" polynomial pair is:
+    //   ABC_low[j] = poly_ABC_vec[j] for j=0..num_vars-1
+    //   ABC_high[j] = poly_ABC_vec[num_vars+j] for j=0..num_extra-1, else 0
+    //   z_low[j] = z[j], z_high[j] = z[num_vars+j] for j=0..num_extra-1, else 0
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+    let num_extra = 1 + pk.S.num_public + pk.S.num_challenges;
 
-    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
-    debug!(
-      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
-      poly_ABC.len(),
-      poly_z.len()
-    );
-    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
-      *poly_A_comp * *poly_B_comp
-    };
-    let (sc_proof_inner, r_y, claims_inner) = SumcheckProof::prove_quad(
-      &claim_inner_joint,
-      num_rounds_y,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
-      comb_func,
+    // Compute eval_0 = inner product of ABC_low and z_low
+    let mut acc_eval0 = Acc::<E::Scalar>::default();
+    for j in 0..num_vars {
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut acc_eval0,
+        &poly_ABC_vec[j],
+        &z[j],
+      );
+    }
+    let eval0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_eval0);
+
+    // Compute corrections for num_extra terms where high values are non-zero
+    let mut correction_low = E::Scalar::ZERO;
+    let mut correction_cross = E::Scalar::ZERO;
+    for j in 0..num_extra {
+      let abc_low = poly_ABC_vec[j];
+      let abc_high = poly_ABC_vec[num_vars + j];
+      let z_low_j = z[j];
+      let z_high_j = z[num_vars + j];
+      correction_low += abc_low * z_low_j;
+      correction_cross += (abc_high - abc_low) * (z_high_j - z_low_j);
+    }
+
+    let t_inf = eval0 - correction_low + correction_cross;
+
+    // BDDT: eval_2 = 2*claim - 3*eval_0 + 2*t_inf
+    let three_eval0 = eval0 + eval0 + eval0;
+    let eval2 = claim_inner_joint + claim_inner_joint - three_eval0 + t_inf + t_inf;
+    let evals_r0 = vec![eval0, claim_inner_joint - eval0, eval2];
+    let inner_r0_poly = UniPoly::from_evals(&evals_r0)?;
+
+    // Append round-0 polynomial to transcript (matching prove_quad protocol)
+    transcript.absorb(b"p", &inner_r0_poly);
+    let r0_inner = transcript.squeeze(b"c")?;
+    let claim_after_r0 = inner_r0_poly.evaluate(&r0_inner);
+
+    // Fused bind: for j < num_extra standard bind; for j >= num_extra both scale by (1-r0)
+    let one_minus_r0 = E::Scalar::ONE - r0_inner;
+    for j in 0..num_extra {
+      let abc_low = poly_ABC_vec[j];
+      let abc_high = poly_ABC_vec[num_vars + j];
+      poly_ABC_vec[j] = abc_low + r0_inner * (abc_high - abc_low);
+      let z_low = z[j];
+      let z_high = z[num_vars + j];
+      z[j] = z_low + r0_inner * (z_high - z_low);
+    }
+    for j in num_extra..num_vars {
+      poly_ABC_vec[j] *= one_minus_r0;
+      z[j] *= one_minus_r0;
+    }
+    poly_ABC_vec.truncate(num_vars);
+    z.truncate(num_vars);
+
+    // Continue with remaining rounds of inner sumcheck
+    let mut poly_z = MultilinearPolynomial::new(z);
+    let (sc_proof_inner, r_y_rest, _claims_inner) = SumcheckProof::prove_quad(
+      &claim_after_r0,
+      num_rounds_y - 1,
+      &mut MultilinearPolynomial::new(poly_ABC_vec),
+      &mut poly_z,
       &mut transcript,
     )?;
-    let eval_Z = claims_inner[1]; // evaluation of Z at r_y
+    // Recover the allocation from poly_z for reuse across prove calls.
+    let z_buffer = poly_z.Z;
+
+    // Reconstruct full r_y and prepend round-0 to inner sumcheck proof
+    let mut r_y = Vec::with_capacity(num_rounds_y);
+    r_y.push(r0_inner);
+    r_y.extend_from_slice(&r_y_rest);
+
+    // Prepend the manual round-0 polynomial to the inner sumcheck proof
+    let sc_proof_inner = sc_proof_inner.prepend_round(inner_r0_poly);
+
+    // eval_Z: claims_inner[1] is the z polynomial evaluated at all inner sumcheck challenges,
+    // which equals z evaluated at r_y (since the manual round-0 binding was applied first).
+    let eval_Z = _claims_inner[1];
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
-    // Compute final evaluations needed for the inner-final round
+    // Compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
     let U_regular = U.to_regular_instance()?;
     let eval_X = {
       let X = vec![E::Scalar::ONE]
@@ -297,14 +417,12 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
         .collect::<Vec<E::Scalar>>();
       SparsePolynomial::new(num_rounds_y - 1, X).evaluate(&r_y[1..])
     };
-
-    // compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let eval_W = (eval_Z - r_y[0] * eval_X) * (E::Scalar::ONE - r_y[0]).invert().unwrap();
+    let inv: Option<E::Scalar> = (E::Scalar::ONE - r_y[0]).invert().into();
+    let eval_W = (eval_Z - r_y[0] * eval_X) * inv.ok_or(SpartanError::DivisionByZero)?;
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1); // blind for committing to eval_W
-    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?; // commitment to eval_W
-    let U_regular = U.to_regular_instance()?;
+    let blind_eval_W = E::PCS::blind(&pk.ck_s, 1);
+    let comm_eval_W = E::PCS::commit(&pk.ck_s, &[eval_W], &blind_eval_W, false)?;
     let eval_arg = E::PCS::prove(
       &pk.ck,
       &pk.ck_s,
@@ -319,15 +437,32 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     info!(elapsed_ms = %prove_t.elapsed().as_millis(), "spartan_snark_prove");
-    Ok(SpartanSNARK {
-      U,
-      sc_proof_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
-      sc_proof_inner,
-      eval_W,
-      blind_eval_W,
-      eval_arg,
-    })
+    // Return proof and updated prep state with preserved scratch buffers
+    let updated_prep = SpartanPrepSNARK {
+      ps: prep_snark.ps,
+      cached_az: prep_snark.cached_az,
+      cached_bz: prep_snark.cached_bz,
+      cached_cz: prep_snark.cached_cz,
+      cached_rest_witness: prep_snark.cached_rest_witness,
+      cached_rest_msm: prep_snark.cached_rest_msm,
+      scratch_az,
+      scratch_bz,
+      scratch_cz,
+      z_buffer,
+      evals_rx_buffer,
+    };
+    Ok((
+      SpartanSNARK {
+        U,
+        sc_proof_outer,
+        claims_outer: (claim_Az, claim_Bz, claim_Cz),
+        sc_proof_inner,
+        eval_W,
+        blind_eval_W,
+        eval_arg,
+      },
+      updated_prep,
+    ))
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
@@ -415,7 +550,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
     let T_x = EqPolynomial::evals_from_points(&r_x);
     let T_y = EqPolynomial::evals_from_points(&r_y);
-    let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables(&T_x, &T_y);
+    let (eval_A, eval_B, eval_C) = vk.S.evaluate_with_tables_fast(&T_x, &T_y);
 
     let claim_inner_final_expected = (eval_A + r * eval_B + r * r * eval_C) * eval_Z;
     if claim_inner_final != claim_inner_final_expected {
@@ -542,9 +677,9 @@ mod tests {
     let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
 
     // generate a witness and proof
-    let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
+    let res = S::prove(&pk, circuit.clone(), prep_snark, false);
     assert!(res.is_ok());
-    let snark = res.unwrap();
+    let (snark, _prep_snark) = res.unwrap();
 
     // verify the SNARK
     let res = snark.verify(&vk);

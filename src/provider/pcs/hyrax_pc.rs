@@ -8,7 +8,7 @@
 use crate::{
   errors::SpartanError,
   math::Math,
-  polys::{eq::EqPolynomial, multilinear::MultilinearPolynomial},
+  polys::eq::EqPolynomial,
   provider::{
     pcs::ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
@@ -23,12 +23,35 @@ use crate::{
 use core::marker::PhantomData;
 use ff::{Field, PrimeField};
 use num_integer::div_ceil;
-use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-type AffineGroupElement<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
+use crate::big_num::delayed_reduction::DelayedReduction;
+use crate::big_num::montgomery::MontgomeryLimbs;
+use crate::provider::msm::{AffineGroupElement, FixedBaseMul, vartime_scalar_mul};
+
+/// Bind polynomial top variables using delayed reduction for Montgomery multiply.
+/// Avoids per-product REDC, reducing multiply cost by ~50%.
+/// The accumulator array (r_len * 72B) must fit in L2 cache.
+#[inline(never)]
+fn bind_with_delayed<F: PrimeField + MontgomeryLimbs + Copy>(
+  poly: &[F],
+  l: &[F],
+  r_len: usize,
+) -> Vec<F> {
+  assert_eq!(poly.len(), l.len() * r_len);
+  type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+  let mut acc = vec![Acc::<F>::default(); r_len];
+  for j in 0..l.len() {
+    let l_j = &l[j];
+    let row = &poly[j * r_len..(j + 1) * r_len];
+    for i in 0..r_len {
+      F::unreduced_multiply_accumulate(&mut acc[i], l_j, &row[i]);
+    }
+  }
+  acc.iter().map(|a| F::reduce(a)).collect()
+}
 
 /// A type that holds commitment generators for Hyrax commitments
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +63,37 @@ where
   num_cols: usize,
   ck: Vec<AffineGroupElement<E>>,
   h: E::GE,
+  /// Precomputed fixed-base table for h (computed lazily, not serialized)
+  #[serde(skip)]
+  h_table: std::sync::OnceLock<FixedBaseMul<E>>,
+  /// Precomputed fixed-base tables for ALL ck bases (for small ck widths).
+  /// Enables fast per-row commits via table lookup instead of runtime MSM.
+  #[serde(skip)]
+  ck_tables: std::sync::OnceLock<Vec<FixedBaseMul<E>>>,
+}
+
+impl<E: Engine> HyraxCommitmentKey<E>
+where
+  E::GE: DlogGroupExt,
+{
+  /// Eagerly initialize the h_table for fixed-base scalar multiplication.
+  /// Call before cloning to ensure both copies have the precomputed table.
+  pub fn ensure_h_table(&self) {
+    self
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&self.h, 8));
+    // For small ck widths (e.g., VC with 32 bases), precompute tables for all bases.
+    // This enables fast fixed-base MSM for commit (table lookup vs runtime MSM).
+    if self.ck.len() <= 64 {
+      self.ck_tables.get_or_init(|| {
+        self
+          .ck
+          .par_iter()
+          .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
+          .collect()
+      });
+    }
+  }
 }
 
 /// A type that holds the verifier key for Hyrax commitments
@@ -111,18 +165,42 @@ where
       h,
     };
 
-    let ck = Self::CommitmentKey { num_cols, ck, h };
+    let ck = Self::CommitmentKey {
+      num_cols,
+      ck,
+      h,
+      h_table: std::sync::OnceLock::new(),
+      ck_tables: std::sync::OnceLock::new(),
+    };
 
     (ck, vk)
   }
 
+  fn precompute_ck(ck: &Self::CommitmentKey) {
+    ck.ensure_h_table();
+    // Eagerly init fixed-base tables for small ck widths (e.g., VC with 32 bases)
+    if ck.ck.len() <= 64 {
+      ck.ck_tables.get_or_init(|| {
+        ck.ck
+          .par_iter()
+          .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
+          .collect()
+      });
+    }
+  }
+
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
+    use crate::traits::PrimeFieldExt;
+    let mut rng = rand::thread_rng();
     let num_rows = div_ceil(n, ck.num_cols);
 
+    // Bulk random generation: fill all bytes at once, then reduce mod p
+    let mut buf = vec![0u8; num_rows * 64];
+    rand::RngCore::fill_bytes(&mut rng, &mut buf);
     HyraxBlind {
       blind: (0..num_rows)
-        .map(|_| E::Scalar::random(&mut OsRng))
-        .collect::<Vec<E::Scalar>>(),
+        .map(|i| E::Scalar::from_uniform(&buf[i * 64..(i + 1) * 64]))
+        .collect(),
     }
   }
 
@@ -138,6 +216,17 @@ where
     let num_cols = ck.num_cols;
     let num_rows = div_ceil(n, num_cols);
 
+    // Lazily initialize fixed-base tables for small ck widths (e.g., VC with 32 bases).
+    // This ensures both prover and verifier benefit from fast fixed-base commits.
+    if ck.ck.len() <= 64 {
+      ck.ck_tables.get_or_init(|| {
+        ck.ck
+          .par_iter()
+          .map(|base| FixedBaseMul::precompute(&E::GE::group(base), 8))
+          .collect()
+      });
+    }
+    let ck_tables = ck.ck_tables.get();
     let comm = (0..num_rows)
       .into_par_iter()
       .map(|i| {
@@ -149,23 +238,83 @@ where
           &v[lower..upper]
         };
 
-        let msm_result = if !is_small {
+        let h_table = ck
+          .h_table
+          .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+
+        // Fast path: skip MSM for rows where all scalars are zero (e.g., zero-padded suffix)
+        if scalars.iter().all(|s| *s == E::Scalar::ZERO) {
+          return Ok(E::GE::zero() + h_table.mul(&r.blind[i]));
+        }
+
+        // Trim trailing zeros to reduce MSM size (e.g., boundary row between data and padding)
+        let effective_len = scalars
+          .iter()
+          .rposition(|s| *s != E::Scalar::ZERO)
+          .map(|pos| pos + 1)
+          .unwrap_or(scalars.len());
+        let scalars = &scalars[..effective_len];
+
+        // Fixed-base path: use precomputed tables for each ck base (fast for small ck widths)
+        let msm_result = if let Some(tables) = ck_tables {
+          FixedBaseMul::multi_mul(&tables[..scalars.len()], scalars)
+        } else if scalars.len() <= 16 {
+          // For very small MSMs, skip classification overhead and use direct MSM
           E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
         } else {
-          let scalars_small = scalars
-            .par_iter()
-            .map(|s| s.to_repr().as_ref()[0] as u64)
-            .collect::<Vec<_>>();
-          E::GE::vartime_multiscalar_mul_small(
-            &scalars_small,
-            &ck.ck[..scalars_small.len()],
-            false,
-          )?
+          // Single-pass detect+convert: one to_repr per scalar instead of two
+          let mut scalars_small: Vec<u64> = Vec::with_capacity(scalars.len());
+          let mut all_small = is_small; // caller hint: skip detection if known small
+          if !is_small {
+            all_small = true;
+            for s in scalars.iter() {
+              let r = s.to_repr();
+              if r.as_ref()[8..].iter().any(|&b| b != 0) {
+                all_small = false;
+                break;
+              }
+              scalars_small.push(u64::from_le_bytes(r.as_ref()[..8].try_into().unwrap()));
+            }
+          }
+          if all_small {
+            if scalars_small.len() < scalars.len() {
+              // is_small=true path or detection bailed early: convert remaining
+              scalars_small.clear();
+              scalars_small.extend(scalars.iter().map(|s| {
+                let bytes = s.to_repr();
+                u64::from_le_bytes(bytes.as_ref()[..8].try_into().unwrap())
+              }));
+            }
+            E::GE::vartime_multiscalar_mul_small(
+              &scalars_small,
+              &ck.ck[..scalars_small.len()],
+              false,
+            )?
+          } else {
+            // Full-size scalars: direct MSM
+            E::GE::vartime_multiscalar_mul(scalars, &ck.ck[..scalars.len()], false)?
+          }
         };
-        Ok(msm_result + ck.h * r.blind[i])
+        Ok(msm_result + h_table.mul(&r.blind[i]))
       })
       .collect::<Result<Vec<_>, _>>()?;
 
+    Ok(HyraxCommitment { comm })
+  }
+
+  fn commit_zeros(
+    ck: &Self::CommitmentKey,
+    n: usize,
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let comm = (0..num_rows)
+      .map(|i| E::GE::zero() + h_table.mul(&r.blind[i]))
+      .collect::<Vec<_>>();
     Ok(HyraxCommitment { comm })
   }
 
@@ -182,9 +331,13 @@ where
       });
     }
 
+    // Use precomputed fixed-base table for h to speed up scalar muls
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+
     let new_comm = (0..comm.comm.len())
-      .into_par_iter()
-      .map(|i| comm.comm[i] + ck.h * (r_new.blind[i] - r_old.blind[i]))
+      .map(|i| comm.comm[i] + h_table.mul(&(r_new.blind[i] - r_old.blind[i])))
       .collect::<Vec<_>>();
 
     Ok(HyraxCommitment { comm: new_comm })
@@ -192,10 +345,10 @@ where
 
   fn check_commitment(comm: &Self::Commitment, n: usize, width: usize) -> Result<(), SpartanError> {
     let min_rows = div_ceil(n, width);
-    if comm.comm.len() < min_rows {
+    if comm.comm.len() != min_rows {
       return Err(SpartanError::InvalidCommitmentLength {
         reason: format!(
-          "InvalidCommitmentLength: actual: {}, expected at least: {}",
+          "InvalidCommitmentLength: actual: {}, expected: {}",
           comm.comm.len(),
           min_rows
         ),
@@ -269,26 +422,37 @@ where
 
       (comm_LZ, R, LZ, r_LZ)
     } else {
-      let (L, R) = rayon::join(
-        || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
-        || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
-      );
+      let (L, R) = if rayon::current_num_threads() > 1 {
+        rayon::join(
+          || EqPolynomial::new(point[..num_vars_rows].to_vec()).evals(),
+          || EqPolynomial::new(point[num_vars_rows..].to_vec()).evals(),
+        )
+      } else {
+        let l = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
+        let r = EqPolynomial::new(point[num_vars_rows..].to_vec()).evals();
+        (l, r)
+      };
 
       info!(elapsed_ms = %setup_t.elapsed().as_millis(), "hyrax_prove_prep");
 
       let (_bind_span, bind_t) = start_span!("hyrax_prove_bind");
       // compute the vector underneath L*Z
       // compute vector-matrix product between L and Z viewed as a matrix
-      let LZ = MultilinearPolynomial::bind_with(poly, &L, R.len());
+      let LZ = bind_with_delayed(poly, &L, R.len());
       info!(elapsed_ms = %bind_t.elapsed().as_millis(), "hyrax_prove_bind");
 
       let (_commit_span, commit_t) = start_span!("hyrax_prove_commit");
 
-      let r_LZ = (0..L.len())
-        .into_par_iter()
-        .map(|i| L[i] * blind.blind[i])
-        .reduce(|| E::Scalar::ZERO, |acc, x| acc + x);
-      let comm_LZ = E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + ck.h * r_LZ;
+      let r_LZ = L
+        .iter()
+        .zip(blind.blind.iter())
+        .map(|(l, b)| *l * *b)
+        .fold(E::Scalar::ZERO, |acc, x| acc + x);
+      let h_table = ck
+        .h_table
+        .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+      let comm_LZ =
+        E::GE::vartime_multiscalar_mul(&LZ, &ck.ck[..LZ.len()], true)? + h_table.mul(&r_LZ);
 
       info!(elapsed_ms = %commit_t.elapsed().as_millis(), "hyrax_prove_commit");
 
@@ -365,6 +529,186 @@ where
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "hyrax_pcs_verify");
     result
   }
+
+  fn commit_without_blind(
+    ck: &Self::CommitmentKey,
+    v: &[E::Scalar],
+    is_small: bool,
+  ) -> Result<Vec<E::GE>, SpartanError> {
+    use ff::Field;
+    let n = v.len();
+    let num_cols = ck.ck.len();
+    let num_rows = div_ceil(n, num_cols);
+
+    let raw_points: Vec<E::GE> = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let row_start = i * num_cols;
+        let row_end = std::cmp::min(row_start + num_cols, n);
+        let row = &v[row_start..row_end];
+        let all_zero = row.iter().all(|s| s.is_zero().into());
+        if all_zero {
+          Ok(E::GE::zero())
+        } else if is_small {
+          let scalars_small: Vec<u64> = row
+            .iter()
+            .map(|s| {
+              let r = s.to_repr();
+              u64::from_le_bytes(r.as_ref()[..8].try_into().unwrap())
+            })
+            .collect();
+          E::GE::vartime_multiscalar_mul_small(&scalars_small, &ck.ck[..row.len()], false)
+        } else {
+          E::GE::vartime_multiscalar_mul(row, &ck.ck[..row.len()], false)
+        }
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+    Ok(raw_points)
+  }
+
+  fn commit_incremental(
+    ck: &Self::CommitmentKey,
+    raw: &[E::GE],
+    delta: &[E::Scalar],
+    blind: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    use ff::Field;
+    let num_cols = ck.ck.len();
+    let n = delta.len();
+    let num_rows = div_ceil(n, num_cols);
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+
+    let comm: Result<Vec<E::GE>, SpartanError> = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let row_start = i * num_cols;
+        let row_end = std::cmp::min(row_start + num_cols, n);
+        let row = &delta[row_start..row_end];
+
+        let all_zero = row.iter().all(|s| s.is_zero().into());
+
+        let raw_point = if i < raw.len() { raw[i] } else { E::GE::zero() };
+
+        let point = if all_zero {
+          raw_point
+        } else {
+          let delta_msm = E::GE::vartime_multiscalar_mul(row, &ck.ck[..row.len()], false)?;
+          raw_point + delta_msm
+        };
+
+        // Add blinding factor
+        Ok(point + h_table.mul(&blind.blind[i]))
+      })
+      .collect();
+
+    Ok(HyraxCommitment { comm: comm? })
+  }
+
+  fn prove_direct(
+    ck: &Self::CommitmentKey,
+    poly: &[E::Scalar],
+    blind: &Self::Blind,
+    point: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, E::Scalar), SpartanError> {
+    let num_cols = ck.num_cols;
+    // Derive dimensions from point length (must match how commitment was structured)
+    let n = (2_usize).pow(point.len() as u32);
+    let num_rows = div_ceil(n, num_cols);
+
+    if num_rows == 1 {
+      let mut v = poly.to_vec();
+      v.resize(num_cols, E::Scalar::ZERO);
+      return Ok((v, blind.blind[0]));
+    }
+
+    let num_vars_rows = num_rows.log_2();
+    let point_left = &point[..num_vars_rows];
+
+    // Pad polynomial to full n
+    let mut padded_poly;
+    let poly_ref = if poly.len() < n {
+      padded_poly = poly.to_vec();
+      padded_poly.resize(n, E::Scalar::ZERO);
+      &padded_poly
+    } else {
+      poly
+    };
+
+    let L = EqPolynomial::new(point_left.to_vec()).evals();
+
+    // v = L * poly_matrix (bind row variables)
+    let v = bind_with_delayed(poly_ref, &L, num_cols);
+
+    // combined_blind = <L, blind> (only over actual blind rows; padding rows have zero blind)
+    let combined_blind = L
+      .iter()
+      .zip(blind.blind.iter())
+      .map(|(l, b)| *l * *b)
+      .fold(E::Scalar::ZERO, |acc, x| acc + x);
+
+    Ok((v, combined_blind))
+  }
+
+  fn verify_direct(
+    vk: &Self::VerifierKey,
+    comm: &Self::Commitment,
+    v: &[E::Scalar],
+    combined_blind: &E::Scalar,
+    point: &[E::Scalar],
+  ) -> Result<E::Scalar, SpartanError> {
+    let num_cols = vk.num_cols;
+    if v.len() != num_cols {
+      return Err(SpartanError::ProofVerifyError {
+        reason: format!(
+          "Direct opening: v.len() ({}) != num_cols ({})",
+          v.len(),
+          num_cols
+        ),
+      });
+    }
+    // Derive dimensions from point length (same as standard Hyrax verify)
+    let n = (2_usize).pow(point.len() as u32);
+    let num_rows = div_ceil(n, num_cols);
+    let num_vars_rows = num_rows.log_2();
+
+    // Compute the RLC commitment from row commitments
+    // Commitment may have fewer rows than padded num_rows (unpadded rows are zero commitments + blind*H)
+    let comm_LZ = if num_vars_rows == 0 {
+      comm.comm[0]
+    } else {
+      let L = EqPolynomial::new(point[..num_vars_rows].to_vec()).evals();
+      // Only sum over actual commitment rows; padding rows contribute identity (all-zero poly + zero blind)
+      // The actual commitment rows already include blinding, so we sum L[i] * comm[i] for existing rows
+      // For padded rows beyond comm.comm.len(), the commitment was zero + blind*H with blind=0
+      // (padding rows have zero polynomial and zero blind since the blind vector is only as long as actual rows)
+      let actual_rows = comm.comm.len();
+      let ck_aff: Vec<_> = comm.comm.iter().map(|c| c.affine()).collect();
+      E::GE::vartime_multiscalar_mul(&L[..actual_rows], &ck_aff, true)?
+    };
+
+    // Recompute commitment from v and combined_blind
+    let expected =
+      E::GE::vartime_multiscalar_mul(v, &vk.ck[..v.len()], false)? + vk.h * *combined_blind;
+
+    if comm_LZ != expected {
+      return Err(SpartanError::ProofVerifyError {
+        reason: "Direct opening: commitment mismatch".to_string(),
+      });
+    }
+
+    // Compute evaluation: <v, eq(point_right)>
+    let point_right = &point[num_vars_rows..];
+    let R = EqPolynomial::new(point_right.to_vec()).evals();
+    let eval = v
+      .iter()
+      .zip(R.iter())
+      .map(|(vi, ri)| *vi * *ri)
+      .fold(E::Scalar::ZERO, |acc, x| acc + x);
+
+    Ok(eval)
+  }
 }
 
 impl<E: Engine> TranscriptReprTrait<E::GE> for HyraxCommitment<E>
@@ -408,16 +752,42 @@ where
       });
     }
 
-    let folded_comm = (0..n)
-      .into_par_iter()
-      .map(|i| {
-        let bases = comms
-          .par_iter()
-          .map(|c| c.comm[i].affine())
-          .collect::<Vec<_>>();
-        E::GE::vartime_multiscalar_mul(weights, &bases, false)
-      })
-      .collect::<Result<Vec<_>, SpartanError>>()?;
+    let num_comms = comms.len();
+
+    // Fast path: fold 2 commitments where one weight is ONE.
+    if num_comms == 2 {
+      let (unit_idx, scalar_idx, scalar_w) = if weights[0] == E::Scalar::ONE {
+        (0, 1, weights[1])
+      } else if weights[1] == E::Scalar::ONE {
+        (1, 0, weights[0])
+      } else {
+        (usize::MAX, usize::MAX, E::Scalar::ZERO)
+      };
+      if unit_idx != usize::MAX {
+        let mut folded_comm = Vec::with_capacity(n);
+        for (p, q) in comms[unit_idx]
+          .comm
+          .iter()
+          .zip(comms[scalar_idx].comm.iter())
+        {
+          folded_comm.push(*p + vartime_scalar_mul::<E>(*q, &scalar_w));
+        }
+        return Ok(Self::Commitment { comm: folded_comm });
+      }
+    }
+
+    // Batch-convert all projective points to affine (1 inversion via Montgomery's trick)
+    let all_projective: Vec<E::GE> = (0..n)
+      .flat_map(|row| comms.iter().map(move |c| c.comm[row]))
+      .collect();
+    let all_affine = E::GE::batch_affine(&all_projective);
+
+    // Use shared-weight MSM: all rows share the same scalar weights,
+    // so scalar decomposition is done once instead of n times.
+    let bases_rows: Vec<&[<E::GE as DlogGroup>::AffineGroupElement]> = (0..n)
+      .map(|row| &all_affine[row * num_comms..(row + 1) * num_comms])
+      .collect();
+    let folded_comm = E::GE::vartime_multiscalar_mul_shared_weights(weights, &bases_rows)?;
 
     Ok(Self::Commitment { comm: folded_comm })
   }
@@ -438,28 +808,68 @@ where
       });
     }
 
-    let acc = blinds
-      .par_iter()
-      .zip(weights.par_iter())
-      .fold(
-        || vec![<E as Engine>::Scalar::ZERO; n],
-        |mut local, (b, w)| {
-          for (a, &x) in local.iter_mut().zip(&b.blind) {
-            *a += x * *w;
-          }
-          local
-        },
-      )
-      .reduce(
-        || vec![E::Scalar::ZERO; n],
-        |mut a, b| {
-          for (ai, bi) in a.iter_mut().zip(b) {
-            *ai += bi;
-          }
-          a
-        },
-      );
+    let mut acc = vec![<E as Engine>::Scalar::ZERO; n];
+    for (b, w) in blinds.iter().zip(weights.iter()) {
+      for (a, &x) in acc.iter_mut().zip(&b.blind) {
+        *a += x * *w;
+      }
+    }
 
     Ok(Self::Blind { blind: acc })
+  }
+
+  fn fold_commitments_partial(
+    comms: &[Self::Commitment],
+    weights: &[E::Scalar],
+    num_data_rows: usize,
+    folded_blind: &Self::Blind,
+    ck: &Self::CommitmentKey,
+  ) -> Result<Self::Commitment, SpartanError> {
+    if comms.is_empty() || weights.is_empty() || comms.len() != weights.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_commitments_partial: Commitments and weights must have the same length"
+          .to_string(),
+      });
+    }
+
+    let total_rows = comms[0].comm.len();
+    if num_data_rows > total_rows {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "fold_commitments_partial: num_data_rows ({}) exceeds total_rows ({})",
+          num_data_rows, total_rows
+        ),
+      });
+    }
+    if num_data_rows >= total_rows {
+      return Self::fold_commitments(comms, weights);
+    }
+
+    let num_comms = comms.len();
+
+    // Step 1: Fold only the data rows via MSM
+    let data_comms: Vec<Self::Commitment> = comms
+      .iter()
+      .map(|c| HyraxCommitment {
+        comm: c.comm[..num_data_rows].to_vec(),
+      })
+      .collect();
+    let data_folded = Self::fold_commitments(&data_comms, &weights[..num_comms])?;
+
+    // Step 2: Compute rest rows from folded blind + h
+    // For rest rows, each comm_k[row] = blind_k[row] * h, so:
+    //   folded[row] = sum_k w[k] * blind_k[row] * h = folded_blind[row] * h
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let num_rest_rows = total_rows - num_data_rows;
+    let mut comm = data_folded.comm;
+    comm.reserve(num_rest_rows);
+    for i in 0..num_rest_rows {
+      let row = num_data_rows + i;
+      comm.push(h_table.mul(&folded_blind.blind[row]));
+    }
+
+    Ok(HyraxCommitment { comm })
   }
 }

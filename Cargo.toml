@@ -1,6 +1,6 @@
 [package]
 name = "spartan2"
-version = "0.7.0"
+version = "0.8.0"
 authors = ["Srinath Setty <srinath@microsoft.com>"]
 edition = "2024"
 description = "High-speed zkSNARKs without trusted setup"
@@ -16,8 +16,10 @@ bellpepper = "0.4.0"
 ff = { version = "0.13.0", features = ["derive"] }
 digest = "0.10"
 sha3 = "0.10"
+sha2 = "0.10.7"
 rayon = "1.10.0"
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+rand = "0.8"
 itertools = "0.14.0"
 subtle = "2.5"
 generic-array = "0.14"
@@ -61,3 +63,6 @@ jem = ["tikv-jemallocator"]
 [profile.release]
 debug = 1
 lto = "fat"
+
+[patch.crates-io]
+halo2curves = { git = "https://github.com/srinathsetty/halo2curves.git", rev = "09622e31d34952697080c952a7b5d26fe4a6c76a" }

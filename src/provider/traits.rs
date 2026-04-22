@@ -90,6 +90,11 @@ pub trait DlogGroup:
   /// Produces a preprocessed element
   fn affine(&self) -> Self::AffineGroupElement;
 
+  /// Batch convert projective points to affine using Montgomery's trick (single inversion).
+  fn batch_affine(points: &[Self]) -> Vec<Self::AffineGroupElement> {
+    points.iter().map(|p| p.affine()).collect()
+  }
+
   /// Returns a group element from a preprocessed group element
   fn group(p: &Self::AffineGroupElement) -> Self;
 
@@ -101,6 +106,12 @@ pub trait DlogGroup:
 
   /// Returns the affine coordinates (x, y, infinity) for the point
   fn to_coordinates(&self) -> (<Self as Group>::Base, <Self as Group>::Base, bool);
+
+  /// Variable-time mixed addition: self + affine point.
+  /// Uses z=1 optimization for the affine operand.
+  fn add_affine_vartime(&self, other: &Self::AffineGroupElement) -> Self {
+    *self + Self::group(other)
+  }
 }
 
 /// Extension trait for DlogGroup that provides multi-scalar multiplication operations
@@ -140,6 +151,14 @@ pub trait DlogGroupExt: DlogGroup {
       .map(|scalar| Self::vartime_multiscalar_mul_small(scalar, &bases[..scalar.len()], false))
       .collect::<Result<Vec<_>, _>>()
   }
+
+  /// Shared-weight multi-MSM: all rows use same scalars, different bases.
+  /// More efficient than calling vartime_multiscalar_mul repeatedly because
+  /// scalar decomposition (to_repr + window extraction) is done once.
+  fn vartime_multiscalar_mul_shared_weights(
+    scalars: &[Self::Scalar],
+    bases_rows: &[&[Self::AffineGroupElement]],
+  ) -> Result<Vec<Self>, SpartanError>;
 }
 
 /// Implements Spartan's traits except DlogGroupExt so that the MSM can be implemented differently
@@ -171,6 +190,12 @@ macro_rules! impl_traits_no_dlog_ext {
 
       fn affine(&self) -> Self::AffineGroupElement {
         self.to_affine()
+      }
+
+      fn batch_affine(points: &[Self]) -> Vec<Self::AffineGroupElement> {
+        let mut affine = vec![$name_curve_affine::identity(); points.len()];
+        <Self as Curve>::batch_normalize(points, &mut affine);
+        affine
       }
 
       fn group(p: &Self::AffineGroupElement) -> Self {
@@ -241,6 +266,10 @@ macro_rules! impl_traits_no_dlog_ext {
           (Self::Base::zero(), Self::Base::zero(), true)
         }
       }
+
+      fn add_affine_vartime(&self, other: &Self::AffineGroupElement) -> Self {
+        CurveExt::add_mixed_vartime(self, other)
+      }
     }
 
     impl PrimeFieldExt for $name::Scalar {
@@ -310,6 +339,13 @@ macro_rules! impl_traits {
         use_parallelism_internally: bool,
       ) -> Result<Self, $crate::errors::SpartanError> {
         msm_small(scalars, bases, use_parallelism_internally)
+      }
+
+      fn vartime_multiscalar_mul_shared_weights(
+        scalars: &[Self::Scalar],
+        bases_rows: &[&[Self::AffineGroupElement]],
+      ) -> Result<Vec<Self>, $crate::errors::SpartanError> {
+        msm_shared_weights(scalars, bases_rows)
       }
     }
   };

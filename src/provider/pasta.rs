@@ -8,7 +8,7 @@
 use crate::{
   impl_traits,
   provider::{
-    msm::{msm, msm_small},
+    msm::{msm, msm_shared_weights, msm_small},
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{Group, PrimeFieldExt, transcript::TranscriptReprTrait},

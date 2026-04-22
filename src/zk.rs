@@ -11,10 +11,7 @@
 //!
 //! Note: This circuit only encodes the algebraic checks of the verifier. It does **not**
 //! encode the Fiat-Shamir challenge generation, so no proof composition is performed here.
-use crate::{
-  MULTIROUND_COMMITMENT_WIDTH,
-  traits::{Engine, circuit::MultiRoundCircuit},
-};
+use crate::traits::{Engine, circuit::MultiRoundCircuit};
 use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
 use ff::Field;
 
@@ -25,7 +22,7 @@ fn eval_poly_horner<E: Engine, CS: ConstraintSystem<E::Scalar>>(
   x: &AllocatedNum<E::Scalar>,
 ) -> Result<AllocatedNum<E::Scalar>, SynthesisError> {
   // Start from highest coefficient.
-  let mut acc = coeffs.last().unwrap().clone(); // degree ≥ 1 in practice
+  let mut acc = coeffs.last().unwrap().clone(); // degree >= 1 in practice
   // We iterate from degree-1 down to 0 (excluding last which we already used).
   for (i, c_i) in coeffs.iter().rev().skip(1).enumerate() {
     // new_acc = acc * x + c_i
@@ -229,7 +226,7 @@ fn enforce_inner_sc_final_check<E: Engine, CS: ConstraintSystem<E::Scalar>>(
 }
 
 /// Circuit constraining Spartan verifier computation across multiple rounds.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SpartanVerifierCircuit<E: Engine> {
   pub(crate) outer_polys: Vec<[E::Scalar; 4]>,
   pub(crate) claim_Az: E::Scalar,
@@ -239,10 +236,11 @@ pub struct SpartanVerifierCircuit<E: Engine> {
   pub(crate) inner_polys: Vec<[E::Scalar; 3]>,
   pub(crate) eval_W: E::Scalar,
   pub(crate) eval_X: E::Scalar,
+  pub(crate) mr_commitment_width: usize,
 }
 
 impl<E: Engine> SpartanVerifierCircuit<E> {
-  pub fn default(num_rounds_x: usize, num_rounds_y: usize) -> Self {
+  pub fn default(num_rounds_x: usize, num_rounds_y: usize, mr_commitment_width: usize) -> Self {
     Self {
       outer_polys: vec![[E::Scalar::ZERO; 4]; num_rounds_x],
       claim_Az: E::Scalar::ZERO,
@@ -252,6 +250,7 @@ impl<E: Engine> SpartanVerifierCircuit<E> {
       inner_polys: vec![[E::Scalar::ZERO; 3]; num_rounds_y],
       eval_W: E::Scalar::ZERO,
       eval_X: E::Scalar::ZERO,
+      mr_commitment_width,
     }
   }
 
@@ -451,7 +450,7 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
       );
 
       // Pad to width
-      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+      for j in 0..self.mr_commitment_width - 1 {
         alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_{j}")))?;
       }
       Ok((vec![eval_W], vec![]))
@@ -463,10 +462,14 @@ impl<E: Engine> MultiRoundCircuit<E> for SpartanVerifierCircuit<E> {
   fn num_rounds(&self) -> usize {
     self.idx_commit_w() + 1
   }
+
+  fn commitment_width(&self) -> usize {
+    self.mr_commitment_width
+  }
 }
 
 /// NeutronNova verifier circuit constraining computation across multiple rounds.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct NeutronNovaVerifierCircuit<E: Engine> {
   // NeutronNova folding scheme verifier state across multiple rounds
   // NIFS cubic sum-check polynomials (4 coeffs per round)
@@ -497,11 +500,18 @@ pub struct NeutronNovaVerifierCircuit<E: Engine> {
   pub(crate) eval_W_core: E::Scalar,
   pub(crate) eval_X_step: E::Scalar,
   pub(crate) eval_X_core: E::Scalar,
+
+  pub(crate) mr_commitment_width: usize,
 }
 
 impl<E: Engine> NeutronNovaVerifierCircuit<E> {
   /// Creates a default instance of the NeutronNova verifier circuit with zeroed fields.
-  pub fn default(num_rounds_z: usize, num_rounds_x: usize, num_rounds_y: usize) -> Self {
+  pub fn default(
+    num_rounds_z: usize,
+    num_rounds_x: usize,
+    num_rounds_y: usize,
+    mr_commitment_width: usize,
+  ) -> Self {
     Self {
       outer_polys_step: vec![[E::Scalar::ZERO; 4]; num_rounds_x],
       outer_polys_core: vec![[E::Scalar::ZERO; 4]; num_rounds_x],
@@ -521,6 +531,7 @@ impl<E: Engine> NeutronNovaVerifierCircuit<E> {
       t_out_step: E::Scalar::ZERO,
       nifs_polys: vec![[E::Scalar::ZERO; 4]; num_rounds_z],
       eq_rho_at_rb: E::Scalar::ZERO,
+      mr_commitment_width,
     }
   }
 
@@ -892,7 +903,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
       );
 
       // Pad to per-round commitment width
-      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+      for j in 0..self.mr_commitment_width - 1 {
         alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_step_{j}")))?;
       }
 
@@ -913,7 +924,7 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
       );
 
       // Pad to per-round commitment width
-      for j in 0..MULTIROUND_COMMITMENT_WIDTH - 1 {
+      for j in 0..self.mr_commitment_width - 1 {
         alloc_zero::<E, _>(cs.namespace(|| format!("pad_eval_W_core_{j}")))?;
       }
       Ok((vec![], vec![]))
@@ -924,5 +935,9 @@ impl<E: Engine> MultiRoundCircuit<E> for NeutronNovaVerifierCircuit<E> {
 
   fn num_rounds(&self) -> usize {
     self.idx_commit_w_core() + 1
+  }
+
+  fn commitment_width(&self) -> usize {
+    self.mr_commitment_width
   }
 }
