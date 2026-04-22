@@ -29,16 +29,16 @@ pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
 /// An inner product instance consists of a commitment to a vector `a` and another vector `b`
 /// and the claim that c = <a, b>.
 pub struct InnerProductInstance<E: Engine> {
-  comm_a_vec: E::GE,
-  b_vec: Vec<E::Scalar>,
-  comm_c: E::GE,
+  pub(crate) comm_a_vec: E::GE,
+  pub(crate) b_vec: Vec<E::Scalar>,
+  pub(crate) comm_c: E::GE,
 }
 
 /// Holds witness for the inner product instance.
 pub struct InnerProductWitness<E: Engine> {
-  a_vec: Vec<E::Scalar>,
-  r_a: E::Scalar, // blind for the commitment to a_vec
-  r_c: E::Scalar, // blind for the commitment to c
+  pub(crate) a_vec: Vec<E::Scalar>,
+  pub(crate) r_a: E::Scalar, // blind for the commitment to a_vec
+  pub(crate) r_c: E::Scalar, // blind for the commitment to c
 }
 
 impl<E: Engine> InnerProductInstance<E>

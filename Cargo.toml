@@ -59,6 +59,7 @@ proptest = "1.2.0"
 [features]
 default = []
 jem = ["tikv-jemallocator"]
+ipa-hybrid = []
 
 [profile.release]
 debug = 1
