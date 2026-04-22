@@ -10,12 +10,12 @@
 //! digests of data structures used in Spartan. It includes the `Digestible` trait
 //! for types that can be converted to byte representations, the `SimpleDigestible`
 //! marker trait for serializable types, and the `DigestComputer` utility for
-//! computing SHA3-256 digests.
+//! computing SHA-256 digests.
 
 use crate::traits::snark::SpartanDigest;
 use bincode::Options;
 use serde::Serialize;
-use sha3::{Digest, Sha3_256};
+use sha2::{Digest, Sha256};
 use std::io;
 
 /// Trait for components with potentially discrete digests to be included in their container's digest.
@@ -42,7 +42,7 @@ impl<T: SimpleDigestible> Digestible for T {
 
 /// A utility for computing cryptographic digests of `Digestible` instances.
 ///
-/// `DigestComputer` provides a way to compute secure hash digests using SHA3-256
+/// `DigestComputer` provides a way to compute secure hash digests using SHA-256
 /// for any type that implements the `Digestible` trait. It serializes the input
 /// data and computes a 32-byte digest that can be used for integrity verification
 /// and identification purposes.
@@ -51,8 +51,8 @@ pub struct DigestComputer<'a, T> {
 }
 
 impl<'a, T: Digestible> DigestComputer<'a, T> {
-  fn hasher() -> Sha3_256 {
-    Sha3_256::new()
+  fn hasher() -> Sha256 {
+    Sha256::new()
   }
 
   /// Create a new DigestComputer
@@ -62,12 +62,31 @@ impl<'a, T: Digestible> DigestComputer<'a, T> {
 
   /// Compute the digest of a `Digestible` instance.
   pub fn digest(&self) -> Result<SpartanDigest, io::Error> {
-    let mut hasher = Self::hasher();
-    self
-      .inner
-      .write_bytes(&mut hasher)
-      .expect("Serialization error");
+    // Stream bytes directly into the hasher via a small buffered adapter.
+    // A 64 KiB buffer is large enough to amortize per-call overhead from
+    // bincode while avoiding the large upfront allocation that a
+    // serialize-then-hash approach would require for big objects.
+    let mut writer = io::BufWriter::with_capacity(64 * 1024, HashWriter(Self::hasher()));
+    self.inner.write_bytes(&mut writer)?;
+    let hasher = writer
+      .into_inner()
+      .map_err(|e| io::Error::other(e.to_string()))?
+      .0;
     Ok(hasher.finalize().into())
+  }
+}
+
+/// Adapter that forwards `io::Write` calls into a SHA-256 hasher.
+struct HashWriter(Sha256);
+
+impl io::Write for HashWriter {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    self.0.update(buf);
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    Ok(())
   }
 }
 

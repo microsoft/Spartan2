@@ -29,7 +29,8 @@ where
   E::PCS: FoldingEngineTrait<E>,
 {
   /// Fold a relaxed instance/witness `(U1, W1)` with a regular instance/witness `(U2, W2)`.
-  /// Returns only the folded witness to avoid unnecessary computation on the prover side.
+  /// Returns the folded witness plus the folded scalar fields `(u, X)` -- no commitment
+  /// arithmetic, keeping the prover fast.
   pub fn prove(
     ck: &CommitmentKey<E>,
     S: &R1CSShape<E>,
@@ -38,7 +39,7 @@ where
     U2: &R1CSInstance<E>,
     W2: &R1CSWitness<E>,
     transcript: &mut E::TE,
-  ) -> Result<(Self, RelaxedR1CSWitness<E>), SpartanError> {
+  ) -> Result<(Self, RelaxedR1CSWitness<E>, E::Scalar, Vec<E::Scalar>), SpartanError> {
     // Use the caller-provided transcript and absorb both instances.
     transcript.absorb(b"U1", U1);
     transcript.absorb(b"U2", U2);
@@ -52,8 +53,11 @@ where
     let r = transcript.squeeze(b"r")?;
 
     let W = W1.fold(W2, &T, &r_T, &r)?;
+    // Fold scalar fields only (no commitment arithmetic)
+    let u_folded = U1.u + r;
+    let X_folded: Vec<E::Scalar> = U1.X.iter().zip(&U2.X).map(|(a, b)| *a + r * *b).collect();
 
-    Ok((Self { comm_T }, W))
+    Ok((Self { comm_T }, W, u_folded, X_folded))
   }
 
   /// Verify folding given a regular instance `U2` that corresponds to the

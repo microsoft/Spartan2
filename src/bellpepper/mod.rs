@@ -111,6 +111,10 @@ mod tests {
     fn num_rounds(&self) -> usize {
       2
     }
+
+    fn commitment_width(&self) -> usize {
+      32
+    }
   }
 
   fn test_multiround_bits_with<E: Engine>() {
@@ -326,6 +330,10 @@ mod tests {
 
     fn num_rounds(&self) -> usize {
       2
+    }
+
+    fn commitment_width(&self) -> usize {
+      32
     }
   }
 

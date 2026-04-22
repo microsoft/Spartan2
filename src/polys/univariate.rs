@@ -12,7 +12,6 @@ use crate::{
   traits::{Group, transcript::TranscriptReprTrait},
 };
 use ff::PrimeField;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
 // ax^2 + bx + c stored as vec![c, b, a]
@@ -48,24 +47,74 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   /// Returns `SpartanError` if the Gaussian elimination fails due to singular matrix
   /// or invalid input dimensions.
   pub fn from_evals(evals: &[Scalar]) -> Result<Self, SpartanError> {
-    let n = evals.len();
-    let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
+    // Use closed-form formulas for common degrees to avoid Gaussian elimination
+    match evals.len() {
+      3 => Ok(Self::from_evals_deg2(evals)),
+      4 => Ok(Self::from_evals_deg3(evals)),
+      _ => {
+        let n = evals.len();
+        let xs: Vec<Scalar> = (0..n).map(|x| Scalar::from(x as u64)).collect();
 
-    let mut matrix: Vec<Vec<Scalar>> = Vec::with_capacity(n);
-    for i in 0..n {
-      let mut row = Vec::with_capacity(n);
-      let x = xs[i];
-      row.push(Scalar::ONE);
-      row.push(x);
-      for j in 2..n {
-        row.push(row[j - 1] * x);
+        let mut matrix: Vec<Vec<Scalar>> = Vec::with_capacity(n);
+        for i in 0..n {
+          let mut row = Vec::with_capacity(n);
+          let x = xs[i];
+          row.push(Scalar::ONE);
+          row.push(x);
+          for j in 2..n {
+            row.push(row[j - 1] * x);
+          }
+          row.push(evals[i]);
+          matrix.push(row);
+        }
+
+        let coeffs = gaussian_elimination(&mut matrix)?;
+        Ok(Self { coeffs })
       }
-      row.push(evals[i]);
-      matrix.push(row);
     }
+  }
 
-    let coeffs = gaussian_elimination(&mut matrix)?;
-    Ok(Self { coeffs })
+  /// Constructs a degree-2 polynomial from evaluations at {0, 1, 2}.
+  ///
+  /// For p(X) = c + bX + aX^2, given e0=p(0), e1=p(1), e2=p(2):
+  ///   c = e0
+  ///   a = (e0 - 2*e1 + e2) / 2
+  ///   b = e1 - c - a
+  #[inline]
+  pub fn from_evals_deg2(evals: &[Scalar]) -> Self {
+    debug_assert!(evals.len() >= 3);
+    let c = evals[0];
+    let a = (evals[0] - evals[1].double() + evals[2]) * Scalar::TWO_INV;
+    let b = evals[1] - c - a;
+    Self {
+      coeffs: vec![c, b, a],
+    }
+  }
+
+  /// Constructs a degree-3 polynomial from evaluations at {0, 1, 2, 3}.
+  ///
+  /// For p(X) = d + cX + bX^2 + aX^3, given e0..e3 = p(0)..p(3):
+  ///   d = e0
+  ///   a = (e3 - 3*e2 + 3*e1 - e0) / 6
+  ///   b = (e2 - 2*e1 + e0) / 2 - 3*a
+  ///   c = e1 - d - b - a
+  #[inline]
+  pub fn from_evals_deg3(evals: &[Scalar]) -> Self {
+    debug_assert!(evals.len() >= 4);
+    let d = evals[0];
+    // Compute a = Delta^3/6 = (e3 - 3*e2 + 3*e1 - e0) / 6
+    let e1_3 = evals[1].double() + evals[1]; // 3*e1
+    let e2_3 = evals[2].double() + evals[2]; // 3*e2
+    let delta3 = evals[3] - e2_3 + e1_3 - evals[0];
+    let six_inv = Scalar::from(6u64).invert().unwrap();
+    let a = delta3 * six_inv;
+    // b = (e2 - 2*e1 + e0) / 2 - 3*a
+    let delta2 = evals[2] - evals[1].double() + evals[0];
+    let b = delta2 * Scalar::TWO_INV - (a.double() + a);
+    let c = evals[1] - d - b - a;
+    Self {
+      coeffs: vec![d, c, b, a],
+    }
   }
 
   /// Returns the degree of the polynomial.
@@ -80,10 +129,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
 
   /// Evaluates the polynomial at one.
   pub fn eval_at_one(&self) -> Scalar {
-    (0..self.coeffs.len())
-      .into_par_iter()
-      .map(|i| self.coeffs[i])
-      .sum()
+    self.coeffs.iter().copied().sum()
   }
 
   /// Evaluates the polynomial at a given point `r`.

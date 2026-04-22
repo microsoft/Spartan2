@@ -8,7 +8,7 @@
 use crate::{
   impl_traits,
   provider::{
-    msm::{msm, msm_small},
+    msm::{msm, msm_shared_weights, msm_small},
     traits::{DlogGroup, DlogGroupExt},
   },
   traits::{Group, PrimeFieldExt, transcript::TranscriptReprTrait},
@@ -58,4 +58,5 @@ mod big_num_tests {
   crate::test_field_reduction_constants!(scalar_frc, crate::provider::bn254::types::Scalar);
   crate::test_montgomery!(scalar_mont, crate::provider::bn254::types::Scalar);
   crate::test_delayed_reduction!(scalar_dr, crate::provider::bn254::types::Scalar);
+  crate::test_small_value!(scalar_sv, crate::provider::bn254::types::Scalar);
 }

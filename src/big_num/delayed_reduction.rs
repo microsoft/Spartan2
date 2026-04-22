@@ -7,21 +7,20 @@
 //! products `Σ (field_i × field_j)`, the standard approach does N reductions.
 //! Delayed reduction accumulates unreduced products in wide integers, reducing
 //! only once at the end.
+//!
+//! Uses WideLimbs<9> (576-bit) accumulators with a single Montgomery REDC
+//! at the end.
 
-use super::{
-  limbs::{WideLimbs, mul_4_by_4},
-  montgomery::{MontgomeryLimbs, montgomery_reduce_9},
-};
-use ff::PrimeField;
-use num_traits::Zero;
 use std::ops::AddAssign;
+
+use ff::PrimeField;
 
 /// Trait for delayed modular reduction operations.
 ///
 /// Accumulates unreduced products in wide integers, reducing only at the end.
 pub trait DelayedReduction<Value>: Sized {
   /// Wide accumulator type for unreduced products.
-  type Accumulator: Copy + Clone + Default + AddAssign + Send + Sync + Zero;
+  type Accumulator: Copy + Clone + Default + AddAssign + Send + Sync;
 
   /// Accumulate: `acc += field × value` without modular reduction.
   fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field: &Self, value: &Value);
@@ -30,9 +29,18 @@ pub trait DelayedReduction<Value>: Sized {
   fn reduce(acc: &Self::Accumulator) -> Self;
 }
 
-/// DelayedReduction<F> for field × field products.
+// =============================================================================
+// Wide-integer delayed reduction
+// =============================================================================
+
+use crate::big_num::{
+  limbs::{WideLimbs, mul_acc_4_by_4},
+  montgomery::{MontgomeryLimbs, montgomery_reduce_9},
+};
+
+/// DelayedReduction<F> for field × field products using wide integers.
 ///
-/// Uses WideLimbs<9> (576 bits) as accumulator, supporting up to 2^68 products.
+/// Uses WideLimbs<9> (576 bits) as accumulator, supporting up to 2^64 products.
 ///
 /// # Capacity Invariant
 ///
@@ -40,34 +48,13 @@ pub trait DelayedReduction<Value>: Sized {
 /// field×field product contributes at most 1 to the carry chain into limb 8.
 /// With a u64 limb, we can accumulate up to 2^64 products before overflow.
 /// In practice, sumcheck rounds are bounded by polynomial size (≤ 2^40),
-/// so this limit is never approached. The debug_assert below catches misuse.
+/// so this limit is never approached.
 impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
   type Accumulator = WideLimbs<9>;
 
   #[inline(always)]
   fn unreduced_multiply_accumulate(acc: &mut Self::Accumulator, field_a: &Self, field_b: &F) {
-    // Compute field_a × field_b as 8 limbs and add to accumulator
-    let product = mul_4_by_4(field_a.to_limbs(), field_b.to_limbs());
-    let mut carry = 0u128;
-    for (acc_limb, &prod_limb) in acc.0.iter_mut().take(8).zip(product.iter()) {
-      let sum = (*acc_limb as u128) + (prod_limb as u128) + carry;
-      *acc_limb = sum as u64;
-      carry = sum >> 64;
-    }
-
-    // Accumulate carry into the 9th limb. Overflow here means we've exceeded
-    // the accumulator's capacity (~2^64 products) - this should never happen
-    // in valid usage since sumcheck polynomials are bounded by practical sizes.
-    let old_limb8 = acc.0[8];
-    acc.0[8] = acc.0[8].wrapping_add(carry as u64);
-    debug_assert!(
-      acc.0[8] >= old_limb8,
-      "DelayedReduction accumulator overflow: limb 8 wrapped from {} to {} (carry={}). \
-       Too many products accumulated without reduction.",
-      old_limb8,
-      acc.0[8],
-      carry
-    );
+    mul_acc_4_by_4(&mut acc.0, field_a.to_limbs(), field_b.to_limbs());
   }
 
   #[inline(always)]
@@ -81,7 +68,7 @@ impl<F: MontgomeryLimbs + PrimeField + Copy> DelayedReduction<F> for F {
 // =============================================================================
 
 #[cfg(test)]
-pub(crate) fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + Copy>() {
+pub(crate) fn test_delayed_reduction_sum_impl<F: DelayedReduction<F> + PrimeField + Copy>() {
   use rand::{SeedableRng, rngs::StdRng};
 
   let mut rng = StdRng::seed_from_u64(54321);
@@ -94,7 +81,7 @@ pub(crate) fn test_delayed_reduction_sum_impl<F: MontgomeryLimbs + PrimeField + 
   let expected: F = a_vec.iter().zip(b_vec.iter()).map(|(a, b)| *a * *b).sum();
 
   // Compute using delayed reduction
-  let mut acc = WideLimbs::<9>::default();
+  let mut acc = <F as DelayedReduction<F>>::Accumulator::default();
   for (a, b) in a_vec.iter().zip(b_vec.iter()) {
     <F as DelayedReduction<F>>::unreduced_multiply_accumulate(&mut acc, a, b);
   }

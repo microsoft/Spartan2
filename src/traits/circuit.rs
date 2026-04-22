@@ -82,4 +82,7 @@ pub trait MultiRoundCircuit<E: Engine>: Send + Sync + Clone {
 
   /// Returns the number of rounds in the circuit
   fn num_rounds(&self) -> usize;
+
+  /// Returns the commitment width for per-round witness commitments.
+  fn commitment_width(&self) -> usize;
 }
