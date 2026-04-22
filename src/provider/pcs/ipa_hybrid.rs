@@ -280,7 +280,7 @@ where
 /// Balances proof size and prover speed: k bullet rounds compress the proof
 /// while the Schnorr tail keeps prover time manageable.
 ///
-/// Proof size: 2k group elements (L/R) + n/2^k scalars (z_vec) + 2 points + 3 scalars.
+/// Proof size: 2k group elements (L/R) + n/2^k scalars (z_vec) + 3 points + 3 scalars.
 /// Prover/verifier time: k rounds of MSM + O(n) tail MSM (expanded back to original generators).
 ///
 /// The number of bullet rounds is controlled by `BULLET_ROUNDS`.
@@ -328,9 +328,6 @@ where
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
   ) -> Result<Self, SpartanError> {
-    transcript.dom_sep(Self::protocol_name());
-    transcript.absorb(b"U", U);
-
     let n = W.a_vec.len();
     if !n.is_power_of_two() {
       return Err(SpartanError::InvalidInputLength {
@@ -345,12 +342,6 @@ where
         ),
       });
     }
-    let ck = &ck[..n];
-    let lg_n = n.trailing_zeros() as usize;
-    let k = BULLET_ROUNDS.min(lg_n);
-
-    let mut rng = rand::thread_rng();
-
     if U.b_vec.len() != n {
       return Err(SpartanError::InvalidInputLength {
         reason: format!(
@@ -359,6 +350,14 @@ where
         ),
       });
     }
+    let ck = &ck[..n];
+    let lg_n = n.trailing_zeros() as usize;
+    let k = BULLET_ROUNDS.min(lg_n);
+
+    transcript.dom_sep(Self::protocol_name());
+    transcript.absorb(b"U", U);
+
+    let mut rng = rand::thread_rng();
 
     // Step 1: Re-commit evaluation under h
     let v = inner_product(&W.a_vec, &U.b_vec);
@@ -446,9 +445,6 @@ where
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    transcript.dom_sep(Self::protocol_name());
-    transcript.absorb(b"U", U);
-
     let k = self.bullet.L_vec.len();
 
     if n == 0 || !n.is_power_of_two() {
@@ -474,6 +470,9 @@ where
       });
     }
     let ck = &ck[..n];
+
+    transcript.dom_sep(Self::protocol_name());
+    transcript.absorb(b"U", U);
 
     // Step 1: Verify equality proof
     transcript.absorb(b"comm_v", &self.comm_v);
@@ -553,10 +552,8 @@ mod tests {
     let mut rng = thread_rng();
 
     for log_n in [4, 8, 11] {
-      if K > log_n {
-        continue;
-      }
       let n = 1 << log_n;
+      let effective_k = K.min(log_n);
 
       let gens = E::GE::from_label(b"test_ipa_hybrid", n + 1);
       let ck = &gens[..n];
@@ -584,7 +581,7 @@ mod tests {
           .unwrap();
 
       let proof_bytes = bincode::serialize(&proof).unwrap();
-      let n_reduced = n >> K;
+      let n_reduced = n >> effective_k;
       tracing::debug!(
         "Hybrid IPA k={} n={}: proof={} bytes, z_vec_len={}, expected_reduced={}",
         K,
@@ -614,6 +611,57 @@ mod tests {
   #[test]
   fn test_hybrid_ipa_k3_t256() {
     test_hybrid_ipa_with_engine::<E, 3>();
+  }
+
+  /// K=0: pure Schnorr tail, no bullet rounds.
+  #[test]
+  fn test_hybrid_ipa_k0_pure_schnorr() {
+    test_hybrid_ipa_with_engine::<E, 0>();
+  }
+
+  /// K larger than lg_n: clamped to lg_n (full Bulletproofs, no Schnorr tail).
+  #[test]
+  fn test_hybrid_ipa_k_exceeds_lgn() {
+    // K=20 but n=16 (lg_n=4), so effective k = min(20, 4) = 4
+    test_hybrid_ipa_with_engine::<E, 20>();
+  }
+
+  /// Small n: n=2 (lg_n=1) with K=1 (one bullet round + scalar Schnorr tail).
+  #[test]
+  fn test_hybrid_ipa_small_n() {
+    let mut rng = thread_rng();
+    const K: usize = 1;
+    let n = 2;
+
+    let gens = GE::from_label(b"test_ipa_hybrid", n + 1);
+    let ck = &gens[..n];
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_ipa_hybrid_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let v = inner_product(&a_vec, &b_vec);
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, ck, true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_hybrid_ipa");
+    let proof =
+      InnerProductArgumentHybrid::<E, K>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt)
+        .expect("prove with n=2 should succeed");
+
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    proof
+      .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+      .expect("verify with n=2 should succeed");
   }
 
   /// Verify that prove/verify both work when ck is longer than n (Hyrax scenario).
@@ -718,6 +766,72 @@ mod tests {
         .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
         .is_err(),
       "mismatched L/R should fail verification"
+    );
+
+    // Tamper: corrupt comm_v (equality proof should fail)
+    let mut bad_proof = proof.clone();
+    bad_proof.comm_v += h;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted comm_v should fail verification"
+    );
+
+    // Tamper: corrupt T_eq (equality proof should fail)
+    let mut bad_proof = proof.clone();
+    bad_proof.T_eq += h;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted T_eq should fail verification"
+    );
+
+    // Tamper: corrupt s1_eq scalar
+    let mut bad_proof = proof.clone();
+    bad_proof.s1_eq += Scalar::ONE;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted s1_eq should fail verification"
+    );
+
+    // Tamper: corrupt s2_eq scalar
+    let mut bad_proof = proof.clone();
+    bad_proof.s2_eq += Scalar::ONE;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted s2_eq should fail verification"
+    );
+
+    // Tamper: corrupt Schnorr nonce D
+    let mut bad_proof = proof.clone();
+    bad_proof.D += h;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted D should fail verification"
+    );
+
+    // Tamper: corrupt z_r blinding response
+    let mut bad_proof = proof.clone();
+    bad_proof.z_r += Scalar::ONE;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted z_r should fail verification"
     );
   }
 

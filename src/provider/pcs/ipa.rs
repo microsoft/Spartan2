@@ -131,8 +131,6 @@ where
     W: &InnerProductWitness<E>,
     transcript: &mut E::TE,
   ) -> Result<Self, SpartanError> {
-    transcript.dom_sep(Self::protocol_name());
-
     let n = U.b_vec.len();
     if W.a_vec.len() != n {
       return Err(SpartanError::InvalidInputLength {
@@ -150,6 +148,8 @@ where
         ),
       });
     }
+
+    transcript.dom_sep(Self::protocol_name());
 
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
@@ -198,16 +198,6 @@ where
     U: &InnerProductInstance<E>,
     transcript: &mut E::TE,
   ) -> Result<(), SpartanError> {
-    transcript.dom_sep(Self::protocol_name());
-
-    // absorb the instance in the transcript
-    transcript.absorb(b"U", U);
-
-    transcript.absorb(b"delta", &self.delta);
-    transcript.absorb(b"beta", &self.beta);
-
-    let r = transcript.squeeze(b"r")?;
-
     if self.z_vec.len() != n || ck.len() < self.z_vec.len() {
       return Err(SpartanError::InvalidInputLength {
         reason: format!(
@@ -227,6 +217,16 @@ where
       });
     }
 
+    transcript.dom_sep(Self::protocol_name());
+
+    // absorb the instance in the transcript
+    transcript.absorb(b"U", U);
+
+    transcript.absorb(b"delta", &self.delta);
+    transcript.absorb(b"beta", &self.beta);
+
+    let r = transcript.squeeze(b"r")?;
+
     if U.comm_a_vec * r + self.delta
       != E::GE::vartime_multiscalar_mul(&self.z_vec, &ck[0..self.z_vec.len()], true)?
         + *h * self.z_delta
@@ -245,5 +245,128 @@ where
     }
 
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::provider::T256HyraxEngine;
+  use crate::provider::traits::DlogGroup;
+  use ff::Field;
+  use rand::thread_rng;
+
+  type E = T256HyraxEngine;
+  type Scalar = <E as Engine>::Scalar;
+  type GE = <E as Engine>::GE;
+  type TE = <E as Engine>::TE;
+
+  /// Mismatched a_vec/b_vec lengths should return error, not panic.
+  #[test]
+  fn test_linear_ipa_prove_mismatched_lengths() {
+    let mut rng = thread_rng();
+    let n = 8;
+
+    let gens = GE::from_label(b"test_linear_ipa", n + 1);
+    let ck = &gens[..n];
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_linear_ipa_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec_bad: Vec<Scalar> = (0..n + 1).map(|_| Scalar::random(&mut rng)).collect();
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, ck, true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let v = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec_bad, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_linear_ipa");
+    let result =
+      InnerProductArgumentLinear::<E>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt);
+    assert!(result.is_err(), "mismatched lengths should return error");
+  }
+
+  /// ck too short should return error, not panic.
+  #[test]
+  fn test_linear_ipa_prove_short_ck() {
+    let mut rng = thread_rng();
+    let n = 8;
+
+    let gens = GE::from_label(b"test_linear_ipa", n + 1);
+    let ck_short = &gens[..n - 1]; // too short
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_linear_ipa_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, &gens[..n], true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let v = inner_product(&a_vec, &b_vec);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_linear_ipa");
+    let result = InnerProductArgumentLinear::<E>::prove(
+      ck_short, &h, ck_c, &h_c, &instance, &witness, &mut pt,
+    );
+    assert!(result.is_err(), "short ck should return error");
+  }
+
+  /// Verify with mismatched b_vec length should return error.
+  #[test]
+  fn test_linear_ipa_verify_mismatched_bvec() {
+    let mut rng = thread_rng();
+    let n = 8;
+
+    let gens = GE::from_label(b"test_linear_ipa", n + 1);
+    let ck = &gens[..n];
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_linear_ipa_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let v = inner_product(&a_vec, &b_vec);
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, ck, true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    // Prove with correct inputs
+    let mut pt = TE::new(b"test_linear_ipa");
+    let proof =
+      InnerProductArgumentLinear::<E>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt)
+        .unwrap();
+
+    // Verify with wrong-length b_vec
+    let b_vec_bad: Vec<Scalar> = (0..n + 1).map(|_| Scalar::random(&mut rng)).collect();
+    let bad_instance = InnerProductInstance::<E>::new(&comm_a, &b_vec_bad, &comm_c);
+
+    let mut vt = TE::new(b"test_linear_ipa");
+    let result = proof.verify(ck, &h, ck_c, &h_c, n, &bad_instance, &mut vt);
+    assert!(
+      result.is_err(),
+      "mismatched b_vec in verify should return error"
+    );
   }
 }
