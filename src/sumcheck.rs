@@ -1032,7 +1032,6 @@ pub(crate) mod eq_sumcheck {
     ///
     /// The first suffix tau τ[l₀] is handled via `eval_eq_left` and `bound()`,
     /// matching the Nova optimization where the first variable is tracked separately.
-    #[allow(dead_code)]
     pub fn from_pyramids(
       e_in_pyramid: Vec<Vec<E::Scalar>>,
       e_xout_pyramid: Vec<Vec<E::Scalar>>,
@@ -1493,7 +1492,10 @@ pub(crate) mod eq_sumcheck {
   #[cfg(test)]
   mod tests {
     use super::EqSumCheckInstance;
-    use crate::{polys::eq::build_eq_pyramid, provider::PallasHyraxEngine};
+    use crate::{
+      polys::{eq::build_eq_pyramid, multilinear::MultilinearPolynomial, univariate::UniPoly},
+      provider::PallasHyraxEngine,
+    };
     use ff::Field;
 
     type E = PallasHyraxEngine;
@@ -1543,6 +1545,75 @@ pub(crate) mod eq_sumcheck {
         .collect::<Vec<_>>();
 
       assert_eq!(instance.eq_tau_0_slope_m1, expected);
+    }
+
+    #[test]
+    fn test_from_pyramids_matches_rebuilt_instance() {
+      for len in [1usize, 2, 3, 5, 7] {
+        let taus: Vec<F> = (0..len).map(|i| F::from((i as u64) + 2)).collect();
+        let eval_eq_left = F::from(17u64);
+
+        let mut rebuilt = EqSumCheckInstance::<E>::new_with_eval_eq_left(&taus, eval_eq_left);
+
+        let in_vars = len.div_ceil(2);
+        let xout_vars = len - in_vars;
+        let mut e_in_pyramid = build_eq_pyramid(&taus[..in_vars]);
+        e_in_pyramid.pop();
+        let e_xout_pyramid = build_eq_pyramid(&taus[in_vars..]);
+        debug_assert_eq!(e_in_pyramid.len(), in_vars);
+        debug_assert_eq!(e_xout_pyramid.len(), xout_vars + 1);
+
+        let mut reused =
+          EqSumCheckInstance::<E>::from_pyramids(e_in_pyramid, e_xout_pyramid, &taus, eval_eq_left);
+
+        let size = 1usize << len;
+        let a_vals: Vec<F> = (0..size).map(|i| F::from((i as u64) + 2)).collect();
+        let b_vals: Vec<F> = (0..size).map(|i| F::from((i as u64) + 5)).collect();
+        let c_vals: Vec<F> = a_vals
+          .iter()
+          .zip(&b_vals)
+          .map(|(a, b)| *a * *b - F::from(3u64))
+          .collect();
+
+        let mut rebuilt_a = MultilinearPolynomial::new(a_vals.clone());
+        let mut rebuilt_b = MultilinearPolynomial::new(b_vals.clone());
+        let mut rebuilt_c = MultilinearPolynomial::new(c_vals.clone());
+        let mut reused_a = MultilinearPolynomial::new(a_vals);
+        let mut reused_b = MultilinearPolynomial::new(b_vals);
+        let mut reused_c = MultilinearPolynomial::new(c_vals);
+        let mut claim = F::from(19u64);
+
+        for round in 0..len {
+          let rebuilt_evals = rebuilt
+            .evaluation_points_cubic_with_three_inputs(&rebuilt_a, &rebuilt_b, &rebuilt_c, claim);
+          let reused_evals = reused
+            .evaluation_points_cubic_with_three_inputs(&reused_a, &reused_b, &reused_c, claim);
+
+          assert_eq!(
+            reused_evals, rebuilt_evals,
+            "eval mismatch at round {round} for len={len}"
+          );
+
+          let evals = [
+            rebuilt_evals.0,
+            claim - rebuilt_evals.0,
+            rebuilt_evals.1,
+            rebuilt_evals.2,
+          ];
+          let poly = UniPoly::from_evals(&evals).expect("cubic evals should interpolate");
+          let r_i = F::from((round as u64) + 11);
+          claim = poly.evaluate(&r_i);
+
+          rebuilt_a.bind_poly_var_top(&r_i);
+          rebuilt_b.bind_poly_var_top(&r_i);
+          rebuilt_c.bind_poly_var_top(&r_i);
+          reused_a.bind_poly_var_top(&r_i);
+          reused_b.bind_poly_var_top(&r_i);
+          reused_c.bind_poly_var_top(&r_i);
+          rebuilt.bound(&r_i);
+          reused.bound(&r_i);
+        }
+      }
     }
   }
 
