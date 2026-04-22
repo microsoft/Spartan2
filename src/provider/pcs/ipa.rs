@@ -133,6 +133,24 @@ where
   ) -> Result<Self, SpartanError> {
     transcript.dom_sep(Self::protocol_name());
 
+    let n = U.b_vec.len();
+    if W.a_vec.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "linear IPA prove: a_vec has {} elements but b_vec has {n}",
+          W.a_vec.len()
+        ),
+      });
+    }
+    if ck.len() < n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "linear IPA prove: ck has {} elements but need at least {n}",
+          ck.len()
+        ),
+      });
+    }
+
     // absorb the instance in the transcript
     transcript.absorb(b"U", U);
 
@@ -193,9 +211,18 @@ where
     if self.z_vec.len() != n || ck.len() < self.z_vec.len() {
       return Err(SpartanError::InvalidInputLength {
         reason: format!(
-          "Inner product argument verify: Expected {} elements in z_vec, got {}",
+          "linear IPA verify: expected {} elements in z_vec, got {}",
           n,
           self.z_vec.len()
+        ),
+      });
+    }
+
+    if U.b_vec.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "linear IPA verify: b_vec has {} elements but expected {n}",
+          U.b_vec.len()
         ),
       });
     }
