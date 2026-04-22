@@ -70,7 +70,7 @@ impl<'a, T: Digestible> DigestComputer<'a, T> {
     self.inner.write_bytes(&mut writer)?;
     let hasher = writer
       .into_inner()
-      .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+      .map_err(|e| io::Error::other(e.to_string()))?
       .0;
     Ok(hasher.finalize().into())
   }
