@@ -39,7 +39,6 @@ use crate::{
   traits::{Engine, transcript::TranscriptEngineTrait},
 };
 use ff::PrimeField;
-use itertools::Itertools;
 use num_traits::Zero;
 use rayon::prelude::*;
 use tracing::info;
@@ -57,7 +56,6 @@ struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
   eq_alpha: Scalar,
   basis_factory: LagrangeBasisFactory<Scalar, D>,
 }
-
 
 /// Prove Spartan's outer `poly_A * poly_B - poly_C` relation using Algorithm 6
 /// (EqPoly-SmallValueSC).
@@ -128,7 +126,7 @@ where
   // Internally computes eq tables with balanced split and precomputed eq_cache.
   // Uses: small × small → intermediate (for Az·Bz products),
   // then intermediate × field (for eq weighting via DelayedReduction).
-  let (accumulators, _e_in_pyramid, _e_xout_pyramid) =
+  let (accumulators, mut e_in_pyramid, e_xout_pyramid) =
     build_accumulators_spartan(poly_A_small, poly_B_small, &taus, l0);
 
   let mut small_value_sumcheck =
@@ -197,10 +195,23 @@ where
   );
 
   // ===== Remaining Rounds (ℓ₀ to ℓ-1) =====
-  let mut eq_instance = eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
-    &taus[transition_round..],
-    small_value_sumcheck.eq_alpha(),
-  );
+  let mut eq_instance = if transition_round == l0 {
+    // Reuse the precomputed pyramids when the optimized rounds completed as planned.
+    // The first suffix tau is tracked separately in eval_eq_left, so the left pyramid
+    // passed to EqSumCheckInstance must exclude that first tau.
+    e_in_pyramid.pop();
+    eq_sumcheck::EqSumCheckInstance::<E>::from_pyramids(
+      e_in_pyramid,
+      e_xout_pyramid,
+      &taus[l0..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  } else {
+    eq_sumcheck::EqSumCheckInstance::<E>::new_with_eval_eq_left(
+      &taus[transition_round..],
+      small_value_sumcheck.eq_alpha(),
+    )
+  };
 
   // Continue with the remaining rounds using the standard eq instance seeded with the
   // accumulated prefix eq factor from the small-value rounds.
@@ -396,13 +407,30 @@ where
     (F::reduce(&acc_a), F::reduce(&acc_b), F::reduce(&acc_c))
   };
 
-  let results: Vec<(F, F, F)> = if stride >= PAR_THRESHOLD {
-    (0..stride).into_par_iter().map(compute).collect()
-  } else {
-    (0..stride).map(compute).collect()
-  };
+  let mut out_a = vec![F::ZERO; stride];
+  let mut out_b = vec![F::ZERO; stride];
+  let mut out_c = vec![F::ZERO; stride];
 
-  let (out_a, out_b, out_c): (Vec<_>, Vec<_>, Vec<_>) = results.into_iter().multiunzip();
+  if stride >= PAR_THRESHOLD {
+    out_a
+      .par_iter_mut()
+      .zip(out_b.par_iter_mut())
+      .zip(out_c.par_iter_mut())
+      .enumerate()
+      .for_each(|(s, ((a, b), c))| {
+        let (ra, rb, rc) = compute(s);
+        *a = ra;
+        *b = rb;
+        *c = rc;
+      });
+  } else {
+    for s in 0..stride {
+      let (a, b, c) = compute(s);
+      out_a[s] = a;
+      out_b[s] = b;
+      out_c[s] = c;
+    }
+  }
 
   (
     MultilinearPolynomial::new(out_a),
@@ -419,7 +447,6 @@ where
 {
   MultilinearPolynomial::new(poly.Z.iter().copied().map(F::small_to_field).collect())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -555,8 +582,8 @@ mod tests {
 
     for (round, &tau_round) in taus.iter().enumerate().take(SMALL_VALUE_ROUNDS) {
       // Get expected evaluations from standard method
-      let (expected_eval_0, expected_eval_2, expected_eval_3) = eq_instance
-        .evaluation_points_cubic_with_three_inputs(&poly_A, &poly_B, &poly_C, claim);
+      let (expected_eval_0, expected_eval_2, expected_eval_3) =
+        eq_instance.evaluation_points_cubic_with_three_inputs(&poly_A, &poly_B, &poly_C, claim);
       let expected_eval_1 = claim - expected_eval_0; // s(0) + s(1) = claim
 
       // Build small-value polynomial
