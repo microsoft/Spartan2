@@ -9,6 +9,7 @@
 // helper code for polynomial commitment schemes
 pub mod ipa;
 /// Hybrid Inner Product Argument (Bulletproofs halving + Schnorr tail)
+#[cfg(feature = "ipa-hybrid")]
 pub mod ipa_log;
 
 // implementations of polynomial commitment schemes

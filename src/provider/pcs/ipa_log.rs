@@ -68,13 +68,41 @@ where
     SpartanError,
   > {
     let n_orig = a_vec.len();
-    assert!(n_orig.is_power_of_two());
+    if !n_orig.is_power_of_two() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("bullet prove: n={n_orig} is not a power of two"),
+      });
+    }
     let lg_n = n_orig.trailing_zeros() as usize;
-    assert!(num_rounds <= lg_n);
-
-    assert_eq!(G_affine.len(), n_orig);
-    assert_eq!(b_vec.len(), n_orig);
-    assert!(blinds_vec.len() >= num_rounds);
+    if num_rounds > lg_n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("bullet prove: num_rounds={num_rounds} exceeds lg_n={lg_n}"),
+      });
+    }
+    if G_affine.len() != n_orig {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "bullet prove: G_affine has {} elements but need {n_orig}",
+          G_affine.len()
+        ),
+      });
+    }
+    if b_vec.len() != n_orig {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "bullet prove: b_vec has {} elements but need {n_orig}",
+          b_vec.len()
+        ),
+      });
+    }
+    if blinds_vec.len() < num_rounds {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "bullet prove: blinds_vec has {} elements but need at least {num_rounds}",
+          blinds_vec.len()
+        ),
+      });
+    }
 
     let mut a = a_vec.to_vec();
     let mut b = b_vec.to_vec();
@@ -160,6 +188,14 @@ where
     Gamma: &E::GE,
   ) -> Result<(Vec<E::Scalar>, E::GE, Vec<E::Scalar>), SpartanError> {
     let k = self.L_vec.len();
+    if self.R_vec.len() != k {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "bullet verify: L_vec has {k} elements but R_vec has {}",
+          self.R_vec.len()
+        ),
+      });
+    }
     let lg_n = n.trailing_zeros() as usize;
     if k > lg_n || !n.is_power_of_two() {
       return Err(SpartanError::InvalidInputLength {
@@ -167,6 +203,11 @@ where
           "bullet verify: k={} exceeds lg_n={} or n={} is not a power of two",
           k, lg_n, n
         ),
+      });
+    }
+    if b.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("bullet verify: b has {} elements but need {n}", b.len()),
       });
     }
     let n_reduced = n >> k;
@@ -222,7 +263,14 @@ where
       let (b_L, b_R) = b_folded.split_at(half);
       b_folded = (0..half).map(|i| b_L[i] * u_inv + b_R[i] * u).collect();
     }
-    debug_assert_eq!(b_folded.len(), n_reduced);
+    if b_folded.len() != n_reduced {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "bullet verify: b_folded has {} elements, expected {n_reduced}",
+          b_folded.len()
+        ),
+      });
+    }
 
     Ok((s, Gamma_hat, b_folded))
   }
@@ -285,9 +333,21 @@ where
     transcript.absorb(b"U", U);
 
     let n = W.a_vec.len();
+    if !n.is_power_of_two() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("hybrid IPA prove: n={n} is not a power of two"),
+      });
+    }
+    if ck.len() < n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "hybrid IPA prove: ck has {} elements but need at least {n}",
+          ck.len()
+        ),
+      });
+    }
+    let ck = &ck[..n];
     let lg_n = n.trailing_zeros() as usize;
-    assert!(n.is_power_of_two());
-    assert_eq!(ck.len(), n);
     let k = BULLET_ROUNDS.min(lg_n);
 
     let mut rng = rand::thread_rng();
@@ -382,7 +442,6 @@ where
     transcript.absorb(b"U", U);
 
     let k = self.bullet.L_vec.len();
-    let n_reduced = n >> k;
 
     if ck.len() < n {
       return Err(SpartanError::InvalidInputLength {
@@ -413,7 +472,9 @@ where
     let Q = E::GE::group(ck_c) * r;
 
     // Step 3: Verify bullet reduction -> (s_values, Gamma_hat, b_hat)
+    // bullet.verify validates k <= lg_n, so n_reduced is safe to compute after it succeeds.
     let (s_values, Gamma_hat, b_hat) = self.bullet.verify(n, &U.b_vec, transcript, &Gamma)?;
+    let n_reduced = n >> k;
 
     // Step 4: Schnorr verification without materializing g_hat.
     // Expand z_vec back to original generators:
@@ -499,7 +560,7 @@ mod tests {
 
       let proof_bytes = bincode::serialize(&proof).unwrap();
       let n_reduced = n >> K;
-      println!(
+      tracing::debug!(
         "Hybrid IPA k={} n={}: proof={} bytes, z_vec_len={}, expected_reduced={}",
         K,
         n,
