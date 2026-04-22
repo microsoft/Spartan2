@@ -19,7 +19,6 @@ pub(crate) mod delayed_reduction;
 pub(crate) mod field_reduction_constants;
 pub(crate) mod macros;
 pub(crate) mod montgomery;
-pub(crate) mod small_value;
 pub(crate) mod small_value_field;
 pub(crate) mod wide_mul;
 
@@ -27,6 +26,7 @@ mod limbs;
 
 // Re-exports: traits
 pub use delayed_reduction::DelayedReduction;
+pub(crate) use delayed_reduction::SmallAccumulator;
 pub use field_reduction_constants::{
   BarrettReductionConstants, BarrettRemainderWidth, FieldReductionConstants,
 };

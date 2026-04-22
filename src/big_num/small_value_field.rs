@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use super::montgomery::MontgomeryLimbs;
+use super::{field_reduction_constants::FieldReductionConstants, montgomery::MontgomeryLimbs};
 use ff::PrimeField;
 
 /// Trait for fields that support small-value optimization.
@@ -33,6 +33,59 @@ pub trait SmallValueField<SmallValue>: PrimeField {
   /// Try to convert a field element to SmallValue.
   /// Returns None if the value doesn't fit.
   fn try_field_to_small(val: &Self) -> Option<SmallValue>;
+}
+
+/// Maximum absolute value for "small" field elements stored as i64.
+///
+/// Chosen so that all i128 arithmetic in small-value sumcheck consumers remains
+/// overflow-free.
+const SMALL_VALUE_MAX: u64 = (1u64 << 62) - 1;
+
+const SMALL_VALUE_MIN_I64: i64 = -(SMALL_VALUE_MAX as i64);
+
+#[derive(Clone, Copy)]
+enum SignedMagnitude {
+  Positive(u128),
+  Negative(u128),
+}
+
+#[inline]
+fn high_bytes_are_zero(bytes: &[u8], width_bytes: usize) -> bool {
+  bytes[width_bytes..].iter().all(|&b| b == 0)
+}
+
+#[inline]
+fn lower_bytes_to_u128(bytes: &[u8], width_bytes: usize) -> u128 {
+  let mut buf = [0u8; 16];
+  buf[..width_bytes].copy_from_slice(&bytes[..width_bytes]);
+  u128::from_le_bytes(buf)
+}
+
+#[inline]
+fn try_field_to_signed_magnitude<F: PrimeField>(
+  val: &F,
+  width_bytes: usize,
+) -> Option<SignedMagnitude> {
+  let repr = val.to_repr();
+  let bytes = repr.as_ref();
+
+  if high_bytes_are_zero(bytes, width_bytes) {
+    return Some(SignedMagnitude::Positive(lower_bytes_to_u128(
+      bytes,
+      width_bytes,
+    )));
+  }
+
+  let neg_repr = val.neg().to_repr();
+  let neg_bytes = neg_repr.as_ref();
+  if high_bytes_are_zero(neg_bytes, width_bytes) {
+    let mag = lower_bytes_to_u128(neg_bytes, width_bytes);
+    if mag > 0 {
+      return Some(SignedMagnitude::Negative(mag));
+    }
+  }
+
+  None
 }
 
 impl<F> SmallValueField<i32> for F
@@ -119,94 +172,35 @@ pub fn i128_to_field<F: PrimeField>(val: i128) -> F {
 ///
 /// Returns Some(v) if the field element represents a small integer in [-2^31, 2^31-1].
 pub fn try_field_to_small_i32<F: PrimeField>(val: &F) -> Option<i32> {
-  let repr = val.to_repr();
-  let bytes = repr.as_ref();
-
-  // Check if value fits in positive i32
-  let high_zero = bytes[4..].iter().all(|&b| b == 0);
-  if high_zero {
-    let val_u32 = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-    if val_u32 <= i32::MAX as u32 {
-      return Some(val_u32 as i32);
-    }
+  match try_field_to_signed_magnitude(val, 4)? {
+    SignedMagnitude::Positive(mag) if mag <= i32::MAX as u128 => Some(mag as i32),
+    SignedMagnitude::Negative(mag) if mag <= (i32::MAX as u128) + 1 => Some(-(mag as i64) as i32),
+    _ => None,
   }
-
-  // Check if negation fits in i32 (value is negative)
-  let neg_val = val.neg();
-  let neg_repr = neg_val.to_repr();
-  let neg_bytes = neg_repr.as_ref();
-  let neg_high_zero = neg_bytes[4..].iter().all(|&b| b == 0);
-  if neg_high_zero {
-    let neg_u32 = u32::from_le_bytes(neg_bytes[..4].try_into().unwrap());
-    if neg_u32 > 0 && neg_u32 <= (i32::MAX as u32) + 1 {
-      return Some(-(neg_u32 as i64) as i32);
-    }
-  }
-
-  None
 }
 
 /// Try to convert a field element to i64.
 /// Returns None if the value doesn't fit in the i64 range.
 #[inline]
 pub fn try_field_to_i64<F: PrimeField>(val: &F) -> Option<i64> {
-  let repr = val.to_repr();
-  let bytes = repr.as_ref();
-
-  // Check if value fits in positive i64 (high bytes all zero)
-  let high_zero = bytes[8..].iter().all(|&b| b == 0);
-  if high_zero {
-    let val_u64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-    if val_u64 <= i64::MAX as u64 {
-      return Some(val_u64 as i64);
-    }
+  match try_field_to_signed_magnitude(val, 8)? {
+    SignedMagnitude::Positive(mag) if mag <= i64::MAX as u128 => Some(mag as i64),
+    SignedMagnitude::Negative(mag) if mag <= (i64::MAX as u128) + 1 => Some(-(mag as i128) as i64),
+    _ => None,
   }
-
-  // Check if negation fits in i64 (value is negative)
-  let neg_val = val.neg();
-  let neg_repr = neg_val.to_repr();
-  let neg_bytes = neg_repr.as_ref();
-  let neg_high_zero = neg_bytes[8..].iter().all(|&b| b == 0);
-  if neg_high_zero {
-    let neg_u64 = u64::from_le_bytes(neg_bytes[..8].try_into().unwrap());
-    if neg_u64 > 0 && neg_u64 <= (i64::MAX as u64) + 1 {
-      return Some(-(neg_u64 as i128) as i64);
-    }
-  }
-
-  None
 }
 
 /// Try to convert a field element to i128.
 /// Returns None if the value doesn't fit in the i128 range.
 #[inline]
 pub fn try_field_to_i128<F: PrimeField>(val: &F) -> Option<i128> {
-  let repr = val.to_repr();
-  let bytes = repr.as_ref();
-
-  // Check if value fits in positive i128 (high bytes all zero)
-  let high_zero = bytes[16..].iter().all(|&b| b == 0);
-  if high_zero {
-    let val_u128 = u128::from_le_bytes(bytes[..16].try_into().unwrap());
-    if val_u128 <= i128::MAX as u128 {
-      return Some(val_u128 as i128);
+  match try_field_to_signed_magnitude(val, 16)? {
+    SignedMagnitude::Positive(mag) if mag <= i128::MAX as u128 => Some(mag as i128),
+    SignedMagnitude::Negative(mag) if mag <= (i128::MAX as u128) + 1 => {
+      Some(mag.wrapping_neg() as i128)
     }
+    _ => None,
   }
-
-  // Check if negation fits in i128 (value is negative)
-  let neg_val = val.neg();
-  let neg_repr = neg_val.to_repr();
-  let neg_bytes = neg_repr.as_ref();
-  let neg_high_zero = neg_bytes[16..].iter().all(|&b| b == 0);
-  if neg_high_zero {
-    let neg_u128 = u128::from_le_bytes(neg_bytes[..16].try_into().unwrap());
-    if neg_u128 > 0 && neg_u128 <= (i128::MAX as u128) + 1 {
-      // Handle i128::MIN case: -(i128::MAX + 1) = i128::MIN
-      return Some(neg_u128.wrapping_neg() as i128);
-    }
-  }
-
-  None
 }
 
 // ============================================================================
@@ -215,6 +209,30 @@ pub fn try_field_to_i128<F: PrimeField>(val: &F) -> Option<i128> {
 
 use crate::errors::SpartanError;
 use rayon::prelude::*;
+
+/// Convert field elements to i64 values, storing 0 for values outside the
+/// small-value range and recording those positions for field correction.
+#[inline(never)]
+pub(crate) fn to_small_vec_or_zero<F: PrimeField + FieldReductionConstants>(
+  poly: &[F],
+) -> (Vec<i64>, Vec<usize>) {
+  let mut result = Vec::with_capacity(poly.len());
+  let mut large_positions = Vec::new();
+
+  for (idx, f) in poly.iter().enumerate() {
+    match try_field_to_i64(f) {
+      Some(val) if (SMALL_VALUE_MIN_I64..=SMALL_VALUE_MAX as i64).contains(&val) => {
+        result.push(val);
+      }
+      _ => {
+        result.push(0);
+        large_positions.push(idx);
+      }
+    }
+  }
+
+  (result, large_positions)
+}
 
 /// Convert a vector of field elements to small values.
 ///
@@ -256,6 +274,11 @@ macro_rules! test_small_value_field {
         SmallValueField,
         small_value_field::{i64_to_field, i128_to_field, try_field_to_i64, try_field_to_i128},
       };
+
+      #[test]
+      fn small_vec_or_zero() {
+        $crate::big_num::small_value_field::tests::test_small_vec_or_zero_impl::<$field>();
+      }
 
       #[test]
       fn small_value_i32_negative() {
@@ -336,4 +359,50 @@ macro_rules! test_small_value_field {
       }
     }
   };
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+  use super::*;
+
+  /// Test to_small_vec_or_zero with mixed small and large values.
+  pub(crate) fn test_small_vec_or_zero_impl<F: PrimeField + FieldReductionConstants + Copy>() {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    let mut rng = StdRng::seed_from_u64(11111);
+
+    let vals: Vec<F> = (0..10).map(|i| F::from(i as u64)).collect();
+    let (small, large) = to_small_vec_or_zero(&vals);
+    assert!(large.is_empty());
+    for (i, &v) in small.iter().enumerate() {
+      assert_eq!(v, i as i64);
+    }
+
+    let mixed = vec![
+      F::from(5u64),
+      F::random(&mut rng),
+      -F::from(3u64),
+      F::random(&mut rng),
+      F::from(100u64),
+    ];
+    let (small, large) = to_small_vec_or_zero(&mixed);
+    assert_eq!(small.len(), 5);
+    assert_eq!(small[0], 5);
+    assert_eq!(small[1], 0);
+    assert_eq!(small[2], -3);
+    assert_eq!(small[3], 0);
+    assert_eq!(small[4], 100);
+    assert_eq!(large, vec![1, 3]);
+
+    let boundary = vec![F::from(SMALL_VALUE_MAX), -F::from(SMALL_VALUE_MAX)];
+    let (small, large) = to_small_vec_or_zero(&boundary);
+    assert!(large.is_empty(), "values at threshold should be small");
+    assert_eq!(small[0], SMALL_VALUE_MAX as i64);
+    assert_eq!(small[1], -(SMALL_VALUE_MAX as i64));
+
+    let above = vec![F::from(SMALL_VALUE_MAX + 1)];
+    let (small, large) = to_small_vec_or_zero(&above);
+    assert_eq!(large, vec![0], "values above threshold should be large");
+    assert_eq!(small[0], 0);
+  }
 }

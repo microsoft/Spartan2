@@ -83,8 +83,7 @@ impl<const N: usize> AddAssign for SignedWideLimbs<N> {
   /// Merge two signed accumulators by adding their respective parts.
   #[inline]
   fn add_assign(&mut self, other: Self) {
-    self.pos += other.pos;
-    self.neg += other.neg;
+    <Self as AddAssign<&Self>>::add_assign(self, &other);
   }
 }
 
@@ -101,8 +100,7 @@ impl<const N: usize> Add for SignedWideLimbs<N> {
 
   #[inline]
   fn add(mut self, other: Self) -> Self {
-    self.pos += other.pos;
-    self.neg += other.neg;
+    self += other;
     self
   }
 }
@@ -180,14 +178,7 @@ impl<const N: usize> Default for WideLimbs<N> {
 impl<const N: usize> AddAssign for WideLimbs<N> {
   #[inline]
   fn add_assign(&mut self, other: Self) {
-    let mut carry = 0u64;
-    for i in 0..N {
-      let (sum, c1) = self.0[i].overflowing_add(other.0[i]);
-      let (sum, c2) = sum.overflowing_add(carry);
-      self.0[i] = sum;
-      carry = (c1 as u64) + (c2 as u64);
-    }
-    debug_assert_eq!(carry, 0, "WideLimbs overflow on merge");
+    <Self as AddAssign<&Self>>::add_assign(self, &other);
   }
 }
 
