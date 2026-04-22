@@ -20,11 +20,7 @@ use crate::{
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
-  big_num::{
-    DelayedReduction,
-    montgomery::MontgomeryLimbs,
-    small_value::{SmallAccumulator, to_small_vec_or_zero},
-  },
+  big_num::{DelayedReduction, SmallAccumulator, small_value_field::to_small_vec_or_zero},
   digest::DigestComputer,
   errors::SpartanError,
   math::Math,
@@ -264,7 +260,10 @@ where
     Az2_i64: &[i64],
     Bz2_i64: &[i64],
     large_positions: &[usize],
-  ) -> E::Scalar {
+  ) -> E::Scalar
+  where
+    E::Scalar: DelayedReduction<i128>,
+  {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
     let f = &e[left..];
@@ -275,17 +274,21 @@ where
 
     for i in 0..right {
       let base = i * left;
-      let mut inner_acc = SmallAccumulator::zero();
+      let mut inner_acc = SmallAccumulator::<E::Scalar>::default();
 
       for j in 0..left {
         let k = base + j;
         let az_diff = Az2_i64[k] as i128 - Az1_i64[k] as i128;
         let bz_diff = Bz2_i64[k] as i128 - Bz1_i64[k] as i128;
         let quad_val = az_diff * bz_diff;
-        inner_acc.accumulate(e_left[j].to_limbs(), quad_val);
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut inner_acc,
+          &e_left[j],
+          &quad_val,
+        );
       }
 
-      let inner_quad_red = inner_acc.reduce::<E::Scalar>();
+      let inner_quad_red = <E::Scalar as DelayedReduction<i128>>::reduce(&inner_acc);
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
         &mut acc_quad,
         &f[i],
@@ -336,7 +339,10 @@ where
     c11: &E::Scalar,
     r0: &E::Scalar,
     large_positions: &[usize],
-  ) -> (E::Scalar, E::Scalar) {
+  ) -> (E::Scalar, E::Scalar)
+  where
+    E::Scalar: DelayedReduction<i128>,
+  {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
     let f = &e[left..];
@@ -350,23 +356,35 @@ where
       let base = i * left;
 
       // Process e0 cross-product terms (Az_lo * Bz_lo)
-      let mut sa_e0_00 = SmallAccumulator::zero();
-      let mut sa_e0_01 = SmallAccumulator::zero();
-      let mut sa_e0_11 = SmallAccumulator::zero();
+      let mut sa_e0_00 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_e0_01 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_e0_11 = SmallAccumulator::<E::Scalar>::default();
 
       for j in 0..left {
         let k = base + j;
-        let limbs = e_left[j].to_limbs();
+        let field = &e_left[j];
         let (a0, a1) = (a_i64[0][k] as i128, a_i64[1][k] as i128);
         let (b0, b1) = (b_i64[0][k] as i128, b_i64[1][k] as i128);
-        sa_e0_00.accumulate(limbs, a0 * b0);
-        sa_e0_01.accumulate(limbs, a0 * b1 + a1 * b0);
-        sa_e0_11.accumulate(limbs, a1 * b1);
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_e0_00,
+          field,
+          &(a0 * b0),
+        );
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_e0_01,
+          field,
+          &(a0 * b1 + a1 * b0),
+        );
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_e0_11,
+          field,
+          &(a1 * b1),
+        );
       }
 
-      let e0_inner = *c00 * sa_e0_00.reduce::<E::Scalar>()
-        + *c01 * sa_e0_01.reduce::<E::Scalar>()
-        + *c11 * sa_e0_11.reduce::<E::Scalar>();
+      let e0_inner = *c00 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_e0_00)
+        + *c01 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_e0_01)
+        + *c11 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_e0_11);
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
         &mut acc_e0,
         &f[i],
@@ -374,13 +392,13 @@ where
       );
 
       // Process quad cross-product terms ((Az_hi-Az_lo) * (Bz_hi-Bz_lo))
-      let mut sa_q_00 = SmallAccumulator::zero();
-      let mut sa_q_01 = SmallAccumulator::zero();
-      let mut sa_q_11 = SmallAccumulator::zero();
+      let mut sa_q_00 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_q_01 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_q_11 = SmallAccumulator::<E::Scalar>::default();
 
       for j in 0..left {
         let k = base + j;
-        let limbs = e_left[j].to_limbs();
+        let field = &e_left[j];
         let (da0, da1) = (
           a_i64[2][k] as i128 - a_i64[0][k] as i128,
           a_i64[3][k] as i128 - a_i64[1][k] as i128,
@@ -389,14 +407,26 @@ where
           b_i64[2][k] as i128 - b_i64[0][k] as i128,
           b_i64[3][k] as i128 - b_i64[1][k] as i128,
         );
-        sa_q_00.accumulate(limbs, da0 * db0);
-        sa_q_01.accumulate(limbs, da0 * db1 + da1 * db0);
-        sa_q_11.accumulate(limbs, da1 * db1);
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_q_00,
+          field,
+          &(da0 * db0),
+        );
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_q_01,
+          field,
+          &(da0 * db1 + da1 * db0),
+        );
+        <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+          &mut sa_q_11,
+          field,
+          &(da1 * db1),
+        );
       }
 
-      let quad_inner = *c00 * sa_q_00.reduce::<E::Scalar>()
-        + *c01 * sa_q_01.reduce::<E::Scalar>()
-        + *c11 * sa_q_11.reduce::<E::Scalar>();
+      let quad_inner = *c00 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_q_00)
+        + *c01 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_q_01)
+        + *c11 * <E::Scalar as DelayedReduction<i128>>::reduce(&sa_q_11);
       <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
         &mut acc_quad,
         &f[i],
@@ -514,7 +544,10 @@ where
       R1CSInstance<E>, // final folded instance
     ),
     SpartanError,
-  > {
+  >
+  where
+    E::Scalar: DelayedReduction<i128>,
+  {
     // Determine padding and NIFS rounds
     let n = Us.len();
     let n_padded = Us.len().next_power_of_two();
@@ -642,11 +675,15 @@ where
           #[allow(clippy::needless_range_loop)]
           for i in 0..right {
             let base = i * left;
-            let mut inner = SmallAccumulator::zero();
+            let mut inner = SmallAccumulator::<E::Scalar>::default();
             for j in 0..left {
-              inner.accumulate(e_left[j].to_limbs(), c_i64[base + j] as i128);
+              <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+                &mut inner,
+                &e_left[j],
+                &(c_i64[base + j] as i128),
+              );
             }
-            let inner_red = inner.reduce::<E::Scalar>();
+            let inner_red = <E::Scalar as DelayedReduction<i128>>::reduce(&inner);
             <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
               &mut acc, &f[i], &inner_red,
             );
@@ -1119,18 +1156,19 @@ where
       let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
       let total = left * right;
 
-      // Precompute weight limbs to avoid repeated to_limbs() calls
-      let weight_limbs: Vec<&[u64; 4]> = final_weights.iter().map(|w| w.to_limbs()).collect();
-
       // Parallel across k: for each k, accumulate across all b serially.
       let mut cz_step: Vec<E::Scalar> = (0..total)
         .into_par_iter()
         .map(|k| {
-          let mut sa = SmallAccumulator::zero();
+          let mut sa = SmallAccumulator::<E::Scalar>::default();
           for b in 0..n_padded {
-            sa.accumulate(weight_limbs[b], C_i64_layers[b][k] as i128);
+            <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
+              &mut sa,
+              &final_weights[b],
+              &(C_i64_layers[b][k] as i128),
+            );
           }
-          sa.reduce::<E::Scalar>()
+          <E::Scalar as DelayedReduction<i128>>::reduce(&sa)
         })
         .collect();
 
@@ -1550,7 +1588,10 @@ where
     core_circuit: &C2,
     mut prep_snark: NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError> {
+  ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError>
+  where
+    E::Scalar: DelayedReduction<i128>,
+  {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
     // rerandomize prep state in-place (we own it, no clone needed)
@@ -2363,6 +2404,7 @@ mod tests {
     core_circuit: &C2,
   ) where
     E::PCS: FoldingEngineTrait<E>,
+    E::Scalar: DelayedReduction<i128>,
   {
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}",
