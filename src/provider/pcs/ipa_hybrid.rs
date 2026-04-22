@@ -281,7 +281,7 @@ where
 /// while the Schnorr tail keeps prover time manageable.
 ///
 /// Proof size: 2k group elements (L/R) + n/2^k scalars (z_vec) + 2 points + 3 scalars.
-/// Prover time: k rounds of MSM + single MSM of n/2^k.
+/// Prover/verifier time: k rounds of MSM + O(n) tail MSM (expanded back to original generators).
 ///
 /// The number of bullet rounds is controlled by `BULLET_ROUNDS`.
 ///
@@ -450,6 +450,19 @@ where
     transcript.absorb(b"U", U);
 
     let k = self.bullet.L_vec.len();
+
+    if n == 0 || !n.is_power_of_two() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("Hybrid IPA verify: n must be a non-zero power of two, got {n}"),
+      });
+    }
+    let lg_n = n.ilog2() as usize;
+    let expected_k = BULLET_ROUNDS.min(lg_n);
+    if k != expected_k {
+      return Err(SpartanError::InvalidPCS {
+        reason: format!("Hybrid IPA verify: proof has {k} bullet rounds, expected {expected_k}"),
+      });
+    }
 
     if ck.len() < n {
       return Err(SpartanError::InvalidInputLength {

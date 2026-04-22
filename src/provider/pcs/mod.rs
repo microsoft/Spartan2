@@ -10,7 +10,7 @@
 pub mod ipa;
 /// Hybrid Inner Product Argument (Bulletproofs halving + Schnorr tail)
 #[cfg(feature = "ipa-hybrid")]
-pub mod ipa_log;
+pub mod ipa_hybrid;
 
 // implementations of polynomial commitment schemes
 pub mod hyrax_pc;

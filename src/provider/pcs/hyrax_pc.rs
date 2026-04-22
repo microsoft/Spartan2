@@ -34,7 +34,7 @@ use crate::provider::msm::{AffineGroupElement, FixedBaseMul, vartime_scalar_mul}
 #[cfg(not(feature = "ipa-hybrid"))]
 use crate::provider::pcs::ipa::InnerProductArgumentLinear;
 #[cfg(feature = "ipa-hybrid")]
-use crate::provider::pcs::ipa_log::InnerProductArgumentHybrid;
+use crate::provider::pcs::ipa_hybrid::InnerProductArgumentHybrid;
 
 /// Number of bullet reduction rounds for the hybrid IPA.
 #[cfg(feature = "ipa-hybrid")]
