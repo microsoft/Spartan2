@@ -232,7 +232,6 @@ where
 
     // Compute s values for the k rounds (length n, grouped into n_reduced groups of 2^k)
     // s[j] = product of u/u_inv based on bits of j corresponding to the k rounds
-    let lg_n = n.trailing_zeros() as usize;
     let mut s = vec![E::Scalar::ONE; n];
     for round in 0..k {
       let bit_mask = 1usize << (lg_n - 1 - round);
@@ -352,6 +351,15 @@ where
 
     let mut rng = rand::thread_rng();
 
+    if U.b_vec.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "hybrid IPA prove: b_vec has {} elements but need {n}",
+          U.b_vec.len()
+        ),
+      });
+    }
+
     // Step 1: Re-commit evaluation under h
     let v = inner_product(&W.a_vec, &U.b_vec);
     let r_v = E::Scalar::random(&mut rng);
@@ -452,6 +460,7 @@ where
         ),
       });
     }
+    let ck = &ck[..n];
 
     // Step 1: Verify equality proof
     transcript.absorb(b"comm_v", &self.comm_v);
@@ -520,6 +529,9 @@ mod tests {
 
   use crate::provider::T256HyraxEngine;
   type E = T256HyraxEngine;
+  type Scalar = <E as Engine>::Scalar;
+  type GE = <E as Engine>::GE;
+  type TE = <E as Engine>::TE;
 
   fn test_hybrid_ipa_with_engine<E: Engine, const K: usize>()
   where
@@ -589,5 +601,147 @@ mod tests {
   #[test]
   fn test_hybrid_ipa_k3_t256() {
     test_hybrid_ipa_with_engine::<E, 3>();
+  }
+
+  /// Verify that prove/verify both work when ck is longer than n (Hyrax scenario).
+  #[test]
+  fn test_hybrid_ipa_oversized_ck() {
+    let mut rng = thread_rng();
+    const K: usize = 2;
+    let n = 16;
+    let extra = 8;
+
+    let gens = GE::from_label(b"test_ipa_hybrid", n + extra + 1);
+    let ck = &gens[..n + extra]; // deliberately longer than n
+    let h = GE::group(&gens[n + extra]);
+
+    let gens_eval = GE::from_label(b"test_ipa_hybrid_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let v = inner_product(&a_vec, &b_vec);
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, &ck[..n], true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_hybrid_ipa");
+    let proof =
+      InnerProductArgumentHybrid::<E, K>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt)
+        .expect("prove with oversized ck should succeed");
+
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    proof
+      .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+      .expect("verify with oversized ck should succeed");
+  }
+
+  /// Malformed proofs should return errors, not panic.
+  #[test]
+  fn test_hybrid_ipa_malformed_proof_errors() {
+    let mut rng = thread_rng();
+    const K: usize = 2;
+    let n = 16;
+
+    let gens = GE::from_label(b"test_ipa_hybrid", n + 1);
+    let ck = &gens[..n];
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_ipa_hybrid_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let b_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    let v = inner_product(&a_vec, &b_vec);
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, ck, true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_hybrid_ipa");
+    let proof =
+      InnerProductArgumentHybrid::<E, K>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt)
+        .unwrap();
+
+    // Tamper: truncate z_vec to wrong length
+    let mut bad_proof = proof.clone();
+    bad_proof.z_vec.pop();
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "truncated z_vec should fail verification"
+    );
+
+    // Tamper: corrupt a z_vec element
+    let mut bad_proof = proof.clone();
+    bad_proof.z_vec[0] += Scalar::ONE;
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "corrupted z_vec should fail verification"
+    );
+
+    // Tamper: mismatched L/R lengths
+    let mut bad_proof = proof.clone();
+    bad_proof.bullet.R_vec.pop();
+    let mut vt = TE::new(b"test_hybrid_ipa");
+    assert!(
+      bad_proof
+        .verify(ck, &h, ck_c, &h_c, n, &instance, &mut vt)
+        .is_err(),
+      "mismatched L/R should fail verification"
+    );
+  }
+
+  /// Mismatched witness/instance lengths should return errors from prove.
+  #[test]
+  fn test_hybrid_ipa_prove_mismatched_lengths() {
+    let mut rng = thread_rng();
+    const K: usize = 2;
+    let n = 16;
+
+    let gens = GE::from_label(b"test_ipa_hybrid", n + 1);
+    let ck = &gens[..n];
+    let h = GE::group(&gens[n]);
+
+    let gens_eval = GE::from_label(b"test_ipa_hybrid_eval", 2);
+    let ck_c = &gens_eval[0];
+    let h_c = GE::group(&gens_eval[1]);
+
+    let a_vec: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+    // b_vec with wrong length
+    let b_vec_bad: Vec<Scalar> = (0..n + 1).map(|_| Scalar::random(&mut rng)).collect();
+
+    let r_a = Scalar::random(&mut rng);
+    let comm_a = GE::vartime_multiscalar_mul(&a_vec, ck, true).unwrap() + h * r_a;
+    let r_c = Scalar::random(&mut rng);
+    let v = Scalar::random(&mut rng);
+    let comm_c = GE::group(ck_c) * v + h_c * r_c;
+
+    let instance = InnerProductInstance::<E>::new(&comm_a, &b_vec_bad, &comm_c);
+    let witness = InnerProductWitness::<E>::new(&a_vec, &r_a, &r_c);
+
+    let mut pt = TE::new(b"test_hybrid_ipa");
+    let result =
+      InnerProductArgumentHybrid::<E, K>::prove(ck, &h, ck_c, &h_c, &instance, &witness, &mut pt);
+    assert!(
+      result.is_err(),
+      "mismatched a_vec/b_vec lengths should return error"
+    );
   }
 }
