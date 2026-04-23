@@ -43,6 +43,8 @@ mod polys;
 mod sumcheck;
 
 // public modules for proof systems
+mod hash;
+mod linear_code;
 pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_relaxed; // Spartan for relaxed R1CS (non-ZK)
