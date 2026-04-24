@@ -8,7 +8,7 @@
 //! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
 //! circuit with varying message lengths
 //!
-//! Run with: `RUST_LOG=info cargo run --release --example sha256_spartan`
+//! Run with: `RUST_LOG=info cargo bench --bench sha256_spartan`
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]

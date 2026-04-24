@@ -8,7 +8,7 @@
 //! Measure NeutronNova {setup, prep_prove, prove, verify} times for a batch
 //! of 32 SHA-256 step circuits folded together with a core SHA-256 circuit.
 //!
-//! Run with: `RUST_LOG=info cargo run --release --example sha256_neutronnova`
+//! Run with: `RUST_LOG=info cargo bench --bench sha256_neutronnova`
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]
@@ -112,11 +112,12 @@ fn main() {
 
   let num_steps = 32;
   let msg_len = 64;
+  let total_bytes = num_steps * msg_len;
 
-  let root_span = info_span!("bench", num_steps, msg_len).entered();
+  let root_span = info_span!("bench", num_steps, total_bytes).entered();
   info!(
-    "======= NeutronNova: {} step circuits, message_len={} bytes =======",
-    num_steps, msg_len
+    "======= NeutronNova: {} step circuits, total_hashed={} bytes =======",
+    num_steps, total_bytes
   );
 
   let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
@@ -157,8 +158,8 @@ fn main() {
 
   // Summary
   info!(
-    "SUMMARY steps={}, msg={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
-    num_steps, msg_len, setup_ms, prep_ms, prove_ms, verify_ms
+    "SUMMARY steps={}, total_hashed={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
+    num_steps, total_bytes, setup_ms, prep_ms, prove_ms, verify_ms
   );
   drop(root_span);
 }

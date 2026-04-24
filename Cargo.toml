@@ -60,6 +60,14 @@ proptest = "1.2.0"
 default = []
 jem = ["tikv-jemallocator"]
 
+[[bench]]
+name = "sha256_spartan"
+harness = false
+
+[[bench]]
+name = "sha256_neutronnova"
+harness = false
+
 [profile.release]
 debug = 1
 lto = "fat"
