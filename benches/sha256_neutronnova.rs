@@ -8,13 +8,6 @@
 //! Criterion benchmarks for NeutronNova {setup, prep_prove, prove, verify}
 //! on a batch of SHA-256 single-block compressions.
 //!
-//! Layout per size `S` (in bytes):
-//!   * num_steps  = S / 64
-//!   * step ckt   = 1 x `sha256_compression_function` on a 64-byte block
-//!                  (~26,352 constraints)
-//!   * core ckt   = 1 x `sha256_compression_function` as well
-//!                  (~26,352 constraints; <= 32,768)
-//!
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
 
