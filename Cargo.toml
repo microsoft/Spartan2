@@ -51,6 +51,7 @@ getrandom = { version = "0.2.0", default-features = false, features = ["js"] }
 
 [dev-dependencies]
 rand = "0.8.4"
+criterion = "0.5"
 hex = "0.4.3"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
@@ -59,6 +60,14 @@ proptest = "1.2.0"
 [features]
 default = []
 jem = ["tikv-jemallocator"]
+
+[[bench]]
+name = "sha256_spartan"
+harness = false
+
+[[bench]]
+name = "sha256_neutronnova"
+harness = false
 
 [profile.release]
 debug = 1

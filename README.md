@@ -1,50 +1,83 @@
-# Spartan: High-speed zero-knowledge SNARKs without trusted setup
-Spartan is a sum-check-based zkSNARK with an extremely efficient prover (a zkSNARK is type cryptographic proof system that enables a prover to prove a mathematical statement to a verifier with a short proof and succinct verification, and without revealing anything beyond the validity of the statement). Spartan also features several unique properties that are particularly relevant for applications where zero-knowledge is essential. Here are some highlights:
+# Spartan and NeutronNova: Fast client-side zero-knowledge proving systems
 
-* Spartan provides a linear-time polynomial IOP that when combined with a polynomial commitment scheme provides a succinct interactive argument. It is made non-interactive using the Fiat-Shamir transform.
+A client-side zkSNARK library built on the Spartan sum-check proof
+system and NeutronNova's folding scheme. Spartan2 powers
+[Vega](https://eprint.iacr.org/2025/2094).
 
-* Spartan can be instantiated with any multilinear polynomial commitment scheme (e.g., Binius, HyperKZG, Samaritan, WHIR, Mercury, BaseFold, PST13, Dory, Hyrax). Depending on the polynomial commitment scheme used, one can achieve different properties (e.g., small fields or big fields, post-quantum or pre-quantum security, transparent or universal setup, hash-based or curve-based, binary fields or prime fields).
+## What this library provides
 
-* Spartan is flexible with respect to arithmetization: it can support R1CS, Plonkish, AIR, and their generalization CCS. Spartan protocol itself internally uses lookup arguments, so one can additionally prove lookup constraints with Spartan.
+- **Spartan zkSNARK** — a PCS-generic Rust implementation of
+  [Spartan](https://eprint.iacr.org/2019/550), a sum-check-based zkSNARK
+  with a linear-time prover. Accepts R1CS circuits written with
+  [bellpepper](https://github.com/lurk-lab/bellpepper). Spartan is
+  PCS-agnostic and works with any multilinear polynomial commitment
+  scheme (Hyrax, HyperKZG, Binius, WHIR, BaseFold, Dory, PST13, …); the
+  choice determines field size, security model (pre- or post-quantum),
+  setup assumptions (transparent or universal), and commitment style
+  (hash- or curve-based). While Spartan supports R1CS, Plonkish, AIR,
+  and CCS in principle (with lookup constraints fitting natively via
+  Spartan's internal lookup arguments), this library currently exposes
+  the R1CS frontend. Zero-knowledge is obtained via Nova's folding
+  scheme. The Spark optimization is not implemented, so verifier work
+  is proportional to the number of non-zero R1CS entries.
 
-* The prover's work naturally splits into a witness-dependent part and a witness-independent part (a significant chunk, up to 90%, of the prover's work is incurred in the witness-independent part). The latter part can be offloaded to any untrusted entity without violating zero-knowledge. Note that such a clean decomposition between witness-dependent part and witness-independent part is not featured by other popular zkSNARKs (e.g., Plonk, HyperPlonk, Honk).
+- **NeutronNova zkSNARK** — a non-recursive implementation of
+  [NeutronNova](https://eprint.iacr.org/2024/1606) folding for uniform
+  computations: given many instances of a single **step circuit**, all
+  R1CS instances are multi-folded into one and the folded instance is
+  proved with Spartan, amortizing the prover across the batch. An
+  optional **core circuit** can tie the batch together (e.g., to
+  enforce cross-step consistency).
 
-* The witness-dependent work of the Spartan prover is shown to be MPC-friendly by more recent works, allowing the whole Spartan prover to be delegated.
+- **Precomputable / online witness split.** Both protocols expose
+  `setup` → `prep_prove` → `prove`. `setup` produces circuit-shape key
+  material. `prep_prove` processes the *precomputable* witness — the
+  portion known ahead of proving time — synthesizing and committing to
+  it; for NeutronNova it also caches the per-step matrix-vector
+  products (`Az`, `Bz`, `Cz`). `prove` consumes fresh *online* witness
+  data (challenges, rest-witness, fresh randomness), runs NeutronNova's
+  multi-folding rounds where applicable, and produces the final proof.
+  The `prep_prove` state can be reused across multiple `prove` calls,
+  so amortizable work is paid once. This is the pattern
+  [Vega](https://eprint.iacr.org/2025/2094) relies on for low-latency
+  proving.
 
-* For uniform constraint systems, Spartan's prover can be optimized further by eliminating the witness-independent work of the prover, which constitutes about 90% of the prover's work.
+- **Criterion benchmarks** — `benches/sha256_spartan.rs` and
+  `benches/sha256_neutronnova.rs` measure setup, prep_prove, prove, and
+  verify across message sizes and thread counts, and report proof
+  sizes.
 
-## About this library and zero-knowledge properties
-We implement two zkSNARKs in this library.
+## Running benchmarks
 
-* **Spartan:** Compared to an earlier implementation of [Spartan](https://github.com/Microsoft/Spartan), this project provides an implementation of Spartan that is generic over the polynomial commitment scheme. This version also accepts circuits expressed with bellpepper, which supports R1CS. In the future, we plan to add support for other circuit formats (e.g., Plonkish, CCS). The first version of this code is derived from Nova's open-source code. The current implementation does not implement the Spark protocol, so the verifier's work is proportional to the number of non-zero entries in the R1CS matrices.
+The `benches/` directory contains SHA-256 benchmarks for both protocols using [Criterion](https://github.com/bheisler/criterion.rs). Each benchmark measures setup, prep_prove, prove, and verify times across multiple iterations and thread counts, and reports proof sizes.
 
-* **NeutronNova:** We additionally implement NeutronNova's folding scheme for folding together a batch of R1CS instances. This implementation focuses on a non-recursive version of NeutronNova and targets the case where the batch size is moderately large. Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding) and then use Spartan to prove that folded instance.
+```bash
+# Spartan: SHA-256 over 1 KiB and 2 KiB messages
+RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan
 
-Both Spartan and NeutronNova's SNARKs are made zero-knowledge (i.e., they are both zkSNARKs) using Nova's folding scheme. The details of this zero-knowledge transformation will be described in an upcoming paper.
+# NeutronNova: 32 SHA-256 step circuits (2048 bytes total)
+RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova
+```
 
-### Supported polynomial commitment schemes
-- [ ] Elliptic-curve based schemes
-  - [x] Bulletproofs-based PCS
-  - [x] Hyrax PCS
-  - [ ] Dory
-  - [ ] Sona
-  - [ ] HyperKZG (requires a universal trusted setup)
-  - [ ] Mercury / Samaritan (require a universal trusted setup)
-- [ ] Hash-based schemes
-  - [ ] Basefold
-  - [ ] WHIR
-  - [ ] Brakedown
-  - [ ] Binius
-  - [ ] Ligero
-- [ ] Lattice-based schemes
-  - [ ] Greyhound
+Override thread counts with `BENCH_THREADS` (comma-separated):
+
+```bash
+BENCH_THREADS=1,8 RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan
+```
 
 ## References
-The following paper, which appeared at CRYPTO 2020, provides details of the Spartan proof system:
 
 [Spartan: Efficient and general-purpose zkSNARKs without trusted setup](https://eprint.iacr.org/2019/550) \
 Srinath Setty \
-IACR CRYPTO 2020
+CRYPTO 2020
+
+[NeutronNova: Folding everything that reduces to zero-check](https://eprint.iacr.org/2024/1606) \
+Abhiram Kothapalli, Srinath Setty \
+IACR ePrint 2024/1606
+
+[Vega: Low-latency zero-knowledge proofs over existing credentials](https://eprint.iacr.org/2025/2094) \
+Darya Kaviani, Srinath Setty \
+IEEE S&P 2026
 
 ## Contributing
 
