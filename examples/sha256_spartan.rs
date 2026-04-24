@@ -4,11 +4,11 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! examples/sha256.rs
+//! examples/sha256_spartan.rs
 //! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
 //! circuit with varying message lengths
 //!
-//! Run with: `RUST_LOG=info cargo run --release --example sha256`
+//! Run with: `RUST_LOG=info cargo run --release --example sha256_spartan`
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]
