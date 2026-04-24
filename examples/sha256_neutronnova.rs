@@ -136,9 +136,8 @@ fn main() {
 
   // PREP PROVE
   let t0 = Instant::now();
-  let prep_snark =
-    NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
-      .expect("prep_prove failed");
+  let prep_snark = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
+    .expect("prep_prove failed");
   let prep_ms = t0.elapsed().as_millis();
   info!(elapsed_ms = prep_ms, "prep_prove");
 
