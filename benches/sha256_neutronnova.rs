@@ -4,31 +4,31 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! examples/sha256_neutronnova.rs
-//! Measure NeutronNova {setup, prep_prove, prove, verify} times for a batch
-//! of 32 SHA-256 step circuits folded together with a core SHA-256 circuit.
+//! benches/sha256_neutronnova.rs
+//! Criterion benchmarks for NeutronNova {setup, prep_prove, prove, verify}
+//! on a batch of 32 SHA-256 step circuits (2048 bytes total).
 //!
-//! Run with: `RUST_LOG=info cargo bench --bench sha256_neutronnova`
+//! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]
 #[global_allocator]
 static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
+
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use ff::Field;
 use spartan2::{
   neutronnova_zk::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
   traits::{Engine, circuit::SpartanCircuit},
 };
-use std::{marker::PhantomData, time::Instant};
-use tracing::{info, info_span};
-use tracing_subscriber::EnvFilter;
+use std::{marker::PhantomData, time::Duration};
 
 type E = T256HyraxEngine;
 
@@ -103,63 +103,161 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256Circuit<Eng> {
   }
 }
 
-fn main() {
-  tracing_subscriber::fmt()
-    .with_target(false)
-    .with_ansi(true)
-    .with_env_filter(EnvFilter::from_default_env())
-    .init();
+/// Thread counts to benchmark. Override with BENCH_THREADS env var (comma-separated).
+fn thread_counts() -> Vec<usize> {
+  if let Ok(val) = std::env::var("BENCH_THREADS") {
+    val
+      .split(',')
+      .filter_map(|s| s.trim().parse().ok())
+      .collect()
+  } else {
+    vec![1, 4, 8, 16]
+  }
+}
 
+fn neutronnova_benches(c: &mut Criterion) {
   let num_steps = 32;
   let msg_len = 64;
   let total_bytes = num_steps * msg_len;
+  let thread_counts = thread_counts();
 
-  let root_span = info_span!("bench", num_steps, total_bytes).entered();
-  info!(
-    "======= NeutronNova: {} step circuits, total_hashed={} bytes =======",
-    num_steps, total_bytes
-  );
+  // Report proof size once (outside measurements)
+  {
+    let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+    let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+    let (pk, _vk) =
+      NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps).unwrap();
+    let step_circuits: Vec<_> = (0..num_steps)
+      .map(|i| Sha256Circuit::<E>::new(vec![i as u8; msg_len]))
+      .collect();
+    let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+    let prep =
+      NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true).unwrap();
+    let (proof, _) =
+      NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true).unwrap();
+    let proof_bytes = bincode::serialize(&proof).unwrap();
+    println!(
+      "NeutronNova SHA-256 steps={} total_hashed={}B: proof_size={} bytes",
+      num_steps,
+      total_bytes,
+      proof_bytes.len()
+    );
+  }
 
-  let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
-  let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+  let mut g = c.benchmark_group("neutronnova_sha256");
+  g.sample_size(10);
+  g.warm_up_time(Duration::from_millis(100));
+  g.measurement_time(Duration::from_secs(10));
+  g.throughput(Throughput::Bytes(total_bytes as u64));
 
-  // SETUP
-  let t0 = Instant::now();
-  let (pk, vk) =
-    NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps).expect("setup failed");
-  let setup_ms = t0.elapsed().as_millis();
-  info!(elapsed_ms = setup_ms, "setup");
+  for &nthreads in &thread_counts {
+    let pool = rayon::ThreadPoolBuilder::new()
+      .num_threads(nthreads)
+      .build()
+      .expect("failed to build rayon pool");
 
-  let step_circuits: Vec<_> = (0..num_steps)
-    .map(|i| Sha256Circuit::<E>::new(vec![i as u8; msg_len]))
-    .collect();
-  let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+    g.bench_function(format!("setup/{total_bytes}/t{nthreads}"), |b| {
+      b.iter(|| {
+        pool.install(|| {
+          let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+          let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+          let _ =
+            NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps).unwrap();
+        });
+      });
+    });
 
-  // PREP PROVE
-  let t0 = Instant::now();
-  let prep_snark = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
-    .expect("prep_prove failed");
-  let prep_ms = t0.elapsed().as_millis();
-  info!(elapsed_ms = prep_ms, "prep_prove");
+    g.bench_function(format!("prep_prove/{total_bytes}/t{nthreads}"), |b| {
+      b.iter_batched(
+        || {
+          pool.install(|| {
+            let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps)
+              .unwrap()
+              .0
+          })
+        },
+        |pk| {
+          pool.install(|| {
+            let step_circuits: Vec<_> = (0..num_steps)
+              .map(|i| Sha256Circuit::<E>::new(vec![i as u8; msg_len]))
+              .collect();
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let _ =
+              NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
+                .unwrap();
+          });
+        },
+        BatchSize::LargeInput,
+      );
+    });
 
-  // PROVE
-  let t0 = Instant::now();
-  let (proof, _prep_snark) =
-    NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep_snark, true)
-      .expect("prove failed");
-  let prove_ms = t0.elapsed().as_millis();
-  info!(elapsed_ms = prove_ms, "prove");
+    g.bench_function(format!("prove/{total_bytes}/t{nthreads}"), |b| {
+      b.iter_batched(
+        || {
+          pool.install(|| {
+            let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let (pk, _vk) =
+              NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps).unwrap();
+            let step_circuits: Vec<_> = (0..num_steps)
+              .map(|i| Sha256Circuit::<E>::new(vec![i as u8; msg_len]))
+              .collect();
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let prep =
+              NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
+                .unwrap();
+            // Warm-up prove
+            let (_proof, prep_back) =
+              NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                .unwrap();
+            (pk, step_circuits, core_circuit, prep_back)
+          })
+        },
+        |(pk, step_circuits, core_circuit, prep)| {
+          pool.install(|| {
+            let _ =
+              NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                .unwrap();
+          });
+        },
+        BatchSize::LargeInput,
+      );
+    });
 
-  // VERIFY
-  let t0 = Instant::now();
-  proof.verify(&vk, num_steps).expect("verify failed");
-  let verify_ms = t0.elapsed().as_millis();
-  info!(elapsed_ms = verify_ms, "verify");
-
-  // Summary
-  info!(
-    "SUMMARY steps={}, total_hashed={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
-    num_steps, total_bytes, setup_ms, prep_ms, prove_ms, verify_ms
-  );
-  drop(root_span);
+    g.bench_function(format!("verify/{total_bytes}/t{nthreads}"), |b| {
+      b.iter_batched(
+        || {
+          pool.install(|| {
+            let step_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let (pk, vk) =
+              NeutronNovaZkSNARK::<E>::setup(&step_circuit, &core_circuit, num_steps).unwrap();
+            let step_circuits: Vec<_> = (0..num_steps)
+              .map(|i| Sha256Circuit::<E>::new(vec![i as u8; msg_len]))
+              .collect();
+            let core_circuit = Sha256Circuit::<E>::new(vec![0u8; msg_len]);
+            let prep =
+              NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
+                .unwrap();
+            let (proof, _) =
+              NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                .unwrap();
+            (vk, proof)
+          })
+        },
+        |(vk, proof)| {
+          pool.install(|| {
+            proof.verify(&vk, num_steps).unwrap();
+          });
+        },
+        BatchSize::LargeInput,
+      );
+    });
+  }
+  g.finish();
 }
+
+criterion_group!(benches, neutronnova_benches);
+criterion_main!(benches);

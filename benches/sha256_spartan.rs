@@ -4,22 +4,24 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! examples/sha256_spartan.rs
-//! Measure Spartan-2 {setup, prove, verify} times for a SHA-256
-//! circuit with varying message lengths
+//! benches/sha256_spartan.rs
+//! Criterion benchmarks for Spartan {setup, prep_prove, prove, verify}
+//! on a SHA-256 circuit with varying message lengths.
 //!
-//! Run with: `RUST_LOG=info cargo bench --bench sha256_spartan`
+//! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan`
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]
 #[global_allocator]
 static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
+
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use ff::{Field, PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use spartan2::{
@@ -27,9 +29,7 @@ use spartan2::{
   spartan::SpartanSNARK,
   traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait},
 };
-use std::{marker::PhantomData, time::Instant};
-use tracing::{info, info_span};
-use tracing_subscriber::EnvFilter;
+use std::{marker::PhantomData, time::Duration};
 
 type E = T256HyraxEngine;
 
@@ -50,11 +50,9 @@ impl<Scalar: PrimeField + PrimeFieldBits> Sha256Circuit<Scalar> {
 
 impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
-    // compute the SHA-256 hash of the preimage
     let mut hasher = Sha256::new();
     hasher.update(&self.preimage);
     let hash = hasher.finalize();
-    // convert the hash to a vector of scalars
     let hash_scalars: Vec<<E as Engine>::Scalar> = hash
       .iter()
       .flat_map(|&byte| {
@@ -74,16 +72,14 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
     &self,
     _: &mut CS,
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-    // No shared variables in this circuit
     Ok(vec![])
   }
 
   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
     &self,
     cs: &mut CS,
-    _: &[AllocatedNum<E::Scalar>], // shared variables, if any
+    _: &[AllocatedNum<E::Scalar>],
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-    // 1. Preimage bits
     let bit_values: Vec<_> = self
       .preimage
       .clone()
@@ -100,10 +96,8 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
       .map(|b| b.map(Boolean::from))
       .collect::<Result<Vec<_>, _>>()?;
 
-    // 2. SHA-256 gadget
     let hash_bits = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-    // 3. Sanity-check against Rust SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&self.preimage);
     let expected = hasher.finalize();
@@ -121,7 +115,6 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
     }
 
     for (i, bit) in hash_bits.iter().enumerate() {
-      // Allocate public input
       let n = AllocatedNum::alloc_input(cs.namespace(|| format!("public num {i}")), || {
         Ok(
           if bit.get_value().ok_or(SynthesisError::AssignmentMissing)? {
@@ -132,7 +125,6 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
         )
       })?;
 
-      // Single equality constraint is enough
       cs.enforce(
         || format!("bit == num {i}"),
         |_| bit.lc(CS::one(), E::Scalar::ONE),
@@ -145,7 +137,6 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   }
 
   fn num_challenges(&self) -> usize {
-    // SHA-256 circuit does not expect any challenges
     0
   }
 
@@ -160,54 +151,121 @@ impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E::Scalar> {
   }
 }
 
-fn main() {
-  tracing_subscriber::fmt()
-    .with_target(false)
-    .with_ansi(true)                // no bold colour codes
-    .with_env_filter(EnvFilter::from_default_env())
-    .init();
-
-  // Message lengths: 2^10 … 2^11 bytes.
-  let circuits: Vec<_> = (10..=11)
-    .map(|k| Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; 1 << k]))
-    .collect();
-
-  for circuit in circuits {
-    let msg_len = circuit.preimage.len();
-    let root_span = info_span!("bench", msg_len).entered();
-    info!("======= message_len={} bytes =======", msg_len);
-
-    // SETUP
-    let t0 = Instant::now();
-    let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).expect("setup failed");
-    let setup_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = setup_ms, "setup");
-
-    // PREPARE
-    let t0 = Instant::now();
-    let prep_snark =
-      SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).expect("prep_prove failed");
-    let prep_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = prep_ms, "prep_prove");
-
-    // PROVE
-    let t0 = Instant::now();
-    let (proof, _prep_snark) =
-      SpartanSNARK::<E>::prove(&pk, circuit.clone(), prep_snark, true).expect("prove failed");
-    let prove_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = prove_ms, "prove");
-
-    // VERIFY
-    let t0 = Instant::now();
-    proof.verify(&vk).expect("verify errored");
-    let verify_ms = t0.elapsed().as_millis();
-    info!(elapsed_ms = verify_ms, "verify");
-
-    // Summary
-    info!(
-      "SUMMARY msg={}B, setup={} ms, prep_prove={} ms, prove={} ms, verify={} ms",
-      msg_len, setup_ms, prep_ms, prove_ms, verify_ms
-    );
-    drop(root_span);
+/// Thread counts to benchmark. Override with BENCH_THREADS env var (comma-separated).
+fn thread_counts() -> Vec<usize> {
+  if let Ok(val) = std::env::var("BENCH_THREADS") {
+    val
+      .split(',')
+      .filter_map(|s| s.trim().parse().ok())
+      .collect()
+  } else {
+    vec![1, 4, 8, 16]
   }
 }
+
+fn spartan_benches(c: &mut Criterion) {
+  let sizes = [1024usize, 2048];
+  let thread_counts = thread_counts();
+
+  // Report proof sizes once (outside measurements)
+  for &size in &sizes {
+    let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+    let (pk, _vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+    let prep = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+    let (proof, _) = SpartanSNARK::<E>::prove(&pk, circuit, prep, true).unwrap();
+    let proof_bytes = bincode::serialize(&proof).unwrap();
+    println!(
+      "Spartan SHA-256 msg={}B: proof_size={} bytes",
+      size,
+      proof_bytes.len()
+    );
+  }
+
+  let mut g = c.benchmark_group("spartan_sha256");
+  g.sample_size(10);
+  g.warm_up_time(Duration::from_millis(100));
+  g.measurement_time(Duration::from_secs(10));
+
+  for &size in &sizes {
+    g.throughput(Throughput::Bytes(size as u64));
+    for &nthreads in &thread_counts {
+      let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(nthreads)
+        .build()
+        .expect("failed to build rayon pool");
+
+      g.bench_function(format!("setup/{size}/t{nthreads}"), |b| {
+        b.iter(|| {
+          pool.install(|| {
+            let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+            let _ = SpartanSNARK::<E>::setup(circuit).unwrap();
+          });
+        });
+      });
+
+      g.bench_function(format!("prep_prove/{size}/t{nthreads}"), |b| {
+        b.iter_batched(
+          || {
+            pool.install(|| {
+              let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+              SpartanSNARK::<E>::setup(circuit).unwrap().0
+            })
+          },
+          |pk| {
+            pool.install(|| {
+              let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+              let _ = SpartanSNARK::<E>::prep_prove(&pk, circuit, true).unwrap();
+            });
+          },
+          BatchSize::LargeInput,
+        );
+      });
+
+      g.bench_function(format!("prove/{size}/t{nthreads}"), |b| {
+        b.iter_batched(
+          || {
+            pool.install(|| {
+              let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+              let (pk, _vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+              let prep = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+              // Warm-up prove
+              let (_proof, prep_back) =
+                SpartanSNARK::<E>::prove(&pk, circuit.clone(), prep, true).unwrap();
+              (pk, circuit, prep_back)
+            })
+          },
+          |(pk, circuit, prep)| {
+            pool.install(|| {
+              let _ = SpartanSNARK::<E>::prove(&pk, circuit, prep, true).unwrap();
+            });
+          },
+          BatchSize::LargeInput,
+        );
+      });
+
+      g.bench_function(format!("verify/{size}/t{nthreads}"), |b| {
+        b.iter_batched(
+          || {
+            pool.install(|| {
+              let circuit = Sha256Circuit::<<E as Engine>::Scalar>::new(vec![0u8; size]);
+              let (pk, vk) = SpartanSNARK::<E>::setup(circuit.clone()).unwrap();
+              let prep = SpartanSNARK::<E>::prep_prove(&pk, circuit.clone(), true).unwrap();
+              let (proof, _) = SpartanSNARK::<E>::prove(&pk, circuit, prep, true).unwrap();
+              (vk, proof)
+            })
+          },
+          |(vk, proof)| {
+            pool.install(|| {
+              proof.verify(&vk).unwrap();
+            });
+          },
+          BatchSize::LargeInput,
+        );
+      });
+    }
+  }
+  g.finish();
+}
+
+criterion_group!(benches, spartan_benches);
+criterion_main!(benches);

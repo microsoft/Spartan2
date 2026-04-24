@@ -36,14 +36,20 @@ Because every step circuit shares the same R1CS shape, the prover can precompute
 
 ## Running benchmarks
 
-The `benches/` directory contains SHA-256 benchmarks for both protocols. Use `RUST_LOG=info` for timing output and `RUSTFLAGS="-C target-cpu=native"` for best performance:
+The `benches/` directory contains SHA-256 benchmarks for both protocols using [Criterion](https://github.com/bheisler/criterion.rs). Each benchmark measures setup, prep_prove, prove, and verify times across multiple iterations and thread counts, and reports proof sizes.
 
 ```bash
 # Spartan: SHA-256 over 1 KiB and 2 KiB messages
-RUST_LOG=info RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan
+RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan
 
 # NeutronNova: 32 SHA-256 step circuits (2048 bytes total)
-RUST_LOG=info RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova
+RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova
+```
+
+Override thread counts with `BENCH_THREADS` (comma-separated):
+
+```bash
+BENCH_THREADS=1,8 RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_spartan
 ```
 
 ## References
