@@ -14,7 +14,6 @@
 //!                  (~26,352 constraints)
 //!   * core ckt   = 1 x `sha256_compression_function` as well
 //!                  (~26,352 constraints; <= 32,768)
-//!   * is_small   = false
 //!
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
@@ -206,6 +205,7 @@ impl<Eng: Engine> SpartanCircuit<Eng> for CoreCircuit<Eng> {
 }
 
 /// Thread counts to benchmark. Override with BENCH_THREADS env var (comma-separated).
+/// Defaults are capped at the host's available parallelism to avoid oversubscription.
 fn thread_counts() -> Vec<usize> {
   if let Ok(val) = std::env::var("BENCH_THREADS") {
     val
@@ -213,7 +213,13 @@ fn thread_counts() -> Vec<usize> {
       .filter_map(|s| s.trim().parse().ok())
       .collect()
   } else {
+    let max = std::thread::available_parallelism()
+      .map(|n| n.get())
+      .unwrap_or(4);
     vec![1, 2, 4, 8, 16]
+      .into_iter()
+      .filter(|&t| t <= max)
+      .collect()
   }
 }
 
@@ -235,9 +241,9 @@ fn neutronnova_benches(c: &mut Criterion) {
     let step_circuits = make_step_circuits(num_steps);
     let core_circuit = CoreCircuit::<E>::new();
     let prep =
-      NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false).unwrap();
+      NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true).unwrap();
     let (proof, _) =
-      NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, false).unwrap();
+      NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true).unwrap();
     let proof_bytes = bincode::serialize(&proof).unwrap();
     println!(
       "NeutronNova SHA-256 size={}B num_steps={} (= {} compressions): proof_size={} bytes",
@@ -288,12 +294,11 @@ fn neutronnova_benches(c: &mut Criterion) {
             pool.install(|| {
               let step_circuits = make_step_circuits(num_steps);
               let core_circuit = CoreCircuit::<E>::new();
-              let _ =
-                NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false)
-                  .unwrap();
+              let _ = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
+                .unwrap();
             });
           },
-          BatchSize::SmallInput,
+          BatchSize::LargeInput,
         );
       });
 
@@ -308,7 +313,7 @@ fn neutronnova_benches(c: &mut Criterion) {
               let step_circuits = make_step_circuits(num_steps);
               let core_circuit = CoreCircuit::<E>::new();
               let prep =
-                NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false)
+                NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
                   .unwrap();
               // Warm-up prove
               let (_proof, prep_back) =
@@ -324,7 +329,7 @@ fn neutronnova_benches(c: &mut Criterion) {
                   .unwrap();
             });
           },
-          BatchSize::SmallInput,
+          BatchSize::LargeInput,
         );
       });
 
@@ -339,7 +344,7 @@ fn neutronnova_benches(c: &mut Criterion) {
               let step_circuits = make_step_circuits(num_steps);
               let core_circuit = CoreCircuit::<E>::new();
               let prep =
-                NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false)
+                NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true)
                   .unwrap();
               let (proof, _) =
                 NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
@@ -352,7 +357,7 @@ fn neutronnova_benches(c: &mut Criterion) {
               proof.verify(&vk, num_steps).unwrap();
             });
           },
-          BatchSize::SmallInput,
+          BatchSize::LargeInput,
         );
       });
     }
