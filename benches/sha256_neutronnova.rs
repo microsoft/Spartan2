@@ -95,16 +95,15 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
       .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
       .enumerate()
       .map(|(i, b)| {
-        AllocatedBit::alloc(cs.namespace(|| format!("block bit {i}")), Some(b))
-          .map(Boolean::from)
+        AllocatedBit::alloc(cs.namespace(|| format!("block bit {i}")), Some(b)).map(Boolean::from)
       })
       .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(input_bits.len(), 512);
 
     // Use SHA-256 IV for the current hash value (constants).
     const IV: [u32; 8] = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+      0x5be0cd19,
     ];
     let current_hash: Vec<UInt32> = IV.iter().map(|&v| UInt32::constant(v)).collect();
 
@@ -175,8 +174,8 @@ impl<Eng: Engine> SpartanCircuit<Eng> for CoreCircuit<Eng> {
       .collect::<Result<Vec<_>, _>>()?;
 
     const IV: [u32; 8] = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+      0x5be0cd19,
     ];
     let current_hash: Vec<UInt32> = IV.iter().map(|&v| UInt32::constant(v)).collect();
 
@@ -232,8 +231,7 @@ fn neutronnova_benches(c: &mut Criterion) {
     let num_steps = num_steps_for_size(size);
     let step_proto = Sha256StepCircuit::<E>::new([0u8; BLOCK_BYTES]);
     let core_proto = CoreCircuit::<E>::new();
-    let (pk, _vk) =
-      NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap();
+    let (pk, _vk) = NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap();
     let step_circuits = make_step_circuits(num_steps);
     let core_circuit = CoreCircuit::<E>::new();
     let prep =
@@ -270,8 +268,7 @@ fn neutronnova_benches(c: &mut Criterion) {
           pool.install(|| {
             let step_proto = Sha256StepCircuit::<E>::new([0u8; BLOCK_BYTES]);
             let core_proto = CoreCircuit::<E>::new();
-            let _ =
-              NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap();
+            let _ = NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap();
           });
         });
       });
@@ -314,27 +311,17 @@ fn neutronnova_benches(c: &mut Criterion) {
                 NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false)
                   .unwrap();
               // Warm-up prove
-              let (_proof, prep_back) = NeutronNovaZkSNARK::<E>::prove(
-                &pk,
-                &step_circuits,
-                &core_circuit,
-                prep,
-                true,
-              )
-              .unwrap();
+              let (_proof, prep_back) =
+                NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                  .unwrap();
               (pk, step_circuits, core_circuit, prep_back)
             })
           },
           |(pk, step_circuits, core_circuit, prep)| {
             pool.install(|| {
-              let _ = NeutronNovaZkSNARK::<E>::prove(
-                &pk,
-                &step_circuits,
-                &core_circuit,
-                prep,
-                true,
-              )
-              .unwrap();
+              let _ =
+                NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                  .unwrap();
             });
           },
           BatchSize::SmallInput,
@@ -354,14 +341,9 @@ fn neutronnova_benches(c: &mut Criterion) {
               let prep =
                 NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false)
                   .unwrap();
-              let (proof, _) = NeutronNovaZkSNARK::<E>::prove(
-                &pk,
-                &step_circuits,
-                &core_circuit,
-                prep,
-                true,
-              )
-              .unwrap();
+              let (proof, _) =
+                NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true)
+                  .unwrap();
               (vk, proof)
             })
           },
