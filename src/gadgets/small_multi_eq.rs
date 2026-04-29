@@ -67,9 +67,9 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallMultiEq<Scalar>
 
     let count = self.addmany_count;
     self.addmany_count += 1;
-    self.cs.push_namespace(|| format!("add{count}"));
+    self.cs.get_root().push_namespace(|| format!("add{count}"));
     let result = addmany::limbed(self, operands);
-    self.cs.pop_namespace();
+    self.cs.get_root().pop_namespace();
     result
   }
 }
@@ -77,7 +77,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallMultiEq<Scalar>
 impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> ConstraintSystem<Scalar>
   for NoBatchEq<'_, Scalar, CS>
 {
-  type Root = Self;
+  type Root = CS::Root;
 
   fn one() -> Variable {
     CS::one()
@@ -117,15 +117,15 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> ConstraintSystem<Scalar>
     NR: Into<String>,
     N: FnOnce() -> NR,
   {
-    self.cs.push_namespace(name_fn);
+    self.cs.get_root().push_namespace(name_fn);
   }
 
   fn pop_namespace(&mut self) {
-    self.cs.pop_namespace();
+    self.cs.get_root().pop_namespace();
   }
 
   fn get_root(&mut self) -> &mut Self::Root {
-    self
+    self.cs.get_root()
   }
 
   fn is_witness_generator(&self) -> bool {
@@ -224,9 +224,9 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> SmallMult
 
     let count = self.addmany_count;
     self.addmany_count += 1;
-    self.cs.push_namespace(|| format!("add{count}"));
+    self.cs.get_root().push_namespace(|| format!("add{count}"));
     let result = addmany::full(self, operands);
-    self.cs.pop_namespace();
+    self.cs.get_root().pop_namespace();
     result
   }
 }
@@ -242,7 +242,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> Drop
 impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> ConstraintSystem<Scalar>
   for BatchingEq<'_, Scalar, CS, K>
 {
-  type Root = Self;
+  type Root = CS::Root;
 
   fn one() -> Variable {
     CS::one()
@@ -282,15 +282,15 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>, const K: usize> Constrain
     NR: Into<String>,
     N: FnOnce() -> NR,
   {
-    self.cs.push_namespace(name_fn);
+    self.cs.get_root().push_namespace(name_fn);
   }
 
   fn pop_namespace(&mut self) {
-    self.cs.pop_namespace();
+    self.cs.get_root().pop_namespace();
   }
 
   fn get_root(&mut self) -> &mut Self::Root {
-    self
+    self.cs.get_root()
   }
 
   fn is_witness_generator(&self) -> bool {
