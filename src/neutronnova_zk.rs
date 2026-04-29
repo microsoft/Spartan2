@@ -55,7 +55,10 @@ use num_traits::{Bounded, One, Signed, Zero};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::ops::{Div, Mul};
+use std::{
+  borrow::Cow,
+  ops::{Div, Mul},
+};
 use tracing::{debug, info};
 
 type NeutronNovaNIFSOutput<E> = (
@@ -96,6 +99,22 @@ fn build_z_small<SV: Copy + One>(w: &[SV], x: &[SV]) -> Vec<SV> {
   z.push(SV::one());
   z.extend_from_slice(x);
   z
+}
+
+/// Adapter trait for reusing the full-small i64 cache across `prove_with_l0` specializations.
+pub trait BorrowI64SmallCache: SmallValue {
+  /// Returns a borrowed view of an i64 cache slice when the small-value type is `i64`.
+  fn borrow_i64_slice(_: &[i64]) -> Option<&[Self]> {
+    None
+  }
+}
+
+impl BorrowI64SmallCache for i32 {}
+
+impl BorrowI64SmallCache for i64 {
+  fn borrow_i64_slice(v: &[i64]) -> Option<&[Self]> {
+    Some(v)
+  }
 }
 
 fn prepare_nifs_inputs<E: Engine>(
@@ -165,54 +184,32 @@ fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &
   w
 }
 
-fn fold_small_value_vectors<F, SV>(weights: &[F], vectors: &[Vec<SV>]) -> Vec<F>
+fn fold_small_value_vectors<F, SV, V>(weights: &[F], vectors: &[V]) -> Vec<F>
 where
   F: Field + DelayedReduction<SV>,
+  V: AsRef<[SV]> + Sync,
   SV: Send + Sync,
 {
-  let dim = vectors[0].len();
+  let dim = vectors[0].as_ref().len();
   (0..dim)
     .into_par_iter()
     .map(|j| {
       let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
-      for (i, wi) in weights.iter().enumerate() {
-        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, wi, &vectors[i][j]);
+      for (wi, vector) in weights.iter().zip(vectors.iter()) {
+        let vector = vector.as_ref();
+        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, wi, &vector[j]);
       }
       <F as DelayedReduction<SV>>::reduce(&acc)
     })
     .collect()
 }
 
-fn small_value_eq_weighted_fold<E, SV>(
-  eq_evals: &[E::Scalar],
-  layers: &[Vec<SV>],
-  num_cons: usize,
-) -> Vec<E::Scalar>
-where
-  E: Engine,
-  E::Scalar: DelayedReduction<SV>,
-  SV: Copy + Send + Sync,
-{
-  (0..num_cons)
-    .into_par_iter()
-    .map(|k| {
-      let mut acc = <E::Scalar as DelayedReduction<SV>>::Accumulator::zero();
-      for (eq_eval, layer) in eq_evals.iter().zip(layers) {
-        <E::Scalar as DelayedReduction<SV>>::unreduced_multiply_accumulate(
-          &mut acc, eq_eval, &layer[k],
-        );
-      }
-      <E::Scalar as DelayedReduction<SV>>::reduce(&acc)
-    })
-    .collect()
-}
-
-fn fold_and_update_vc_small<E, SV>(
+fn fold_and_update_vc_small<E, SV, W, X>(
   r_bs: &[E::Scalar],
   T_cur: E::Scalar,
   acc_eq: E::Scalar,
-  ws_small: &[Vec<SV>],
-  xs_small: &[Vec<SV>],
+  ws_small: &[W],
+  xs_small: &[X],
   Us: &[R1CSInstance<E>],
   Ws: &[R1CSWitness<E>],
   ell_b: usize,
@@ -226,6 +223,8 @@ where
   E: Engine,
   E::Scalar: DelayedReduction<SV>,
   E::PCS: FoldingEngineTrait<E>,
+  W: AsRef<[SV]> + Sync,
+  X: AsRef<[SV]> + Sync,
   SV: Send + Sync,
 {
   let T_out = T_cur
@@ -255,6 +254,43 @@ where
     &weights,
   )?;
   let folded_U = R1CSInstance::new_unchecked(comm_W_acc, folded_X)?;
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
+
+  Ok((folded_W, folded_U))
+}
+
+fn fold_and_update_vc_field<E>(
+  r_bs: &[E::Scalar],
+  T_cur: E::Scalar,
+  acc_eq: E::Scalar,
+  Us: &[R1CSInstance<E>],
+  Ws: &[R1CSWitness<E>],
+  ell_b: usize,
+  vc: &mut NeutronNovaVerifierCircuit<E>,
+  vc_state: &mut MultiRoundState<E>,
+  vc_shape: &SplitMultiRoundR1CSShape<E>,
+  vc_ck: &CommitmentKey<E>,
+  transcript: &mut E::TE,
+) -> Result<(R1CSWitness<E>, R1CSInstance<E>), SpartanError>
+where
+  E: Engine,
+  E::PCS: FoldingEngineTrait<E>,
+{
+  let T_out = T_cur
+    * acc_eq
+      .invert()
+      .into_option()
+      .ok_or(SpartanError::DivisionByZero)?;
+  vc.t_out_step = T_out;
+  vc.eq_rho_at_rb = acc_eq;
+  SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+
+  let (_fold_span, fold_t) = start_span!("fold_witnesses");
+  let folded_W = R1CSWitness::fold_multiple(r_bs, Ws)?;
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_witnesses");
+
+  let (_fold_span, fold_t) = start_span!("fold_instances");
+  let folded_U = R1CSInstance::fold_multiple(r_bs, Us)?;
   info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
 
   Ok((folded_W, folded_U))
@@ -707,9 +743,9 @@ where
     }
   }
 
-  fn prove_neutronnova_small_value_sumcheck<SV>(
-    a_layers: &[Vec<SV>],
-    b_layers: &[Vec<SV>],
+  fn prove_neutronnova_small_value_sumcheck<SV, A, B>(
+    a_layers: &[A],
+    b_layers: &[B],
     e_eq: &[E::Scalar],
     left: usize,
     right: usize,
@@ -733,9 +769,16 @@ where
       + DelayedReduction<SV>
       + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
+    A: AsRef<[SV]> + Sync,
+    B: AsRef<[SV]> + Sync,
     SV: SmallValue,
   {
     let ell_b = rhos.len();
+
+    let mut polys = Vec::with_capacity(ell_b);
+    let mut r_bs = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO;
+    let mut acc_eq = E::Scalar::ONE;
 
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
     let accumulators =
@@ -746,11 +789,6 @@ where
     );
 
     let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
-    let mut polys = Vec::with_capacity(ell_b);
-    let mut r_bs = Vec::with_capacity(ell_b);
-    let mut T_cur = E::Scalar::ZERO;
-    let mut acc_eq = E::Scalar::ONE;
-
     for (i, rho_i) in rhos.iter().enumerate() {
       let (_round_span, round_t) = start_span!("nifs_smallvalue_round", round = i);
       let t_all = small_value.eval_t_all_u(i);
@@ -790,6 +828,10 @@ where
     S: &SplitR1CSShape<E>,
     Us: &[R1CSInstance<E>],
     Ws: &[R1CSWitness<E>],
+    cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
+    cached_ext_i64: Option<&[(Vec<i64>, Vec<i64>, Vec<i64>)]>,
+    cached_w_ext_i64: Option<&[Vec<i64>]>,
+    cached_x_ext_i64: Option<&[Vec<i64>]>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut MultiRoundState<E>,
     vc_shape: &SplitMultiRoundR1CSShape<E>,
@@ -801,7 +843,7 @@ where
       + DelayedReduction<SV>
       + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
-    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV: SmallValue + Bounded + One + Into<SV::Product> + BorrowI64SmallCache,
     SV::Product:
       Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
   {
@@ -809,35 +851,50 @@ where
     let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
     let n_padded = Us.len();
 
-    let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
-    let ws_small: Vec<Vec<SV>> = Ws
-      .par_iter()
-      .map(|w| vec_to_small_for_extension::<E::Scalar, SV, 2>(&w.W, ell_b))
-      .collect::<Result<_, _>>()?;
-    let xs_small: Vec<Vec<SV>> = Us
-      .par_iter()
-      .map(|u| vec_to_small_for_extension::<E::Scalar, SV, 2>(&u.X, ell_b))
-      .collect::<Result<_, _>>()?;
-    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
-
     let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
     let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
 
     let (_matrix_span, matrix_t) =
       start_span!("matrix_vector_multiply_instances", instances = n_padded);
-    let smalls: Vec<(Vec<SV>, Vec<SV>, Vec<SV>)> = (0..n_padded)
-      .into_par_iter()
-      .map(|i| {
-        let z_small = build_z_small(&ws_small[i], &xs_small[i]);
-        let Az = S.A.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
-        let Bz = S.B.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
-        let Cz = S.C.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
-        Ok((Az, Bz, Cz))
-      })
-      .collect::<Result<_, SpartanError>>()?;
+    let (a_small, b_small, c_small, small_inputs) = if let Some(cached) = cached_ext_i64 {
+      let mut cached_small: Vec<(Cow<'_, [SV]>, Cow<'_, [SV]>, Cow<'_, [SV]>)> = cached
+        .iter()
+        .map(|(az, bz, cz)| {
+          Ok((
+            Cow::Borrowed(
+              SV::borrow_i64_slice(az).ok_or(SpartanError::InvalidInputLength {
+                reason: "prove_accumulator_small: incompatible cached_step_ext_i64 type".into(),
+              })?,
+            ),
+            Cow::Borrowed(
+              SV::borrow_i64_slice(bz).ok_or(SpartanError::InvalidInputLength {
+                reason: "prove_accumulator_small: incompatible cached_step_ext_i64 type".into(),
+              })?,
+            ),
+            Cow::Borrowed(
+              SV::borrow_i64_slice(cz).ok_or(SpartanError::InvalidInputLength {
+                reason: "prove_accumulator_small: incompatible cached_step_ext_i64 type".into(),
+              })?,
+            ),
+          ))
+        })
+        .collect::<Result<Vec<_>, SpartanError>>()?;
 
-    let (a_small, b_small, c_small): (Vec<Vec<SV>>, Vec<Vec<SV>>, Vec<Vec<SV>>) =
-      smalls.into_iter().fold(
+      if cached_small.len() < n_padded {
+        let first = cached_small
+          .first()
+          .ok_or(SpartanError::InvalidInputLength {
+            reason: "prove_accumulator_small: empty cached_step_ext_i64".into(),
+          })?
+          .clone();
+        cached_small.resize(n_padded, first);
+      }
+
+      let (a_small, b_small, c_small): (
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+      ) = cached_small.into_iter().fold(
         (
           Vec::with_capacity(n_padded),
           Vec::with_capacity(n_padded),
@@ -850,6 +907,137 @@ where
           (a, b, c)
         },
       );
+      let small_inputs = match (cached_w_ext_i64, cached_x_ext_i64) {
+        (Some(ws_cached), Some(xs_cached)) => {
+          let mut ws_small: Vec<Cow<'_, [SV]>> = ws_cached
+            .iter()
+            .map(|w| {
+              Ok(Cow::Borrowed(SV::borrow_i64_slice(w).ok_or(
+                SpartanError::InvalidInputLength {
+                  reason: "prove_accumulator_small: incompatible cached_step_w_ext_i64 type".into(),
+                },
+              )?))
+            })
+            .collect::<Result<_, SpartanError>>()?;
+          let mut xs_small: Vec<Cow<'_, [SV]>> = xs_cached
+            .iter()
+            .map(|x| {
+              Ok(Cow::Borrowed(SV::borrow_i64_slice(x).ok_or(
+                SpartanError::InvalidInputLength {
+                  reason: "prove_accumulator_small: incompatible cached_step_x_ext_i64 type".into(),
+                },
+              )?))
+            })
+            .collect::<Result<_, SpartanError>>()?;
+
+          if ws_small.len() < n_padded {
+            let first = ws_small
+              .first()
+              .ok_or(SpartanError::InvalidInputLength {
+                reason: "prove_accumulator_small: empty cached_step_w_ext_i64".into(),
+              })?
+              .clone();
+            ws_small.resize(n_padded, first);
+          }
+          if xs_small.len() < n_padded {
+            let first = xs_small
+              .first()
+              .ok_or(SpartanError::InvalidInputLength {
+                reason: "prove_accumulator_small: empty cached_step_x_ext_i64".into(),
+              })?
+              .clone();
+            xs_small.resize(n_padded, first);
+          }
+
+          Some((ws_small, xs_small))
+        }
+        _ => None,
+      };
+      (a_small, b_small, c_small, small_inputs)
+    } else if let Some(cached) = cached_matvec {
+      let mut cached_small: Vec<(Vec<SV>, Vec<SV>, Vec<SV>)> = cached
+        .into_par_iter()
+        .map(|(az, bz, cz)| {
+          Ok((
+            vec_to_small_for_extension::<E::Scalar, SV, 2>(&az, ell_b)?,
+            vec_to_small_for_extension::<E::Scalar, SV, 2>(&bz, ell_b)?,
+            vec_to_small_for_extension::<E::Scalar, SV, 2>(&cz, ell_b)?,
+          ))
+        })
+        .collect::<Result<_, SpartanError>>()?;
+
+      if cached_small.len() < n_padded {
+        let first = cached_small
+          .first()
+          .cloned()
+          .ok_or(SpartanError::InvalidInputLength {
+            reason: "prove_accumulator_small: empty cached matvec".into(),
+          })?;
+        cached_small.resize(n_padded, first);
+      }
+
+      let (a_small, b_small, c_small): (
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+      ) = cached_small.into_iter().fold(
+        (
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+        ),
+        |(mut a, mut b, mut c), (az, bz, cz)| {
+          a.push(Cow::Owned(az));
+          b.push(Cow::Owned(bz));
+          c.push(Cow::Owned(cz));
+          (a, b, c)
+        },
+      );
+      (a_small, b_small, c_small, None)
+    } else {
+      let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
+      let ws_small: Vec<Vec<SV>> = Ws
+        .par_iter()
+        .map(|w| vec_to_small_for_extension::<E::Scalar, SV, 2>(&w.W, ell_b))
+        .collect::<Result<_, _>>()?;
+      let xs_small: Vec<Vec<SV>> = Us
+        .par_iter()
+        .map(|u| vec_to_small_for_extension::<E::Scalar, SV, 2>(&u.X, ell_b))
+        .collect::<Result<_, _>>()?;
+      info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
+
+      let smalls: Vec<(Vec<SV>, Vec<SV>, Vec<SV>)> = (0..n_padded)
+        .into_par_iter()
+        .map(|i| {
+          let z_small = build_z_small(&ws_small[i], &xs_small[i]);
+          let Az = S.A.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+          let Bz = S.B.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+          let Cz = S.C.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+          Ok((Az, Bz, Cz))
+        })
+        .collect::<Result<_, SpartanError>>()?;
+
+      let (a_small, b_small, c_small): (
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+        Vec<Cow<'_, [SV]>>,
+      ) = smalls.into_iter().fold(
+        (
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+        ),
+        |(mut a, mut b, mut c), (az, bz, cz)| {
+          a.push(Cow::Owned(az));
+          b.push(Cow::Owned(bz));
+          c.push(Cow::Owned(cz));
+          (a, b, c)
+        },
+      );
+      let ws_small: Vec<Cow<'_, [SV]>> = ws_small.into_iter().map(Cow::Owned).collect();
+      let xs_small: Vec<Cow<'_, [SV]>> = xs_small.into_iter().map(Cow::Owned).collect();
+      (a_small, b_small, c_small, Some((ws_small, xs_small)))
+    };
     info!(
       elapsed_ms = %matrix_t.elapsed().as_millis(),
       instances = n_padded,
@@ -857,7 +1045,7 @@ where
     );
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
-    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck(
+    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck::<SV, _, _>(
       &a_small, &b_small, &E_eq, left, right, &rhos, vc, vc_state, vc_shape, vc_ck, transcript,
     )?;
     info!(
@@ -869,23 +1057,28 @@ where
     let (_fold_span, fold_t) = start_span!("nifs_eq_fold");
     let r_bs_rev: Vec<_> = r_bs.iter().rev().copied().collect();
     let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
-    let num_cons = a_small[0].len();
 
     let (az_folded, (bz_folded, cz_folded)) = rayon::join(
-      || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &a_small, num_cons),
+      || fold_small_value_vectors(&eq_evals, &a_small),
       || {
         rayon::join(
-          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &b_small, num_cons),
-          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &c_small, num_cons),
+          || fold_small_value_vectors(&eq_evals, &b_small),
+          || fold_small_value_vectors(&eq_evals, &c_small),
         )
       },
     );
     info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
 
-    let (folded_W, folded_U) = fold_and_update_vc_small::<E, SV>(
-      &r_bs, T_cur, acc_eq, &ws_small, &xs_small, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck,
-      transcript,
-    )?;
+    let (folded_W, folded_U) = if let Some((ws_small, xs_small)) = small_inputs {
+      fold_and_update_vc_small::<E, SV, _, _>(
+        &r_bs, T_cur, acc_eq, &ws_small, &xs_small, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck,
+        transcript,
+      )?
+    } else {
+      fold_and_update_vc_field::<E>(
+        &r_bs, T_cur, acc_eq, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck, transcript,
+      )?
+    };
 
     info!(elapsed_ms = %nifs_total_t.elapsed().as_millis(), "nifs_prove");
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
@@ -899,6 +1092,9 @@ where
     Ws: Vec<R1CSWitness<E>>,
     cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
     cached_i64: Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
+    cached_ext_i64: Option<&[(Vec<i64>, Vec<i64>, Vec<i64>)]>,
+    cached_w_ext_i64: Option<&[Vec<i64>]>,
+    cached_x_ext_i64: Option<&[Vec<i64>]>,
     large_positions: &[usize],
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut MultiRoundState<E>,
@@ -913,7 +1109,7 @@ where
       + DelayedReduction<SV>
       + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
-    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV: SmallValue + Bounded + One + Into<SV::Product> + BorrowI64SmallCache,
     SV::Product:
       Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
   {
@@ -962,7 +1158,20 @@ where
       );
     }
 
-    Self::prove_accumulator_small::<SV>(S, &Us, &Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+    Self::prove_accumulator_small::<SV>(
+      S,
+      &Us,
+      &Ws,
+      cached_matvec,
+      cached_ext_i64,
+      cached_w_ext_i64,
+      cached_x_ext_i64,
+      vc,
+      vc_state,
+      vc_shape,
+      vc_ck,
+      transcript,
+    )
   }
 
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
@@ -1835,6 +2044,15 @@ pub struct NeutronNovaPrepZkSNARK<E: Engine> {
   /// Positions where ANY instance's Az/Bz/Cz didn't fit i64 (union across all instances).
   /// i64 vectors are zeroed at these positions; correction uses field values.
   large_positions: Vec<usize>,
+  /// Extension-safe i64 cache for the full-small accumulator path.
+  /// Present only for `prep_prove_with_l0` when `l0 == ell_b` and conversion succeeds.
+  cached_step_ext_i64: Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
+  /// Extension-safe i64 witness cache for the full-small final fold.
+  /// Present only when the step witness is fully determined during prep.
+  cached_step_w_ext_i64: Option<Vec<Vec<i64>>>,
+  /// Extension-safe i64 public input cache for the full-small final fold.
+  /// Present only when the step witness is fully determined during prep.
+  cached_step_x_ext_i64: Option<Vec<Vec<i64>>>,
   /// Public values used when computing cached_step_matvec, for validation in prove.
   /// Non-empty when the matvec cache is active; prove checks that step circuits produce the same values.
   cached_step_public_values: Vec<Vec<E::Scalar>>,
@@ -2069,6 +2287,9 @@ where
       cached_step_matvec,
       cached_step_i64,
       large_positions,
+      cached_step_ext_i64: None,
+      cached_step_w_ext_i64: None,
+      cached_step_x_ext_i64: None,
       cached_step_public_values,
     })
   }
@@ -2083,6 +2304,8 @@ where
     core_circuit: &C2,
     mut prep_snark: NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
+    clone_cached_matvec: bool,
+    clone_cached_i64: bool,
     nifs_fn: NifsFn,
   ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError>
   where
@@ -2096,6 +2319,9 @@ where
       Vec<R1CSWitness<E>>,
       Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
       Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
+      Option<&[(Vec<i64>, Vec<i64>, Vec<i64>)]>,
+      Option<&[Vec<i64>]>,
+      Option<&[Vec<i64>]>,
       &[usize],
       &mut NeutronNovaVerifierCircuit<E>,
       &mut MultiRoundState<E>,
@@ -2250,14 +2476,25 @@ where
     let (_nifs_span, nifs_t) = start_span!("NIFS");
     // Parallel clone: each inner triple (Vec, Vec, Vec) of size num_cons is
     // large enough that serial clone becomes a bottleneck at many instances.
-    let cached_matvec = prep_snark
-      .cached_step_matvec
-      .as_ref()
-      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
-    let cached_i64 = prep_snark
-      .cached_step_i64
-      .as_ref()
-      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
+    let cached_matvec = if clone_cached_matvec {
+      prep_snark
+        .cached_step_matvec
+        .as_ref()
+        .map(|v| v.par_iter().cloned().collect::<Vec<_>>())
+    } else {
+      None
+    };
+    let cached_i64 = if clone_cached_i64 {
+      prep_snark
+        .cached_step_i64
+        .as_ref()
+        .map(|v| v.par_iter().cloned().collect::<Vec<_>>())
+    } else {
+      None
+    };
+    let cached_ext_i64 = prep_snark.cached_step_ext_i64.as_deref();
+    let cached_w_ext_i64 = prep_snark.cached_step_w_ext_i64.as_deref();
+    let cached_x_ext_i64 = prep_snark.cached_step_x_ext_i64.as_deref();
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = nifs_fn(
       &pk.S_step,
       &pk.ck,
@@ -2265,6 +2502,9 @@ where
       step_witnesses,
       cached_matvec,
       cached_i64,
+      cached_ext_i64,
+      cached_w_ext_i64,
+      cached_x_ext_i64,
       &prep_snark.large_positions,
       &mut vc,
       &mut vc_state,
@@ -2591,7 +2831,40 @@ where
     core_circuit: &C2,
     l0: usize,
   ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
-    Self::prep_prove(pk, step_circuits, core_circuit, l0 > 0)
+    let mut prep = Self::prep_prove(pk, step_circuits, core_circuit, l0 > 0)?;
+    let ell_b = step_circuits.len().next_power_of_two().log_2();
+    if l0 == ell_b {
+      prep.cached_step_ext_i64 = prep.cached_step_matvec.as_ref().and_then(|matvec| {
+        matvec
+          .par_iter()
+          .map(|(az, bz, cz)| {
+            Ok((
+              vec_to_small_for_extension::<E::Scalar, i64, 2>(az, ell_b)?,
+              vec_to_small_for_extension::<E::Scalar, i64, 2>(bz, ell_b)?,
+              vec_to_small_for_extension::<E::Scalar, i64, 2>(cz, ell_b)?,
+            ))
+          })
+          .collect::<Result<Vec<_>, SpartanError>>()
+          .ok()
+      });
+      prep.cached_step_w_ext_i64 = prep.cached_step_matvec.as_ref().and_then(|_| {
+        prep
+          .ps_step
+          .par_iter()
+          .map(|ps| vec_to_small_for_extension::<E::Scalar, i64, 2>(&ps.W, ell_b))
+          .collect::<Result<Vec<_>, SpartanError>>()
+          .ok()
+      });
+      prep.cached_step_x_ext_i64 = prep.cached_step_matvec.as_ref().and_then(|_| {
+        prep
+          .cached_step_public_values
+          .par_iter()
+          .map(|x| vec_to_small_for_extension::<E::Scalar, i64, 2>(x, ell_b))
+          .collect::<Result<Vec<_>, SpartanError>>()
+          .ok()
+      });
+    }
+    Ok(prep)
   }
 
   /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together.
@@ -2614,12 +2887,17 @@ where
       core_circuit,
       prep_snark,
       is_small,
+      true,
+      true,
       |S,
        ck,
        Us,
        Ws,
        cached_matvec,
        cached_i64,
+       _cached_ext_i64,
+       _cached_w_ext_i64,
+       _cached_x_ext_i64,
        large_positions,
        vc,
        vc_state,
@@ -2658,7 +2936,7 @@ where
       + DelayedReduction<SV>
       + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
-    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV: SmallValue + Bounded + One + Into<SV::Product> + BorrowI64SmallCache,
     SV::Product:
       Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
   {
@@ -2668,6 +2946,11 @@ where
         reason: format!("l0 ({}) must be <= ell_b ({})", l0, ell_b),
       });
     }
+    let clone_cached_matvec = if l0 == ell_b {
+      prep_snark.cached_step_ext_i64.is_none()
+    } else {
+      true
+    };
 
     Self::prove_with_nifs_callback(
       pk,
@@ -2675,12 +2958,17 @@ where
       core_circuit,
       prep_snark,
       l0 > 0,
+      clone_cached_matvec,
+      l0 < ell_b,
       |S,
        ck,
        Us,
        Ws,
        cached_matvec,
        cached_i64,
+       cached_ext_i64,
+       cached_w_ext_i64,
+       cached_x_ext_i64,
        large_positions,
        vc,
        vc_state,
@@ -2694,6 +2982,9 @@ where
           Ws,
           cached_matvec,
           cached_i64,
+          cached_ext_i64,
+          cached_w_ext_i64,
+          cached_x_ext_i64,
           large_positions,
           vc,
           vc_state,
@@ -3343,7 +3634,7 @@ mod tests {
     let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
     assert_eq!(eq_evals, weights_from_r::<E::Scalar>(&challenges, n_padded));
 
-    let folded_a = small_value_eq_weighted_fold::<E, i64>(&eq_evals, &a_small, num_cons);
+    let folded_a = fold_small_value_vectors(&eq_evals, &a_small);
     assert_eq!(folded_a, A_layers[0]);
   }
 

@@ -266,9 +266,9 @@ where
 /// `l0` sumcheck variables are exactly the instance-folding variables, so all
 /// `Az/Bz` layer values can stay in the native small-value domain while the
 /// accumulator collects only the non-Boolean Lagrange contributions.
-pub(crate) fn build_accumulators_neutronnova<F, SV>(
-  a_layers: &[Vec<SV>],
-  b_layers: &[Vec<SV>],
+pub(crate) fn build_accumulators_neutronnova<F, SV, A, B>(
+  a_layers: &[A],
+  b_layers: &[B],
   e_eq: &[F],
   left: usize,
   right: usize,
@@ -277,6 +277,8 @@ pub(crate) fn build_accumulators_neutronnova<F, SV>(
 ) -> LagrangeAccumulators<F, 2>
 where
   F: SmallValueEngine<SV>,
+  A: AsRef<[SV]> + Sync,
+  B: AsRef<[SV]> + Sync,
   SV: SmallValue + Add<Output = SV> + Sub<Output = SV>,
 {
   let n = a_layers.len();
@@ -290,7 +292,7 @@ where
   debug_assert_eq!(rhos.len(), ell_b, "rhos must have length ell_b");
   debug_assert_eq!(b_layers.len(), n);
   debug_assert_eq!(e_eq.len(), left + right, "E_eq length mismatch");
-  debug_assert_eq!(a_layers[0].len(), left * right);
+  debug_assert_eq!(a_layers[0].as_ref().len(), left * right);
 
   let base: usize = 3;
   let prefix_size = n;
@@ -320,6 +322,8 @@ where
   let bit_rev: Vec<usize> = (0..prefix_size)
     .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
     .collect();
+  let az_layers_by_prefix: Vec<&[SV]> = bit_rev.iter().map(|&p| a_layers[p].as_ref()).collect();
+  let bz_layers_by_prefix: Vec<&[SV]> = bit_rev.iter().map(|&p| b_layers[p].as_ref()).collect();
   let ext_size = base.pow(l0 as u32);
 
   let BetaPrefixCache {
@@ -332,85 +336,93 @@ where
     .collect();
 
   type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
+  let process_outer = |state: &mut State<F, SV>, x_outer: usize| {
+    state.reset_partial_sums();
+
+    for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
+      let idx = if swap_loops {
+        x_inner * left + x_outer
+      } else {
+        x_outer * left + x_inner
+      };
+
+      #[allow(clippy::needless_range_loop)]
+      for p in 0..prefix_size {
+        state.az_prefix_boolean_evals[p] = az_layers_by_prefix[p][idx];
+        state.bz_prefix_boolean_evals[p] = bz_layers_by_prefix[p][idx];
+      }
+
+      let az_size = extend_to_lagrange_domain::<SV, 2>(
+        &state.az_prefix_boolean_evals,
+        &mut state.az_extended_evals,
+        &mut state.az_extended_scratch,
+      );
+      let az_ext = &state.az_extended_evals[..az_size];
+
+      let bz_size = extend_to_lagrange_domain::<SV, 2>(
+        &state.bz_prefix_boolean_evals,
+        &mut state.bz_extended_evals,
+        &mut state.bz_extended_scratch,
+      );
+      let bz_ext = &state.bz_extended_evals[..bz_size];
+
+      for &beta_idx in &betas_with_infty {
+        let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+        F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], &e_inner_val, &prod);
+      }
+    }
+
+    for &beta_idx in &betas_with_infty {
+      let unreduced = &state.partial_sums[beta_idx];
+      if unreduced.is_zero() {
+        continue;
+      }
+      let val = <F as DelayedReduction<SV::Product>>::reduce(unreduced);
+      if val != F::ZERO {
+        state.beta_values.push((beta_idx, val));
+      }
+    }
+
+    for &(beta_idx, ref val) in &state.beta_values {
+      for pref in &beta_prefix_cache[beta_idx] {
+        let round = pref.round_0 as usize;
+        let num_y = num_y_per_round[round];
+        let e_val = e_cache[round][x_outer * num_y + pref.y_idx as usize];
+        <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
+          &mut state.acc.rounds[round].data_mut()[pref.v_idx as usize][pref.u_idx as usize],
+          val,
+          &e_val,
+        );
+      }
+    }
+  };
+
+  if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
+    let mut state = State::<F, SV>::new(l0, num_betas, prefix_size, ext_size);
+    for x_outer in 0..outer_dim {
+      process_outer(&mut state, x_outer);
+    }
+    return state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc));
+  }
 
   let fold_results: Vec<State<F, SV>> = (0..outer_dim)
     .into_par_iter()
     .fold(
       || State::<F, SV>::new(l0, num_betas, prefix_size, ext_size),
       |mut state: State<F, SV>, x_outer| {
-        state.reset_partial_sums();
-
-        for (x_inner, e_inner_val) in e_inner.iter().enumerate() {
-          #[allow(clippy::needless_range_loop)]
-          for p in 0..prefix_size {
-            let layer_idx = bit_rev[p];
-            let idx = if swap_loops {
-              x_inner * left + x_outer
-            } else {
-              x_outer * left + x_inner
-            };
-            state.az_prefix_boolean_evals[p] = a_layers[layer_idx][idx];
-            state.bz_prefix_boolean_evals[p] = b_layers[layer_idx][idx];
-          }
-
-          let az_size = extend_to_lagrange_domain::<SV, 2>(
-            &state.az_prefix_boolean_evals,
-            &mut state.az_extended_evals,
-            &mut state.az_extended_scratch,
-          );
-          let az_ext = &state.az_extended_evals[..az_size];
-
-          let bz_size = extend_to_lagrange_domain::<SV, 2>(
-            &state.bz_prefix_boolean_evals,
-            &mut state.bz_extended_evals,
-            &mut state.bz_extended_scratch,
-          );
-          let bz_ext = &state.bz_extended_evals[..bz_size];
-
-          for &beta_idx in &betas_with_infty {
-            let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
-            F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], e_inner_val, &prod);
-          }
-        }
-
-        for &beta_idx in &betas_with_infty {
-          let unreduced = &state.partial_sums[beta_idx];
-          if unreduced.is_zero() {
-            continue;
-          }
-          let val = <F as DelayedReduction<SV::Product>>::reduce(unreduced);
-          if val != F::ZERO {
-            state.beta_values.push((beta_idx, val));
-          }
-        }
-
-        for &(beta_idx, ref val) in &state.beta_values {
-          for pref in &beta_prefix_cache[beta_idx] {
-            let round = pref.round_0 as usize;
-            let num_y = num_y_per_round[round];
-            let e_val = e_cache[round][x_outer * num_y + pref.y_idx as usize];
-            <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
-              &mut state.acc.rounds[round].data_mut()[pref.v_idx as usize][pref.u_idx as usize],
-              val,
-              &e_val,
-            );
-          }
-        }
-
+        process_outer(&mut state, x_outer);
         state
       },
     )
     .collect();
 
-  let merged = fold_results
+  fold_results
     .into_iter()
     .reduce(|mut a, b| {
       a.acc.merge(&b.acc);
       a
     })
-    .expect("outer_dim > 0 guarantees non-empty fold results");
-
-  merged
+    .expect("outer_dim > 0 guarantees non-empty fold results")
     .acc
     .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
 }
