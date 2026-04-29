@@ -50,7 +50,7 @@ use crate::sumcheck::PAR_THRESHOLD;
 /// This struct maintains the precomputed accumulators and running state
 /// needed to efficiently evaluate round polynomials using native integer
 /// arithmetic instead of field operations.
-struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
+pub(crate) struct SmallValueSumCheck<Scalar: PrimeField, const D: usize> {
   accumulators: LagrangeAccumulators<Scalar, D>,
   coeff: LagrangeCoeff<Scalar, D>,
   eq_alpha: Scalar,
@@ -278,18 +278,18 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
   }
 
   /// Create from accumulators with the standard Lagrange basis (0, 1, 2, ...).
-  fn from_accumulators(accumulators: LagrangeAccumulators<Scalar, D>) -> Self {
+  pub(crate) fn from_accumulators(accumulators: LagrangeAccumulators<Scalar, D>) -> Self {
     let basis_factory = LagrangeBasisFactory::<Scalar, D>::new(|i| Scalar::from(i as u64));
     Self::new(accumulators, basis_factory)
   }
 
   /// Evaluate t_i(u) for all u ∈ Û_D in a single pass for round i.
-  fn eval_t_all_u(&self, round: usize) -> ReducedLagrangeDomainEvals<Scalar, D> {
+  pub(crate) fn eval_t_all_u(&self, round: usize) -> ReducedLagrangeDomainEvals<Scalar, D> {
     self.accumulators.eval_t_all_u(round, &self.coeff)
   }
 
   /// Compute ℓ_i values for the provided w_i.
-  fn eq_round_values(&self, w_i: Scalar) -> LagrangeDomainEvals<Scalar, 2> {
+  pub(crate) fn eq_round_values(&self, w_i: Scalar) -> LagrangeDomainEvals<Scalar, 2> {
     let l0 = self.eq_alpha * (Scalar::ONE - w_i);
     let l1 = self.eq_alpha * w_i;
     let linf = self.eq_alpha * (w_i.double() - Scalar::ONE);
@@ -297,7 +297,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
   }
 
   /// Advance the round state with the verifier challenge r_i.
-  fn advance(&mut self, li: &LagrangeDomainEvals<Scalar, 2>, r_i: Scalar) {
+  pub(crate) fn advance(&mut self, li: &LagrangeDomainEvals<Scalar, 2>, r_i: Scalar) {
     self.eq_alpha = li.eval_linear_at(r_i);
     self.coeff.extend(&self.basis_factory.basis_at(r_i));
   }
@@ -306,7 +306,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
   ///
   /// After l0 rounds, this gives the eq factor that must be incorporated
   /// into the remaining sumcheck rounds.
-  fn eq_alpha(&self) -> Scalar {
+  pub(crate) fn eq_alpha(&self) -> Scalar {
     self.eq_alpha
   }
 }
@@ -316,7 +316,7 @@ impl<Scalar: PrimeField, const D: usize> SmallValueSumCheck<Scalar, D> {
 ///
 /// Returns `None` when `ℓ_i(1) = 0`, since the optimized path cannot recover
 /// `t_i(1)` in that case.
-fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
+pub(crate) fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
   let s0 = l0 * t0;
   let s1 = claim_prev - s0;
   l1.invert().into_option().map(|inv| s1 * inv)
@@ -327,7 +327,7 @@ fn derive_t1<F: PrimeField>(l0: F, l1: F, claim_prev: F, t0: F) -> Option<F> {
 /// Constructs s_i(X) = ℓ_i(X) · t_i(X) where:
 /// - ℓ_i(X) is the linear eq factor
 /// - t_i(X) is the degree-2 polynomial from accumulators
-fn build_univariate_round_polynomial<F: PrimeField>(
+pub(crate) fn build_univariate_round_polynomial<F: PrimeField>(
   li: &LagrangeDomainEvals<F, 2>,
   t0: F,
   t1: F,

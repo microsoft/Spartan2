@@ -16,8 +16,8 @@ use super::{
   montgomery::MontgomeryLimbs,
 };
 use ff::PrimeField;
-use num_traits::Zero;
-use std::ops::{Add, Sub};
+use num_traits::{Bounded, One, Signed, Zero};
+use std::ops::{Add, Div, Mul, Sub};
 
 // =============================================================================
 // SmallValue trait
@@ -309,6 +309,80 @@ where
         value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
         context: format!("vec_to_small at index {}", i),
       })
+    })
+    .collect()
+}
+
+// ============================================================================
+// Extension bounds
+// ============================================================================
+
+/// Precomputed bound for values that will be extended from `{0,1}` to a
+/// degree-`D` Lagrange domain for `lb` rounds.
+///
+/// The extension can grow native magnitudes by at most `(D + 1)^lb`, so full-small
+/// accumulator mode only accepts values whose absolute value survives that growth.
+pub struct ExtensionBound<SV: WideMul, const D: usize> {
+  max_safe: SV::Product,
+}
+
+impl<SV, const D: usize> ExtensionBound<SV, D>
+where
+  SV: WideMul + Bounded + Copy + Into<SV::Product>,
+  SV::Product:
+    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+{
+  pub fn new(lb: usize) -> Self {
+    let base: SV::Product = (D as i32 + 1).into();
+    let mut power = SV::Product::one();
+    for _ in 0..lb {
+      power = power * base;
+    }
+    let max_safe = SV::max_value().into() / power;
+    Self { max_safe }
+  }
+
+  #[inline]
+  pub fn is_safe(&self, small: SV) -> bool {
+    let abs_small: SV::Product = small.into();
+    abs_small.abs() <= self.max_safe
+  }
+
+  #[inline]
+  pub fn try_to_small<F>(&self, val: &F) -> Option<SV>
+  where
+    F: SmallValueField<SV>,
+  {
+    let small = F::try_field_to_small(val)?;
+    self.is_safe(small).then_some(small)
+  }
+}
+
+/// Convert field elements to small values and enforce the extension-safe bound.
+pub fn vec_to_small_for_extension<F, SV, const D: usize>(
+  v: &[F],
+  lb: usize,
+) -> Result<Vec<SV>, SpartanError>
+where
+  F: SmallValueField<SV> + Sync,
+  SV: WideMul + Bounded + Copy + Send + Sync + Into<SV::Product>,
+  SV::Product:
+    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+{
+  let bound = ExtensionBound::<SV, D>::new(lb);
+
+  v.par_iter()
+    .enumerate()
+    .map(|(i, f)| {
+      bound
+        .try_to_small(f)
+        .ok_or_else(|| SpartanError::SmallValueOverflow {
+          value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
+          context: format!(
+            "vec_to_small_for_extension: value at index {} exceeds bound for D={}, lb={}",
+            i, D, lb
+          ),
+        })
     })
     .collect()
 }

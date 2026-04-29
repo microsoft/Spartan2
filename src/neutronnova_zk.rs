@@ -20,9 +20,13 @@ use crate::{
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
-  big_num::{DelayedReduction, SmallAccumulator, small_value_field::to_small_vec_or_zero},
+  big_num::{
+    DelayedReduction, SmallAccumulator, SmallValue, SmallValueField,
+    small_value_field::to_small_vec_or_zero, vec_to_small_for_extension,
+  },
   digest::DigestComputer,
   errors::SpartanError,
+  lagrange_accumulator::build_accumulators_neutronnova,
   math::Math,
   nifs::NovaNIFS,
   polys::{
@@ -35,6 +39,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
+  small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial, derive_t1},
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -46,10 +51,23 @@ use crate::{
   zk::NeutronNovaVerifierCircuit,
 };
 use ff::Field;
+use num_traits::{Bounded, One, Signed, Zero};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ops::{Div, Mul};
 use tracing::{debug, info};
+
+type NeutronNovaNIFSOutput<E> = (
+  Vec<<E as Engine>::Scalar>,
+  Vec<<E as Engine>::Scalar>,
+  Vec<<E as Engine>::Scalar>,
+  Vec<<E as Engine>::Scalar>,
+  R1CSWitness<E>,
+  R1CSInstance<E>,
+);
+
+type MultiRoundState<E> = <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState;
 
 fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
   let ell = n.next_power_of_two().log_2();
@@ -60,6 +78,71 @@ fn compute_tensor_decomp(n: usize) -> (usize, usize, usize) {
   let right = 1 << ell2;
 
   (ell, left, right)
+}
+
+#[inline]
+fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
+  let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+  z.extend_from_slice(w);
+  z.push(E::Scalar::ONE);
+  z.extend_from_slice(x);
+  z
+}
+
+#[inline]
+fn build_z_small<SV: Copy + One>(w: &[SV], x: &[SV]) -> Vec<SV> {
+  let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+  z.extend_from_slice(w);
+  z.push(SV::one());
+  z.extend_from_slice(x);
+  z
+}
+
+fn prepare_nifs_inputs<E: Engine>(
+  Us: &[R1CSInstance<E>],
+  Ws: &[R1CSWitness<E>],
+  transcript: &mut E::TE,
+) -> Result<
+  (
+    Vec<R1CSInstance<E>>,
+    Vec<R1CSWitness<E>>,
+    usize,
+    E::Scalar,
+    Vec<E::Scalar>,
+  ),
+  SpartanError,
+>
+where
+  E::PCS: FoldingEngineTrait<E>,
+{
+  let n = Us.len();
+  let n_padded = n.next_power_of_two();
+  let ell_b = n_padded.log_2();
+
+  info!(
+    "NeutronNova NIFS prove for {} instances and padded to {} instances",
+    Us.len(),
+    n_padded
+  );
+
+  let mut Us = Us.to_vec();
+  let mut Ws = Ws.to_vec();
+  if Us.len() < n_padded {
+    Us.extend(vec![Us[0].clone(); n_padded - n]);
+    Ws.extend(vec![Ws[0].clone(); n_padded - n]);
+  }
+
+  for U in Us.iter() {
+    transcript.absorb(b"U", U);
+  }
+  transcript.absorb(b"T", &E::Scalar::ZERO);
+
+  let tau = transcript.squeeze(b"tau")?;
+  let rhos = (0..ell_b)
+    .map(|_| transcript.squeeze(b"rho"))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  Ok((Us, Ws, ell_b, tau, rhos))
 }
 
 /// A type that holds the NeutronNova NIFS (Non-Interactive Folding Scheme)
@@ -80,6 +163,101 @@ fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &
     k >>= 1;
   }
   w
+}
+
+fn fold_small_value_vectors<F, SV>(weights: &[F], vectors: &[Vec<SV>]) -> Vec<F>
+where
+  F: Field + DelayedReduction<SV>,
+  SV: Send + Sync,
+{
+  let dim = vectors[0].len();
+  (0..dim)
+    .into_par_iter()
+    .map(|j| {
+      let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
+      for (i, wi) in weights.iter().enumerate() {
+        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, wi, &vectors[i][j]);
+      }
+      <F as DelayedReduction<SV>>::reduce(&acc)
+    })
+    .collect()
+}
+
+fn small_value_eq_weighted_fold<E, SV>(
+  eq_evals: &[E::Scalar],
+  layers: &[Vec<SV>],
+  num_cons: usize,
+) -> Vec<E::Scalar>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  SV: Copy + Send + Sync,
+{
+  (0..num_cons)
+    .into_par_iter()
+    .map(|k| {
+      let mut acc = <E::Scalar as DelayedReduction<SV>>::Accumulator::zero();
+      for (eq_eval, layer) in eq_evals.iter().zip(layers) {
+        <E::Scalar as DelayedReduction<SV>>::unreduced_multiply_accumulate(
+          &mut acc, eq_eval, &layer[k],
+        );
+      }
+      <E::Scalar as DelayedReduction<SV>>::reduce(&acc)
+    })
+    .collect()
+}
+
+fn fold_and_update_vc_small<E, SV>(
+  r_bs: &[E::Scalar],
+  T_cur: E::Scalar,
+  acc_eq: E::Scalar,
+  ws_small: &[Vec<SV>],
+  xs_small: &[Vec<SV>],
+  Us: &[R1CSInstance<E>],
+  Ws: &[R1CSWitness<E>],
+  ell_b: usize,
+  vc: &mut NeutronNovaVerifierCircuit<E>,
+  vc_state: &mut MultiRoundState<E>,
+  vc_shape: &SplitMultiRoundR1CSShape<E>,
+  vc_ck: &CommitmentKey<E>,
+  transcript: &mut E::TE,
+) -> Result<(R1CSWitness<E>, R1CSInstance<E>), SpartanError>
+where
+  E: Engine,
+  E::Scalar: DelayedReduction<SV>,
+  E::PCS: FoldingEngineTrait<E>,
+  SV: Send + Sync,
+{
+  let T_out = T_cur
+    * acc_eq
+      .invert()
+      .into_option()
+      .ok_or(SpartanError::DivisionByZero)?;
+  vc.t_out_step = T_out;
+  vc.eq_rho_at_rb = acc_eq;
+  SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+
+  let weights = weights_from_r::<E::Scalar>(r_bs, Us.len());
+
+  let (_fold_span, fold_t) = start_span!("fold_witnesses");
+  let folded_W_vec = fold_small_value_vectors(&weights, ws_small);
+  let folded_r_W = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+    &Ws.iter().map(|w| w.r_W.clone()).collect::<Vec<_>>(),
+    &weights,
+  )?;
+  let folded_W = R1CSWitness::new_unchecked(folded_W_vec, folded_r_W, false)?;
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_witnesses");
+
+  let (_fold_span, fold_t) = start_span!("fold_instances");
+  let folded_X = fold_small_value_vectors(&weights, xs_small);
+  let comm_W_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+    &Us.iter().map(|u| u.comm_W.clone()).collect::<Vec<_>>(),
+    &weights,
+  )?;
+  let folded_U = R1CSInstance::new_unchecked(comm_W_acc, folded_X)?;
+  info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
+
+  Ok((folded_W, folded_U))
 }
 
 impl<E: Engine> NeutronNovaNIFS<E>
@@ -529,6 +707,264 @@ where
     }
   }
 
+  fn prove_neutronnova_small_value_sumcheck<SV>(
+    a_layers: &[Vec<SV>],
+    b_layers: &[Vec<SV>],
+    e_eq: &[E::Scalar],
+    left: usize,
+    right: usize,
+    rhos: &[E::Scalar],
+    vc: &mut NeutronNovaVerifierCircuit<E>,
+    vc_state: &mut MultiRoundState<E>,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+  ) -> Result<
+    (
+      Vec<UniPoly<E::Scalar>>,
+      Vec<E::Scalar>,
+      E::Scalar,
+      E::Scalar,
+    ),
+    SpartanError,
+  >
+  where
+    E::Scalar: SmallValueField<SV>
+      + DelayedReduction<SV>
+      + DelayedReduction<SV::Product>
+      + DelayedReduction<E::Scalar>,
+    SV: SmallValue,
+  {
+    let ell_b = rhos.len();
+
+    let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
+    let accumulators =
+      build_accumulators_neutronnova(a_layers, b_layers, e_eq, left, right, rhos, ell_b);
+    info!(
+      elapsed_ms = %acc_t.elapsed().as_millis(),
+      "build_accumulators_neutronnova"
+    );
+
+    let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let mut polys = Vec::with_capacity(ell_b);
+    let mut r_bs = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO;
+    let mut acc_eq = E::Scalar::ONE;
+
+    for (i, rho_i) in rhos.iter().enumerate() {
+      let (_round_span, round_t) = start_span!("nifs_smallvalue_round", round = i);
+      let t_all = small_value.eval_t_all_u(i);
+      let t0 = t_all.at_zero();
+      let t_inf = t_all.at_infinity();
+      let li = small_value.eq_round_values(*rho_i);
+      let t1 = derive_t1(li.at_zero(), li.at_one(), T_cur, t0)
+        .ok_or(SpartanError::InvalidSumcheckProof)?;
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+
+      let c = &poly.coeffs;
+      vc.nifs_polys[i] = [c[0], c[1], c[2], c[3]];
+
+      let (_vc_span, vc_t) = start_span!("vc_commit");
+      let chals =
+        SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, i, transcript)?;
+      info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
+      let r_i = chals[0];
+
+      T_cur = poly.evaluate(&r_i);
+      acc_eq *= (E::Scalar::ONE - r_i) * (E::Scalar::ONE - *rho_i) + r_i * *rho_i;
+      r_bs.push(r_i);
+      polys.push(poly);
+      small_value.advance(&li, r_i);
+
+      info!(
+        elapsed_ms = %round_t.elapsed().as_millis(),
+        round = i,
+        "nifs_smallvalue_round"
+      );
+    }
+
+    Ok((polys, r_bs, T_cur, acc_eq))
+  }
+
+  fn prove_accumulator_small<SV>(
+    S: &SplitR1CSShape<E>,
+    Us: &[R1CSInstance<E>],
+    Ws: &[R1CSWitness<E>],
+    vc: &mut NeutronNovaVerifierCircuit<E>,
+    vc_state: &mut MultiRoundState<E>,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+  ) -> Result<NeutronNovaNIFSOutput<E>, SpartanError>
+  where
+    E::Scalar: SmallValueField<SV>
+      + DelayedReduction<SV>
+      + DelayedReduction<SV::Product>
+      + DelayedReduction<E::Scalar>,
+    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV::Product:
+      Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  {
+    let (_nifs_total_span, nifs_total_t) = start_span!("nifs_prove");
+    let (Us, Ws, ell_b, tau, rhos) = prepare_nifs_inputs::<E>(Us, Ws, transcript)?;
+    let n_padded = Us.len();
+
+    let (_convert_span, convert_t) = start_span!("convert_to_small", instances = n_padded);
+    let ws_small: Vec<Vec<SV>> = Ws
+      .par_iter()
+      .map(|w| vec_to_small_for_extension::<E::Scalar, SV, 2>(&w.W, ell_b))
+      .collect::<Result<_, _>>()?;
+    let xs_small: Vec<Vec<SV>> = Us
+      .par_iter()
+      .map(|u| vec_to_small_for_extension::<E::Scalar, SV, 2>(&u.X, ell_b))
+      .collect::<Result<_, _>>()?;
+    info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_small");
+
+    let (ell_cons, left, right) = compute_tensor_decomp(S.num_cons);
+    let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
+
+    let (_matrix_span, matrix_t) =
+      start_span!("matrix_vector_multiply_instances", instances = n_padded);
+    let smalls: Vec<(Vec<SV>, Vec<SV>, Vec<SV>)> = (0..n_padded)
+      .into_par_iter()
+      .map(|i| {
+        let z_small = build_z_small(&ws_small[i], &xs_small[i]);
+        let Az = S.A.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+        let Bz = S.B.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+        let Cz = S.C.multiply_vec_small::<2, SV>(&z_small, ell_b)?;
+        Ok((Az, Bz, Cz))
+      })
+      .collect::<Result<_, SpartanError>>()?;
+
+    let (a_small, b_small, c_small): (Vec<Vec<SV>>, Vec<Vec<SV>>, Vec<Vec<SV>>) =
+      smalls.into_iter().fold(
+        (
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+          Vec::with_capacity(n_padded),
+        ),
+        |(mut a, mut b, mut c), (az, bz, cz)| {
+          a.push(az);
+          b.push(bz);
+          c.push(cz);
+          (a, b, c)
+        },
+      );
+    info!(
+      elapsed_ms = %matrix_t.elapsed().as_millis(),
+      instances = n_padded,
+      "matrix_vector_multiply_instances"
+    );
+
+    let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
+    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck(
+      &a_small, &b_small, &E_eq, left, right, &rhos, vc, vc_state, vc_shape, vc_ck, transcript,
+    )?;
+    info!(
+      elapsed_ms = %rounds_t.elapsed().as_millis(),
+      rounds = ell_b,
+      "nifs_folding_rounds"
+    );
+
+    let (_fold_span, fold_t) = start_span!("nifs_eq_fold");
+    let r_bs_rev: Vec<_> = r_bs.iter().rev().copied().collect();
+    let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
+    let num_cons = a_small[0].len();
+
+    let (az_folded, (bz_folded, cz_folded)) = rayon::join(
+      || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &a_small, num_cons),
+      || {
+        rayon::join(
+          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &b_small, num_cons),
+          || small_value_eq_weighted_fold::<E, SV>(&eq_evals, &c_small, num_cons),
+        )
+      },
+    );
+    info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
+
+    let (folded_W, folded_U) = fold_and_update_vc_small::<E, SV>(
+      &r_bs, T_cur, acc_eq, &ws_small, &xs_small, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck,
+      transcript,
+    )?;
+
+    info!(elapsed_ms = %nifs_total_t.elapsed().as_millis(), "nifs_prove");
+    Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
+  }
+
+  /// NIFS prove with additive `l0` routing.
+  pub fn prove_with_l0<SV>(
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    Us: Vec<R1CSInstance<E>>,
+    Ws: Vec<R1CSWitness<E>>,
+    cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
+    cached_i64: Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
+    large_positions: &[usize],
+    vc: &mut NeutronNovaVerifierCircuit<E>,
+    vc_state: &mut MultiRoundState<E>,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+    l0: usize,
+  ) -> Result<NeutronNovaNIFSOutput<E>, SpartanError>
+  where
+    E::Scalar: DelayedReduction<i128>
+      + SmallValueField<SV>
+      + DelayedReduction<SV>
+      + DelayedReduction<SV::Product>
+      + DelayedReduction<E::Scalar>,
+    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV::Product:
+      Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  {
+    let ell_b = Us.len().next_power_of_two().log_2();
+    if l0 > ell_b {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("l0 ({}) must be <= ell_b ({})", l0, ell_b),
+      });
+    }
+
+    if l0 == 0 {
+      return Self::prove(
+        S,
+        ck,
+        Us,
+        Ws,
+        cached_matvec,
+        cached_i64,
+        large_positions,
+        vc,
+        vc_state,
+        vc_shape,
+        vc_ck,
+        transcript,
+      );
+    }
+
+    if l0 < ell_b {
+      info!(
+        l0,
+        ell_b, "partial l0 requested; falling back to baseline NeutronNova NIFS"
+      );
+      return Self::prove(
+        S,
+        ck,
+        Us,
+        Ws,
+        cached_matvec,
+        cached_i64,
+        large_positions,
+        vc,
+        vc_state,
+        vc_shape,
+        vc_ck,
+        transcript,
+      );
+    }
+
+    Self::prove_accumulator_small::<SV>(S, &Us, &Ws, vc, vc_state, vc_shape, vc_ck, transcript)
+  }
+
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
   /// rounds while interacting with the multi-round verifier circuit/state to derive
   /// per-round challenges via Fiat-Shamir, and populates the verifier circuit's
@@ -618,10 +1054,7 @@ where
     for i in n_cached..n_padded {
       let w = &Ws[i].W;
       let x = &Us[i].X;
-      let mut z = Vec::with_capacity(w.len() + 1 + x.len());
-      z.extend_from_slice(w);
-      z.push(E::Scalar::ONE);
-      z.extend_from_slice(x);
+      let z = build_z::<E>(w, x);
       let (a, b, c) = S.multiply_vec(&z)?;
       A_layers.push(a);
       B_layers.push(b);
@@ -1644,15 +2077,32 @@ where
   /// Takes ownership of `prep_snark` to avoid cloning large witness vectors (~66MB).
   /// Returns the proof and the (consumed) prep state, which can be passed to prove again
   /// after re-running prep_prove or simply re-rerandomized.
-  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+  fn prove_with_nifs_callback<C1, C2, NifsFn>(
     pk: &NeutronNovaProverKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
     mut prep_snark: NeutronNovaPrepZkSNARK<E>,
     is_small: bool, // do witness elements fit in machine words?
+    nifs_fn: NifsFn,
   ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError>
   where
+    C1: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
     E::Scalar: DelayedReduction<i128>,
+    NifsFn: FnOnce(
+      &SplitR1CSShape<E>,
+      &CommitmentKey<E>,
+      Vec<R1CSInstance<E>>,
+      Vec<R1CSWitness<E>>,
+      Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
+      Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
+      &[usize],
+      &mut NeutronNovaVerifierCircuit<E>,
+      &mut MultiRoundState<E>,
+      &SplitMultiRoundR1CSShape<E>,
+      &CommitmentKey<E>,
+      &mut E::TE,
+    ) -> Result<NeutronNovaNIFSOutput<E>, SpartanError>,
   {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
@@ -1808,7 +2258,7 @@ where
       .cached_step_i64
       .as_ref()
       .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
-    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
+    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = nifs_fn(
       &pk.S_step,
       &pk.ck,
       step_instances_regular,
@@ -2133,6 +2583,129 @@ where
     Ok((result, prep_snark))
   }
 
+  /// Additive l0-aware prep API. Existing boolean `prep_prove` remains the
+  /// baseline API; this helper derives the witness smallness flag from `l0`.
+  pub fn prep_prove_with_l0<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+    pk: &NeutronNovaProverKey<E>,
+    step_circuits: &[C1],
+    core_circuit: &C2,
+    l0: usize,
+  ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
+    Self::prep_prove(pk, step_circuits, core_circuit, l0 > 0)
+  }
+
+  /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together.
+  /// Takes ownership of `prep_snark` to avoid cloning large witness vectors (~66MB).
+  /// Returns the proof and the (consumed) prep state, which can be passed to prove again
+  /// after re-running prep_prove or simply re-rerandomized.
+  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+    pk: &NeutronNovaProverKey<E>,
+    step_circuits: &[C1],
+    core_circuit: &C2,
+    prep_snark: NeutronNovaPrepZkSNARK<E>,
+    is_small: bool, // do witness elements fit in machine words?
+  ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError>
+  where
+    E::Scalar: DelayedReduction<i128>,
+  {
+    Self::prove_with_nifs_callback(
+      pk,
+      step_circuits,
+      core_circuit,
+      prep_snark,
+      is_small,
+      |S,
+       ck,
+       Us,
+       Ws,
+       cached_matvec,
+       cached_i64,
+       large_positions,
+       vc,
+       vc_state,
+       vc_shape,
+       vc_ck,
+       transcript| {
+        NeutronNovaNIFS::<E>::prove(
+          S,
+          ck,
+          Us,
+          Ws,
+          cached_matvec,
+          cached_i64,
+          large_positions,
+          vc,
+          vc_state,
+          vc_shape,
+          vc_ck,
+          transcript,
+        )
+      },
+    )
+  }
+
+  /// Additive l0-aware prove API.
+  pub fn prove_with_l0<SV>(
+    pk: &NeutronNovaProverKey<E>,
+    step_circuits: &[impl SpartanCircuit<E>],
+    core_circuit: &impl SpartanCircuit<E>,
+    prep_snark: NeutronNovaPrepZkSNARK<E>,
+    l0: usize,
+  ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError>
+  where
+    E::Scalar: DelayedReduction<i128>
+      + SmallValueField<SV>
+      + DelayedReduction<SV>
+      + DelayedReduction<SV::Product>
+      + DelayedReduction<E::Scalar>,
+    SV: SmallValue + Bounded + One + Into<SV::Product>,
+    SV::Product:
+      Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  {
+    let ell_b = step_circuits.len().next_power_of_two().log_2();
+    if l0 > ell_b {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!("l0 ({}) must be <= ell_b ({})", l0, ell_b),
+      });
+    }
+
+    Self::prove_with_nifs_callback(
+      pk,
+      step_circuits,
+      core_circuit,
+      prep_snark,
+      l0 > 0,
+      |S,
+       ck,
+       Us,
+       Ws,
+       cached_matvec,
+       cached_i64,
+       large_positions,
+       vc,
+       vc_state,
+       vc_shape,
+       vc_ck,
+       transcript| {
+        NeutronNovaNIFS::<E>::prove_with_l0::<SV>(
+          S,
+          ck,
+          Us,
+          Ws,
+          cached_matvec,
+          cached_i64,
+          large_positions,
+          vc,
+          vc_state,
+          vc_shape,
+          vc_ck,
+          transcript,
+          l0,
+        )
+      },
+    )
+  }
+
   /// Verifies the NeutronNovaZkSNARK and returns the public IO from the instances
   pub fn verify(
     &self,
@@ -2401,6 +2974,76 @@ mod tests {
     _p: PhantomData<E>,
   }
 
+  #[derive(Clone, Debug)]
+  struct TinyCubicCircuit<E: Engine> {
+    x: u64,
+    _p: PhantomData<E>,
+  }
+
+  impl<E: Engine> TinyCubicCircuit<E> {
+    fn new(x: u64) -> Self {
+      Self { x, _p: PhantomData }
+    }
+  }
+
+  impl<E: Engine> SpartanCircuit<E> for TinyCubicCircuit<E> {
+    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
+      Ok(vec![E::Scalar::ZERO])
+    }
+
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      Ok(vec![])
+    }
+
+    fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      cs: &mut CS,
+      _: &[AllocatedNum<E::Scalar>],
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+      let x_val = E::Scalar::from(self.x);
+      let y_val = x_val * x_val;
+      let z_val = y_val * x_val;
+      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(x_val))?;
+      let y = AllocatedNum::alloc(cs.namespace(|| "y"), || Ok(y_val))?;
+      let z = AllocatedNum::alloc(cs.namespace(|| "z"), || Ok(z_val))?;
+
+      cs.enforce(
+        || "x squared",
+        |lc| lc + x.get_variable(),
+        |lc| lc + x.get_variable(),
+        |lc| lc + y.get_variable(),
+      );
+      cs.enforce(
+        || "x cubed",
+        |lc| lc + y.get_variable(),
+        |lc| lc + x.get_variable(),
+        |lc| lc + z.get_variable(),
+      );
+
+      let public = AllocatedNum::alloc(cs.namespace(|| "public zero"), || Ok(E::Scalar::ZERO))?;
+      public.inputize(cs.namespace(|| "inputize public zero"))?;
+
+      Ok(vec![x, y, z])
+    }
+
+    fn num_challenges(&self) -> usize {
+      0
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+      &self,
+      _: &mut CS,
+      _: &[AllocatedNum<E::Scalar>],
+      _: &[AllocatedNum<E::Scalar>],
+      _: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
+      Ok(())
+    }
+  }
+
   impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E> {
     fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
       Ok(vec![E::Scalar::ZERO]) // Placeholder, we don't use public values in this example
@@ -2516,6 +3159,228 @@ mod tests {
 
     let (public_values_step, _public_values_core) = res.unwrap();
     assert_eq!(public_values_step.len(), step_circuits.len());
+  }
+
+  fn small_to_field_vec<E: Engine>(vals: &[i64]) -> Vec<E::Scalar>
+  where
+    E::Scalar: SmallValueField<i64>,
+  {
+    vals
+      .iter()
+      .copied()
+      .map(<E::Scalar as SmallValueField<i64>>::small_to_field)
+      .collect()
+  }
+
+  fn nifs_round_poly_from_direct_terms<F: ff::PrimeField>(
+    rho_t: F,
+    acc_eq: F,
+    T_cur: F,
+    e0: F,
+    quad_coeff: F,
+  ) -> UniPoly<F> {
+    let one_minus_rho = F::ONE - rho_t;
+    let two_rho_minus_one = rho_t - one_minus_rho;
+    let c = e0 * acc_eq;
+    let a = quad_coeff * acc_eq;
+    let rho_t_inv = rho_t.invert().unwrap();
+    let a_b_c = (T_cur - c * one_minus_rho) * rho_t_inv;
+    let b = a_b_c - a - c;
+
+    UniPoly {
+      coeffs: vec![
+        c * one_minus_rho,
+        c * two_rho_minus_one + b * one_minus_rho,
+        b * two_rho_minus_one + a * one_minus_rho,
+        a * two_rho_minus_one,
+      ],
+    }
+  }
+
+  fn fold_layers_once<F: Field>(layers: &[Vec<F>], r: F) -> Vec<Vec<F>> {
+    layers
+      .chunks_exact(2)
+      .map(|pair| {
+        pair[0]
+          .iter()
+          .zip(&pair[1])
+          .map(|(lo, hi)| *lo + r * (*hi - *lo))
+          .collect()
+      })
+      .collect()
+  }
+
+  fn run_nifs_sumcheck_polynomial_equivalence_test<E: Engine>(num_instances: usize)
+  where
+    E::PCS: FoldingEngineTrait<E>,
+    E::Scalar: crate::big_num::SmallValueEngine<i64>,
+  {
+    let n_padded = num_instances.next_power_of_two();
+    let ell_b = n_padded.log_2();
+    assert!(ell_b > 0);
+
+    let (ell_cons, left, right) = compute_tensor_decomp(16);
+    let num_cons = left * right;
+
+    let mut a_small: Vec<Vec<i64>> = (0..num_instances)
+      .map(|inst| {
+        (0..num_cons)
+          .map(|k| ((inst as i64 * 11 + k as i64 * 7) % 9) - 4)
+          .collect()
+      })
+      .collect();
+    let mut b_small: Vec<Vec<i64>> = (0..num_instances)
+      .map(|inst| {
+        (0..num_cons)
+          .map(|k| ((inst as i64 * 5 + k as i64 * 3 + 2) % 11) - 5)
+          .collect()
+      })
+      .collect();
+    while a_small.len() < n_padded {
+      a_small.push(a_small[0].clone());
+      b_small.push(b_small[0].clone());
+    }
+
+    let c_small: Vec<Vec<i64>> = a_small
+      .iter()
+      .zip(&b_small)
+      .map(|(a, b)| a.iter().zip(b).map(|(x, y)| x * y).collect())
+      .collect();
+
+    let mut A_layers = a_small
+      .iter()
+      .map(|v| small_to_field_vec::<E>(v))
+      .collect::<Vec<_>>();
+    let mut B_layers = b_small
+      .iter()
+      .map(|v| small_to_field_vec::<E>(v))
+      .collect::<Vec<_>>();
+    let mut C_layers = c_small
+      .iter()
+      .map(|v| small_to_field_vec::<E>(v))
+      .collect::<Vec<_>>();
+
+    let tau = E::Scalar::from(42u64);
+    let E_eq = PowPolynomial::split_evals(tau, ell_cons, left, right);
+    let rhos = (0..ell_b)
+      .map(|i| E::Scalar::from((i as u64) + 3))
+      .collect::<Vec<_>>();
+    let challenges = (0..ell_b)
+      .map(|i| E::Scalar::from((2 * i as u64) + 7))
+      .collect::<Vec<_>>();
+
+    let mut direct_polys = Vec::with_capacity(ell_b);
+    let mut T_cur = E::Scalar::ZERO;
+    let mut acc_eq = E::Scalar::ONE;
+    let mut m = n_padded;
+
+    for t in 0..ell_b {
+      let pairs = m / 2;
+      let (e0, quad_coeff) = A_layers
+        .chunks_exact(2)
+        .zip(B_layers.chunks_exact(2))
+        .zip(C_layers.chunks_exact(2))
+        .take(pairs)
+        .enumerate()
+        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+          let (e0, quad_coeff) = NeutronNovaNIFS::<E>::prove_helper(
+            t,
+            (left, right),
+            &E_eq,
+            &pair_a[0],
+            &pair_b[0],
+            &pair_c[0],
+            &pair_a[1],
+            &pair_b[1],
+          );
+          let w = suffix_weight_full::<E::Scalar>(t, ell_b, pair_idx, &rhos);
+          (e0 * w, quad_coeff * w)
+        })
+        .fold((E::Scalar::ZERO, E::Scalar::ZERO), |a, b| {
+          (a.0 + b.0, a.1 + b.1)
+        });
+
+      let poly = nifs_round_poly_from_direct_terms(rhos[t], acc_eq, T_cur, e0, quad_coeff);
+      direct_polys.push(poly.clone());
+
+      let r_b = challenges[t];
+      acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rhos[t]) + r_b * rhos[t];
+      T_cur = poly.evaluate(&r_b);
+
+      A_layers = fold_layers_once(&A_layers[..m], r_b);
+      B_layers = fold_layers_once(&B_layers[..m], r_b);
+      C_layers = fold_layers_once(&C_layers[..m], r_b);
+      m = pairs;
+    }
+
+    let accumulators =
+      build_accumulators_neutronnova(&a_small, &b_small, &E_eq, left, right, &rhos, ell_b);
+    let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let mut small_polys = Vec::with_capacity(ell_b);
+    let mut T_cur_small = E::Scalar::ZERO;
+
+    for (i, rho_i) in rhos.iter().enumerate() {
+      let t_all = small_value.eval_t_all_u(i);
+      let t0 = t_all.at_zero();
+      let t_inf = t_all.at_infinity();
+      let li = small_value.eq_round_values(*rho_i);
+      let t1 = derive_t1(li.at_zero(), li.at_one(), T_cur_small, t0).unwrap();
+      let poly = build_univariate_round_polynomial(&li, t0, t1, t_inf);
+      small_polys.push(poly.clone());
+      let r_i = challenges[i];
+      T_cur_small = poly.evaluate(&r_i);
+      small_value.advance(&li, r_i);
+    }
+
+    for (round, (direct, small)) in direct_polys.iter().zip(&small_polys).enumerate() {
+      assert_eq!(
+        direct.coeffs, small.coeffs,
+        "round {round} polynomial mismatch for num_instances={num_instances}"
+      );
+    }
+
+    let r_bs_rev = challenges.iter().rev().copied().collect::<Vec<_>>();
+    let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
+    assert_eq!(eq_evals, weights_from_r::<E::Scalar>(&challenges, n_padded));
+
+    let folded_a = small_value_eq_weighted_fold::<E, i64>(&eq_evals, &a_small, num_cons);
+    assert_eq!(folded_a, A_layers[0]);
+  }
+
+  #[test]
+  fn test_nifs_sumcheck_polynomial_equivalence() {
+    type E = T256HyraxEngine;
+
+    for num_instances in [2, 3, 4, 5, 7, 8] {
+      run_nifs_sumcheck_polynomial_equivalence_test::<E>(num_instances);
+    }
+  }
+
+  #[test]
+  fn test_prove_with_l0_routes_verify() {
+    type E = T256HyraxEngine;
+
+    let num_circuits = 3;
+    let proto = TinyCubicCircuit::<E>::new(2);
+    let core = TinyCubicCircuit::<E>::new(1);
+    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&proto, &core, num_circuits).unwrap();
+    let circuits = (0..num_circuits)
+      .map(|i| TinyCubicCircuit::<E>::new((i + 2) as u64))
+      .collect::<Vec<_>>();
+    let ell_b = num_circuits.next_power_of_two().log_2();
+
+    for l0 in [0, 1, ell_b] {
+      let prep = NeutronNovaZkSNARK::<E>::prep_prove_with_l0(&pk, &circuits, &core, l0).unwrap();
+      let (snark, _) =
+        NeutronNovaZkSNARK::<E>::prove_with_l0::<i64>(&pk, &circuits, &core, prep, l0).unwrap();
+      snark.verify(&vk, num_circuits).unwrap();
+    }
+
+    let prep = NeutronNovaZkSNARK::<E>::prep_prove_with_l0(&pk, &circuits, &core, 0).unwrap();
+    let err = NeutronNovaZkSNARK::<E>::prove_with_l0::<i64>(&pk, &circuits, &core, prep, ell_b + 1)
+      .map(|_| ())
+      .unwrap_err();
+    assert!(matches!(err, SpartanError::InvalidInputLength { .. }));
   }
 
   #[test]
