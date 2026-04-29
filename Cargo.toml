@@ -52,6 +52,7 @@ getrandom = { version = "0.2.0", default-features = false, features = ["js"] }
 
 [dev-dependencies]
 rand = "0.8.4"
+criterion = "0.5"
 cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
@@ -60,9 +61,17 @@ proptest = "1.2.0"
 default = []
 jem = ["tikv-jemallocator"]
 
+[[bench]]
+name = "sha256_spartan"
+harness = false
+
+[[bench]]
+name = "sha256_neutronnova"
+harness = false
+
 [profile.release]
 debug = 1
 lto = "fat"
 
 [patch.crates-io]
-halo2curves = { git = "https://github.com/srinathsetty/halo2curves.git", rev = "09622e31d34952697080c952a7b5d26fe4a6c76a" }
+halo2curves = { git = "https://github.com/privacy-ethereum/halo2curves.git", rev = "02c235f0bb52800c28d9c3370400b5435dbe2220" }

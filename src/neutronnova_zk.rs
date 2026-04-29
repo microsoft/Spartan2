@@ -512,6 +512,23 @@ where
     }
   }
 
+  /// Like `compact_folded_layers` but also handles C layers (for non-i64 path).
+  fn compact_folded_layers_abc(
+    a: &mut [Vec<E::Scalar>],
+    b: &mut [Vec<E::Scalar>],
+    c: &mut [Vec<E::Scalar>],
+    prove_pairs: usize,
+  ) {
+    for j in 0..prove_pairs {
+      a.swap(2 * j, 4 * j);
+      a.swap(2 * j + 1, 4 * j + 2);
+      b.swap(2 * j, 4 * j);
+      b.swap(2 * j + 1, 4 * j + 2);
+      c.swap(2 * j, 4 * j);
+      c.swap(2 * j + 1, 4 * j + 2);
+    }
+  }
+
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
   /// rounds while interacting with the multi-round verifier circuit/state to derive
   /// per-round challenges via Fiat-Shamir, and populates the verifier circuit's
@@ -1056,24 +1073,60 @@ where
             }
           }
         } else {
-          for j in 0..prove_pairs {
-            fold_abc_pair!(4 * j, 4 * j + 1, 2 * j, prev_r_b);
-            fold_abc_pair!(4 * j + 2, 4 * j + 3, 2 * j + 1, prev_r_b);
+          // Parallel merged fold + prove for the non-i64 path (mirrors the i64 structure above).
+          let e_eq_ref = &E_eq;
+          let rhos_ref = &rhos;
 
-            let (e0, qc) = Self::prove_helper(
-              t,
-              (left, right),
-              &E_eq,
-              &A_layers[2 * j],
-              &B_layers[2 * j],
-              &C_layers[2 * j],
-              &A_layers[2 * j + 1],
-              &B_layers[2 * j + 1],
+          let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
+          let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
+          let (c_head, _) = C_layers.split_at_mut(4 * prove_pairs);
+
+          let (e0_sum, qc_sum) = a_head
+            .par_chunks_mut(4)
+            .zip(b_head.par_chunks_mut(4))
+            .zip(c_head.par_chunks_mut(4))
+            .enumerate()
+            .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
+              // Fold [0] += r * ([1] - [0]) and [2] += r * ([3] - [2]) for A, B, C
+              for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
+                {
+                  let (lo, hi) = chunk.split_at_mut(1);
+                  lo[0]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                {
+                  let (lo, hi) = chunk.split_at_mut(3);
+                  lo[2]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+              }
+              // Prove from folded positions [0] and [2]
+              let (e0, qc) = Self::prove_helper(
+                t,
+                (left, right),
+                e_eq_ref,
+                &a_chunk[0],
+                &b_chunk[0],
+                &c_chunk[0],
+                &a_chunk[2],
+                &b_chunk[2],
+              );
+              let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
+              (e0 * w, qc * w)
+            })
+            .reduce(
+              || (E::Scalar::ZERO, E::Scalar::ZERO),
+              |a, b| (a.0 + b.0, a.1 + b.1),
             );
-            let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, &rhos);
-            e0_acc += e0 * w;
-            quad_acc += qc * w;
-          }
+          e0_acc += e0_sum;
+          quad_acc += qc_sum;
+
+          // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
+          Self::compact_folded_layers_abc(&mut A_layers, &mut B_layers, &mut C_layers, prove_pairs);
 
           for i in (2 * prove_pairs)..fold_pairs {
             fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
@@ -1349,6 +1402,9 @@ pub struct NeutronNovaPrepZkSNARK<E: Engine> {
   /// Positions where ANY instance's Az/Bz/Cz didn't fit i64 (union across all instances).
   /// i64 vectors are zeroed at these positions; correction uses field values.
   large_positions: Vec<usize>,
+  /// Public values used when computing cached_step_matvec, for validation in prove.
+  /// Non-empty when the matvec cache is active; prove checks that step circuits produce the same values.
+  cached_step_public_values: Vec<Vec<E::Scalar>>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
@@ -1505,68 +1561,73 @@ where
     // meaning z = [shared_W, precommitted_W, 0..., 1, public_values] is fully known during prep.
     let can_cache_matvec = pk.S_step.num_challenges == 0 && pk.S_step.num_rest_unpadded == 0;
 
-    let (cached_step_matvec, cached_step_i64, large_positions) = if can_cache_matvec {
-      let matvec: Vec<_> = (0..ps_step.len())
-        .into_par_iter()
-        .map(|i| {
-          let ps_i = &ps_step[i];
-          let circuit = &step_circuits[i];
-          let public_values =
-            circuit
-              .public_values()
-              .map_err(|e| SpartanError::SynthesisError {
-                reason: format!("Circuit does not provide public IO: {e}"),
-              })?;
-          let mut z = Vec::with_capacity(ps_i.W.len() + 1 + public_values.len());
-          z.extend_from_slice(&ps_i.W);
-          z.push(E::Scalar::ONE);
-          z.extend_from_slice(&public_values);
-          pk.S_step.multiply_vec(&z)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-      // Convert Az/Bz to i64 for small-value NIFS round 0 optimization.
-      let mut all_i64 = Vec::with_capacity(matvec.len());
-      let mut large_pos_set = std::collections::BTreeSet::new();
-      for (az, bz, cz) in &matvec {
-        let (az_i64, az_large) = to_small_vec_or_zero(az);
-        let (bz_i64, bz_large) = to_small_vec_or_zero(bz);
-        let (cz_i64, cz_large) = to_small_vec_or_zero(cz);
-        for pos in az_large {
-          large_pos_set.insert(pos);
-        }
-        for pos in bz_large {
-          large_pos_set.insert(pos);
-        }
-        for pos in cz_large {
-          large_pos_set.insert(pos);
-        }
-        all_i64.push((az_i64, bz_i64, cz_i64));
-      }
-      let lp: Vec<usize> = large_pos_set.into_iter().collect();
-      info!(
-        n_large = lp.len(),
-        total = matvec[0].0.len(),
-        "i64_conversion_stats"
-      );
+    let (cached_step_matvec, cached_step_i64, large_positions, cached_step_public_values) =
+      if can_cache_matvec {
+        // Collect public values for each step circuit so we can validate in prove
+        let step_public_values: Vec<Vec<E::Scalar>> = step_circuits
+          .iter()
+          .map(|c| {
+            c.public_values().map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Circuit does not provide public IO: {e}"),
+            })
+          })
+          .collect::<Result<Vec<_>, _>>()?;
 
-      // Zero out i64 values at ALL large_positions in ALL instances.
-      if !lp.is_empty() {
-        for (az_i64, bz_i64, cz_i64) in &mut all_i64 {
-          for &pos in &lp {
-            az_i64[pos] = 0;
-            bz_i64[pos] = 0;
-            cz_i64[pos] = 0;
+        let matvec: Vec<_> = (0..ps_step.len())
+          .into_par_iter()
+          .map(|i| {
+            let ps_i = &ps_step[i];
+            let public_values = &step_public_values[i];
+            let mut z = Vec::with_capacity(ps_i.W.len() + 1 + public_values.len());
+            z.extend_from_slice(&ps_i.W);
+            z.push(E::Scalar::ONE);
+            z.extend_from_slice(public_values);
+            pk.S_step.multiply_vec(&z)
+          })
+          .collect::<Result<Vec<_>, _>>()?;
+        // Convert Az/Bz to i64 for small-value NIFS round 0 optimization.
+        let mut all_i64 = Vec::with_capacity(matvec.len());
+        let mut large_pos_set = std::collections::BTreeSet::new();
+        for (az, bz, cz) in &matvec {
+          let (az_i64, az_large) = to_small_vec_or_zero(az);
+          let (bz_i64, bz_large) = to_small_vec_or_zero(bz);
+          let (cz_i64, cz_large) = to_small_vec_or_zero(cz);
+          for pos in az_large {
+            large_pos_set.insert(pos);
+          }
+          for pos in bz_large {
+            large_pos_set.insert(pos);
+          }
+          for pos in cz_large {
+            large_pos_set.insert(pos);
+          }
+          all_i64.push((az_i64, bz_i64, cz_i64));
+        }
+        let lp: Vec<usize> = large_pos_set.into_iter().collect();
+        info!(
+          n_large = lp.len(),
+          total = matvec[0].0.len(),
+          "i64_conversion_stats"
+        );
+
+        // Zero out i64 values at ALL large_positions in ALL instances.
+        if !lp.is_empty() {
+          for (az_i64, bz_i64, cz_i64) in &mut all_i64 {
+            for &pos in &lp {
+              az_i64[pos] = 0;
+              bz_i64[pos] = 0;
+              cz_i64[pos] = 0;
+            }
           }
         }
-      }
-      (Some(matvec), Some(all_i64), lp)
-    } else {
-      info!(
-        "Step circuit has rest_unpadded={} challenges={}, skipping matvec/i64 caching",
-        pk.S_step.num_rest_unpadded, pk.S_step.num_challenges
-      );
-      (None, None, Vec::new())
-    };
+        (Some(matvec), Some(all_i64), lp, step_public_values)
+      } else {
+        info!(
+          "Step circuit has rest_unpadded={} challenges={}, skipping matvec/i64 caching",
+          pk.S_step.num_rest_unpadded, pk.S_step.num_challenges
+        );
+        (None, None, Vec::new(), Vec::new())
+      };
 
     info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_prep_prove");
     Ok(NeutronNovaPrepZkSNARK {
@@ -1575,6 +1636,7 @@ where
       cached_step_matvec,
       cached_step_i64,
       large_positions,
+      cached_step_public_values,
     })
   }
 
@@ -1601,73 +1663,101 @@ where
       .rerandomize_in_place(&pk.ck, &pk.S_core)?;
     let comm_W_shared = prep_snark.ps_core.comm_W_shared.clone();
     let r_W_shared = prep_snark.ps_core.r_W_shared.clone();
-    for ps_i in prep_snark.ps_step.iter_mut() {
-      ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)?;
-    }
+    prep_snark.ps_step.par_iter_mut().try_for_each(|ps_i| {
+      ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)
+    })?;
     info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
 
-    // Sequential generation of instances and witnesses (faster for single-threaded)
-    let (_gen_span, gen_t) = start_span!(
-      "generate_instances_witnesses",
-      step_circuits = step_circuits.len()
-    );
-    let res_steps = prep_snark
-      .ps_step
-      .iter_mut()
-      .zip(step_circuits.iter().enumerate())
-      .map(|(pre_state, (i, circuit))| {
-        let mut transcript = E::TE::new(b"neutronnova_prove");
-        transcript.absorb(b"vk", &pk.vk_digest);
-        transcript.absorb(
-          b"num_circuits",
-          &E::Scalar::from(step_circuits.len() as u64),
-        );
-        transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-        let public_values = circuit
+    // Validate that cached matvec matches current step circuit public values.
+    // The cache computed in prep_prove includes public_values in the z vector;
+    // if the circuits changed, the cache is stale and would produce incorrect proofs.
+    if !prep_snark.cached_step_public_values.is_empty() {
+      if prep_snark.cached_step_public_values.len() != step_circuits.len() {
+        return Err(SpartanError::InternalError {
+          reason: format!(
+            "Cached matvec was computed for {} step circuits, but prove received {}",
+            prep_snark.cached_step_public_values.len(),
+            step_circuits.len()
+          ),
+        });
+      }
+      for (i, circuit) in step_circuits.iter().enumerate() {
+        let current_pv = circuit
           .public_values()
           .map_err(|e| SpartanError::SynthesisError {
             reason: format!("Circuit does not provide public IO: {e}"),
           })?;
-        transcript.absorb(b"public_values", &public_values.as_slice());
+        if prep_snark.cached_step_public_values[i] != current_pv {
+          return Err(SpartanError::InternalError {
+            reason: format!("Step circuit {i} public values changed between prep_prove and prove"),
+          });
+        }
+      }
+    }
 
+    // Parallel generation of instances and witnesses
+    let (_gen_span, gen_t) = start_span!(
+      "generate_instances_witnesses",
+      step_circuits = step_circuits.len()
+    );
+    let (res_steps, res_core) = rayon::join(
+      || {
+        prep_snark
+          .ps_step
+          .par_iter_mut()
+          .zip(step_circuits.par_iter().enumerate())
+          .map(|(pre_state, (i, circuit))| {
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &pk.vk_digest);
+            transcript.absorb(
+              b"num_circuits",
+              &E::Scalar::from(step_circuits.len() as u64),
+            );
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+
+            let public_values =
+              circuit
+                .public_values()
+                .map_err(|e| SpartanError::SynthesisError {
+                  reason: format!("Circuit does not provide public IO: {e}"),
+                })?;
+            transcript.absorb(b"public_values", &public_values.as_slice());
+
+            SatisfyingAssignment::r1cs_instance_and_witness(
+              pre_state,
+              &pk.S_step,
+              &pk.ck,
+              circuit,
+              is_small,
+              &mut transcript,
+            )
+          })
+          .collect::<Result<Vec<_>, _>>()
+          .map(|pairs| {
+            let (instances, witnesses): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+            (instances, witnesses)
+          })
+      },
+      || {
+        let mut transcript = E::TE::new(b"neutronnova_prove");
+        transcript.absorb(b"vk", &pk.vk_digest);
+        let public_values_core =
+          core_circuit
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Core circuit does not provide public IO: {e}"),
+            })?;
+        transcript.absorb(b"public_values", &public_values_core.as_slice());
         SatisfyingAssignment::r1cs_instance_and_witness(
-          pre_state,
-          &pk.S_step,
+          &mut prep_snark.ps_core,
+          &pk.S_core,
           &pk.ck,
-          circuit,
+          core_circuit,
           is_small,
           &mut transcript,
         )
-      })
-      .try_fold(
-        (Vec::new(), Vec::new()),
-        |mut acc, res: Result<_, SpartanError>| {
-          let (u, w) = res?;
-          acc.0.push(u);
-          acc.1.push(w);
-          Ok(acc)
-        },
-      );
-    let res_core = {
-      let mut transcript = E::TE::new(b"neutronnova_prove");
-      transcript.absorb(b"vk", &pk.vk_digest);
-      let public_values_core =
-        core_circuit
-          .public_values()
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Core circuit does not provide public IO: {e}"),
-          })?;
-      transcript.absorb(b"public_values", &public_values_core.as_slice());
-      SatisfyingAssignment::r1cs_instance_and_witness(
-        &mut prep_snark.ps_core,
-        &pk.S_core,
-        &pk.ck,
-        core_circuit,
-        is_small,
-        &mut transcript,
-      )
-    };
+      },
+    );
 
     let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
     info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
@@ -1988,8 +2078,8 @@ where
     )?;
     let W = folded_W
       .W
-      .iter()
-      .zip(core_witness.W.iter())
+      .par_iter()
+      .zip(core_witness.W.par_iter())
       .map(|(w1, w2)| *w1 + c_eval * *w2)
       .collect::<Vec<_>>();
     let comm_eval = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
