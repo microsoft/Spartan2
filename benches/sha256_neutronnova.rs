@@ -31,6 +31,7 @@ use spartan2::{
   traits::{Engine, circuit::SpartanCircuit},
 };
 use std::{marker::PhantomData, time::Duration};
+use tracing_subscriber::EnvFilter;
 
 type E = T256HyraxEngine;
 
@@ -247,6 +248,15 @@ fn make_step_circuits(num_steps: usize) -> Vec<Sha256StepCircuit<E>> {
 }
 
 fn neutronnova_benches(c: &mut Criterion) {
+  if std::env::var_os("NEUTRONNOVA_BENCH_TRACE").is_some() || std::env::var_os("RUST_LOG").is_some()
+  {
+    let _ = tracing_subscriber::fmt()
+      .with_target(false)
+      .with_ansi(true)
+      .with_env_filter(EnvFilter::from_default_env())
+      .try_init();
+  }
+
   let thread_counts = thread_counts();
 
   // Report proof sizes once per size (outside measurements).
