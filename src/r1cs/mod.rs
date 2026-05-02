@@ -1114,12 +1114,14 @@ impl<E: Engine> SplitR1CSShape<E> {
     z_cached: &[E::Scalar],
   ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     let cached_len = self.num_shared + self.num_precommitted;
-    assert_eq!(
-      z_cached.len(),
-      cached_len,
-      "multiply_vec_precommitted expects shared + precommitted ({cached_len}), got {}",
-      z_cached.len()
-    );
+    if z_cached.len() != cached_len {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "multiply_vec_precommitted expects shared + precommitted ({cached_len}), got {}",
+          z_cached.len()
+        ),
+      });
+    }
     // Build a full-size z vector with shared + precommitted values at correct positions
     let total_len = cached_len + self.num_rest + 1 + self.num_public + self.num_challenges;
     let mut z_full = vec![E::Scalar::ZERO; total_len];

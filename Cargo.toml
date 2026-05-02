@@ -60,6 +60,7 @@ proptest = "1.2.0"
 [features]
 default = []
 jem = ["tikv-jemallocator"]
+ipa-hybrid = []
 
 [[bench]]
 name = "sha256_spartan"

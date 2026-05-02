@@ -10,7 +10,7 @@ use crate::{
   math::Math,
   polys::eq::EqPolynomial,
   provider::{
-    pcs::ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
+    pcs::ipa::{InnerProductInstance, InnerProductWitness},
     traits::{DlogGroup, DlogGroupExt},
   },
   start_span,
@@ -30,6 +30,15 @@ use tracing::info;
 use crate::big_num::delayed_reduction::DelayedReduction;
 use crate::big_num::montgomery::MontgomeryLimbs;
 use crate::provider::msm::{AffineGroupElement, FixedBaseMul, vartime_scalar_mul};
+
+#[cfg(not(feature = "ipa-hybrid"))]
+use crate::provider::pcs::ipa::InnerProductArgumentLinear;
+#[cfg(feature = "ipa-hybrid")]
+use crate::provider::pcs::ipa_hybrid::InnerProductArgumentHybrid;
+
+/// Number of bullet reduction rounds for the hybrid IPA.
+#[cfg(feature = "ipa-hybrid")]
+const HYBRID_BULLET_ROUNDS: usize = 3;
 
 /// Bind polynomial top variables using delayed reduction for Montgomery multiply.
 /// Avoids per-product REDC, reducing multiply cost by ~50%.
@@ -135,7 +144,10 @@ pub struct HyraxEvaluationArgument<E: Engine>
 where
   E::GE: DlogGroupExt,
 {
+  #[cfg(not(feature = "ipa-hybrid"))]
   ipa: InnerProductArgumentLinear<E>,
+  #[cfg(feature = "ipa-hybrid")]
+  ipa: InnerProductArgumentHybrid<E, HYBRID_BULLET_ROUNDS>,
 }
 
 impl<E: Engine> PCSEngineTrait<E> for HyraxPCS<E>
@@ -463,7 +475,18 @@ where
     let (_ipa_span, ipa_t) = start_span!("hyrax_prove_ipa");
     let ipa_instance = InnerProductInstance::<E>::new(&comm_LZ, &R, &comm_eval.comm[0]);
     let ipa_witness = InnerProductWitness::<E>::new(&LZ, &r_LZ, &blind_eval.blind[0]);
+    #[cfg(not(feature = "ipa-hybrid"))]
     let ipa = InnerProductArgumentLinear::<E>::prove(
+      &ck.ck,
+      &ck.h,
+      &ck_eval.ck[0],
+      &ck_eval.h,
+      &ipa_instance,
+      &ipa_witness,
+      transcript,
+    )?;
+    #[cfg(feature = "ipa-hybrid")]
+    let ipa = InnerProductArgumentHybrid::<E, HYBRID_BULLET_ROUNDS>::prove(
       &ck.ck,
       &ck.h,
       &ck_eval.ck[0],
