@@ -38,6 +38,35 @@ pub trait SmallValue:
 impl SmallValue for i32 {}
 impl SmallValue for i64 {}
 
+/// Native value type that can be safely checked against a Lagrange-extension
+/// growth bound.
+///
+/// This packages the product-type requirements used by `ExtensionBound` and
+/// `vec_to_small_for_extension`, so higher-level generic code can stay phrased
+/// in terms of its small-value type instead of spelling concrete integer
+/// conversion details in each API.
+pub trait ExtensionSmallValue: SmallValue + Bounded + One + Into<Self::Product> {
+  fn try_extension_small<F, const D: usize>(lb: usize, val: &F) -> Option<Self>
+  where
+    Self: Sized,
+    F: SmallValueField<Self>;
+}
+
+impl<SV> ExtensionSmallValue for SV
+where
+  SV: SmallValue + Bounded + One + Into<SV::Product>,
+  SV::Product:
+    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+{
+  #[inline]
+  fn try_extension_small<F, const D: usize>(lb: usize, val: &F) -> Option<Self>
+  where
+    F: SmallValueField<Self>,
+  {
+    ExtensionBound::<Self, D>::new(lb).try_to_small(val)
+  }
+}
+
 // =============================================================================
 // SmallValueEngine trait
 // =============================================================================
@@ -365,24 +394,18 @@ pub fn vec_to_small_for_extension<F, SV, const D: usize>(
 ) -> Result<Vec<SV>, SpartanError>
 where
   F: SmallValueField<SV> + Sync,
-  SV: WideMul + Bounded + Copy + Send + Sync + Into<SV::Product>,
-  SV::Product:
-    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  SV: ExtensionSmallValue,
 {
-  let bound = ExtensionBound::<SV, D>::new(lb);
-
   v.par_iter()
     .enumerate()
     .map(|(i, f)| {
-      bound
-        .try_to_small(f)
-        .ok_or_else(|| SpartanError::SmallValueOverflow {
-          value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
-          context: format!(
-            "vec_to_small_for_extension: value at index {} exceeds bound for D={}, lb={}",
-            i, D, lb
-          ),
-        })
+      SV::try_extension_small::<F, D>(lb, f).ok_or_else(|| SpartanError::SmallValueOverflow {
+        value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
+        context: format!(
+          "vec_to_small_for_extension: value at index {} exceeds bound for D={}, lb={}",
+          i, D, lb
+        ),
+      })
     })
     .collect()
 }

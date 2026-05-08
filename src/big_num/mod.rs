@@ -34,7 +34,8 @@ pub use montgomery::MontgomeryLimbs;
 // TODO: Remove unused imports after adding small-value sumcheck support (https://github.com/microsoft/Spartan2/pull/112)
 #[allow(unused_imports)]
 pub use small_value_field::{
-  ExtensionBound, SmallValue, SmallValueEngine, SmallValueField, vec_to_small_for_extension,
+  ExtensionBound, ExtensionSmallValue, SmallValue, SmallValueEngine, SmallValueField,
+  vec_to_small_for_extension,
 };
 // TODO: Remove unused imports after adding small-value sumcheck support (https://github.com/microsoft/Spartan2/pull/112)
 #[allow(unused_imports)]
