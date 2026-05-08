@@ -203,22 +203,38 @@ fn main() {
       num_steps, l0, threads
     );
 
-    let prep_start = Instant::now();
-    let prep = if l0 == 0 {
-      NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true).unwrap()
-    } else {
-      NeutronNovaZkSNARK::<E>::prep_prove_with_l0(&pk, &step_circuits, &core_circuit, l0).unwrap()
-    };
-    let prep_elapsed = prep_start.elapsed();
+    let (proof, prep_elapsed, prove_elapsed) = if l0 == 0 {
+      let prep_start = Instant::now();
+      let prep =
+        NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, true).unwrap();
+      let prep_elapsed = prep_start.elapsed();
 
-    let prove_start = Instant::now();
-    let (proof, _prep_back) = if l0 == 0 {
-      NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true).unwrap()
+      let prove_start = Instant::now();
+      let (proof, _prep_back) =
+        NeutronNovaZkSNARK::<E>::prove(&pk, &step_circuits, &core_circuit, prep, true).unwrap();
+      (proof, prep_elapsed, prove_start.elapsed())
     } else {
-      NeutronNovaZkSNARK::<E>::prove_with_l0::<i64>(&pk, &step_circuits, &core_circuit, prep, l0)
-        .unwrap()
+      let prep_start = Instant::now();
+      let prep = NeutronNovaZkSNARK::<E>::prep_prove_accumulator_with_l0::<i64>(
+        &pk,
+        &step_circuits,
+        &core_circuit,
+        l0,
+      )
+      .unwrap();
+      let prep_elapsed = prep_start.elapsed();
+
+      let prove_start = Instant::now();
+      let (proof, _prep_back) = NeutronNovaZkSNARK::<E>::prove_accumulator_with_l0::<i64>(
+        &pk,
+        &step_circuits,
+        &core_circuit,
+        prep,
+        l0,
+      )
+      .unwrap();
+      (proof, prep_elapsed, prove_start.elapsed())
     };
-    let prove_elapsed = prove_start.elapsed();
 
     black_box(proof);
     eprintln!(

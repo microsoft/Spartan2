@@ -10,8 +10,18 @@
 //!
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
-//! Set `NEUTRONNOVA_L0_SWEEP_SUMMARY=1` to print a coarse per-size `l0` sweep
-//! summary before Criterion runs.
+//!
+//! The bench measures two prover variants against their *natural* circuits:
+//! - `BaselineMode` runs the standard NeutronNova prover on a SHA-256 circuit
+//!   built from `bellpepper::gadgets::sha256::sha256_compression_function`
+//!   (full-field `UInt32`s).
+//! - `AccumulatorMode { l0 }` runs the small-value accumulator prover on a
+//!   SHA-256 circuit built from `small_sha256_compression_function`
+//!   (`SmallUInt32`).
+//!
+//! The choice of compression gadget is pinned by the `Sha256Gadget` trait
+//! and threaded through a shared `Sha256StepCircuit<E, G>` /
+//! `Sha256CoreCircuit<E, G>` so neither circuit body is duplicated.
 
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
@@ -19,27 +29,25 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
 
+use bellpepper::gadgets::{sha256::sha256_compression_function, uint32::UInt32};
 use bellpepper_core::{
   ConstraintSystem, SynthesisError,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use ff::Field;
+use ff::{Field, PrimeField};
 use spartan2::{
   errors::SpartanError,
   gadgets::{SmallUInt32, small_sha256_compression_function},
   neutronnova_zk::{
-    NeutronNovaPrepZkSNARK, NeutronNovaProverKey, NeutronNovaVerifierKey, NeutronNovaZkSNARK,
+    NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaPrepZkSNARK, NeutronNovaProverKey,
+    NeutronNovaVerifierKey, NeutronNovaZkSNARK,
   },
   provider::T256HyraxEngine,
   traits::{Engine, circuit::SpartanCircuit},
 };
-use std::{
-  cmp::Ordering,
-  marker::PhantomData,
-  time::{Duration, Instant},
-};
+use std::{fmt::Debug, marker::PhantomData, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 type E = T256HyraxEngine;
@@ -50,54 +58,89 @@ const SIZES: &[usize] = &[1024, 2048, 4096, 8192];
 /// SHA-256 block size in bytes.
 const BLOCK_BYTES: usize = 64;
 
-/// Coarse success target for the printed sweep summary.
-const SPEEDUP_TARGET: f64 = 1.5;
+/// Standard SHA-256 initial hash values (used by both gadgets).
+const SHA256_IV: [u32; 8] = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
 
-type BenchResult<T> = Result<T, SpartanError>;
+/// Hard ceiling on `l0` for SHA-256 + `SV = i64` + `BatchingEq<21>`.
+///
+/// `vec_to_small_for_extension::<_, i64, 2>(&Az, l0)` requires
+/// `|Az[i]| ≤ 2^62 / 3^l0`. SHA-256 row sums reach ~`2^53.7` empirically
+/// (matrix coefficients up to `2^21`, witness up to `2^32`). At `l0 = 5`
+/// the bound is `~2^54.1` — ~1.3× margin; `l0 = 6` fails with
+/// `SmallValueOverflow`. Lifting this requires switching `SV` to a wider
+/// type or shrinking `BatchingEq<K>` in `small_sha256_compression_function`.
+const MAX_L0: usize = 5;
 
-fn num_steps_for_size(size: usize) -> usize {
-  size / BLOCK_BYTES
+// ---------------------------------------------------------------------------
+// Sha256Gadget: the compression-function plug-in point.
+// ---------------------------------------------------------------------------
+
+/// Picks which SHA-256 compression gadget the circuit uses.
+///
+/// Each impl owns the entire compression call, including the IV element type
+/// (`UInt32` vs `SmallUInt32`), so the generic circuit body never names those
+/// types directly.
+trait Sha256Gadget<Scalar: PrimeField>: 'static + Clone + Debug + Send + Sync {
+  fn run<CS: ConstraintSystem<Scalar>>(
+    cs: CS,
+    input_bits: &[Boolean],
+  ) -> Result<(), SynthesisError>;
 }
 
-fn ell_b_for_steps(num_steps: usize) -> usize {
-  num_steps.next_power_of_two().ilog2() as usize
-}
+/// Full-field SHA-256 (bellpepper's `sha256_compression_function` + `UInt32`).
+#[derive(Clone, Copy, Debug, Default)]
+struct FullFieldSha256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BenchMode {
-  Baseline,
-  L0(usize),
-}
-
-impl BenchMode {
-  fn label(self) -> String {
-    match self {
-      BenchMode::Baseline => "baseline".to_string(),
-      BenchMode::L0(l0) => format!("l0-{l0}"),
-    }
+impl<S: PrimeField> Sha256Gadget<S> for FullFieldSha256 {
+  fn run<CS: ConstraintSystem<S>>(
+    mut cs: CS,
+    input_bits: &[Boolean],
+  ) -> Result<(), SynthesisError> {
+    let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
+    let _ = sha256_compression_function(
+      cs.namespace(|| "sha256 compression"),
+      input_bits,
+      &current_hash,
+    )?;
+    Ok(())
   }
 }
 
-fn sweep_modes(num_steps: usize) -> Vec<BenchMode> {
-  let ell_b = ell_b_for_steps(num_steps);
-  std::iter::once(BenchMode::Baseline)
-    .chain((1..=ell_b).map(BenchMode::L0))
-    .collect()
+/// Small-value SHA-256 (local `small_sha256_compression_function` + `SmallUInt32`).
+#[derive(Clone, Copy, Debug, Default)]
+struct SmallValueSha256;
+
+impl<S: PrimeField> Sha256Gadget<S> for SmallValueSha256 {
+  fn run<CS: ConstraintSystem<S>>(
+    mut cs: CS,
+    input_bits: &[Boolean],
+  ) -> Result<(), SynthesisError> {
+    let current_hash: Vec<SmallUInt32> = SHA256_IV
+      .iter()
+      .map(|&v| SmallUInt32::constant(v))
+      .collect();
+    let _ = small_sha256_compression_function(
+      cs.namespace(|| "sha256 compression"),
+      input_bits,
+      &current_hash,
+    )?;
+    Ok(())
+  }
 }
 
-fn control_modes(num_steps: usize) -> Vec<BenchMode> {
-  let ell_b = ell_b_for_steps(num_steps);
-  vec![BenchMode::Baseline, BenchMode::L0(ell_b)]
-}
+// ---------------------------------------------------------------------------
+// Circuits: one shape, parameterized over the gadget.
+// ---------------------------------------------------------------------------
 
-/// Step circuit: proves one SHA-256 compression on a 64-byte block.
 #[derive(Clone, Debug)]
-struct Sha256StepCircuit<Eng: Engine> {
+struct Sha256StepCircuit<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> {
   block: [u8; BLOCK_BYTES],
-  _p: PhantomData<Eng>,
+  _p: PhantomData<(Eng, G)>,
 }
 
-impl<Eng: Engine> Sha256StepCircuit<Eng> {
+impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> Sha256StepCircuit<Eng, G> {
   fn new(block: [u8; BLOCK_BYTES]) -> Self {
     Self {
       block,
@@ -106,7 +149,7 @@ impl<Eng: Engine> Sha256StepCircuit<Eng> {
   }
 }
 
-impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
+impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256StepCircuit<Eng, G> {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
     Ok(vec![Eng::Scalar::ZERO])
   }
@@ -134,17 +177,7 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
       .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(input_bits.len(), 512);
 
-    const IV: [u32; 8] = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-      0x5be0cd19,
-    ];
-    let current_hash: Vec<SmallUInt32> = IV.iter().map(|&v| SmallUInt32::constant(v)).collect();
-
-    let _next = small_sha256_compression_function(
-      cs.namespace(|| "sha256 compression"),
-      &input_bits,
-      &current_hash,
-    )?;
+    G::run(cs.namespace(|| "compress"), &input_bits)?;
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
@@ -167,17 +200,16 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
   }
 }
 
-/// Trivial core circuit: just exposes a single public input.
 #[derive(Clone, Debug)]
-struct CoreCircuit<Eng: Engine>(PhantomData<Eng>);
+struct Sha256CoreCircuit<Eng: Engine, G: Sha256Gadget<Eng::Scalar>>(PhantomData<(Eng, G)>);
 
-impl<Eng: Engine> CoreCircuit<Eng> {
+impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> Sha256CoreCircuit<Eng, G> {
   fn new() -> Self {
     Self(PhantomData)
   }
 }
 
-impl<Eng: Engine> SpartanCircuit<Eng> for CoreCircuit<Eng> {
+impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256CoreCircuit<Eng, G> {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
     Ok(vec![Eng::Scalar::ZERO])
   }
@@ -201,17 +233,7 @@ impl<Eng: Engine> SpartanCircuit<Eng> for CoreCircuit<Eng> {
       })
       .collect::<Result<Vec<_>, _>>()?;
 
-    const IV: [u32; 8] = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-      0x5be0cd19,
-    ];
-    let current_hash: Vec<SmallUInt32> = IV.iter().map(|&v| SmallUInt32::constant(v)).collect();
-
-    let _next = small_sha256_compression_function(
-      cs.namespace(|| "core sha256 compression"),
-      &input_bits,
-      &current_hash,
-    )?;
+    G::run(cs.namespace(|| "core compress"), &input_bits)?;
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
@@ -233,6 +255,206 @@ impl<Eng: Engine> SpartanCircuit<Eng> for CoreCircuit<Eng> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// BenchMode: prover + circuit pairing.
+// ---------------------------------------------------------------------------
+
+trait BenchMode: Send + Sync {
+  type StepCircuit: SpartanCircuit<E> + Clone + Debug + Send + Sync;
+  type CoreCircuit: SpartanCircuit<E> + Clone + Debug + Send + Sync;
+  type Prep: Send;
+
+  fn label(&self) -> String;
+
+  fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit;
+  fn make_core_circuit() -> Self::CoreCircuit;
+
+  fn setup_keypair(num_steps: usize) -> (NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>) {
+    let step_proto = Self::make_step_circuit([0u8; BLOCK_BYTES]);
+    let core_proto = Self::make_core_circuit();
+    NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap()
+  }
+
+  fn prep_prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+  ) -> Result<Self::Prep, SpartanError>;
+
+  fn prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError>;
+
+  fn bench_nifs(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<Self::Prep, SpartanError>;
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BaselineMode;
+
+impl BenchMode for BaselineMode {
+  type StepCircuit = Sha256StepCircuit<E, FullFieldSha256>;
+  type CoreCircuit = Sha256CoreCircuit<E, FullFieldSha256>;
+  type Prep = NeutronNovaPrepZkSNARK<E>;
+
+  fn label(&self) -> String {
+    "baseline".to_string()
+  }
+
+  fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit {
+    Sha256StepCircuit::new(block)
+  }
+
+  fn make_core_circuit() -> Self::CoreCircuit {
+    Sha256CoreCircuit::new()
+  }
+
+  fn prep_prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+  ) -> Result<Self::Prep, SpartanError> {
+    NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true)
+  }
+
+  fn prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
+    NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true)
+  }
+
+  fn bench_nifs(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<Self::Prep, SpartanError> {
+    NeutronNovaZkSNARK::<E>::bench_nifs(pk, steps, core, prep, true)
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccumulatorMode {
+  l0: usize,
+}
+
+impl AccumulatorMode {
+  fn check_l0(&self) {
+    assert!(
+      (1..=MAX_L0).contains(&self.l0),
+      "AccumulatorMode l0={} out of range 1..={MAX_L0}; see MAX_L0 docs for the bound math",
+      self.l0,
+    );
+  }
+}
+
+impl BenchMode for AccumulatorMode {
+  type StepCircuit = Sha256StepCircuit<E, SmallValueSha256>;
+  type CoreCircuit = Sha256CoreCircuit<E, SmallValueSha256>;
+  type Prep = NeutronNovaAccumulatorPrepZkSNARK<E, i64>;
+
+  fn label(&self) -> String {
+    format!("l0-{}", self.l0)
+  }
+
+  fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit {
+    Sha256StepCircuit::new(block)
+  }
+
+  fn make_core_circuit() -> Self::CoreCircuit {
+    Sha256CoreCircuit::new()
+  }
+
+  fn prep_prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+  ) -> Result<Self::Prep, SpartanError> {
+    self.check_l0();
+    NeutronNovaZkSNARK::<E>::prep_prove_accumulator_with_l0::<i64>(pk, steps, core, self.l0)
+  }
+
+  fn prove(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
+    self.check_l0();
+    NeutronNovaZkSNARK::<E>::prove_accumulator_with_l0::<i64>(pk, steps, core, prep, self.l0)
+  }
+
+  fn bench_nifs(
+    &self,
+    pk: &NeutronNovaProverKey<E>,
+    steps: &[Self::StepCircuit],
+    core: &Self::CoreCircuit,
+    prep: Self::Prep,
+  ) -> Result<Self::Prep, SpartanError> {
+    self.check_l0();
+    NeutronNovaZkSNARK::<E>::bench_accumulator_nifs_with_l0::<i64>(pk, steps, core, prep, self.l0)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generic per-mode helpers.
+// ---------------------------------------------------------------------------
+
+fn num_steps_for_size(size: usize) -> usize {
+  size / BLOCK_BYTES
+}
+
+fn ell_b_for_steps(num_steps: usize) -> usize {
+  num_steps.next_power_of_two().ilog2() as usize
+}
+
+fn make_step_circuits<M: BenchMode>(num_steps: usize) -> Vec<M::StepCircuit> {
+  (0..num_steps)
+    .map(|i| M::make_step_circuit([i as u8; BLOCK_BYTES]))
+    .collect()
+}
+
+fn build_inputs<M: BenchMode>(num_steps: usize) -> (Vec<M::StepCircuit>, M::CoreCircuit) {
+  (make_step_circuits::<M>(num_steps), M::make_core_circuit())
+}
+
+fn build_proof_for_mode<M: BenchMode>(
+  num_steps: usize,
+  mode: &M,
+) -> Result<NeutronNovaZkSNARK<E>, SpartanError> {
+  let (pk, _vk) = M::setup_keypair(num_steps);
+  let (steps, core) = build_inputs::<M>(num_steps);
+  let prep = mode.prep_prove(&pk, &steps, &core)?;
+  Ok(mode.prove(&pk, &steps, &core, prep)?.0)
+}
+
+/// Accumulator `l0` values to bench at `num_steps`.
+///
+/// The cap is `min(ell_b, MAX_L0)` — anything above `MAX_L0` is known to
+/// overflow `vec_to_small_for_extension`, so we skip it a priori instead of
+/// probing at runtime. See `MAX_L0` for the bound math.
+fn accumulator_l0_values(num_steps: usize) -> Vec<usize> {
+  (1..=ell_b_for_steps(num_steps).min(MAX_L0)).collect()
+}
+
 fn thread_counts() -> Vec<usize> {
   if let Ok(val) = std::env::var("BENCH_THREADS") {
     val
@@ -250,276 +472,128 @@ fn thread_counts() -> Vec<usize> {
   }
 }
 
-fn summary_enabled() -> bool {
-  std::env::var_os("NEUTRONNOVA_L0_SWEEP_SUMMARY").is_some()
-}
+// ---------------------------------------------------------------------------
+// Criterion bench registration.
+// ---------------------------------------------------------------------------
 
-fn summary_reps() -> usize {
-  std::env::var("NEUTRONNOVA_SUMMARY_REPS")
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .filter(|&n| n > 0)
-    .unwrap_or(1)
-}
-
-fn make_step_circuits(num_steps: usize) -> Vec<Sha256StepCircuit<E>> {
-  (0..num_steps)
-    .map(|i| Sha256StepCircuit::<E>::new([i as u8; BLOCK_BYTES]))
-    .collect()
-}
-
-fn build_inputs(num_steps: usize) -> (Vec<Sha256StepCircuit<E>>, CoreCircuit<E>) {
-  (make_step_circuits(num_steps), CoreCircuit::<E>::new())
-}
-
-fn setup_keypair(num_steps: usize) -> (NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>) {
-  let step_proto = Sha256StepCircuit::<E>::new([0u8; BLOCK_BYTES]);
-  let core_proto = CoreCircuit::<E>::new();
-  NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap()
-}
-
-fn prep_for_mode(
-  pk: &NeutronNovaProverKey<E>,
-  step_circuits: &[Sha256StepCircuit<E>],
-  core_circuit: &CoreCircuit<E>,
-  mode: BenchMode,
-) -> BenchResult<NeutronNovaPrepZkSNARK<E>> {
-  match mode {
-    BenchMode::Baseline => {
-      NeutronNovaZkSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true)
-    }
-    BenchMode::L0(l0) => {
-      NeutronNovaZkSNARK::<E>::prep_prove_with_l0(pk, step_circuits, core_circuit, l0)
-    }
-  }
-}
-
-fn prove_for_mode(
-  pk: &NeutronNovaProverKey<E>,
-  step_circuits: &[Sha256StepCircuit<E>],
-  core_circuit: &CoreCircuit<E>,
-  prep: NeutronNovaPrepZkSNARK<E>,
-  mode: BenchMode,
-) -> BenchResult<(NeutronNovaZkSNARK<E>, NeutronNovaPrepZkSNARK<E>)> {
-  match mode {
-    BenchMode::Baseline => {
-      NeutronNovaZkSNARK::<E>::prove(pk, step_circuits, core_circuit, prep, true)
-    }
-    BenchMode::L0(l0) => {
-      NeutronNovaZkSNARK::<E>::prove_with_l0::<i64>(pk, step_circuits, core_circuit, prep, l0)
-    }
-  }
-}
-
-fn bench_nifs_for_mode(
-  pk: &NeutronNovaProverKey<E>,
-  step_circuits: &[Sha256StepCircuit<E>],
-  core_circuit: &CoreCircuit<E>,
-  prep: NeutronNovaPrepZkSNARK<E>,
-  mode: BenchMode,
-) -> BenchResult<NeutronNovaPrepZkSNARK<E>> {
-  match mode {
-    BenchMode::Baseline => {
-      NeutronNovaZkSNARK::<E>::bench_nifs(pk, step_circuits, core_circuit, prep, true)
-    }
-    BenchMode::L0(l0) => {
-      NeutronNovaZkSNARK::<E>::bench_nifs_with_l0::<i64>(pk, step_circuits, core_circuit, prep, l0)
-    }
-  }
-}
-
-fn build_proof_for_mode(num_steps: usize, mode: BenchMode) -> BenchResult<NeutronNovaZkSNARK<E>> {
-  let (pk, _vk) = setup_keypair(num_steps);
-  let (step_circuits, core_circuit) = build_inputs(num_steps);
-  let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode)?;
-  Ok(prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode)?.0)
-}
-
-fn is_skippable_mode_error(err: &SpartanError) -> bool {
-  matches!(err, SpartanError::SmallValueOverflow { .. })
-}
-
-fn probe_mode(num_steps: usize, mode: BenchMode) -> BenchResult<()> {
-  build_proof_for_mode(num_steps, mode).map(|_| ())
-}
-
-fn collect_valid_modes(
-  num_steps: usize,
-  modes: impl IntoIterator<Item = BenchMode>,
-) -> (Vec<BenchMode>, Vec<(BenchMode, SpartanError)>) {
-  let mut valid = Vec::new();
-  let mut skipped = Vec::new();
-
-  for mode in modes {
-    match probe_mode(num_steps, mode) {
-      Ok(()) => valid.push(mode),
-      Err(err) if is_skippable_mode_error(&err) => skipped.push((mode, err)),
-      Err(err) => panic!(
-        "failed to probe mode {} for {num_steps} steps: {err}",
-        mode.label()
-      ),
-    }
-  }
-
-  (valid, skipped)
-}
-
-fn median_duration(mut samples: Vec<Duration>) -> Duration {
-  samples.sort_unstable();
-  samples[samples.len() / 2]
-}
-
-fn measure_median<F>(reps: usize, mut f: F) -> Duration
-where
-  F: FnMut() -> Duration,
-{
-  median_duration((0..reps).map(|_| f()).collect())
-}
-
-fn measure_prove_duration(
+/// Register the `prep_and_prove`, `prove`, and `nifs_pipeline` benches for one
+/// mode at one (size, threads) cell. The `setup` bench is registered once per
+/// (size, threads) by the caller — it only depends on the circuit shape, not
+/// the prover variant.
+fn register_mode_benches<M: BenchMode + Copy>(
+  g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
   pool: &rayon::ThreadPool,
+  mode: M,
   num_steps: usize,
-  mode: BenchMode,
-  reps: usize,
-) -> Duration {
-  measure_median(reps, || {
-    pool.install(|| {
-      let (pk, _vk) = setup_keypair(num_steps);
-      let (step_circuits, core_circuit) = build_inputs(num_steps);
-      let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-      let prep_back = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode)
-        .unwrap()
-        .1;
-      let start = Instant::now();
-      let _ = prove_for_mode(&pk, &step_circuits, &core_circuit, prep_back, mode).unwrap();
-      start.elapsed()
-    })
-  })
-}
+  size: usize,
+  nthreads: usize,
+) {
+  let label = mode.label();
 
-fn measure_prep_and_prove_duration(
-  pool: &rayon::ThreadPool,
-  num_steps: usize,
-  mode: BenchMode,
-  reps: usize,
-) -> Duration {
-  measure_median(reps, || {
-    pool.install(|| {
-      let (pk, _vk) = setup_keypair(num_steps);
-      let (step_circuits, core_circuit) = build_inputs(num_steps);
-      let start = Instant::now();
-      let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-      let _ = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode).unwrap();
-      start.elapsed()
-    })
-  })
-}
-
-fn duration_ratio(a: Duration, b: Duration) -> f64 {
-  a.as_secs_f64() / b.as_secs_f64()
-}
-
-fn geometric_mean(values: &[f64]) -> f64 {
-  let sum_logs = values.iter().map(|v| v.ln()).sum::<f64>();
-  (sum_logs / values.len() as f64).exp()
-}
-
-fn cmp_f64(a: f64, b: f64) -> Ordering {
-  a.partial_cmp(&b).unwrap_or(Ordering::Equal)
-}
-
-fn report_l0_sweep_summary(thread_counts: &[usize]) {
-  let reps = summary_reps();
-  println!("== NeutronNova l0 sweep summary (reps={reps}) ==");
-
-  for &size in SIZES {
-    let num_steps = num_steps_for_size(size);
-    let (valid_modes, skipped_modes) = collect_valid_modes(num_steps, sweep_modes(num_steps));
-    let l0s: Vec<usize> = valid_modes
-      .into_iter()
-      .filter_map(|mode| match mode {
-        BenchMode::Baseline => None,
-        BenchMode::L0(l0) => Some(l0),
-      })
-      .collect();
-
-    if !skipped_modes.is_empty() {
-      println!("size={}B skipped_modes:", size);
-      for (mode, err) in &skipped_modes {
-        println!("  mode={} skipped: {}", mode.label(), err);
-      }
-    }
-
-    if l0s.is_empty() {
-      println!(
-        "size={}B num_steps={} has no valid accumulator l0 values for i64; skipping summary",
-        size, num_steps
-      );
-      continue;
-    }
-
-    let per_thread = thread_counts
-      .iter()
-      .map(|&nthreads| {
-        let pool = rayon::ThreadPoolBuilder::new()
-          .num_threads(nthreads)
-          .build()
-          .expect("failed to build rayon pool");
-        let baseline_prove = measure_prove_duration(&pool, num_steps, BenchMode::Baseline, reps);
-        let baseline_total =
-          measure_prep_and_prove_duration(&pool, num_steps, BenchMode::Baseline, reps);
-        let candidates = l0s
-          .iter()
-          .map(|&l0| {
-            let mode = BenchMode::L0(l0);
-            let prove = measure_prove_duration(&pool, num_steps, mode, reps);
-            let total = measure_prep_and_prove_duration(&pool, num_steps, mode, reps);
-            (l0, prove, total)
+  g.bench_function(
+    format!("prep_and_prove/{label}/{size}/t{nthreads}"),
+    |b| {
+      b.iter_batched(
+        || {
+          pool.install(|| {
+            let (pk, _vk) = M::setup_keypair(num_steps);
+            let (steps, core) = build_inputs::<M>(num_steps);
+            (pk, steps, core)
           })
-          .collect::<Vec<_>>();
-        (nthreads, baseline_prove, baseline_total, candidates)
-      })
-      .collect::<Vec<_>>();
-
-    let best = l0s
-      .iter()
-      .map(|&l0| {
-        let mut ratios = Vec::with_capacity(per_thread.len() * 2);
-        let mut per_thread_ratios = Vec::with_capacity(per_thread.len());
-        for (nthreads, baseline_prove, baseline_total, candidates) in &per_thread {
-          let (_, prove, total) = candidates
-            .iter()
-            .find(|(candidate_l0, _, _)| *candidate_l0 == l0)
-            .expect("candidate l0 missing");
-          let prove_ratio = duration_ratio(*baseline_prove, *prove);
-          let total_ratio = duration_ratio(*baseline_total, *total);
-          ratios.push(prove_ratio);
-          ratios.push(total_ratio);
-          per_thread_ratios.push((*nthreads, prove_ratio, total_ratio));
-        }
-        let worst_case = ratios.iter().copied().fold(f64::INFINITY, f64::min);
-        let mean_ratio = geometric_mean(&ratios);
-        (l0, worst_case, mean_ratio, per_thread_ratios)
-      })
-      .max_by(|a, b| {
-        cmp_f64(a.1, b.1)
-          .then_with(|| cmp_f64(a.2, b.2))
-          .then_with(|| a.0.cmp(&b.0))
-      })
-      .expect("at least one accumulator l0");
-
-    let pass = best.1 >= SPEEDUP_TARGET;
-    println!(
-      "size={}B num_steps={} best_l0={} worst_case_speedup={:.3} geo_mean_speedup={:.3} pass={}",
-      size, num_steps, best.0, best.1, best.2, pass
-    );
-    for (nthreads, prove_ratio, total_ratio) in &best.3 {
-      println!(
-        "  threads={} prove_speedup={:.3} prep_and_prove_speedup={:.3}",
-        nthreads, prove_ratio, total_ratio
+        },
+        |(pk, steps, core)| {
+          pool.install(|| {
+            let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+            let _ = mode.prove(&pk, &steps, &core, prep).unwrap();
+          });
+        },
+        BatchSize::LargeInput,
       );
-    }
-  }
+    },
+  );
+
+  g.bench_function(format!("prove/{label}/{size}/t{nthreads}"), |b| {
+    b.iter_batched(
+      || {
+        pool.install(|| {
+          let (pk, _vk) = M::setup_keypair(num_steps);
+          let (steps, core) = build_inputs::<M>(num_steps);
+          let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+          let prep_back = mode.prove(&pk, &steps, &core, prep).unwrap().1;
+          (pk, steps, core, prep_back)
+        })
+      },
+      |(pk, steps, core, prep)| {
+        pool.install(|| {
+          let _ = mode.prove(&pk, &steps, &core, prep).unwrap();
+        });
+      },
+      BatchSize::LargeInput,
+    );
+  });
+
+  g.bench_function(
+    format!("nifs_pipeline/{label}/{size}/t{nthreads}"),
+    |b| {
+      b.iter_batched(
+        || {
+          pool.install(|| {
+            let (pk, _vk) = M::setup_keypair(num_steps);
+            let (steps, core) = build_inputs::<M>(num_steps);
+            let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+            let prep_back = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
+            (pk, steps, core, prep_back)
+          })
+        },
+        |(pk, steps, core, prep)| {
+          pool.install(|| {
+            let _ = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
+          });
+        },
+        BatchSize::LargeInput,
+      );
+    },
+  );
+}
+
+fn register_verify_bench<M: BenchMode + Copy>(
+  g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+  pool: &rayon::ThreadPool,
+  mode: M,
+  num_steps: usize,
+  size: usize,
+  nthreads: usize,
+) {
+  let label = mode.label();
+  g.bench_function(format!("verify/{label}/{size}/t{nthreads}"), |b| {
+    b.iter_batched(
+      || {
+        pool.install(|| {
+          let (pk, vk) = M::setup_keypair(num_steps);
+          let (steps, core) = build_inputs::<M>(num_steps);
+          let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+          let proof = mode.prove(&pk, &steps, &core, prep).unwrap().0;
+          (vk, proof)
+        })
+      },
+      |(vk, proof)| {
+        pool.install(|| {
+          proof.verify(&vk, num_steps).unwrap();
+        });
+      },
+      BatchSize::LargeInput,
+    );
+  });
+}
+
+fn print_proof_size<M: BenchMode>(mode: &M, size: usize, num_steps: usize) {
+  let proof = build_proof_for_mode(num_steps, mode).unwrap();
+  let proof_bytes = bincode::serialize(&proof).unwrap();
+  println!(
+    "NeutronNova SHA-256 mode={} size={size}B num_steps={num_steps}: proof_size={} bytes",
+    mode.label(),
+    proof_bytes.len()
+  );
 }
 
 fn neutronnova_benches(c: &mut Criterion) {
@@ -533,33 +607,18 @@ fn neutronnova_benches(c: &mut Criterion) {
   }
 
   let thread_counts = thread_counts();
-  if summary_enabled() {
-    report_l0_sweep_summary(&thread_counts);
-  }
 
-  for &size in SIZES {
-    let num_steps = num_steps_for_size(size);
-    let (valid_modes, skipped_modes) = collect_valid_modes(num_steps, sweep_modes(num_steps));
-    for (mode, err) in skipped_modes {
-      println!(
-        "Skipping NeutronNova SHA-256 mode={} size={}B num_steps={}: {}",
-        mode.label(),
-        size,
-        num_steps,
-        err
-      );
-    }
-
-    for mode in valid_modes {
-      let proof = build_proof_for_mode(num_steps, mode).unwrap();
-      let proof_bytes = bincode::serialize(&proof).unwrap();
-      println!(
-        "NeutronNova SHA-256 mode={} size={}B num_steps={}: proof_size={} bytes",
-        mode.label(),
-        size,
-        num_steps,
-        proof_bytes.len()
-      );
+  // Print proof sizes once per (size, mode) combo. Off by default — each call
+  // to `print_proof_size` runs a full prove just to serialize the output, so
+  // skipping it shaves ~20s off bench startup. Set `NEUTRONNOVA_PROOF_SIZES=1`
+  // to opt back in.
+  if std::env::var_os("NEUTRONNOVA_PROOF_SIZES").is_some() {
+    for &size in SIZES {
+      let num_steps = num_steps_for_size(size);
+      print_proof_size(&BaselineMode, size, num_steps);
+      for l0 in accumulator_l0_values(num_steps) {
+        print_proof_size(&AccumulatorMode { l0 }, size, num_steps);
+      }
     }
   }
 
@@ -570,21 +629,11 @@ fn neutronnova_benches(c: &mut Criterion) {
 
   for &size in SIZES {
     let num_steps = num_steps_for_size(size);
-    let (sweep_modes, skipped_modes) = collect_valid_modes(num_steps, sweep_modes(num_steps));
-    for (mode, err) in skipped_modes {
-      println!(
-        "Skipping benchmark mode={} size={}B num_steps={}: {}",
-        mode.label(),
-        size,
-        num_steps,
-        err
-      );
-    }
-    let verify_modes: Vec<BenchMode> = control_modes(num_steps)
-      .into_iter()
-      .filter(|mode| sweep_modes.contains(mode))
-      .collect();
+    let valid_l0s = accumulator_l0_values(num_steps);
     g.throughput(Throughput::Bytes(size as u64));
+
+    // Verify exactly one accumulator mode per size (the deepest l0 we sweep).
+    let verify_max_l0 = valid_l0s.last().copied();
 
     for &nthreads in &thread_counts {
       let pool = rayon::ThreadPoolBuilder::new()
@@ -592,107 +641,27 @@ fn neutronnova_benches(c: &mut Criterion) {
         .build()
         .expect("failed to build rayon pool");
 
+      // setup is per-circuit-shape, but baseline and accumulator share the
+      // same setup signature; report under "setup" label without per-mode
+      // duplication. We use the baseline circuit because it's the most
+      // expensive shape (full-field SHA-256).
       g.bench_function(format!("setup/{size}/t{nthreads}"), |b| {
         b.iter(|| {
           pool.install(|| {
-            let _ = setup_keypair(num_steps);
+            let _ = BaselineMode::setup_keypair(num_steps);
           });
         });
       });
 
-      for &mode in &sweep_modes {
-        g.bench_function(
-          format!("prep_and_prove/{}/{size}/t{nthreads}", mode.label()),
-          |b| {
-            b.iter_batched(
-              || {
-                pool.install(|| {
-                  let (pk, _vk) = setup_keypair(num_steps);
-                  let (step_circuits, core_circuit) = build_inputs(num_steps);
-                  (pk, step_circuits, core_circuit)
-                })
-              },
-              |(pk, step_circuits, core_circuit)| {
-                pool.install(|| {
-                  let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-                  let _ = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode).unwrap();
-                });
-              },
-              BatchSize::LargeInput,
-            );
-          },
-        );
+      register_mode_benches(&mut g, &pool, BaselineMode, num_steps, size, nthreads);
+      register_verify_bench(&mut g, &pool, BaselineMode, num_steps, size, nthreads);
 
-        g.bench_function(format!("prove/{}/{size}/t{nthreads}", mode.label()), |b| {
-          b.iter_batched(
-            || {
-              pool.install(|| {
-                let (pk, _vk) = setup_keypair(num_steps);
-                let (step_circuits, core_circuit) = build_inputs(num_steps);
-                let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-                let prep_back = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode)
-                  .unwrap()
-                  .1;
-                (pk, step_circuits, core_circuit, prep_back)
-              })
-            },
-            |(pk, step_circuits, core_circuit, prep)| {
-              pool.install(|| {
-                let _ = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode).unwrap();
-              });
-            },
-            BatchSize::LargeInput,
-          );
-        });
-
-        g.bench_function(
-          format!("nifs_pipeline/{}/{size}/t{nthreads}", mode.label()),
-          |b| {
-            b.iter_batched(
-              || {
-                pool.install(|| {
-                  let (pk, _vk) = setup_keypair(num_steps);
-                  let (step_circuits, core_circuit) = build_inputs(num_steps);
-                  let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-                  let prep_back =
-                    bench_nifs_for_mode(&pk, &step_circuits, &core_circuit, prep, mode).unwrap();
-                  (pk, step_circuits, core_circuit, prep_back)
-                })
-              },
-              |(pk, step_circuits, core_circuit, prep)| {
-                pool.install(|| {
-                  let _ =
-                    bench_nifs_for_mode(&pk, &step_circuits, &core_circuit, prep, mode).unwrap();
-                });
-              },
-              BatchSize::LargeInput,
-            );
-          },
-        );
-      }
-
-      for &mode in &verify_modes {
-        g.bench_function(format!("verify/{}/{size}/t{nthreads}", mode.label()), |b| {
-          b.iter_batched(
-            || {
-              pool.install(|| {
-                let (pk, vk) = setup_keypair(num_steps);
-                let (step_circuits, core_circuit) = build_inputs(num_steps);
-                let prep = prep_for_mode(&pk, &step_circuits, &core_circuit, mode).unwrap();
-                let proof = prove_for_mode(&pk, &step_circuits, &core_circuit, prep, mode)
-                  .unwrap()
-                  .0;
-                (vk, proof)
-              })
-            },
-            |(vk, proof)| {
-              pool.install(|| {
-                proof.verify(&vk, num_steps).unwrap();
-              });
-            },
-            BatchSize::LargeInput,
-          );
-        });
+      for &l0 in &valid_l0s {
+        let mode = AccumulatorMode { l0 };
+        register_mode_benches(&mut g, &pool, mode, num_steps, size, nthreads);
+        if Some(l0) == verify_max_l0 {
+          register_verify_bench(&mut g, &pool, mode, num_steps, size, nthreads);
+        }
       }
     }
   }
