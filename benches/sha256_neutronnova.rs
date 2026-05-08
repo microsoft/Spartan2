@@ -23,6 +23,7 @@
 //! and threaded through a shared `Sha256StepCircuit<E, G>` /
 //! `Sha256CoreCircuit<E, G>` so neither circuit body is duplicated.
 
+use rayon::ThreadPool;
 #[cfg(feature = "jem")]
 use tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jem")]
@@ -35,7 +36,10 @@ use bellpepper_core::{
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
-use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{
+  BatchSize, BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main,
+  measurement::WallTime,
+};
 use ff::{Field, PrimeField};
 use spartan2::{
   errors::SpartanError,
@@ -481,8 +485,8 @@ fn thread_counts() -> Vec<usize> {
 /// (size, threads) by the caller — it only depends on the circuit shape, not
 /// the prover variant.
 fn register_mode_benches<M: BenchMode + Copy>(
-  g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-  pool: &rayon::ThreadPool,
+  g: &mut BenchmarkGroup<'_, WallTime>,
+  pool: &ThreadPool,
   mode: M,
   num_steps: usize,
   size: usize,
@@ -490,27 +494,24 @@ fn register_mode_benches<M: BenchMode + Copy>(
 ) {
   let label = mode.label();
 
-  g.bench_function(
-    format!("prep_and_prove/{label}/{size}/t{nthreads}"),
-    |b| {
-      b.iter_batched(
-        || {
-          pool.install(|| {
-            let (pk, _vk) = M::setup_keypair(num_steps);
-            let (steps, core) = build_inputs::<M>(num_steps);
-            (pk, steps, core)
-          })
-        },
-        |(pk, steps, core)| {
-          pool.install(|| {
-            let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
-            let _ = mode.prove(&pk, &steps, &core, prep).unwrap();
-          });
-        },
-        BatchSize::LargeInput,
-      );
-    },
-  );
+  g.bench_function(format!("prep_and_prove/{label}/{size}/t{nthreads}"), |b| {
+    b.iter_batched(
+      || {
+        pool.install(|| {
+          let (pk, _vk) = M::setup_keypair(num_steps);
+          let (steps, core) = build_inputs::<M>(num_steps);
+          (pk, steps, core)
+        })
+      },
+      |(pk, steps, core)| {
+        pool.install(|| {
+          let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+          let _ = mode.prove(&pk, &steps, &core, prep).unwrap();
+        });
+      },
+      BatchSize::LargeInput,
+    );
+  });
 
   g.bench_function(format!("prove/{label}/{size}/t{nthreads}"), |b| {
     b.iter_batched(
@@ -532,33 +533,30 @@ fn register_mode_benches<M: BenchMode + Copy>(
     );
   });
 
-  g.bench_function(
-    format!("nifs_pipeline/{label}/{size}/t{nthreads}"),
-    |b| {
-      b.iter_batched(
-        || {
-          pool.install(|| {
-            let (pk, _vk) = M::setup_keypair(num_steps);
-            let (steps, core) = build_inputs::<M>(num_steps);
-            let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
-            let prep_back = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
-            (pk, steps, core, prep_back)
-          })
-        },
-        |(pk, steps, core, prep)| {
-          pool.install(|| {
-            let _ = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
-          });
-        },
-        BatchSize::LargeInput,
-      );
-    },
-  );
+  g.bench_function(format!("nifs_pipeline/{label}/{size}/t{nthreads}"), |b| {
+    b.iter_batched(
+      || {
+        pool.install(|| {
+          let (pk, _vk) = M::setup_keypair(num_steps);
+          let (steps, core) = build_inputs::<M>(num_steps);
+          let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
+          let prep_back = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
+          (pk, steps, core, prep_back)
+        })
+      },
+      |(pk, steps, core, prep)| {
+        pool.install(|| {
+          let _ = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
+        });
+      },
+      BatchSize::LargeInput,
+    );
+  });
 }
 
 fn register_verify_bench<M: BenchMode + Copy>(
-  g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-  pool: &rayon::ThreadPool,
+  g: &mut BenchmarkGroup<'_, WallTime>,
+  pool: &ThreadPool,
   mode: M,
   num_steps: usize,
   size: usize,
