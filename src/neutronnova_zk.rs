@@ -621,12 +621,31 @@ where
     )
   }
 
-  /// AB-only variant of prove_helper: computes sum E[k]*Az_lo*Bz_lo (without Cz subtraction)
-  /// and the quad term sum E[k]*(Az_hi-Az_lo)*(Bz_hi-Bz_lo).
-  /// The caller subtracts the precomputed C_val contribution from e0_ab externally.
+  /// Computes the AB-only terms for the equality-weighted NIFS fold-line extension.
+  ///
+  /// The two input layers define the ordinary NIFS fold line:
+  ///
+  /// `Az(r) = Az1 + r * (Az2 - Az1)`
+  /// `Bz(r) = Bz1 + r * (Bz2 - Bz1)`
+  ///
+  /// The sum is over the tensor-decomposed constraint-evaluation domain:
+  /// `i in [0, right)`, `j in [0, left)`, and `k = i * left + j`.
+  /// The equality vector is stored in split form, where `e[j]` is the left
+  /// tensor factor and `e[left + i]` is the right tensor factor.
+  ///
+  /// This helper evaluates the AB part:
+  ///
+  /// `sum_i sum_j e[left + i] * e[j] * Az(r)[k] * Bz(r)[k]`
+  ///
+  /// and returns:
+  /// - the constant term `e0_ab`, i.e. the AB value at `r = 0`;
+  /// - the quadratic coefficient of `r^2`.
+  ///
+  /// It intentionally omits the `Cz` contribution. Callers that need the full
+  /// R1CS term subtract the separately computed/evaluated `Cz` contribution.
   #[inline(always)]
   #[allow(clippy::needless_range_loop)]
-  fn prove_helper_ab_only(
+  fn compute_tensor_eq_ab_fold_extension_terms(
     (left, right): (usize, usize),
     e: &[E::Scalar],
     Az1: &[E::Scalar],
@@ -1920,7 +1939,7 @@ where
     }
 
     // Rounds 1..ell_b-1: merged fold(prev round) + prove_helper(current round)
-    // When has_i64: skip C folds, use prove_helper_ab_only, subtract precomputed c_vals.
+    // When has_i64: skip C folds, use AB-only fold extension terms, subtract precomputed c_vals.
     if ell_b > 1 {
       let mut prev_r_b = r_bs[0];
 
@@ -2072,7 +2091,7 @@ where
                     .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
                 }
                 // Prove from folded positions [0] and [2]
-                let (e0_ab, qc) = Self::prove_helper_ab_only(
+                let (e0_ab, qc) = Self::compute_tensor_eq_ab_fold_extension_terms(
                   (left, right),
                   e_eq_ref,
                   &a_chunk[0],
