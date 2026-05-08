@@ -39,8 +39,9 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{
-    R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
-    SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
+    R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SmallR1CSCoefs,
+    SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape,
+    multiply_vec_small_small_triple, weights_from_r,
   },
   small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial, derive_t1},
   sumcheck::SumcheckProof,
@@ -54,7 +55,7 @@ use crate::{
   zk::NeutronNovaVerifierCircuit,
 };
 use ff::Field;
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,15 @@ fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
   let mut z = Vec::with_capacity(w.len() + 1 + x.len());
   z.extend_from_slice(w);
   z.push(E::Scalar::ONE);
+  z.extend_from_slice(x);
+  z
+}
+
+#[inline]
+fn build_z_small<SV: Copy + One>(w: &[SV], x: &[SV]) -> Vec<SV> {
+  let mut z = Vec::with_capacity(w.len() + 1 + x.len());
+  z.extend_from_slice(w);
+  z.push(SV::one());
   z.extend_from_slice(x);
   z
 }
@@ -2743,80 +2753,60 @@ where
     }
   }
 
+  /// Build `Az`, `Bz`, `Cz` tables per step instance using a pure
+  /// native-int matvec. The matrix coefs are pre-narrowed in
+  /// `small_coefs`, the witness/public-IO are pre-narrowed in
+  /// `instance`, and the row sums are bounded with the same
+  /// `ExtensionBound::<SV, 2>::new(l0)` that `vec_to_small_for_extension`
+  /// would have enforced on the field path's post-matvec result.
   fn build_prefix_mle_inputs<SV>(
-    S: &SplitR1CSShape<E>,
-    ps_step: &[PrecommittedState<E>],
-    step_public_values: &[Vec<E::Scalar>],
+    small_coefs: &SmallR1CSCoefs<SV>,
+    instance: &SmallInstanceInputs<SV>,
     l0: usize,
   ) -> Result<PrefixMleInputs<SV>, SpartanError>
   where
-    E::Scalar: SmallValueField<SV> + Sync,
     SV: ExtensionSmallValue,
   {
-    let num_instances = ps_step.len();
+    let num_instances = instance.w.len();
     if num_instances == 0 {
       return Err(SpartanError::InvalidInputLength {
         reason: "cannot build accumulator cache from empty step batch".into(),
       });
     }
-    if step_public_values.len() != num_instances {
+    if instance.x.len() != num_instances {
       return Err(SpartanError::InvalidInputLength {
         reason: format!(
           "accumulator cache needs {} public-value rows, got {}",
           num_instances,
-          step_public_values.len()
+          instance.x.len()
         ),
       });
     }
 
-    let num_constraints = S.num_cons;
+    let num_constraints = small_coefs.a.indptr.len() - 1;
+
     let mut a = vec![SV::default(); num_instances * num_constraints];
     let mut b = vec![SV::default(); num_instances * num_constraints];
     let mut c = vec![SV::default(); num_instances * num_constraints];
 
-    if rayon::current_num_threads() > 1 {
-      a.par_chunks_mut(num_constraints)
-        .zip(b.par_chunks_mut(num_constraints))
-        .zip(c.par_chunks_mut(num_constraints))
-        .enumerate()
-        .try_for_each_init(
-          Vec::<E::Scalar>::new,
-          |z_buf, (idx, ((a_row, b_row), c_row))| {
-            z_buf.clear();
-            z_buf.extend_from_slice(&ps_step[idx].W);
-            z_buf.push(E::Scalar::ONE);
-            z_buf.extend_from_slice(&step_public_values[idx]);
-
-            let (az, bz, cz) = S.multiply_vec(z_buf)?;
-            let az_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&az, l0)?;
-            let bz_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&bz, l0)?;
-            let cz_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&cz, l0)?;
-
-            a_row.copy_from_slice(&az_small);
-            b_row.copy_from_slice(&bz_small);
-            c_row.copy_from_slice(&cz_small);
-            Ok(())
-          },
+    a.par_chunks_mut(num_constraints)
+      .zip(b.par_chunks_mut(num_constraints))
+      .zip(c.par_chunks_mut(num_constraints))
+      .enumerate()
+      .try_for_each(|(idx, ((a_row, b_row), c_row))| {
+        let z_small = build_z_small(&instance.w[idx], &instance.x[idx]);
+        let (az, bz, cz) = multiply_vec_small_small_triple(
+          &small_coefs.a,
+          &small_coefs.b,
+          &small_coefs.c,
+          &z_small,
+          l0,
         )?;
-    } else {
-      let mut z = Vec::new();
-      for idx in 0..num_instances {
-        z.clear();
-        z.extend_from_slice(&ps_step[idx].W);
-        z.push(E::Scalar::ONE);
-        z.extend_from_slice(&step_public_values[idx]);
-
-        let (az, bz, cz) = S.multiply_vec(&z)?;
-        let az_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&az, l0)?;
-        let bz_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&bz, l0)?;
-        let cz_small = vec_to_small_for_extension::<E::Scalar, SV, 2>(&cz, l0)?;
-        let start = idx * num_constraints;
-        let end = start + num_constraints;
-        a[start..end].copy_from_slice(&az_small);
-        b[start..end].copy_from_slice(&bz_small);
-        c[start..end].copy_from_slice(&cz_small);
-      }
-    }
+        a_row.copy_from_slice(&az);
+        b_row.copy_from_slice(&bz);
+        c_row.copy_from_slice(&cz);
+        Ok::<_, SpartanError>(())
+      })?;
 
     Ok(PrefixMleInputs {
       num_instances,
@@ -2875,8 +2865,18 @@ where
       });
     }
 
-    let mle_inputs =
-      Self::build_prefix_mle_inputs::<SV>(&pk.S_step, ps_step, step_public_values, l0)?;
+    // One-shot scan: convert F coefs of A/B/C to SV. Errors hard if any coef
+    // doesn't fit; the bench's is_skippable_mode_error filter catches this.
+    let small_coefs =
+      SmallR1CSCoefs::<SV>::try_from_matrices(&pk.S_step.A, &pk.S_step.B, &pk.S_step.C)?;
+
+    // Pre-convert W and X for every instance (reused by the matvec input
+    // and by the FullBatch cache below).
+    let instance_inputs = Self::build_small_instance_inputs::<SV>(ps_step, step_public_values, l0)?;
+
+    // All-i64 inner loop, no field arithmetic.
+    let mle_inputs = Self::build_prefix_mle_inputs::<SV>(&small_coefs, &instance_inputs, l0)?;
+
     if l0 < ell_b {
       return Ok(AccumulatorNifsCache::Prefix(PrefixAccumulatorNifsCache {
         l0,
@@ -2884,7 +2884,6 @@ where
       }));
     }
 
-    let instance_inputs = Self::build_small_instance_inputs::<SV>(ps_step, step_public_values, l0)?;
     let extended_mle_evals = build_extended_prefix_mle_evals(&mle_inputs, l0)?;
     Ok(AccumulatorNifsCache::FullBatch(
       FullBatchAccumulatorNifsCache {

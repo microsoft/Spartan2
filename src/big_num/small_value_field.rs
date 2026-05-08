@@ -17,7 +17,7 @@ use super::{
 };
 use ff::PrimeField;
 use num_traits::{Bounded, One, Signed, Zero};
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, AddAssign, Div, Mul, Sub};
 
 // =============================================================================
 // SmallValue trait
@@ -50,13 +50,36 @@ pub trait ExtensionSmallValue: SmallValue + Bounded + One + Into<Self::Product> 
   where
     Self: Sized,
     F: SmallValueField<Self>;
+
+  /// Zero of the `Self::Product` accumulator type, exposed via a method so
+  /// callers don't need to spell `Self::Product: Zero` themselves.
+  fn product_zero() -> Self::Product;
+
+  /// Accumulate `Self::wide_mul(a, b)` into `*acc`. Wraps the
+  /// `Self::Product: AddAssign` bound so callers don't have to declare it.
+  fn wide_mul_accumulate(acc: &mut Self::Product, a: Self, b: Self);
+
+  /// Try to narrow a `Self::Product`-typed value back to `Self`, enforcing
+  /// `|val| ≤ ExtensionBound::<Self, D>::new(lb).max_safe()`. Returns
+  /// `None` if the bound is exceeded or the magnitude doesn't fit `Self`.
+  fn try_narrow_from_product<const D: usize>(val: Self::Product, lb: usize) -> Option<Self>;
 }
 
 impl<SV> ExtensionSmallValue for SV
 where
   SV: SmallValue + Bounded + One + Into<SV::Product>,
-  SV::Product:
-    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  SV::Product: Copy
+    + Ord
+    + Signed
+    + Zero
+    + AddAssign
+    + Div<Output = SV::Product>
+    + Mul<Output = SV::Product>
+    + One
+    + From<i32>
+    + TryInto<SV>
+    + Send
+    + Sync,
 {
   #[inline]
   fn try_extension_small<F, const D: usize>(lb: usize, val: &F) -> Option<Self>
@@ -64,6 +87,25 @@ where
     F: SmallValueField<Self>,
   {
     ExtensionBound::<Self, D>::new(lb).try_to_small(val)
+  }
+
+  #[inline]
+  fn product_zero() -> Self::Product {
+    SV::Product::zero()
+  }
+
+  #[inline]
+  fn wide_mul_accumulate(acc: &mut Self::Product, a: Self, b: Self) {
+    *acc += SV::wide_mul(a, b);
+  }
+
+  #[inline]
+  fn try_narrow_from_product<const D: usize>(val: SV::Product, lb: usize) -> Option<SV> {
+    let bound = ExtensionBound::<Self, D>::new(lb).max_safe();
+    if val.abs() > bound {
+      return None;
+    }
+    val.try_into().ok()
   }
 }
 
@@ -369,6 +411,14 @@ where
     }
     let max_safe = SV::max_value().into() / power;
     Self { max_safe }
+  }
+
+  /// Raw bound value `(D + 1)^(-lb) · SV::MAX`, used by accumulators that
+  /// want to bound a `SV::Product`-typed row sum directly without first
+  /// narrowing to `SV`.
+  #[inline]
+  pub fn max_safe(&self) -> SV::Product {
+    self.max_safe
   }
 
   #[inline]
