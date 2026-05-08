@@ -22,7 +22,7 @@ use crate::{
   },
   big_num::{
     DelayedReduction, ExtensionSmallValue, SmallAccumulator, SmallValue, SmallValueField,
-    small_value_field::to_small_vec_or_zero, vec_to_small_for_extension,
+    small_value_field::to_small_vec_or_zero, vec_to_small_for_extension_with_context,
   },
   digest::DigestComputer,
   errors::SpartanError,
@@ -2830,13 +2830,23 @@ where
       || {
         ps_step
           .par_iter()
-          .map(|ps| vec_to_small_for_extension::<E::Scalar, SV, 2>(&ps.W, l0))
+          .enumerate()
+          .map(|(layer_idx, ps)| {
+            vec_to_small_for_extension_with_context::<E::Scalar, SV, 2, _>(&ps.W, l0, |index| {
+              format!("accumulator prep witness layer {layer_idx} index {index}")
+            })
+          })
           .collect::<Result<Vec<_>, SpartanError>>()
       },
       || {
         step_public_values
           .par_iter()
-          .map(|x| vec_to_small_for_extension::<E::Scalar, SV, 2>(x, l0))
+          .enumerate()
+          .map(|(layer_idx, x)| {
+            vec_to_small_for_extension_with_context::<E::Scalar, SV, 2, _>(x, l0, |index| {
+              format!("accumulator prep public input layer {layer_idx} index {index}")
+            })
+          })
           .collect::<Result<Vec<_>, SpartanError>>()
       },
     );
@@ -4032,6 +4042,7 @@ where
 mod tests {
   use super::*;
   use crate::provider::T256HyraxEngine;
+  use crate::r1cs::SparseMatrix;
   use bellpepper::gadgets::{
     boolean::{AllocatedBit, Boolean},
     num::AllocatedNum,
@@ -4549,6 +4560,30 @@ mod tests {
         .map(|_| ())
         .unwrap_err();
     assert!(matches!(err, SpartanError::InvalidInputLength { .. }));
+  }
+
+  #[test]
+  fn test_accumulator_prefix_mle_inputs_error_on_large_row_sum() {
+    type E = T256HyraxEngine;
+    type Scalar = <E as Engine>::Scalar;
+
+    let a = SparseMatrix::<Scalar>::new(&[(0, 0, Scalar::ONE)], 1, 2);
+    let empty = SparseMatrix::<Scalar>::new(&[], 1, 2);
+    let small_coefs = SmallR1CSCoefs::<i64>::try_from_matrices(&a, &empty, &empty).unwrap();
+    let instance = SmallInstanceInputs {
+      w: vec![vec![i64::MAX]],
+      x: vec![Vec::new()],
+    };
+
+    let err = NeutronNovaZkSNARK::<E>::build_prefix_mle_inputs::<i64>(&small_coefs, &instance, 1)
+      .unwrap_err();
+
+    match err {
+      SpartanError::SmallValueOverflow { context, .. } => {
+        assert!(context.contains("Az row sum at row 0"));
+      }
+      other => panic!("expected SmallValueOverflow, got {other:?}"),
+    }
   }
 
   #[test]

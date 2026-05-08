@@ -807,13 +807,15 @@ where
       })
     };
 
-    Ok((narrow(acc_a, 'A')?, narrow(acc_b, 'B')?, narrow(acc_c, 'C')?))
+    Ok((
+      narrow(acc_a, 'A')?,
+      narrow(acc_b, 'B')?,
+      narrow(acc_c, 'C')?,
+    ))
   };
 
   let rows: Vec<(SV, SV, SV)> = if num_rows <= PARALLEL_THRESHOLD {
-    (0..num_rows)
-      .map(compute_row)
-      .collect::<Result<_, _>>()?
+    (0..num_rows).map(compute_row).collect::<Result<_, _>>()?
   } else {
     (0..num_rows)
       .into_par_iter()
@@ -929,6 +931,73 @@ mod tests {
       .multiply_vec_small::<2, i64>(&[i64::MAX], 2)
       .unwrap_err();
 
+    assert!(matches!(err, SpartanError::SmallValueOverflow { .. }));
+  }
+
+  #[test]
+  fn test_small_r1cs_triple_matches_field_matvec() {
+    use crate::big_num::{SmallValueField, vec_to_small_for_extension};
+
+    let a = SparseMatrix::<Fr>::new(
+      &[
+        (0, 0, Fr::from(2u64)),
+        (0, 1, -Fr::from(1u64)),
+        (1, 1, Fr::from(5u64)),
+      ],
+      2,
+      3,
+    );
+    let b = SparseMatrix::<Fr>::new(&[(0, 2, Fr::from(3u64)), (1, 0, -Fr::from(4u64))], 2, 3);
+    let c = SparseMatrix::<Fr>::new(
+      &[
+        (0, 0, Fr::from(1u64)),
+        (0, 2, Fr::from(7u64)),
+        (1, 2, -Fr::from(2u64)),
+      ],
+      2,
+      3,
+    );
+    let z_small = vec![3i64, -2, 4];
+    let z_field = z_small
+      .iter()
+      .copied()
+      .map(<Fr as SmallValueField<i64>>::small_to_field)
+      .collect::<Vec<_>>();
+
+    let coefs = SmallR1CSCoefs::<i64>::try_from_matrices(&a, &b, &c).unwrap();
+    let (az, bz, cz) =
+      multiply_vec_small_small_triple(&coefs.a, &coefs.b, &coefs.c, &z_small, 2).unwrap();
+
+    assert_eq!(
+      az,
+      vec_to_small_for_extension::<Fr, i64, 2>(&a.multiply_vec(&z_field).unwrap(), 2).unwrap()
+    );
+    assert_eq!(
+      bz,
+      vec_to_small_for_extension::<Fr, i64, 2>(&b.multiply_vec(&z_field).unwrap(), 2).unwrap()
+    );
+    assert_eq!(
+      cz,
+      vec_to_small_for_extension::<Fr, i64, 2>(&c.multiply_vec(&z_field).unwrap(), 2).unwrap()
+    );
+  }
+
+  #[test]
+  fn test_small_r1cs_triple_row_sum_overflow_fails_hard() {
+    let a = SmallSparseMatrix {
+      data: vec![1i64],
+      indices: vec![0],
+      indptr: vec![0, 1],
+      cols: 1,
+    };
+    let empty = SmallSparseMatrix {
+      data: Vec::<i64>::new(),
+      indices: Vec::new(),
+      indptr: vec![0, 0],
+      cols: 1,
+    };
+
+    let err = multiply_vec_small_small_triple(&a, &empty, &empty, &[i64::MAX], 1).unwrap_err();
     assert!(matches!(err, SpartanError::SmallValueOverflow { .. }));
   }
 
