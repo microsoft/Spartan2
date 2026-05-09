@@ -36,6 +36,7 @@ pub mod bellpepper;
 pub mod errors;
 pub mod gadgets;
 pub mod provider;
+pub mod small_constraint_system;
 pub mod traits;
 
 // internal modules
@@ -52,6 +53,10 @@ pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_relaxed; // Spartan for relaxed R1CS (non-ZK)
 pub mod spartan_zk; // Spartan with zero-knowledge
+
+/// SHA-256 circuits using the small-value compiler.
+#[allow(missing_docs)]
+pub mod sha256_circuits;
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

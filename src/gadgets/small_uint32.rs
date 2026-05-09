@@ -4,152 +4,167 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! A 32-bit unsigned integer gadget for bounded-coefficient SHA-256 circuits.
+//! SmallUInt32: 32-bit unsigned integer gadget for small-value sumcheck.
+//!
+//! Uses `SmallBoolean` and `SmallConstraintSystem<V>` instead of bellpepper types.
+//! All bit witnesses are 0 or 1 (i8), all coefficients are i32.
+//!
+//! # SHA256 Operations
+//!
+//! | Operation | Constraints |
+//! |-----------|-------------|
+//! | `xor()` | Delegates to SmallBoolean |
+//! | `rotr()` | No constraints - just reorders bits |
+//! | `shr()` | No constraints - inserts zero bits |
+//! | `sha256_ch/maj()` | Uses AND/XOR |
 
-use bellpepper_core::{
-  ConstraintSystem, SynthesisError,
-  boolean::{AllocatedBit, Boolean},
+use bellpepper_core::SynthesisError;
+
+use crate::{
+  gadgets::small_boolean::{Double, NegOne, SmallBit, SmallBoolean},
+  small_constraint_system::SmallConstraintSystem,
 };
-use ff::PrimeField;
 
-/// A 32-bit unsigned integer represented by little-endian Boolean bits.
+/// A 32-bit unsigned integer for circuits with small-value optimization.
 #[derive(Clone, Debug)]
 pub struct SmallUInt32 {
-  bits: [Boolean; 32],
+  /// Little-endian bit representation
+  bits: [SmallBoolean; 32],
+  /// Cached value (if known)
   value: Option<u32>,
 }
 
 impl SmallUInt32 {
-  /// Construct from little-endian bits.
-  pub fn from_bits_le(bits: &[Boolean; 32]) -> Self {
+  /// Construct a `SmallUInt32` from a `SmallBoolean` array.
+  /// Bits are in little-endian order.
+  pub fn from_bits_le(bits: &[SmallBoolean; 32]) -> Self {
     let value = bits.iter().rev().try_fold(0u32, |acc, bit| {
       bit
         .get_value()
         .map(|b| if b { (acc << 1) | 1 } else { acc << 1 })
     });
 
-    Self {
+    SmallUInt32 {
       bits: bits.clone(),
       value,
     }
   }
 
-  /// Construct from big-endian bits.
-  pub fn from_bits_be(bits: &[Boolean; 32]) -> Self {
+  /// Construct a `SmallUInt32` from a `SmallBoolean` array in big-endian order.
+  pub fn from_bits_be(bits: &[SmallBoolean; 32]) -> Self {
     let mut bits_le = bits.clone();
     bits_le.reverse();
     Self::from_bits_le(&bits_le)
   }
 
-  /// Return little-endian bits.
-  pub fn bits_le(&self) -> &[Boolean; 32] {
+  /// Get the bits in little-endian order.
+  pub fn bits_le(&self) -> &[SmallBoolean; 32] {
     &self.bits
   }
 
-  /// Return big-endian bits.
-  pub fn into_bits_be(self) -> [Boolean; 32] {
+  /// Get the bits in big-endian order.
+  pub fn into_bits_be(self) -> [SmallBoolean; 32] {
     let mut bits = self.bits;
     bits.reverse();
     bits
   }
 
-  /// Return the native value when all input bits were known.
+  /// Get the value if known.
   pub fn get_value(&self) -> Option<u32> {
     self.value
   }
 
-  /// Create a constant word.
+  /// Create a constant `SmallUInt32`.
   pub fn constant(value: u32) -> Self {
-    let bits = std::array::from_fn(|i| Boolean::constant((value >> i) & 1 == 1));
-    Self {
+    let bits: [SmallBoolean; 32] =
+      std::array::from_fn(|i| SmallBoolean::constant((value >> i) & 1 == 1));
+
+    SmallUInt32 {
       bits,
       value: Some(value),
     }
   }
 
-  /// Allocate a word as 32 Boolean variables.
-  pub fn alloc<Scalar, CS>(mut cs: CS, value: Option<u32>) -> Result<Self, SynthesisError>
+  /// Allocate a `SmallUInt32` in the constraint system.
+  pub fn alloc<V, CS>(mut cs: CS, value: Option<u32>) -> Result<Self, SynthesisError>
   where
-    Scalar: PrimeField,
-    CS: ConstraintSystem<Scalar>,
+    V: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<V>,
   {
-    let mut bits = [const { Boolean::Constant(false) }; 32];
+    let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, slot) in bits.iter_mut().enumerate() {
-      *slot = Boolean::from(AllocatedBit::alloc(
-        cs.namespace(|| format!("b{i}")),
+      *slot = SmallBoolean::Is(SmallBit::alloc(
+        &mut cs.namespace(|| format!("b{i}")),
         value.map(|v| (v >> i) & 1 == 1),
       )?);
     }
-    Ok(Self { bits, value })
+    Ok(SmallUInt32 { bits, value })
   }
 
-  /// Rotate right by `by` bits.
+  /// Right rotation.
   pub fn rotr(&self, by: usize) -> Self {
     let by = by % 32;
-    let bits = std::array::from_fn(|i| self.bits[(i + by) % 32].clone());
-    Self {
+    let bits: [SmallBoolean; 32] = std::array::from_fn(|i| self.bits[(i + by) % 32].clone());
+
+    SmallUInt32 {
       bits,
       value: self.value.map(|v| v.rotate_right(by as u32)),
     }
   }
 
-  /// Shift right by `by` bits.
+  /// Right shift.
   pub fn shr(&self, by: usize) -> Self {
-    let bits = std::array::from_fn(|i| {
+    let bits: [SmallBoolean; 32] = std::array::from_fn(|i| {
       if i + by < 32 {
         self.bits[i + by].clone()
       } else {
-        Boolean::constant(false)
+        SmallBoolean::Constant(false)
       }
     });
-    Self {
+
+    SmallUInt32 {
       bits,
       value: self.value.map(|v| v >> by),
     }
   }
 
-  /// Bitwise XOR.
-  pub fn xor<Scalar, CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
+  /// XOR with another `SmallUInt32`.
+  pub fn xor<V, CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
   where
-    Scalar: PrimeField,
-    CS: ConstraintSystem<Scalar>,
+    V: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<V>,
   {
-    let mut bits = [const { Boolean::Constant(false) }; 32];
+    let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, (a, b))) in bits
       .iter_mut()
       .zip(self.bits.iter().zip(other.bits.iter()))
       .enumerate()
     {
-      *slot = Boolean::xor(cs.namespace(|| format!("b{i}")), a, b)?;
+      *slot = SmallBoolean::xor(cs.namespace(|| format!("b{i}")).inner, a, b)?;
     }
 
-    Ok(Self {
+    Ok(SmallUInt32 {
       bits,
       value: self.value.and_then(|a| other.value.map(|b| a ^ b)),
     })
   }
 
-  /// SHA-256 choose: `(a & b) ^ (!a & c)`.
-  pub fn sha256_ch<Scalar, CS>(
-    mut cs: CS,
-    a: &Self,
-    b: &Self,
-    c: &Self,
-  ) -> Result<Self, SynthesisError>
+  /// SHA-256 CH function: (a AND b) XOR ((NOT a) AND c)
+  pub fn sha256_ch<V, CS>(mut cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
   where
-    Scalar: PrimeField,
-    CS: ConstraintSystem<Scalar>,
+    V: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<V>,
   {
-    let mut bits = [const { Boolean::Constant(false) }; 32];
+    let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, ((a_bit, b_bit), c_bit))) in bits
       .iter_mut()
       .zip(a.bits.iter().zip(b.bits.iter()).zip(c.bits.iter()))
       .enumerate()
     {
-      *slot = Boolean::sha256_ch(cs.namespace(|| format!("b{i}")), a_bit, b_bit, c_bit)?;
+      *slot = SmallBoolean::sha256_ch(cs.namespace(|| format!("b{i}")).inner, a_bit, b_bit, c_bit)?;
     }
 
-    Ok(Self {
+    Ok(SmallUInt32 {
       bits,
       value: a
         .value
@@ -157,31 +172,30 @@ impl SmallUInt32 {
     })
   }
 
-  /// SHA-256 majority: `(a & b) ^ (a & c) ^ (b & c)`.
-  pub fn sha256_maj<Scalar, CS>(
-    mut cs: CS,
-    a: &Self,
-    b: &Self,
-    c: &Self,
-  ) -> Result<Self, SynthesisError>
+  /// SHA-256 MAJ function: (a AND b) XOR (a AND c) XOR (b AND c)
+  ///
+  /// Optimized identity: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
+  /// This uses 2 AND + 2 XOR per bit instead of 3 AND + 2 XOR.
+  pub fn sha256_maj<V, CS>(mut cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
   where
-    Scalar: PrimeField,
-    CS: ConstraintSystem<Scalar>,
+    V: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<V>,
   {
-    let mut bits = [const { Boolean::Constant(false) }; 32];
+    let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, ((a_bit, b_bit), c_bit))) in bits
       .iter_mut()
       .zip(a.bits.iter().zip(b.bits.iter()).zip(c.bits.iter()))
       .enumerate()
     {
       let mut bit_cs = cs.namespace(|| format!("b{i}"));
-      let t = Boolean::xor(bit_cs.namespace(|| "xor_ab"), a_bit, b_bit)?;
-      let u = Boolean::and(bit_cs.namespace(|| "and_c_t"), c_bit, &t)?;
-      let v = Boolean::and(bit_cs.namespace(|| "and_ab"), a_bit, b_bit)?;
-      *slot = Boolean::xor(bit_cs.namespace(|| "xor_vu"), &v, &u)?;
+      // Optimized: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
+      let t = SmallBoolean::xor(bit_cs.namespace(|| "xor_ab").inner, a_bit, b_bit)?;
+      let u = SmallBoolean::and(bit_cs.namespace(|| "and_c_t").inner, c_bit, &t)?;
+      let v = SmallBoolean::and(bit_cs.namespace(|| "and_ab").inner, a_bit, b_bit)?;
+      *slot = SmallBoolean::xor(bit_cs.namespace(|| "xor_vu").inner, &v, &u)?;
     }
 
-    Ok(Self {
+    Ok(SmallUInt32 {
       bits,
       value: a.value.and_then(|a| {
         b.value
