@@ -6,6 +6,7 @@ use bellpepper_core::{
 use criterion::black_box;
 use ff::Field;
 use spartan2::{
+  bellpepper::r1cs::PrecommittedState,
   gadgets::{SmallUInt32, small_sha256_compression_function},
   neutronnova_zk::{NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaZkSNARK},
   provider::T256HyraxEngine,
@@ -215,12 +216,12 @@ fn main() {
       (proof, prep_elapsed, prove_start.elapsed())
     } else {
       let prep_start = Instant::now();
-      let prep = NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(
-        &pk,
-        &step_circuits,
-        &core_circuit,
-        l0,
-      )
+      let prep = NeutronNovaAccumulatorPrepZkSNARK::<
+        E,
+        i64,
+        <E as Engine>::Scalar,
+        PrecommittedState<E>,
+      >::prep_prove(&pk, &step_circuits, &core_circuit, l0)
       .unwrap();
       let prep_elapsed = prep_start.elapsed();
 

@@ -35,10 +35,11 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
+  small_constraint_system::SmallShapeCS,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
-    circuit::SpartanCircuit,
+    circuit::{SmallSpartanCircuit, SpartanCircuit},
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     snark::{DigestHelperTrait, SpartanDigest},
     transcript::TranscriptEngineTrait,
@@ -54,7 +55,9 @@ use tracing::{debug, info};
 #[path = "small_neutronnova_zk.rs"]
 mod small_neutronnova_zk;
 
-pub use small_neutronnova_zk::NeutronNovaAccumulatorPrepZkSNARK;
+pub use small_neutronnova_zk::{
+  NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaSmallAccumulatorPrepZkSNARK,
+};
 
 type NeutronNovaNIFSOutput<E> = (
   Vec<<E as Engine>::Scalar>,
@@ -87,6 +90,7 @@ fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
   z
 }
 
+#[allow(dead_code)]
 fn prepare_nifs_inputs<E: Engine>(
   Us: &[R1CSInstance<E>],
   Ws: &[R1CSWitness<E>],
@@ -1412,6 +1416,18 @@ pub struct NeutronNovaProverKey<E: Engine> {
   vc_ck: CommitmentKey<E>,
 }
 
+/// Prover key for the native small-value step/core path.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+  serialize = "Coeff: Serialize",
+  deserialize = "Coeff: Deserialize<'de>"
+))]
+pub struct NeutronNovaSmallProverKey<E: Engine, Coeff> {
+  field: NeutronNovaProverKey<E>,
+  S_step_small: SplitR1CSShape<E, Coeff>,
+  S_core_small: SplitR1CSShape<E, Coeff>,
+}
+
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -1520,6 +1536,59 @@ impl<E: Engine> NeutronNovaZkSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
+  fn small_r1cs_shape<C: SmallSpartanCircuit<E, bool, i32>>(
+    circuit: &C,
+  ) -> Result<SplitR1CSShape<E, i32>, SpartanError> {
+    let num_challenges = circuit.num_challenges();
+    if num_challenges != 0 {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "small-value NeutronNova setup only supports zero challenges, got {num_challenges}"
+        ),
+      });
+    }
+
+    let mut cs = SmallShapeCS::<i32>::new();
+    let shared = circuit
+      .shared(&mut cs)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to allocate small shared variables: {e}"),
+      })?;
+    let num_shared = cs.num_vars();
+
+    let precommitted =
+      circuit
+        .precommitted(&mut cs, &shared)
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to allocate small precommitted variables: {e}"),
+        })?;
+    let num_precommitted = cs.num_vars() - num_shared;
+
+    circuit
+      .synthesize(&mut cs, &shared, &precommitted, None)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Unable to synthesize small rest variables: {e}"),
+      })?;
+
+    let num_vars = cs.num_vars();
+    let num_rest = num_vars - num_shared - num_precommitted;
+    let num_public = cs.num_inputs().saturating_sub(1);
+    let num_cons = cs.num_constraints();
+    let (A, B, C) = cs.to_matrices();
+
+    SplitR1CSShape::<E, i32>::new_int(
+      num_cons,
+      num_shared,
+      num_precommitted,
+      num_rest,
+      num_public,
+      num_challenges,
+      A,
+      B,
+      C,
+    )
+  }
+
   /// Sets up the NeutronNova SNARK for a batch of circuits of type `C1` and a single circuit of type `C2`
   ///
   /// # Parameters
@@ -1602,6 +1671,96 @@ where
     vk.S_step.precompute();
     vk.S_core.precompute();
     info!(elapsed_ms = %setup_t.elapsed().as_millis(), "neutronnova_setup");
+    Ok((pk, vk))
+  }
+
+  /// Sets up NeutronNova with native small-value step/core circuits.
+  pub fn setup_small<C1, C2>(
+    step_circuit: &C1,
+    core_circuit: &C2,
+    num_steps: usize,
+  ) -> Result<(NeutronNovaSmallProverKey<E, i32>, NeutronNovaVerifierKey<E>), SpartanError>
+  where
+    C1: SmallSpartanCircuit<E, bool, i32>,
+    C2: SmallSpartanCircuit<E, bool, i32>,
+  {
+    let (_setup_span, setup_t) = start_span!("neutronnova_setup_small");
+
+    let (_r1cs_span, r1cs_t) = start_span!("small_r1cs_shape_generation");
+    debug!("Synthesizing small step circuit");
+    let mut S_step_small = Self::small_r1cs_shape(step_circuit)?;
+    debug!("Finished synthesizing small step circuit");
+
+    debug!("Synthesizing small core circuit");
+    let mut S_core_small = Self::small_r1cs_shape(core_circuit)?;
+    debug!("Finished synthesizing small core circuit");
+
+    SplitR1CSShape::<E, i32>::equalize_int(&mut S_step_small, &mut S_core_small);
+    let S_step = S_step_small.to_field_shape();
+    let S_core = S_core_small.to_field_shape();
+
+    info!(
+      "Small step circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_step.num_shared, S_step.num_precommitted, S_step.num_rest
+    );
+    info!(
+      "Small core circuit's witness sizes: shared = {}, precommitted = {}, rest = {}",
+      S_core.num_shared, S_core.num_precommitted, S_core.num_rest
+    );
+    info!(elapsed_ms = %r1cs_t.elapsed().as_millis(), "small_r1cs_shape_generation");
+
+    let (_ck_span, ck_t) = start_span!("commitment_key_generation");
+    let (ck, vk_ee) = SplitR1CSShape::commitment_key(&[&S_step, &S_core])?;
+    E::PCS::precompute_ck(&ck);
+    info!(elapsed_ms = %ck_t.elapsed().as_millis(), "commitment_key_generation");
+
+    let (_vc_span, vc_t) = start_span!("verifier_circuit_setup");
+    let num_rounds_b = num_steps.next_power_of_two().log_2();
+    let num_vars = S_step.num_shared + S_step.num_precommitted + S_step.num_rest;
+    let num_rounds_x = usize::try_from(S_step.num_cons.ilog2()).unwrap();
+    let num_rounds_y = usize::try_from(num_vars.ilog2()).unwrap() + 1;
+    let vc = NeutronNovaVerifierCircuit::<E>::default(num_rounds_b, num_rounds_x, num_rounds_y, 32);
+    let (vc_shape, vc_ck, vc_vk) =
+      <ShapeCS<E> as MultiRoundSpartanShape<E>>::multiround_r1cs_shape(&vc)?;
+    let vc_shape_regular = vc_shape.to_regular_shape();
+    info!(elapsed_ms = %vc_t.elapsed().as_millis(), "verifier_circuit_setup");
+    E::PCS::precompute_ck(&vc_ck);
+
+    let vk: NeutronNovaVerifierKey<E> = NeutronNovaVerifierKey {
+      ck: ck.clone(),
+      S_step: S_step.clone(),
+      S_core: S_core.clone(),
+      vk_ee,
+      vc_shape: vc_shape.clone(),
+      vc_shape_regular: vc_shape_regular.clone(),
+      vc_ck: vc_ck.clone(),
+      vc_vk: vc_vk.clone(),
+      digest: OnceCell::new(),
+    };
+
+    let vk_digest = vk.digest()?;
+    let field = NeutronNovaProverKey {
+      ck,
+      S_step,
+      S_core,
+      vc_shape,
+      vc_shape_regular,
+      vc_ck,
+      vk_digest,
+    };
+
+    field.S_step.precompute();
+    field.S_core.precompute();
+    vk.S_step.precompute();
+    vk.S_core.precompute();
+
+    let pk = NeutronNovaSmallProverKey {
+      field,
+      S_step_small,
+      S_core_small,
+    };
+
+    info!(elapsed_ms = %setup_t.elapsed().as_millis(), "neutronnova_setup_small");
     Ok((pk, vk))
   }
 
@@ -1915,9 +2074,9 @@ where
     let (_reg_span, reg_t) = start_span!("convert_to_regular_instances");
     let step_instances_regular = step_instances
       .iter()
-      .map(|u| u.to_regular_instance())
+      .map(|u| u.to_regular_field_instance())
       .collect::<Result<Vec<_>, _>>()?;
-    let core_instance_regular = core_instance.to_regular_instance()?;
+    let core_instance_regular = core_instance.to_regular_field_instance()?;
     info!(elapsed_ms = %reg_t.elapsed().as_millis(), "convert_to_regular_instances");
 
     let mut transcript = E::TE::new(b"neutronnova_prove");
@@ -2349,10 +2508,10 @@ where
     }
     let step_instances_regular = step_instances_padded
       .par_iter()
-      .map(|u| u.to_regular_instance())
+      .map(|u| u.to_regular_field_instance())
       .collect::<Result<Vec<_>, _>>()?;
 
-    let core_instance_regular = core_instance.to_regular_instance()?;
+    let core_instance_regular = core_instance.to_regular_field_instance()?;
     info!(elapsed_ms = %convert_t.elapsed().as_millis(), "convert_to_regular_verify");
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
@@ -2528,15 +2687,17 @@ mod tests {
   use super::small_neutronnova_zk::fold_small_value_vectors;
   use super::*;
   use crate::big_num::SmallValueField;
+  use crate::gadgets::SmallBit;
   use crate::lagrange_accumulator::build_accumulators_neutronnova;
   use crate::provider::T256HyraxEngine;
+  use crate::small_constraint_system::{SmallConstraintSystem, SmallLinearCombination};
   use crate::small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial, derive_t1};
   use bellpepper::gadgets::{
     boolean::{AllocatedBit, Boolean},
     num::AllocatedNum,
     sha256::sha256,
   };
-  use bellpepper_core::{ConstraintSystem, SynthesisError};
+  use bellpepper_core::{ConstraintSystem, SynthesisError, Variable};
   use core::marker::PhantomData;
 
   #[derive(Clone, Debug)]
@@ -2549,6 +2710,21 @@ mod tests {
   struct TinyCubicCircuit<E: Engine> {
     x: u64,
     _p: PhantomData<E>,
+  }
+
+  #[derive(Clone, Debug)]
+  struct TinySmallBoolCircuit<E: Engine> {
+    bit: bool,
+    _p: PhantomData<E>,
+  }
+
+  impl<E: Engine> TinySmallBoolCircuit<E> {
+    fn new(bit: bool) -> Self {
+      Self {
+        bit,
+        _p: PhantomData,
+      }
+    }
   }
 
   impl<E: Engine> TinyCubicCircuit<E> {
@@ -2609,6 +2785,61 @@ mod tests {
       _: &mut CS,
       _: &[AllocatedNum<E::Scalar>],
       _: &[AllocatedNum<E::Scalar>],
+      _: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
+      Ok(())
+    }
+  }
+
+  impl<E: Engine> SmallSpartanCircuit<E, bool, i32> for TinySmallBoolCircuit<E> {
+    fn public_values(&self) -> Result<Vec<bool>, SynthesisError> {
+      Ok(vec![false])
+    }
+
+    fn shared<CS: SmallConstraintSystem<bool, i32>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<Variable>, SynthesisError> {
+      Ok(vec![])
+    }
+
+    fn precommitted<CS: SmallConstraintSystem<bool, i32>>(
+      &self,
+      cs: &mut CS,
+      _: &[Variable],
+    ) -> Result<Vec<Variable>, SynthesisError> {
+      let bit = SmallBit::alloc(cs, Some(self.bit))?;
+      let public = cs.alloc_input(|| "public zero", || Ok(false))?;
+      cs.enforce(
+        || "public is zero",
+        SmallLinearCombination::from_variable(public, 1i32),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      cs.enforce(
+        || "dummy zero 0",
+        SmallLinearCombination::zero(),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      cs.enforce(
+        || "dummy zero 1",
+        SmallLinearCombination::zero(),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      Ok(vec![bit.get_variable()])
+    }
+
+    fn num_challenges(&self) -> usize {
+      0
+    }
+
+    fn synthesize<CS: SmallConstraintSystem<bool, i32>>(
+      &self,
+      _: &mut CS,
+      _: &[Variable],
+      _: &[Variable],
       _: Option<&[E::Scalar]>,
     ) -> Result<(), SynthesisError> {
       Ok(())
@@ -2945,15 +3176,25 @@ mod tests {
     snark.verify(&vk, num_circuits).unwrap();
 
     for l0 in [1, ell_b] {
-      let prep =
-        NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(&pk, &circuits, &core, l0).unwrap();
+      let prep = NeutronNovaAccumulatorPrepZkSNARK::<
+        E,
+        i64,
+        <E as Engine>::Scalar,
+        PrecommittedState<E>,
+      >::prep_prove(&pk, &circuits, &core, l0)
+      .unwrap();
       let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
       snark.verify(&vk, num_circuits).unwrap();
     }
 
-    let err = NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(&pk, &circuits, &core, 0)
-      .map(|_| ())
-      .unwrap_err();
+    let err = NeutronNovaAccumulatorPrepZkSNARK::<
+      E,
+      i64,
+      <E as Engine>::Scalar,
+      PrecommittedState<E>,
+    >::prep_prove(&pk, &circuits, &core, 0)
+    .map(|_| ())
+    .unwrap_err();
     assert!(matches!(err, SpartanError::InvalidInputLength { .. }));
   }
 
@@ -2969,10 +3210,38 @@ mod tests {
       .map(|i| TinyCubicCircuit::<E>::new((i + 2) as u64))
       .collect::<Vec<_>>();
 
-    let prep =
-      NeutronNovaAccumulatorPrepZkSNARK::<E, i32>::prep_prove(&pk, &circuits, &core, 1).unwrap();
+    let prep = NeutronNovaAccumulatorPrepZkSNARK::<
+      E,
+      i32,
+      <E as Engine>::Scalar,
+      PrecommittedState<E>,
+    >::prep_prove(&pk, &circuits, &core, 1)
+    .unwrap();
     let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
     snark.verify(&vk, num_circuits).unwrap();
+  }
+
+  #[test]
+  fn test_small_bool_accumulator_routes_verify_l0_cases() {
+    type E = T256HyraxEngine;
+
+    let num_circuits = 3;
+    let proto = TinySmallBoolCircuit::<E>::new(false);
+    let core = TinySmallBoolCircuit::<E>::new(false);
+    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup_small(&proto, &core, num_circuits).unwrap();
+    let circuits = (0..num_circuits)
+      .map(|i| TinySmallBoolCircuit::<E>::new(i % 2 == 1))
+      .collect::<Vec<_>>();
+    let ell_b = num_circuits.next_power_of_two().log_2();
+
+    for l0 in [1, ell_b] {
+      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64>::prep_prove_small(
+        &pk, &circuits, &core, l0,
+      )
+      .unwrap();
+      let (snark, _) = prep.prove_small(&pk, &circuits, &core).unwrap();
+      snark.verify(&vk, num_circuits).unwrap();
+    }
   }
 
   #[test]
@@ -2988,8 +3257,13 @@ mod tests {
       .collect::<Vec<_>>();
 
     for l0 in [3usize, 4usize] {
-      let prep =
-        NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(&pk, &circuits, &core, l0).unwrap();
+      let prep = NeutronNovaAccumulatorPrepZkSNARK::<
+        E,
+        i64,
+        <E as Engine>::Scalar,
+        PrecommittedState<E>,
+      >::prep_prove(&pk, &circuits, &core, l0)
+      .unwrap();
       assert_eq!(prep.l0(), l0);
 
       let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
@@ -3010,8 +3284,13 @@ mod tests {
       TinyCubicCircuit::<E>::new(i32::MAX as u64),
     ];
 
-    let err = NeutronNovaAccumulatorPrepZkSNARK::<E, i32>::prep_prove(&pk, &circuits, &core, 1)
-      .unwrap_err();
+    let err = NeutronNovaAccumulatorPrepZkSNARK::<
+      E,
+      i32,
+      <E as Engine>::Scalar,
+      PrecommittedState<E>,
+    >::prep_prove(&pk, &circuits, &core, 1)
+    .unwrap_err();
 
     match err {
       SpartanError::SmallValueOverflow { context, .. } => {

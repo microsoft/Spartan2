@@ -14,6 +14,7 @@ use crate::{
     R1CSWitness, SparseMatrix, SplitMultiRoundR1CSInstance, SplitMultiRoundR1CSShape,
     SplitR1CSInstance, SplitR1CSShape,
   },
+  small_constraint_system::SmallSatisfyingAssignment,
   traits::{
     Engine,
     circuit::{MultiRoundCircuit, SpartanCircuit},
@@ -22,7 +23,7 @@ use crate::{
   },
 };
 use bellpepper::gadgets::num::AllocatedNum;
-use bellpepper_core::{ConstraintSystem, Index, LinearCombination};
+use bellpepper_core::{ConstraintSystem, Index, LinearCombination, Variable};
 use ff::{Field, PrimeField};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -288,17 +289,30 @@ pub(crate) fn add_constraint<S: PrimeField>(
 
 /// A type that holds the pre-processed state for proving
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct PrecommittedState<E: Engine> {
-  pub(crate) cs: SatisfyingAssignment<E>,
-  pub(crate) shared: Vec<AllocatedNum<E::Scalar>>,
-  pub(crate) precommitted: Vec<AllocatedNum<E::Scalar>>,
+#[serde(bound(
+  serialize = "CS: Serialize, V: Serialize, W: Serialize",
+  deserialize = "CS: Deserialize<'de>, V: Deserialize<'de>, W: Deserialize<'de>"
+))]
+pub struct PrecommittedState<
+  E: Engine,
+  W = <E as Engine>::Scalar,
+  CS = SatisfyingAssignment<E>,
+  V = AllocatedNum<<E as Engine>::Scalar>,
+> {
+  pub(crate) cs: CS,
+  pub(crate) shared: Vec<V>,
+  pub(crate) precommitted: Vec<V>,
   pub(crate) comm_W_shared: Option<Commitment<E>>,
   pub(crate) r_W_shared: Option<Blind<E>>,
   pub(crate) comm_W_precommitted: Option<Commitment<E>>,
   pub(crate) r_W_precommitted: Option<Blind<E>>,
-  pub(crate) W: Vec<E::Scalar>,
+  pub(crate) W: Vec<W>,
 }
+
+#[allow(dead_code)]
+/// Precommitted state for native binary small-value witness generation.
+pub type SmallPrecommittedState<E> =
+  PrecommittedState<E, bool, SmallSatisfyingAssignment<bool>, Variable>;
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   type PrecommittedState = PrecommittedState<E>;
@@ -537,7 +551,13 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   }
 }
 
-impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
+impl<E, W, CS, V> RerandomizationTrait<E> for PrecommittedState<E, W, CS, V>
+where
+  E: Engine,
+  W: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>,
+  CS: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>,
+  V: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>,
+{
   fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
   where
     Self: Sized,
@@ -563,12 +583,18 @@ impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
   }
 }
 
-impl<E: Engine> PrecommittedState<E> {
+impl<E, W, CS, V> PrecommittedState<E, W, CS, V>
+where
+  E: Engine,
+  W: Clone,
+  CS: Clone,
+  V: Clone,
+{
   /// Rerandomize in-place, avoiding a full struct clone when we already own the data.
-  pub fn rerandomize_in_place(
+  pub fn rerandomize_in_place<Coeff>(
     &mut self,
     ck: &CommitmentKey<E>,
-    S: &SplitR1CSShape<E>,
+    S: &SplitR1CSShape<E, Coeff>,
   ) -> Result<(), SpartanError> {
     if let (Some(comm), Some(r_old)) = (&self.comm_W_shared, &self.r_W_shared) {
       let r_new = PCS::<E>::blind(ck, S.num_shared);
@@ -584,10 +610,10 @@ impl<E: Engine> PrecommittedState<E> {
   }
 
   /// Rerandomize in-place, reusing shared commitments from another state.
-  pub fn rerandomize_with_shared_in_place(
+  pub fn rerandomize_with_shared_in_place<Coeff>(
     &mut self,
     ck: &CommitmentKey<E>,
-    S: &SplitR1CSShape<E>,
+    S: &SplitR1CSShape<E, Coeff>,
     comm_W_shared: &Option<Commitment<E>>,
     r_W_shared: &Option<Blind<E>>,
   ) -> Result<(), SpartanError> {

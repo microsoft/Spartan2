@@ -302,6 +302,101 @@ where
     Ok(HyraxCommitment { comm })
   }
 
+  fn commit_bool(
+    ck: &Self::CommitmentKey,
+    v: &[bool],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let n = v.len();
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
+    if r.blind.len() != num_rows {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "commit_bool: blind length {}, expected {}",
+          r.blind.len(),
+          num_rows
+        ),
+      });
+    }
+
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let comm = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let lower = i * num_cols;
+        let upper = (lower + num_cols).min(n);
+        let bits = &v[lower..upper];
+        let blind = h_table.mul(&r.blind[i]);
+
+        if bits.iter().all(|bit| !*bit) {
+          return Ok(E::GE::zero() + blind);
+        }
+
+        let effective_len = bits
+          .iter()
+          .rposition(|bit| *bit)
+          .map(|pos| pos + 1)
+          .unwrap_or(bits.len());
+        let bits = &bits[..effective_len];
+        let msm_result = E::GE::vartime_multiscalar_mul_bool(bits, &ck.ck[..bits.len()], false)?;
+        Ok(msm_result + blind)
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(HyraxCommitment { comm })
+  }
+
+  fn commit_i8(
+    ck: &Self::CommitmentKey,
+    v: &[i8],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let n = v.len();
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
+    if r.blind.len() != num_rows {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "commit_i8: blind length {}, expected {}",
+          r.blind.len(),
+          num_rows
+        ),
+      });
+    }
+
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let comm = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let lower = i * num_cols;
+        let upper = (lower + num_cols).min(n);
+        let scalars = &v[lower..upper];
+        let blind = h_table.mul(&r.blind[i]);
+
+        if scalars.iter().all(|scalar| *scalar == 0) {
+          return Ok(E::GE::zero() + blind);
+        }
+
+        let effective_len = scalars
+          .iter()
+          .rposition(|scalar| *scalar != 0)
+          .map(|pos| pos + 1)
+          .unwrap_or(scalars.len());
+        let scalars = &scalars[..effective_len];
+        let msm_result =
+          E::GE::vartime_multiscalar_mul_signed_i8(scalars, &ck.ck[..scalars.len()], false)?;
+        Ok(msm_result + blind)
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(HyraxCommitment { comm })
+  }
+
   fn commit_zeros(
     ck: &Self::CommitmentKey,
     n: usize,
@@ -871,5 +966,52 @@ where
     }
 
     Ok(HyraxCommitment { comm })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::HyraxPCS;
+  use crate::{provider::T256HyraxEngine, traits::pcs::PCSEngineTrait};
+  use ff::Field;
+
+  type E = T256HyraxEngine;
+  type Scalar = <T256HyraxEngine as crate::traits::Engine>::Scalar;
+
+  #[test]
+  fn commit_bool_matches_field_commit() {
+    let bits = vec![
+      false, true, false, true, true, false, false, true, false, false, true,
+    ];
+    let field = bits
+      .iter()
+      .map(|bit| if *bit { Scalar::ONE } else { Scalar::ZERO })
+      .collect::<Vec<_>>();
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_bool", bits.len(), 4);
+    let blind = HyraxPCS::<E>::blind(&ck, bits.len());
+
+    let comm_bool = HyraxPCS::<E>::commit_bool(&ck, &bits, &blind).unwrap();
+    let comm_field = HyraxPCS::<E>::commit(&ck, &field, &blind, true).unwrap();
+
+    assert_eq!(comm_bool, comm_field);
+  }
+
+  #[test]
+  fn commit_i8_matches_field_commit() {
+    let signed = vec![0i8, 1, -1, 3, -5, 0, 8, -8, 2];
+    let field = signed
+      .iter()
+      .map(|value| {
+        let scalar = Scalar::from(value.unsigned_abs() as u64);
+        if *value < 0 { -scalar } else { scalar }
+      })
+      .collect::<Vec<_>>();
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_i8", signed.len(), 4);
+    let blind = HyraxPCS::<E>::blind(&ck, signed.len());
+
+    let comm_i8 = HyraxPCS::<E>::commit_i8(&ck, &signed, &blind).unwrap();
+    let comm_field = HyraxPCS::<E>::commit(&ck, &field, &blind, false).unwrap();
+
+    assert_eq!(comm_i8, comm_field);
   }
 }

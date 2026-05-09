@@ -409,7 +409,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
     info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
 
     // Compute eval_W = (eval_Z - r_y[0] * eval_X) / (1 - r_y[0]) because Z = (W, 1, X)
-    let U_regular = U.to_regular_instance()?;
+    let U_regular = U.to_regular_field_instance()?;
     let eval_X = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
@@ -476,7 +476,7 @@ impl<E: Engine> R1CSSNARKTrait<E> for SpartanSNARK<E> {
 
     // validate the provided split R1CS instance and convert to regular instance
     self.U.validate(&vk.S, &mut transcript)?;
-    let U_regular = self.U.to_regular_instance()?;
+    let U_regular = self.U.to_regular_field_instance()?;
 
     let num_vars = vk.S.num_shared + vk.S.num_precommitted + vk.S.num_rest;
 

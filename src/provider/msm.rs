@@ -450,6 +450,100 @@ fn msm_binary<C: CurveAffine, T: Integer + Sync>(
   }
 }
 
+/// Multi-scalar multiplication for binary scalars without scalar conversion.
+pub fn msm_bool<C: CurveAffine>(
+  bits: &[bool],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> Result<C::Curve, SpartanError> {
+  if bits.len() != bases.len() {
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM Bool: bits and bases must have the same length".to_string(),
+    });
+  }
+
+  let num_threads = if use_parallelism_internally && bits.len() > 1024 {
+    current_num_threads()
+  } else {
+    1
+  };
+  let process_chunk = |bits: &[bool], bases: &[C]| {
+    bits
+      .iter()
+      .zip(bases.iter())
+      .filter_map(|(bit, base)| if *bit { Some(*base) } else { None })
+      .fold(C::Curve::identity(), |acc, base| {
+        acc.add_mixed_vartime(&base)
+      })
+  };
+
+  let result = if bits.len() > num_threads {
+    let chunk = bits.len().div_ceil(num_threads);
+    bits
+      .par_chunks(chunk)
+      .zip(bases.par_chunks(chunk))
+      .map(|(b, g)| process_chunk(b, g))
+      .reduce(C::Curve::identity, |a, b| a + b)
+  } else {
+    process_chunk(bits, bases)
+  };
+
+  Ok(result)
+}
+
+/// Multi-scalar multiplication for signed i8 scalars without field conversion.
+pub fn msm_signed_i8<C: CurveAffine>(
+  scalars: &[i8],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> Result<C::Curve, SpartanError> {
+  if scalars.len() != bases.len() {
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM signed i8: scalars and bases must have the same length".to_string(),
+    });
+  }
+
+  let num_threads = if use_parallelism_internally && scalars.len() > 1024 {
+    current_num_threads()
+  } else {
+    1
+  };
+  let process_chunk = |scalars: &[i8], bases: &[C]| {
+    let mut buckets = vec![Bucket::<C>::None; i8::MAX as usize];
+    for (scalar, base) in scalars.iter().zip(bases.iter()) {
+      match *scalar {
+        0 => {}
+        v if v > 0 => buckets[v as usize - 1].add_assign(base),
+        v => {
+          let neg_base = -*base;
+          buckets[v.unsigned_abs() as usize - 1].add_assign(&neg_base);
+        }
+      };
+    }
+
+    let mut acc = C::Curve::identity();
+    let mut running_sum = C::Curve::identity();
+    for bucket in buckets.iter().rev() {
+      running_sum = bucket.add_ref(running_sum);
+      acc += &running_sum;
+    }
+    acc
+  };
+
+  let result = if scalars.len() > num_threads {
+    let chunk = scalars.len().div_ceil(num_threads);
+    scalars
+      .par_chunks(chunk)
+      .zip(bases.par_chunks(chunk))
+      .map(|(s, b)| process_chunk(s, b))
+      .reduce(C::Curve::identity, |a, b| a + b)
+  } else {
+    process_chunk(scalars, bases)
+  };
+
+  Ok(result)
+}
+
 /// MSM optimized for up to 10-bit scalars
 #[inline(always)]
 fn msm_10<C: CurveAffine, T: Into<u64> + Zero + Copy + Sync>(

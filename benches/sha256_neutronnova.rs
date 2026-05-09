@@ -16,12 +16,9 @@
 //!   built from `bellpepper::gadgets::sha256::sha256_compression_function`
 //!   (full-field `UInt32`s).
 //! - `AccumulatorMode { l0 }` runs the small-value accumulator prover on a
-//!   SHA-256 circuit built from `small_sha256_compression_function`
-//!   (`SmallUInt32`).
+//!   SHA-256 circuit built directly on `SmallConstraintSystem<bool, i32>`.
 //!
-//! The choice of compression gadget is pinned by the `Sha256Gadget` trait
-//! and threaded through a shared `Sha256StepCircuit<E, G>` /
-//! `Sha256CoreCircuit<E, G>` so neither circuit body is duplicated.
+//! The accumulator path intentionally avoids the Bellpepper bridge.
 
 use rayon::ThreadPool;
 #[cfg(feature = "jem")]
@@ -32,7 +29,7 @@ static GLOBAL: Jemalloc = tikv_jemallocator::Jemalloc;
 
 use bellpepper::gadgets::{sha256::sha256_compression_function, uint32::UInt32};
 use bellpepper_core::{
-  ConstraintSystem, SynthesisError,
+  ConstraintSystem, SynthesisError, Variable,
   boolean::{AllocatedBit, Boolean},
   num::AllocatedNum,
 };
@@ -43,13 +40,19 @@ use criterion::{
 use ff::{Field, PrimeField};
 use spartan2::{
   errors::SpartanError,
-  gadgets::{SmallUInt32, small_sha256_compression_function},
+  gadgets::{
+    NoBatchEq, SmallBit, SmallBoolean, SmallUInt32, small_sha256_compression_function_int,
+  },
   neutronnova_zk::{
-    NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaPrepZkSNARK, NeutronNovaProverKey,
-    NeutronNovaVerifierKey, NeutronNovaZkSNARK,
+    NeutronNovaPrepZkSNARK, NeutronNovaProverKey, NeutronNovaSmallAccumulatorPrepZkSNARK,
+    NeutronNovaSmallProverKey, NeutronNovaVerifierKey, NeutronNovaZkSNARK,
   },
   provider::T256HyraxEngine,
-  traits::{Engine, circuit::SpartanCircuit},
+  small_constraint_system::{SmallConstraintSystem, SmallLinearCombination},
+  traits::{
+    Engine,
+    circuit::{SmallSpartanCircuit, SpartanCircuit},
+  },
 };
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 use tracing_subscriber::EnvFilter;
@@ -76,6 +79,13 @@ const SHA256_IV: [u32; 8] = [
 /// `SmallValueOverflow`. Lifting this requires switching `SV` to a wider
 /// type or shrinking `BatchingEq<K>` in `small_sha256_compression_function`.
 const MAX_L0: usize = 5;
+
+/// Accumulator `l0` values to compare in the benchmark sweep.
+///
+/// These are the useful SHA-256 operating points for the small accumulator:
+/// `l0 = 3` exercises the mixed prefix/suffix path and `l0 = 4` also covers
+/// the full-prefix case for the 1 KiB benchmark, where `ell_b = 4`.
+const BENCH_L0_VALUES: &[usize] = &[3, 4];
 
 // ---------------------------------------------------------------------------
 // Sha256Gadget: the compression-function plug-in point.
@@ -104,28 +114,6 @@ impl<S: PrimeField> Sha256Gadget<S> for FullFieldSha256 {
   ) -> Result<(), SynthesisError> {
     let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
     let _ = sha256_compression_function(
-      cs.namespace(|| "sha256 compression"),
-      input_bits,
-      &current_hash,
-    )?;
-    Ok(())
-  }
-}
-
-/// Small-value SHA-256 (local `small_sha256_compression_function` + `SmallUInt32`).
-#[derive(Clone, Copy, Debug, Default)]
-struct SmallValueSha256;
-
-impl<S: PrimeField> Sha256Gadget<S> for SmallValueSha256 {
-  fn run<CS: ConstraintSystem<S>>(
-    mut cs: CS,
-    input_bits: &[Boolean],
-  ) -> Result<(), SynthesisError> {
-    let current_hash: Vec<SmallUInt32> = SHA256_IV
-      .iter()
-      .map(|&v| SmallUInt32::constant(v))
-      .collect();
-    let _ = small_sha256_compression_function(
       cs.namespace(|| "sha256 compression"),
       input_bits,
       &current_hash,
@@ -259,13 +247,160 @@ impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256Co
   }
 }
 
+#[derive(Clone, Debug)]
+struct SmallSha256StepCircuit<Eng: Engine> {
+  block: [u8; BLOCK_BYTES],
+  _p: PhantomData<Eng>,
+}
+
+impl<Eng: Engine> SmallSha256StepCircuit<Eng> {
+  fn new(block: [u8; BLOCK_BYTES]) -> Self {
+    Self {
+      block,
+      _p: PhantomData,
+    }
+  }
+}
+
+#[derive(Clone, Debug)]
+struct SmallSha256CoreCircuit<Eng: Engine>(PhantomData<Eng>);
+
+impl<Eng: Engine> SmallSha256CoreCircuit<Eng> {
+  fn new() -> Self {
+    Self(PhantomData)
+  }
+}
+
+fn run_small_sha256_compression<CS: SmallConstraintSystem<bool, i32>>(
+  cs: &mut CS,
+  input_bits: &[SmallBoolean],
+) -> Result<(), SynthesisError> {
+  let current_hash = SHA256_IV
+    .iter()
+    .map(|&v| SmallUInt32::constant(v))
+    .collect::<Vec<_>>();
+  let mut eq = NoBatchEq::<bool, i32, _>::new(cs);
+  let _ = small_sha256_compression_function_int::<bool, _>(&mut eq, input_bits, &current_hash)?;
+  Ok(())
+}
+
+fn inputize_small_zero<CS: SmallConstraintSystem<bool, i32>>(
+  cs: &mut CS,
+) -> Result<(), SynthesisError> {
+  let x = cs.alloc(|| "x", || Ok(false))?;
+  let x_public = cs.alloc_input(|| "inputize x", || Ok(false))?;
+  let mut diff = SmallLinearCombination::from_variable(x, 1i32);
+  diff.add_term(x_public, -1i32);
+  cs.enforce(
+    || "x equals public input",
+    diff,
+    SmallLinearCombination::one(1i32),
+    SmallLinearCombination::zero(),
+  );
+  Ok(())
+}
+
+fn alloc_small_block_bits<CS: SmallConstraintSystem<bool, i32>>(
+  cs: &mut CS,
+  block: &[u8; BLOCK_BYTES],
+  label: &'static str,
+) -> Result<Vec<SmallBoolean>, SynthesisError> {
+  block
+    .iter()
+    .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
+    .enumerate()
+    .map(|(i, b)| {
+      SmallBit::alloc(&mut cs.namespace(|| format!("{label} bit {i}")), Some(b))
+        .map(SmallBoolean::Is)
+    })
+    .collect()
+}
+
+impl<Eng: Engine> SmallSpartanCircuit<Eng, bool, i32> for SmallSha256StepCircuit<Eng> {
+  fn public_values(&self) -> Result<Vec<bool>, SynthesisError> {
+    Ok(vec![false])
+  }
+
+  fn shared<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    _: &mut CS,
+  ) -> Result<Vec<Variable>, SynthesisError> {
+    Ok(vec![])
+  }
+
+  fn precommitted<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    cs: &mut CS,
+    _: &[Variable],
+  ) -> Result<Vec<Variable>, SynthesisError> {
+    let input_bits = alloc_small_block_bits(cs, &self.block, "block")?;
+    run_small_sha256_compression(cs, &input_bits)?;
+    inputize_small_zero(cs)?;
+    Ok(vec![])
+  }
+
+  fn num_challenges(&self) -> usize {
+    0
+  }
+
+  fn synthesize<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    _: &mut CS,
+    _: &[Variable],
+    _: &[Variable],
+    _: Option<&[Eng::Scalar]>,
+  ) -> Result<(), SynthesisError> {
+    Ok(())
+  }
+}
+
+impl<Eng: Engine> SmallSpartanCircuit<Eng, bool, i32> for SmallSha256CoreCircuit<Eng> {
+  fn public_values(&self) -> Result<Vec<bool>, SynthesisError> {
+    Ok(vec![false])
+  }
+
+  fn shared<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    _: &mut CS,
+  ) -> Result<Vec<Variable>, SynthesisError> {
+    Ok(vec![])
+  }
+
+  fn precommitted<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    cs: &mut CS,
+    _: &[Variable],
+  ) -> Result<Vec<Variable>, SynthesisError> {
+    let block = [0u8; BLOCK_BYTES];
+    let input_bits = alloc_small_block_bits(cs, &block, "core")?;
+    run_small_sha256_compression(cs, &input_bits)?;
+    inputize_small_zero(cs)?;
+    Ok(vec![])
+  }
+
+  fn num_challenges(&self) -> usize {
+    0
+  }
+
+  fn synthesize<CS: SmallConstraintSystem<bool, i32>>(
+    &self,
+    _: &mut CS,
+    _: &[Variable],
+    _: &[Variable],
+    _: Option<&[Eng::Scalar]>,
+  ) -> Result<(), SynthesisError> {
+    Ok(())
+  }
+}
+
 // ---------------------------------------------------------------------------
 // BenchMode: prover + circuit pairing.
 // ---------------------------------------------------------------------------
 
 trait BenchMode: Send + Sync {
-  type StepCircuit: SpartanCircuit<E> + Clone + Debug + Send + Sync;
-  type CoreCircuit: SpartanCircuit<E> + Clone + Debug + Send + Sync;
+  type ProverKey: Send + Sync;
+  type StepCircuit: Clone + Debug + Send + Sync;
+  type CoreCircuit: Clone + Debug + Send + Sync;
   type Prep: Send;
 
   fn label(&self) -> String;
@@ -273,22 +408,18 @@ trait BenchMode: Send + Sync {
   fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit;
   fn make_core_circuit() -> Self::CoreCircuit;
 
-  fn setup_keypair(num_steps: usize) -> (NeutronNovaProverKey<E>, NeutronNovaVerifierKey<E>) {
-    let step_proto = Self::make_step_circuit([0u8; BLOCK_BYTES]);
-    let core_proto = Self::make_core_circuit();
-    NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap()
-  }
+  fn setup_keypair(num_steps: usize) -> (Self::ProverKey, NeutronNovaVerifierKey<E>);
 
   fn prep_prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError>;
 
   fn prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
     prep: Self::Prep,
@@ -299,6 +430,7 @@ trait BenchMode: Send + Sync {
 struct BaselineMode;
 
 impl BenchMode for BaselineMode {
+  type ProverKey = NeutronNovaProverKey<E>;
   type StepCircuit = Sha256StepCircuit<E, FullFieldSha256>;
   type CoreCircuit = Sha256CoreCircuit<E, FullFieldSha256>;
   type Prep = NeutronNovaPrepZkSNARK<E>;
@@ -315,9 +447,15 @@ impl BenchMode for BaselineMode {
     Sha256CoreCircuit::new()
   }
 
+  fn setup_keypair(num_steps: usize) -> (Self::ProverKey, NeutronNovaVerifierKey<E>) {
+    let step_proto = Self::make_step_circuit([0u8; BLOCK_BYTES]);
+    let core_proto = Self::make_core_circuit();
+    NeutronNovaZkSNARK::<E>::setup(&step_proto, &core_proto, num_steps).unwrap()
+  }
+
   fn prep_prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
@@ -326,7 +464,7 @@ impl BenchMode for BaselineMode {
 
   fn prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
     prep: Self::Prep,
@@ -351,41 +489,48 @@ impl AccumulatorMode {
 }
 
 impl BenchMode for AccumulatorMode {
-  type StepCircuit = Sha256StepCircuit<E, SmallValueSha256>;
-  type CoreCircuit = Sha256CoreCircuit<E, SmallValueSha256>;
-  type Prep = NeutronNovaAccumulatorPrepZkSNARK<E, i64>;
+  type ProverKey = NeutronNovaSmallProverKey<E, i32>;
+  type StepCircuit = SmallSha256StepCircuit<E>;
+  type CoreCircuit = SmallSha256CoreCircuit<E>;
+  type Prep = NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64>;
 
   fn label(&self) -> String {
     format!("l0-{}", self.l0)
   }
 
   fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit {
-    Sha256StepCircuit::new(block)
+    SmallSha256StepCircuit::new(block)
   }
 
   fn make_core_circuit() -> Self::CoreCircuit {
-    Sha256CoreCircuit::new()
+    SmallSha256CoreCircuit::new()
+  }
+
+  fn setup_keypair(num_steps: usize) -> (Self::ProverKey, NeutronNovaVerifierKey<E>) {
+    let step_proto = Self::make_step_circuit([0u8; BLOCK_BYTES]);
+    let core_proto = Self::make_core_circuit();
+    NeutronNovaZkSNARK::<E>::setup_small(&step_proto, &core_proto, num_steps).unwrap()
   }
 
   fn prep_prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
     self.check_l0();
-    NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(pk, steps, core, self.l0)
+    NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64>::prep_prove_small(pk, steps, core, self.l0)
   }
 
   fn prove(
     &self,
-    pk: &NeutronNovaProverKey<E>,
+    pk: &Self::ProverKey,
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
     self.check_l0();
-    prep.prove(pk, steps, core)
+    prep.prove_small(pk, steps, core)
   }
 }
 
@@ -422,12 +567,13 @@ fn build_proof_for_mode<M: BenchMode>(
 }
 
 /// Accumulator `l0` values to bench at `num_steps`.
-///
-/// The cap is `min(ell_b, MAX_L0)` — anything above `MAX_L0` is known to
-/// overflow `vec_to_small_for_extension`, so we skip it a priori instead of
-/// probing at runtime. See `MAX_L0` for the bound math.
 fn accumulator_l0_values(num_steps: usize) -> Vec<usize> {
-  (1..=ell_b_for_steps(num_steps).min(MAX_L0)).collect()
+  let ell_b = ell_b_for_steps(num_steps);
+  BENCH_L0_VALUES
+    .iter()
+    .copied()
+    .filter(|&l0| l0 <= ell_b && l0 <= MAX_L0)
+    .collect()
 }
 
 fn thread_counts() -> Vec<usize> {

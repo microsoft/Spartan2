@@ -285,7 +285,7 @@ impl<W, C, CS: SmallConstraintSystem<W, C>> Drop for SmallNamespace<'_, W, C, CS
 ///
 /// Allocates variables as i8 values (bits 0/1 for SHA-256).
 /// `enforce` is a no-op — constraints are not checked, only witness values recorded.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SmallSatisfyingAssignment<V> {
   pub(crate) input_assignment: Vec<V>,
   pub(crate) aux_assignment: Vec<V>,
