@@ -7,7 +7,7 @@ use criterion::black_box;
 use ff::Field;
 use spartan2::{
   gadgets::{SmallUInt32, small_sha256_compression_function},
-  neutronnova_zk::NeutronNovaZkSNARK,
+  neutronnova_zk::{NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaZkSNARK},
   provider::T256HyraxEngine,
   traits::{Engine, circuit::SpartanCircuit},
 };
@@ -215,7 +215,7 @@ fn main() {
       (proof, prep_elapsed, prove_start.elapsed())
     } else {
       let prep_start = Instant::now();
-      let prep = NeutronNovaZkSNARK::<E>::prep_prove_accumulator_with_l0::<i64>(
+      let prep = NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(
         &pk,
         &step_circuits,
         &core_circuit,
@@ -225,14 +225,7 @@ fn main() {
       let prep_elapsed = prep_start.elapsed();
 
       let prove_start = Instant::now();
-      let (proof, _prep_back) = NeutronNovaZkSNARK::<E>::prove_accumulator_with_l0::<i64>(
-        &pk,
-        &step_circuits,
-        &core_circuit,
-        prep,
-        l0,
-      )
-      .unwrap();
+      let (proof, _prep_back) = prep.prove(&pk, &step_circuits, &core_circuit).unwrap();
       (proof, prep_elapsed, prove_start.elapsed())
     };
 

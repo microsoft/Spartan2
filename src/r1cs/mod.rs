@@ -28,7 +28,6 @@ mod sparse;
 pub(crate) use sparse::FilteredSpmv;
 pub(crate) use sparse::PrecomputedSparseMatrix;
 pub(crate) use sparse::SparseMatrix;
-pub(crate) use sparse::{SmallR1CSCoefs, multiply_vec_small_small_triple};
 
 /// Fused evaluation of three sparse matrices at (T_x, T_y).
 /// Processes all three matrices per row to improve T_y cache reuse.

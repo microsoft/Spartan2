@@ -11,8 +11,8 @@
 
 use super::{
   accumulator::LagrangeAccumulators, csr::Csr, domain::LagrangeIndex,
-  extension::extend_to_lagrange_domain, index::AccumulatorPrefixIndex,
-  thread_state::SpartanThreadState,
+  extension::{bit_rev_prefix_table, extend_to_lagrange_domain, gather_and_extend_prefix},
+  index::AccumulatorPrefixIndex, thread_state::SpartanThreadState,
 };
 use crate::start_span;
 use crate::{
@@ -263,12 +263,16 @@ where
   )
 }
 
-/// Builds the table accumulators used by NeutronNova's full-small NIFS.
+/// Builds the table accumulators used by NeutronNova's small-value NIFS.
 ///
-/// This is intentionally specialized to the `l0 == ell_b` mode: the first
-/// `l0` sumcheck variables are exactly the instance-folding variables, so all
-/// `Az/Bz` layer values can stay in the native small-value domain while the
-/// accumulator collects only the non-Boolean Lagrange contributions.
+/// Handles both modes uniformly:
+/// - **Full-small (`l0 == ell_b`)**: every instance-folding bit lives in the
+///   small-value prefix; the suffix loop degenerates to a single iteration
+///   with weight `F::ONE`.
+/// - **Partial-small (`0 < l0 < ell_b`)**: the first `l0` instance bits go
+///   through the small-value accumulator path; the remaining `ell_b - l0`
+///   suffix bits are summed with their Boolean equality weights from
+///   `rhos[l0..]`.
 pub(crate) fn build_accumulators_neutronnova<F, SV, A, B>(
   a_layers: &[A],
   b_layers: &[B],
@@ -287,176 +291,9 @@ where
   let n = a_layers.len();
   let ell_b = n.trailing_zeros() as usize;
 
-  assert_eq!(
-    l0, ell_b,
-    "build_accumulators_neutronnova requires full-small mode l0 == ell_b. Got l0={}, ell_b={}",
-    l0, ell_b
-  );
-  debug_assert_eq!(rhos.len(), ell_b, "rhos must have length ell_b");
-  debug_assert_eq!(b_layers.len(), n);
-  debug_assert_eq!(e_eq.len(), left + right, "E_eq length mismatch");
-  debug_assert_eq!(a_layers[0].as_ref().len(), left * right);
-
-  let base: usize = 3;
-  let prefix_size = n;
-  let e_b = compute_suffix_eq_pyramid(rhos, l0);
-
-  let e_left = &e_eq[..left];
-  let e_right = &e_eq[left..];
-  let swap_loops = left > right;
-  let outer_dim = if swap_loops { left } else { right };
-  let (e_outer, e_inner) = if swap_loops {
-    (e_left, e_right)
-  } else {
-    (e_right, e_left)
-  };
-
-  let e_cache: Vec<Vec<F>> = e_b
-    .iter()
-    .map(|round_ey| {
-      e_outer
-        .iter()
-        .flat_map(|eo| round_ey.iter().map(|ey| *eo * *ey))
-        .collect()
-    })
-    .collect();
-  let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
-
-  let bit_rev: Vec<usize> = (0..prefix_size)
-    .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
-    .collect();
-  let az_layers_by_prefix: Vec<&[SV]> = bit_rev.iter().map(|&p| a_layers[p].as_ref()).collect();
-  let bz_layers_by_prefix: Vec<&[SV]> = bit_rev.iter().map(|&p| b_layers[p].as_ref()).collect();
-  let ext_size = base.pow(l0 as u32);
-
-  let BetaPrefixCache {
-    cache: beta_prefix_cache,
-    num_betas,
-  } = build_beta_cache::<2>(l0);
-
-  let betas_with_infty: Vec<usize> = (0..num_betas)
-    .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)) % base == 0))
-    .collect();
-
-  type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
-  let process_outer = |state: &mut State<F, SV>, x_outer: usize| {
-    state.reset_partial_sums();
-
-    for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
-      let idx = if swap_loops {
-        x_inner * left + x_outer
-      } else {
-        x_outer * left + x_inner
-      };
-
-      #[allow(clippy::needless_range_loop)]
-      for p in 0..prefix_size {
-        state.az_prefix_boolean_evals[p] = az_layers_by_prefix[p][idx];
-        state.bz_prefix_boolean_evals[p] = bz_layers_by_prefix[p][idx];
-      }
-
-      let az_size = extend_to_lagrange_domain::<SV, 2>(
-        &state.az_prefix_boolean_evals,
-        &mut state.az_extended_evals,
-        &mut state.az_extended_scratch,
-      );
-      let az_ext = &state.az_extended_evals[..az_size];
-
-      let bz_size = extend_to_lagrange_domain::<SV, 2>(
-        &state.bz_prefix_boolean_evals,
-        &mut state.bz_extended_evals,
-        &mut state.bz_extended_scratch,
-      );
-      let bz_ext = &state.bz_extended_evals[..bz_size];
-
-      for &beta_idx in &betas_with_infty {
-        let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
-        F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], &e_inner_val, &prod);
-      }
-    }
-
-    for &beta_idx in &betas_with_infty {
-      let unreduced = &state.partial_sums[beta_idx];
-      if unreduced.is_zero() {
-        continue;
-      }
-      let val = <F as DelayedReduction<SV::Product>>::reduce(unreduced);
-      if val != F::ZERO {
-        state.beta_values.push((beta_idx, val));
-      }
-    }
-
-    for &(beta_idx, ref val) in &state.beta_values {
-      for pref in &beta_prefix_cache[beta_idx] {
-        let round = pref.round_0 as usize;
-        let num_y = num_y_per_round[round];
-        let e_val = e_cache[round][x_outer * num_y + pref.y_idx as usize];
-        <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
-          &mut state.acc.rounds[round].data_mut()[pref.v_idx as usize][pref.u_idx as usize],
-          val,
-          &e_val,
-        );
-      }
-    }
-  };
-
-  if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
-    let mut state = State::<F, SV>::new(l0, num_betas, prefix_size, ext_size);
-    for x_outer in 0..outer_dim {
-      process_outer(&mut state, x_outer);
-    }
-    return state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc));
-  }
-
-  let fold_results: Vec<State<F, SV>> = (0..outer_dim)
-    .into_par_iter()
-    .fold(
-      || State::<F, SV>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<F, SV>, x_outer| {
-        process_outer(&mut state, x_outer);
-        state
-      },
-    )
-    .collect();
-
-  fold_results
-    .into_iter()
-    .reduce(|mut a, b| {
-      a.acc.merge(&b.acc);
-      a
-    })
-    .expect("outer_dim > 0 guarantees non-empty fold results")
-    .acc
-    .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
-}
-
-/// Builds the table accumulators for NeutronNova's partial-small prefix mode.
-///
-/// This specializes the first `l0` instance-folding rounds to the small-value
-/// accumulator path while summing the remaining suffix instance bits with their
-/// Boolean equality weights from `rhos[l0..]`.
-pub(crate) fn build_accumulators_neutronnova_partial<F, SV, A, B>(
-  a_layers: &[A],
-  b_layers: &[B],
-  e_eq: &[F],
-  left: usize,
-  right: usize,
-  rhos: &[F],
-  l0: usize,
-) -> LagrangeAccumulators<F, 2>
-where
-  F: SmallValueEngine<SV>,
-  A: AsRef<[SV]> + Sync,
-  B: AsRef<[SV]> + Sync,
-  SV: SmallValue + Add<Output = SV> + Sub<Output = SV>,
-{
-  let n = a_layers.len();
-  let ell_b = n.trailing_zeros() as usize;
-
-  assert!(l0 > 0, "partial-small mode requires l0 > 0");
   assert!(
-    l0 < ell_b,
-    "build_accumulators_neutronnova_partial requires 0 < l0 < ell_b. Got l0={}, ell_b={}",
+    l0 > 0 && l0 <= ell_b,
+    "build_accumulators_neutronnova requires 0 < l0 <= ell_b. Got l0={}, ell_b={}",
     l0,
     ell_b
   );
@@ -493,9 +330,7 @@ where
     .collect();
   let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
 
-  let bit_rev: Vec<usize> = (0..prefix_size)
-    .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
-    .collect();
+  let bit_rev = bit_rev_prefix_table(l0);
 
   let BetaPrefixCache {
     cache: beta_prefix_cache,
@@ -519,22 +354,23 @@ where
 
       for (suffix_idx, &suffix_weight) in suffix_weights.iter().enumerate() {
         let layer_base = suffix_idx << l0;
-        #[allow(clippy::needless_range_loop)]
-        for p in 0..prefix_size {
-          let layer_idx = layer_base + bit_rev[p];
-          state.az_prefix_boolean_evals[p] = a_layers[layer_idx].as_ref()[idx];
-          state.bz_prefix_boolean_evals[p] = b_layers[layer_idx].as_ref()[idx];
-        }
-
-        let az_size = extend_to_lagrange_domain::<SV, 2>(
-          &state.az_prefix_boolean_evals,
+        let az_size = gather_and_extend_prefix(
+          a_layers,
+          &bit_rev,
+          layer_base,
+          idx,
+          &mut state.az_prefix_boolean_evals,
           &mut state.az_extended_evals,
           &mut state.az_extended_scratch,
         );
         let az_ext = &state.az_extended_evals[..az_size];
 
-        let bz_size = extend_to_lagrange_domain::<SV, 2>(
-          &state.bz_prefix_boolean_evals,
+        let bz_size = gather_and_extend_prefix(
+          b_layers,
+          &bit_rev,
+          layer_base,
+          idx,
+          &mut state.bz_prefix_boolean_evals,
           &mut state.bz_extended_evals,
           &mut state.bz_extended_scratch,
         );
@@ -864,22 +700,36 @@ mod tests {
       })
       .collect();
 
-    let bit_rev: Vec<usize> = (0..n)
-      .map(|p| p.reverse_bits() >> (usize::BITS as usize - l0))
-      .collect();
+    let bit_rev = bit_rev_prefix_table(l0);
     let ext_size = 3usize.pow(l0 as u32);
     let mut a_ext_flat = Vec::with_capacity(num_cons * ext_size);
     let mut b_ext_flat = Vec::with_capacity(num_cons * ext_size);
+    let mut a_prefix = vec![0i32; n];
+    let mut b_prefix = vec![0i32; n];
+    let mut a_buf = Vec::new();
+    let mut a_scratch = Vec::new();
+    let mut b_buf = Vec::new();
+    let mut b_scratch = Vec::new();
 
     for idx in 0..num_cons {
-      let a_prefix: Vec<i32> = bit_rev.iter().map(|&p| a_layers[p][idx]).collect();
-      let b_prefix: Vec<i32> = bit_rev.iter().map(|&p| b_layers[p][idx]).collect();
-      let mut a_buf = Vec::new();
-      let mut a_scratch = Vec::new();
-      let mut b_buf = Vec::new();
-      let mut b_scratch = Vec::new();
-      let a_size = extend_to_lagrange_domain::<i32, 2>(&a_prefix, &mut a_buf, &mut a_scratch);
-      let b_size = extend_to_lagrange_domain::<i32, 2>(&b_prefix, &mut b_buf, &mut b_scratch);
+      let a_size = gather_and_extend_prefix(
+        &a_layers,
+        &bit_rev,
+        0,
+        idx,
+        &mut a_prefix,
+        &mut a_buf,
+        &mut a_scratch,
+      );
+      let b_size = gather_and_extend_prefix(
+        &b_layers,
+        &bit_rev,
+        0,
+        idx,
+        &mut b_prefix,
+        &mut b_buf,
+        &mut b_scratch,
+      );
       assert_eq!(a_size, ext_size);
       assert_eq!(b_size, ext_size);
       a_ext_flat.extend_from_slice(&a_buf[..a_size]);

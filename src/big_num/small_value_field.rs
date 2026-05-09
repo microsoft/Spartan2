@@ -437,7 +437,13 @@ where
   }
 }
 
-/// Convert field elements to small values and enforce the extension-safe bound.
+/// Strictly convert field elements to small values and enforce the extension-safe bound.
+///
+/// Every element must fit the small value type and the
+/// `ExtensionBound::<SV, D>::new(lb)` growth bound. Callers wishing to attach
+/// higher-level context (e.g. which matrix/layer the failing element belongs
+/// to) should wrap the call in a `tracing` span — the failing index is
+/// included in the returned error.
 pub fn vec_to_small_for_extension<F, SV, const D: usize>(
   v: &[F],
   lb: usize,
@@ -446,32 +452,12 @@ where
   F: SmallValueField<SV> + Sync,
   SV: ExtensionSmallValue,
 {
-  vec_to_small_for_extension_with_context::<F, SV, D, _>(v, lb, |i| {
-    format!("vec_to_small_for_extension: value at index {i}")
-  })
-}
-
-/// Strictly convert field elements to small values with caller-provided error context.
-///
-/// Unlike the legacy baseline cache converter, this never substitutes zeroes and
-/// never returns correction positions. Every element must fit the small value
-/// type and the `ExtensionBound::<SV, D>::new(lb)` growth bound.
-pub fn vec_to_small_for_extension_with_context<F, SV, const D: usize, C>(
-  v: &[F],
-  lb: usize,
-  context: C,
-) -> Result<Vec<SV>, SpartanError>
-where
-  F: SmallValueField<SV> + Sync,
-  SV: ExtensionSmallValue,
-  C: Fn(usize) -> String + Sync,
-{
   v.par_iter()
     .enumerate()
     .map(|(i, f)| {
       SV::try_extension_small::<F, D>(lb, f).ok_or_else(|| SpartanError::SmallValueOverflow {
         value: format!("0x{}", hex::encode(f.to_repr().as_ref())),
-        context: format!("{} exceeds bound for D={}, lb={}", context(i), D, lb),
+        context: format!("index {i} exceeds bound for D={D}, lb={lb}"),
       })
     })
     .collect()
@@ -651,10 +637,8 @@ pub(crate) mod tests {
       F::from(max_safe),
       -F::from(max_safe),
     ];
-    let small = vec_to_small_for_extension_with_context::<F, i64, 2, _>(&vals, 3, |idx| {
-      format!("strict test vector index {idx}")
-    })
-    .expect("values within the extension bound fit");
+    let small = vec_to_small_for_extension::<F, i64, 2>(&vals, 3)
+      .expect("values within the extension bound fit");
     assert_eq!(small, vec![0, 7, -7, max_safe as i64, -(max_safe as i64)]);
 
     let too_large = F::from(max_safe + 1);
@@ -662,13 +646,10 @@ pub(crate) mod tests {
       <F as SmallValueField<i64>>::try_field_to_small(&too_large).is_some(),
       "test value should fit i64 before the stricter extension bound is applied"
     );
-    let err = vec_to_small_for_extension_with_context::<F, i64, 2, _>(&[too_large], 3, |idx| {
-      format!("custom Az layer 2 index {idx}")
-    })
-    .unwrap_err();
+    let err = vec_to_small_for_extension::<F, i64, 2>(&[too_large], 3).unwrap_err();
     match err {
       SpartanError::SmallValueOverflow { context, .. } => {
-        assert!(context.contains("custom Az layer 2 index 0"));
+        assert!(context.contains("index 0"));
         assert!(context.contains("D=2"));
         assert!(context.contains("lb=3"));
       }

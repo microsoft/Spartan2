@@ -293,14 +293,6 @@ trait BenchMode: Send + Sync {
     core: &Self::CoreCircuit,
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError>;
-
-  fn bench_nifs(
-    &self,
-    pk: &NeutronNovaProverKey<E>,
-    steps: &[Self::StepCircuit],
-    core: &Self::CoreCircuit,
-    prep: Self::Prep,
-  ) -> Result<Self::Prep, SpartanError>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -340,16 +332,6 @@ impl BenchMode for BaselineMode {
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
     NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true)
-  }
-
-  fn bench_nifs(
-    &self,
-    pk: &NeutronNovaProverKey<E>,
-    steps: &[Self::StepCircuit],
-    core: &Self::CoreCircuit,
-    prep: Self::Prep,
-  ) -> Result<Self::Prep, SpartanError> {
-    NeutronNovaZkSNARK::<E>::bench_nifs(pk, steps, core, prep, true)
   }
 }
 
@@ -392,7 +374,7 @@ impl BenchMode for AccumulatorMode {
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
     self.check_l0();
-    NeutronNovaZkSNARK::<E>::prep_prove_accumulator_with_l0::<i64>(pk, steps, core, self.l0)
+    NeutronNovaAccumulatorPrepZkSNARK::<E, i64>::prep_prove(pk, steps, core, self.l0)
   }
 
   fn prove(
@@ -403,18 +385,7 @@ impl BenchMode for AccumulatorMode {
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
     self.check_l0();
-    NeutronNovaZkSNARK::<E>::prove_accumulator_with_l0::<i64>(pk, steps, core, prep, self.l0)
-  }
-
-  fn bench_nifs(
-    &self,
-    pk: &NeutronNovaProverKey<E>,
-    steps: &[Self::StepCircuit],
-    core: &Self::CoreCircuit,
-    prep: Self::Prep,
-  ) -> Result<Self::Prep, SpartanError> {
-    self.check_l0();
-    NeutronNovaZkSNARK::<E>::bench_accumulator_nifs_with_l0::<i64>(pk, steps, core, prep, self.l0)
+    prep.prove(pk, steps, core)
   }
 }
 
@@ -480,8 +451,8 @@ fn thread_counts() -> Vec<usize> {
 // Criterion bench registration.
 // ---------------------------------------------------------------------------
 
-/// Register the `prep_and_prove`, `prove`, and `nifs_pipeline` benches for one
-/// mode at one (size, threads) cell. The `setup` bench is registered once per
+/// Register the `prep_and_prove` and `prove` benches for one mode at one
+/// (size, threads) cell. The `setup` bench is registered once per
 /// (size, threads) by the caller — it only depends on the circuit shape, not
 /// the prover variant.
 fn register_mode_benches<M: BenchMode + Copy>(
@@ -527,26 +498,6 @@ fn register_mode_benches<M: BenchMode + Copy>(
       |(pk, steps, core, prep)| {
         pool.install(|| {
           let _ = mode.prove(&pk, &steps, &core, prep).unwrap();
-        });
-      },
-      BatchSize::LargeInput,
-    );
-  });
-
-  g.bench_function(format!("nifs_pipeline/{label}/{size}/t{nthreads}"), |b| {
-    b.iter_batched(
-      || {
-        pool.install(|| {
-          let (pk, _vk) = M::setup_keypair(num_steps);
-          let (steps, core) = build_inputs::<M>(num_steps);
-          let prep = mode.prep_prove(&pk, &steps, &core).unwrap();
-          let prep_back = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
-          (pk, steps, core, prep_back)
-        })
-      },
-      |(pk, steps, core, prep)| {
-        pool.install(|| {
-          let _ = mode.bench_nifs(&pk, &steps, &core, prep).unwrap();
         });
       },
       BatchSize::LargeInput,
