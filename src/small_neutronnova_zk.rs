@@ -7,19 +7,16 @@
 //! Small-value accumulator path for NeutronNova's ZK folding scheme.
 
 use super::{
-  MultiRoundState, NeutronNovaNIFS, NeutronNovaNIFSOutput, NeutronNovaProverKey,
-  NeutronNovaSmallProverKey, NeutronNovaZkSNARK, PrepStepArtifacts, build_z, compute_tensor_decomp,
-  suffix_weight_full,
+  MultiRoundState, NeutronNovaNIFS, NeutronNovaNIFSOutput, NeutronNovaSmallProverKey,
+  NeutronNovaZkSNARK, compute_tensor_decomp, suffix_weight_full,
 };
 use crate::{
   CommitmentKey, PCS,
   bellpepper::{
-    r1cs::{MultiRoundSpartanWitness, PrecommittedState, SmallPrecommittedState, SpartanWitness},
+    r1cs::{MultiRoundSpartanWitness, SmallPrecommittedState},
     solver::SatisfyingAssignment,
   },
-  big_num::{
-    DelayedReduction, ExtensionSmallValue, SmallValue, SmallValueField, vec_to_small_for_extension,
-  },
+  big_num::{DelayedReduction, ExtensionSmallValue, SmallValue, SmallValueField},
   errors::SpartanError,
   lagrange_accumulator::{
     build_accumulators_neutronnova, build_accumulators_neutronnova_preextended,
@@ -34,16 +31,16 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{
-    R1CSInstance, R1CSValue, R1CSWitness, SplitMultiRoundR1CSShape, SplitR1CSInstance,
-    SplitR1CSShape, weights_from_r,
+    R1CSInstance, R1CSValue, R1CSWitness, SmallMatVecValue, SplitMultiRoundR1CSShape,
+    SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
-  small_constraint_system::SmallSatisfyingAssignment,
+  small_constraint_system::{SmallCoeff, SmallSatisfyingAssignment},
   small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial, derive_t1},
   start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,
-    circuit::{SmallSpartanCircuit, SpartanCircuit},
+    circuit::SmallSpartanCircuit,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::TranscriptEngineTrait,
   },
@@ -54,7 +51,7 @@ use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, marker::PhantomData};
-use tracing::{info, info_span};
+use tracing::info;
 
 /// Pre-processed state for the accumulator/l0 NIFS proving path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,9 +69,62 @@ pub struct NeutronNovaAccumulatorPrepZkSNARK<E: Engine, SV, W, PS> {
   _p: PhantomData<E>,
 }
 
-/// Small-value accumulator prep state with binary witnesses/public values.
-pub type NeutronNovaSmallAccumulatorPrepZkSNARK<E, SV> =
-  NeutronNovaAccumulatorPrepZkSNARK<E, SV, bool, SmallPrecommittedState<E>>;
+/// Small-value accumulator prep state for typed native small witnesses/public values.
+pub type NeutronNovaSmallAccumulatorPrepZkSNARK<E, SV, W> =
+  NeutronNovaAccumulatorPrepZkSNARK<E, SV, W, SmallPrecommittedState<E, W>>;
+
+/// Witness/public-value type supported by the native small accumulator path.
+pub trait SmallWitnessValue<E>:
+  R1CSValue<E>
+  + Copy
+  + Default
+  + From<bool>
+  + Send
+  + Sync
+  + PartialEq
+  + Eq
+  + Serialize
+  + for<'de> Deserialize<'de>
+where
+  E: Engine,
+{
+  /// Additive identity used for padded witness slots.
+  fn zero() -> Self {
+    Self::from(false)
+  }
+
+  /// Multiplicative identity used for the constant-one slot in `z = (W, 1, X)`.
+  fn one() -> Self {
+    Self::from(true)
+  }
+
+  /// Commit to a native small witness vector using the PCS specialization for this type.
+  fn commit_witness(
+    ck: &CommitmentKey<E>,
+    v: &[Self],
+    r: &<E::PCS as PCSEngineTrait<E>>::Blind,
+  ) -> Result<<E::PCS as PCSEngineTrait<E>>::Commitment, SpartanError>;
+}
+
+impl<E: Engine> SmallWitnessValue<E> for bool {
+  fn commit_witness(
+    ck: &CommitmentKey<E>,
+    v: &[Self],
+    r: &<E::PCS as PCSEngineTrait<E>>::Blind,
+  ) -> Result<<E::PCS as PCSEngineTrait<E>>::Commitment, SpartanError> {
+    PCS::<E>::commit_bool(ck, v, r)
+  }
+}
+
+impl<E: Engine> SmallWitnessValue<E> for i8 {
+  fn commit_witness(
+    ck: &CommitmentKey<E>,
+    v: &[Self],
+    r: &<E::PCS as PCSEngineTrait<E>>::Blind,
+  ) -> Result<<E::PCS as PCSEngineTrait<E>>::Commitment, SpartanError> {
+    PCS::<E>::commit_i8(ck, v, r)
+  }
+}
 
 fn prepare_nifs_inputs_typed<E, X, W>(
   Us: &[R1CSInstance<E, X>],
@@ -127,26 +177,27 @@ where
 }
 
 #[inline]
-fn build_z_small(w: &[bool], x: &[bool]) -> Vec<bool> {
+fn build_z_small<W: Copy + From<bool>>(w: &[W], x: &[W]) -> Vec<W> {
   let mut z = Vec::with_capacity(w.len() + 1 + x.len());
   z.extend_from_slice(w);
-  z.push(true);
+  z.push(W::from(true));
   z.extend_from_slice(x);
   z
 }
 
-fn small_shared_witness<E, C>(
-  S: &SplitR1CSShape<E, i32>,
+fn small_shared_witness<E, W, Coeff, C>(
+  S: &SplitR1CSShape<E, Coeff>,
   ck: &CommitmentKey<E>,
   circuit: &C,
-) -> Result<SmallPrecommittedState<E>, SpartanError>
+) -> Result<SmallPrecommittedState<E, W>, SpartanError>
 where
   E: Engine,
-  C: SmallSpartanCircuit<E, bool, i32>,
+  W: SmallWitnessValue<E>,
+  C: SmallSpartanCircuit<E, W, Coeff>,
 {
-  let mut cs = SmallSatisfyingAssignment::<bool>::new();
+  let mut cs = SmallSatisfyingAssignment::<W>::new();
   let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-  let mut W = vec![false; num_vars];
+  let mut W_vec = vec![W::zero(); num_vars];
 
   let shared = circuit
     .shared(&mut cs)
@@ -158,11 +209,11 @@ where
       reason: "Small shared variables are not allocated correctly".to_string(),
     });
   }
-  W[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
+  W_vec[..S.num_shared_unpadded].copy_from_slice(&cs.aux_assignment[..S.num_shared_unpadded]);
 
   let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
     let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-    let comm_W_shared = PCS::<E>::commit_bool(ck, &W[..S.num_shared], &r_W_shared)?;
+    let comm_W_shared = W::commit_witness(ck, &W_vec[..S.num_shared], &r_W_shared)?;
     (Some(comm_W_shared), Some(r_W_shared))
   } else {
     (None, None)
@@ -176,19 +227,20 @@ where
     r_W_shared,
     comm_W_precommitted: None,
     r_W_precommitted: None,
-    W,
+    W: W_vec,
   })
 }
 
-fn small_precommitted_witness<E, C>(
-  ps: &mut SmallPrecommittedState<E>,
-  S: &SplitR1CSShape<E, i32>,
+fn small_precommitted_witness<E, W, Coeff, C>(
+  ps: &mut SmallPrecommittedState<E, W>,
+  S: &SplitR1CSShape<E, Coeff>,
   ck: &CommitmentKey<E>,
   circuit: &C,
 ) -> Result<(), SpartanError>
 where
   E: Engine,
-  C: SmallSpartanCircuit<E, bool, i32>,
+  W: SmallWitnessValue<E>,
+  C: SmallSpartanCircuit<E, W, Coeff>,
 {
   let precommitted =
     circuit
@@ -209,7 +261,7 @@ where
 
   let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
     let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
-    let comm_W_precommitted = PCS::<E>::commit_bool(
+    let comm_W_precommitted = W::commit_witness(
       ck,
       &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
       &r_W_precommitted,
@@ -225,16 +277,18 @@ where
   Ok(())
 }
 
-fn small_r1cs_instance_and_witness<E, C>(
-  ps: &mut SmallPrecommittedState<E>,
-  S: &SplitR1CSShape<E, i32>,
+fn small_r1cs_instance_and_witness<E, W, Coeff, C>(
+  ps: &mut SmallPrecommittedState<E, W>,
+  S: &SplitR1CSShape<E, Coeff>,
   ck: &CommitmentKey<E>,
   circuit: &C,
+  cached_public_values: Option<&[W]>,
   transcript: &mut E::TE,
-) -> Result<(SplitR1CSInstance<E, bool>, R1CSWitness<E, bool>), SpartanError>
+) -> Result<(SplitR1CSInstance<E, W>, R1CSWitness<E, W>), SpartanError>
 where
   E: Engine,
-  C: SmallSpartanCircuit<E, bool, i32>,
+  W: SmallWitnessValue<E>,
+  C: SmallSpartanCircuit<E, W, Coeff>,
 {
   if S.num_challenges != 0 {
     return Err(SpartanError::InvalidInputLength {
@@ -274,9 +328,9 @@ where
 
   let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
   let comm_W_rest = if S.num_rest_unpadded == 0 {
-    PCS::<E>::commit_bool(ck, &vec![false; S.num_rest], &r_W_rest)?
+    W::commit_witness(ck, &vec![W::zero(); S.num_rest], &r_W_rest)?
   } else {
-    PCS::<E>::commit_bool(
+    W::commit_witness(
       ck,
       &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest],
       &r_W_rest,
@@ -284,17 +338,19 @@ where
   };
   transcript.absorb(b"comm_W_rest", &comm_W_rest);
 
-  let public_values = if skip_synthesize {
+  let public_values = if !skip_synthesize {
+    small_public_values_from_assignment(ps, S)?
+  } else if let Some(public_values) = cached_public_values {
+    public_values.to_vec()
+  } else {
     circuit
       .public_values()
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Small circuit does not provide public IO: {e}"),
       })?
-  } else {
-    ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec()
   };
 
-  let U = SplitR1CSInstance::<E, bool>::new(
+  let U = SplitR1CSInstance::<E, W>::new(
     S,
     ps.comm_W_shared.clone(),
     ps.comm_W_precommitted.clone(),
@@ -314,20 +370,42 @@ where
   let r_W = PCS::<E>::combine_blinds(&blinds)?;
 
   let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
-  let w_vec = std::mem::replace(&mut ps.W, vec![false; num_vars]);
+  let w_vec = std::mem::replace(&mut ps.W, vec![W::zero(); num_vars]);
   ps.W[..S.num_shared_unpadded].copy_from_slice(&ps.cs.aux_assignment[..S.num_shared_unpadded]);
   ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
     &ps.cs.aux_assignment
       [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
   );
 
-  let W = R1CSWitness::<E, bool> {
+  let W = R1CSWitness::<E, W> {
     W: w_vec,
     r_W,
     is_small: true,
   };
 
   Ok((U, W))
+}
+
+fn small_public_values_from_assignment<E, W, Coeff>(
+  ps: &SmallPrecommittedState<E, W>,
+  S: &SplitR1CSShape<E, Coeff>,
+) -> Result<Vec<W>, SpartanError>
+where
+  E: Engine,
+  W: SmallWitnessValue<E>,
+{
+  let end = 1 + S.num_public;
+  ps.cs
+    .input_assignment
+    .get(1..end)
+    .map(|public_values| public_values.to_vec())
+    .ok_or_else(|| SpartanError::SynthesisError {
+      reason: format!(
+        "Small circuit exposed {} public IO values, expected {}",
+        ps.cs.input_assignment.len().saturating_sub(1),
+        S.num_public
+      ),
+    })
 }
 
 impl<E: Engine, SV, W, PS> NeutronNovaAccumulatorPrepZkSNARK<E, SV, W, PS> {
@@ -337,604 +415,15 @@ impl<E: Engine, SV, W, PS> NeutronNovaAccumulatorPrepZkSNARK<E, SV, W, PS> {
   }
 }
 
-impl<E: Engine, SV> NeutronNovaAccumulatorPrepZkSNARK<E, SV, E::Scalar, PrecommittedState<E>>
+impl<E: Engine, SV, W> NeutronNovaSmallAccumulatorPrepZkSNARK<E, SV, W>
 where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<SV> + Sync,
   SV: ExtensionSmallValue,
+  W: SmallWitnessValue<E>,
 {
-  fn validate_l0(
-    pk: &NeutronNovaProverKey<E>,
-    l0: usize,
-    ell_b: usize,
-  ) -> Result<(), SpartanError> {
-    if l0 == 0 || l0 > ell_b {
-      return Err(SpartanError::InvalidInputLength {
-        reason: format!("accumulator l0 ({}) must be in 1..={}", l0, ell_b),
-      });
-    }
-    if !NeutronNovaZkSNARK::<E>::can_cache_step_matvec(pk) {
-      return Err(SpartanError::InvalidInputLength {
-        reason: "accumulator prep requires step circuits without rest/challenge columns".into(),
-      });
-    }
-    Ok(())
-  }
-
-  fn build_small_abc(
-    pk: &NeutronNovaProverKey<E>,
-    ps_step: &[PrecommittedState<E>],
-    step_public_values: &[Vec<E::Scalar>],
-    l0: usize,
-  ) -> Result<SmallAbc<SV>, SpartanError> {
-    let num_instances = ps_step.len();
-    if num_instances == 0 {
-      return Err(SpartanError::InvalidInputLength {
-        reason: "cannot build accumulator cache from empty step batch".into(),
-      });
-    }
-    if step_public_values.len() != num_instances {
-      return Err(SpartanError::InvalidInputLength {
-        reason: format!(
-          "accumulator cache needs {} public-value rows, got {}",
-          num_instances,
-          step_public_values.len()
-        ),
-      });
-    }
-
-    let num_constraints = pk.S_step.num_cons;
-    let rows = (0..num_instances)
-      .into_par_iter()
-      .map(|idx| {
-        let span = info_span!("accumulator_prep", layer = idx);
-        let _enter = span.enter();
-        let prep_ctx = |matrix: &str, e: SpartanError| match e {
-          SpartanError::SmallValueOverflow { value, context } => SpartanError::SmallValueOverflow {
-            value,
-            context: format!("accumulator prep {matrix} layer={idx}: {context}"),
-          },
-          other => other,
-        };
-        let z = build_z::<E>(&ps_step[idx].W, &step_public_values[idx]);
-        let (az, bz, cz) = pk.S_step.multiply_vec(&z)?;
-        let az = info_span!("matrix", name = "Az")
-          .in_scope(|| vec_to_small_for_extension::<E::Scalar, SV, 2>(&az, l0))
-          .map_err(|e| prep_ctx("Az", e))?;
-        let bz = info_span!("matrix", name = "Bz")
-          .in_scope(|| vec_to_small_for_extension::<E::Scalar, SV, 2>(&bz, l0))
-          .map_err(|e| prep_ctx("Bz", e))?;
-        let cz = info_span!("matrix", name = "Cz")
-          .in_scope(|| vec_to_small_for_extension::<E::Scalar, SV, 2>(&cz, l0))
-          .map_err(|e| prep_ctx("Cz", e))?;
-        Ok::<_, SpartanError>((az, bz, cz))
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
-    let mut a = Vec::with_capacity(num_instances * num_constraints);
-    let mut b = Vec::with_capacity(num_instances * num_constraints);
-    let mut c = Vec::with_capacity(num_instances * num_constraints);
-    for (idx, (az, bz, cz)) in rows.into_iter().enumerate() {
-      if az.len() != num_constraints || bz.len() != num_constraints || cz.len() != num_constraints {
-        return Err(SpartanError::InvalidInputLength {
-          reason: format!("accumulator cache row {idx} does not match step constraint count"),
-        });
-      }
-      a.extend(az);
-      b.extend(bz);
-      c.extend(cz);
-    }
-
-    Ok(SmallAbc {
-      l0,
-      num_instances,
-      num_constraints,
-      a,
-      b,
-      c,
-    })
-  }
-
-  /// Prepares the accumulator/l0 proving state.
-  pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
-    pk: &NeutronNovaProverKey<E>,
-    step_circuits: &[C1],
-    core_circuit: &C2,
-    l0: usize,
-  ) -> Result<NeutronNovaAccumulatorPrepZkSNARK<E, SV, E::Scalar, PrecommittedState<E>>, SpartanError>
-  {
-    let ell_b = step_circuits.len().next_power_of_two().log_2();
-    Self::validate_l0(pk, l0, ell_b)?;
-
-    let (_prep_span, prep_t) = start_span!("neutronnova_accumulator_prep_prove");
-    let PrepStepArtifacts {
-      ps_step,
-      ps_core,
-      cached_step_public_values,
-    } =
-      NeutronNovaZkSNARK::<E>::prepare_prep_step_artifacts(pk, step_circuits, core_circuit, true)?;
-    let (_cache_span, cache_t) = start_span!("prep_accumulator_nifs_cache", l0 = l0);
-    let small_abc = Self::build_small_abc(pk, &ps_step, &cached_step_public_values, l0)?;
-    let extended_mle_evals = if l0 == ell_b {
-      Some(build_extended_prefix_mle_evals(&small_abc, l0)?)
-    } else {
-      None
-    };
-    info!(
-      elapsed_ms = %cache_t.elapsed().as_millis(),
-      instances = step_circuits.len(),
-      l0 = l0,
-      "prep_accumulator_nifs_cache"
-    );
-
-    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_accumulator_prep_prove");
-    Ok(NeutronNovaAccumulatorPrepZkSNARK {
-      ps_step,
-      ps_core,
-      small_abc,
-      extended_mle_evals,
-      cached_step_public_values,
-      _p: PhantomData,
-    })
-  }
-
-  /// Proves through the accumulator/l0 NIFS path.
-  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
-    self,
-    pk: &NeutronNovaProverKey<E>,
-    step_circuits: &[C1],
-    core_circuit: &C2,
-  ) -> Result<(NeutronNovaZkSNARK<E>, Self), SpartanError>
-  where
-    E::Scalar: DelayedReduction<SV> + DelayedReduction<SV::Product> + DelayedReduction<E::Scalar>,
-  {
-    let mut prep_snark = self;
-    let l0 = prep_snark.small_abc.l0;
-    let ell_b = step_circuits.len().next_power_of_two().log_2();
-    Self::validate_l0(pk, l0, ell_b)?;
-    let (_prove_span, prove_t) = start_span!("neutronnova_prove");
-
-    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
-    prep_snark
-      .ps_core
-      .rerandomize_in_place(&pk.ck, &pk.S_core)?;
-    let comm_W_shared = prep_snark.ps_core.comm_W_shared.clone();
-    let r_W_shared = prep_snark.ps_core.r_W_shared.clone();
-    prep_snark.ps_step.par_iter_mut().try_for_each(|ps_i| {
-      ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)
-    })?;
-    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
-
-    if prep_snark.cached_step_public_values.len() != step_circuits.len() {
-      return Err(SpartanError::InternalError {
-        reason: format!(
-          "Accumulator cache was computed for {} step circuits, but prove received {}",
-          prep_snark.cached_step_public_values.len(),
-          step_circuits.len()
-        ),
-      });
-    }
-    for (i, circuit) in step_circuits.iter().enumerate() {
-      let current_pv = circuit
-        .public_values()
-        .map_err(|e| SpartanError::SynthesisError {
-          reason: format!("Circuit does not provide public IO: {e}"),
-        })?;
-      if prep_snark.cached_step_public_values[i] != current_pv {
-        return Err(SpartanError::InternalError {
-          reason: format!("Step circuit {i} public values changed between prep_prove and prove"),
-        });
-      }
-    }
-
-    let (_gen_span, gen_t) = start_span!(
-      "generate_instances_witnesses",
-      step_circuits = step_circuits.len()
-    );
-    let (res_steps, res_core) = rayon::join(
-      || {
-        prep_snark
-          .ps_step
-          .par_iter_mut()
-          .zip(step_circuits.par_iter().enumerate())
-          .map(|(pre_state, (i, circuit))| {
-            let mut transcript = E::TE::new(b"neutronnova_prove");
-            transcript.absorb(b"vk", &pk.vk_digest);
-            transcript.absorb(
-              b"num_circuits",
-              &E::Scalar::from(step_circuits.len() as u64),
-            );
-            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-            let public_values =
-              circuit
-                .public_values()
-                .map_err(|e| SpartanError::SynthesisError {
-                  reason: format!("Circuit does not provide public IO: {e}"),
-                })?;
-            transcript.absorb(b"public_values", &public_values.as_slice());
-
-            SatisfyingAssignment::r1cs_instance_and_witness(
-              pre_state,
-              &pk.S_step,
-              &pk.ck,
-              circuit,
-              true,
-              &mut transcript,
-            )
-          })
-          .collect::<Result<Vec<_>, _>>()
-          .map(|pairs| {
-            let (instances, witnesses): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-            (instances, witnesses)
-          })
-      },
-      || {
-        let mut transcript = E::TE::new(b"neutronnova_prove");
-        transcript.absorb(b"vk", &pk.vk_digest);
-        let public_values_core =
-          core_circuit
-            .public_values()
-            .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Core circuit does not provide public IO: {e}"),
-            })?;
-        transcript.absorb(b"public_values", &public_values_core.as_slice());
-        SatisfyingAssignment::r1cs_instance_and_witness(
-          &mut prep_snark.ps_core,
-          &pk.S_core,
-          &pk.ck,
-          core_circuit,
-          true,
-          &mut transcript,
-        )
-      },
-    );
-
-    let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
-    info!(
-      elapsed_ms = %gen_t.elapsed().as_millis(),
-      step_circuits = step_circuits.len(),
-      "generate_instances_witnesses"
-    );
-
-    let (_reg_span, reg_t) = start_span!("convert_to_regular_instances");
-    let step_instances_regular = step_instances
-      .iter()
-      .map(|u| u.to_regular_field_instance())
-      .collect::<Result<Vec<_>, _>>()?;
-    let core_instance_regular = core_instance.to_regular_field_instance()?;
-    info!(elapsed_ms = %reg_t.elapsed().as_millis(), "convert_to_regular_instances");
-
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &pk.vk_digest);
-    transcript.absorb(b"core_instance", &core_instance_regular);
-
-    let n_padded = step_instances_regular.len().next_power_of_two();
-    let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
-    let num_rounds_b = n_padded.log_2();
-    let num_rounds_x = pk.S_step.num_cons.log_2();
-    let num_rounds_y = num_vars.log_2() + 1;
-
-    let mut vc = NeutronNovaVerifierCircuit::<E>::default(
-      num_rounds_b,
-      num_rounds_x,
-      num_rounds_y,
-      pk.vc_shape.commitment_width,
-    );
-    let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
-
-    let (_nifs_span, nifs_t) = start_span!("NIFS");
-    let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) =
-      NeutronNovaNIFS::<E>::prove_accumulator_with_l0::<SV, E::Scalar, E::Scalar>(
-        &pk.S_step,
-        &pk.ck,
-        step_instances_regular,
-        step_witnesses,
-        &prep_snark.small_abc,
-        prep_snark.extended_mle_evals.as_ref(),
-        &mut vc,
-        &mut vc_state,
-        &pk.vc_shape,
-        &pk.vc_ck,
-        &mut transcript,
-        l0,
-      )?;
-    info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
-
-    let (_tensor_span, tensor_t) = start_span!("compute_tensor_and_poly_tau");
-    let (_ell, left, _right) = compute_tensor_decomp(pk.S_step.num_cons);
-    let mut E1 = E_eq;
-    let E2 = E1.split_off(left);
-
-    let mut poly_tau_left = MultilinearPolynomial::new(E1);
-    let poly_tau_right = MultilinearPolynomial::new(E2);
-
-    info!(elapsed_ms = %tensor_t.elapsed().as_millis(), "compute_tensor_and_poly_tau");
-
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az_step, mut poly_Bz_step, mut poly_Cz_step) = (
-      MultilinearPolynomial::new(Az_step),
-      MultilinearPolynomial::new(Bz_step),
-      MultilinearPolynomial::new(Cz_step),
-    );
-
-    let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
-      let (_core_span, core_t) = start_span!("compute_core_polys");
-      let z = [
-        core_witness.W.clone(),
-        vec![E::Scalar::ONE],
-        core_instance.public_values.clone(),
-        core_instance.challenges.clone(),
-      ]
-      .concat();
-
-      let (Az, Bz, Cz) = pk.S_core.multiply_vec(&z)?;
-      info!(elapsed_ms = %core_t.elapsed().as_millis(), "compute_core_polys");
-      (
-        MultilinearPolynomial::new(Az),
-        MultilinearPolynomial::new(Bz),
-        MultilinearPolynomial::new(Cz),
-      )
-    };
-
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-    let outer_start_index = num_rounds_b + 1;
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck_batched");
-    let r_x = SumcheckProof::<E>::prove_cubic_with_additive_term_batched_zk(
-      num_rounds_x,
-      &mut poly_tau_left,
-      &poly_tau_right,
-      &mut poly_Az_step,
-      &mut poly_Az_core,
-      &mut poly_Bz_step,
-      &mut poly_Bz_core,
-      &mut poly_Cz_step,
-      &mut poly_Cz_core,
-      &mut vc,
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &mut transcript,
-      outer_start_index,
-    )?;
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck_batched");
-    vc.claim_Az_step = poly_Az_step[0];
-    vc.claim_Bz_step = poly_Bz_step[0];
-    vc.claim_Cz_step = poly_Cz_step[0];
-    vc.claim_Az_core = poly_Az_core[0];
-    vc.claim_Bz_core = poly_Bz_core[0];
-    vc.claim_Cz_core = poly_Cz_core[0];
-    vc.tau_at_rx = poly_tau_left[0];
-
-    let chals = SatisfyingAssignment::<E>::process_round(
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &vc,
-      outer_start_index + num_rounds_x,
-      &mut transcript,
-    )?;
-    let r = chals[0];
-
-    let claim_inner_joint_step = vc.claim_Az_step + r * vc.claim_Bz_step + r * r * vc.claim_Cz_step;
-    let claim_inner_joint_core = vc.claim_Az_core + r * vc.claim_Bz_core + r * r * vc.claim_Cz_core;
-
-    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
-    let evals_rx = EqPolynomial::evals_from_points(&r_x);
-    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
-
-    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (poly_ABC_step, step_lo_eff, step_hi_eff) =
-      pk.S_step.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
-    let (poly_ABC_core, core_lo_eff, core_hi_eff) =
-      pk.S_core.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
-    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
-
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck_batched");
-    let (z_folded_vec, z_folded_lo, z_folded_hi) = {
-      let mut v = vec![E::Scalar::ZERO; num_vars * 2];
-      let w_len = folded_W.W.len();
-      v[..w_len].copy_from_slice(&folded_W.W);
-      v[w_len] = E::Scalar::ONE;
-      let x_len = folded_U.X.len();
-      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&folded_U.X);
-      let last_nz = w_len + 1 + x_len;
-      (v, last_nz.min(num_vars), last_nz.saturating_sub(num_vars))
-    };
-    let (z_core_vec, z_core_lo, z_core_hi) = {
-      let mut v = vec![E::Scalar::ZERO; num_vars * 2];
-      let w_len = core_witness.W.len();
-      v[..w_len].copy_from_slice(&core_witness.W);
-      v[w_len] = E::Scalar::ONE;
-      let x_len = core_instance_regular.X.len();
-      v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.X);
-      let last_nz = w_len + 1 + x_len;
-      (v, last_nz.min(num_vars), last_nz.saturating_sub(num_vars))
-    };
-
-    let step_hi_eff = step_hi_eff.max(z_folded_hi);
-    let core_hi_eff = core_hi_eff.max(z_core_hi);
-
-    let (r_y, evals) = SumcheckProof::<E>::prove_quad_batched_zk(
-      &[claim_inner_joint_step, claim_inner_joint_core],
-      num_rounds_y,
-      &mut MultilinearPolynomial::new_with_halves(poly_ABC_step, step_lo_eff, step_hi_eff),
-      &mut MultilinearPolynomial::new_with_halves(poly_ABC_core, core_lo_eff, core_hi_eff),
-      &mut MultilinearPolynomial::new_with_halves(z_folded_vec, z_folded_lo, z_folded_hi),
-      &mut MultilinearPolynomial::new_with_halves(z_core_vec, z_core_lo, z_core_hi),
-      &mut vc,
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &mut transcript,
-      outer_start_index + num_rounds_x + 1,
-    )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck_batched");
-
-    let eval_Z_step = evals[2];
-    let eval_Z_core = evals[3];
-
-    let eval_X_step = {
-      let X = vec![E::Scalar::ONE]
-        .into_iter()
-        .chain(folded_U.X.iter().cloned())
-        .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
-      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
-    };
-    let eval_X_core = {
-      let X = vec![E::Scalar::ONE]
-        .into_iter()
-        .chain(core_instance_regular.X.iter().cloned())
-        .collect::<Vec<E::Scalar>>();
-      let num_vars_log2 = usize::try_from(num_vars.ilog2()).unwrap();
-      SparsePolynomial::new(num_vars_log2, X).evaluate(&r_y[1..])
-    };
-    let inv: Option<E::Scalar> = (E::Scalar::ONE - r_y[0]).invert().into();
-    let one_minus_ry0_inv = inv.ok_or(SpartanError::DivisionByZero)?;
-    let eval_W_step = (eval_Z_step - r_y[0] * eval_X_step) * one_minus_ry0_inv;
-    let eval_W_core = (eval_Z_core - r_y[0] * eval_X_core) * one_minus_ry0_inv;
-
-    vc.eval_W_step = eval_W_step;
-    vc.eval_W_core = eval_W_core;
-    vc.eval_X_step = eval_X_step;
-    vc.eval_X_core = eval_X_core;
-
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &vc,
-      outer_start_index + num_rounds_x + 1 + num_rounds_y,
-      &mut transcript,
-    )?;
-
-    let eval_w_step_commit_round = outer_start_index + num_rounds_x + 1 + num_rounds_y + 1;
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &vc,
-      eval_w_step_commit_round,
-      &mut transcript,
-    )?;
-
-    let _ = SatisfyingAssignment::<E>::process_round(
-      &mut vc_state,
-      &pk.vc_shape,
-      &pk.vc_ck,
-      &vc,
-      eval_w_step_commit_round + 1,
-      &mut transcript,
-    )?;
-
-    let (U_verifier, W_verifier) =
-      SatisfyingAssignment::<E>::finalize_multiround_witness(&mut vc_state, &pk.vc_shape)?;
-
-    let U_verifier_regular = U_verifier.to_regular_instance()?;
-
-    let (random_U, random_W) = pk
-      .vc_shape_regular
-      .sample_random_instance_witness(&pk.vc_ck)?;
-    let (nifs, folded_W_verifier, folded_u, folded_X) = NovaNIFS::<E>::prove(
-      &pk.vc_ck,
-      &pk.vc_shape_regular,
-      &random_U,
-      &random_W,
-      &U_verifier_regular,
-      &W_verifier,
-      &mut transcript,
-    )?;
-
-    let relaxed_snark = crate::spartan_relaxed::RelaxedR1CSSpartanProof::prove(
-      &pk.vc_shape_regular,
-      &pk.vc_ck,
-      &folded_u,
-      &folded_X,
-      &folded_W_verifier,
-      &mut transcript,
-    )?;
-    let comm_eval_W_step = U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
-    let blind_eval_W_step = vc_state.r_w_per_round[eval_w_step_commit_round].clone();
-
-    let comm_eval_W_core = U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone();
-    let blind_eval_W_core = vc_state.r_w_per_round[eval_w_step_commit_round + 1].clone();
-
-    let c_eval = transcript.squeeze(b"c_eval")?;
-
-    let (_fold_eval_span, fold_eval_t) = start_span!("fold_evaluation_claims");
-    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      &[folded_U.comm_W, core_instance_regular.comm_W],
-      &[E::Scalar::ONE, c_eval],
-    )?;
-    let blind = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
-      &[folded_W.r_W.clone(), core_witness.r_W.clone()],
-      &[E::Scalar::ONE, c_eval],
-    )?;
-    let W = folded_W
-      .W
-      .par_iter()
-      .zip(core_witness.W.par_iter())
-      .map(|(w1, w2)| *w1 + c_eval * *w2)
-      .collect::<Vec<_>>();
-    let comm_eval = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      &[comm_eval_W_step, comm_eval_W_core],
-      &[E::Scalar::ONE, c_eval],
-    )?;
-    let blind_eval = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
-      &[blind_eval_W_step, blind_eval_W_core],
-      &[E::Scalar::ONE, c_eval],
-    )?;
-    info!(elapsed_ms = %fold_eval_t.elapsed().as_millis(), "fold_evaluation_claims");
-
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let eval_arg = E::PCS::prove(
-      &pk.ck,
-      &pk.vc_ck,
-      &mut transcript,
-      &comm,
-      &W,
-      &blind,
-      &r_y[1..],
-      &comm_eval,
-      &blind_eval,
-    )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
-    let comm_W_shared = step_instances.first().and_then(|u| u.comm_W_shared.clone());
-    let step_instances = step_instances
-      .into_iter()
-      .map(|mut u| {
-        u.comm_W_shared = None;
-        u
-      })
-      .collect::<Vec<_>>();
-    let mut core_instance = core_instance;
-    core_instance.comm_W_shared = None;
-
-    let result = NeutronNovaZkSNARK {
-      comm_W_shared,
-      step_instances,
-      core_instance,
-      eval_arg,
-      U_verifier,
-      nifs,
-      random_U,
-      relaxed_snark,
-    };
-
-    info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_prove");
-    Ok((result, prep_snark))
-  }
-}
-
-impl<E: Engine> NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64>
-where
-  E::PCS: FoldingEngineTrait<E>,
-  E::Scalar: SmallValueField<i64> + Sync,
-{
-  fn validate_l0_small(
-    pk: &NeutronNovaSmallProverKey<E, i32>,
+  fn validate_l0_small<Coeff>(
+    pk: &NeutronNovaSmallProverKey<E, Coeff>,
     l0: usize,
     ell_b: usize,
   ) -> Result<(), SpartanError> {
@@ -952,12 +441,17 @@ where
     Ok(())
   }
 
-  fn build_small_abc_small(
-    pk: &NeutronNovaSmallProverKey<E, i32>,
-    ps_step: &[SmallPrecommittedState<E>],
-    step_public_values: &[Vec<bool>],
+  fn build_small_abc_small<Coeff>(
+    pk: &NeutronNovaSmallProverKey<E, Coeff>,
+    ps_step: &[SmallPrecommittedState<E, W>],
+    step_public_values: &[Vec<W>],
     l0: usize,
-  ) -> Result<SmallAbc<i64>, SpartanError> {
+  ) -> Result<SmallAbc<SV>, SpartanError>
+  where
+    Coeff: SmallCoeff,
+    W: SmallMatVecValue<Coeff, SV>,
+    SV: std::ops::Add<Output = SV>,
+  {
     let num_instances = ps_step.len();
     if num_instances == 0 {
       return Err(SpartanError::InvalidInputLength {
@@ -979,7 +473,7 @@ where
       .into_par_iter()
       .map(|idx| {
         let z = build_z_small(&ps_step[idx].W, &step_public_values[idx]);
-        pk.S_step_small.multiply_vec_bool_i64(&z)
+        pk.S_step_small.multiply_vec_small::<W, SV>(&z)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
@@ -1008,15 +502,18 @@ where
   }
 
   /// Prepares the native small-value accumulator proving state.
-  pub fn prep_prove_small<C1, C2>(
-    pk: &NeutronNovaSmallProverKey<E, i32>,
+  pub fn prep_prove_small<C1, C2, Coeff>(
+    pk: &NeutronNovaSmallProverKey<E, Coeff>,
     step_circuits: &[C1],
     core_circuit: &C2,
     l0: usize,
-  ) -> Result<NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64>, SpartanError>
+  ) -> Result<Self, SpartanError>
   where
-    C1: SmallSpartanCircuit<E, bool, i32>,
-    C2: SmallSpartanCircuit<E, bool, i32>,
+    Coeff: SmallCoeff,
+    W: SmallMatVecValue<Coeff, SV>,
+    SV: std::ops::Add<Output = SV>,
+    C1: SmallSpartanCircuit<E, W, Coeff>,
+    C2: SmallSpartanCircuit<E, W, Coeff>,
   {
     let ell_b = step_circuits.len().next_power_of_two().log_2();
     Self::validate_l0_small(pk, l0, ell_b)?;
@@ -1081,16 +578,19 @@ where
   }
 
   /// Proves through the native small-value accumulator path.
-  pub fn prove_small<C1, C2>(
+  pub fn prove_small<C1, C2, Coeff>(
     self,
-    pk: &NeutronNovaSmallProverKey<E, i32>,
+    pk: &NeutronNovaSmallProverKey<E, Coeff>,
     step_circuits: &[C1],
     core_circuit: &C2,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self), SpartanError>
   where
-    C1: SmallSpartanCircuit<E, bool, i32>,
-    C2: SmallSpartanCircuit<E, bool, i32>,
-    E::Scalar: DelayedReduction<i64> + DelayedReduction<i128> + DelayedReduction<E::Scalar>,
+    Coeff: SmallCoeff,
+    W: SmallMatVecValue<Coeff, SV>,
+    SV: std::ops::Add<Output = SV>,
+    C1: SmallSpartanCircuit<E, W, Coeff>,
+    C2: SmallSpartanCircuit<E, W, Coeff>,
+    E::Scalar: DelayedReduction<SV> + DelayedReduction<SV::Product> + DelayedReduction<E::Scalar>,
   {
     let mut prep_snark = self;
     let l0 = prep_snark.small_abc.l0;
@@ -1141,6 +641,7 @@ where
       "generate_small_instances_witnesses",
       step_circuits = step_circuits.len()
     );
+    let cached_step_public_values = &prep_snark.cached_step_public_values;
     let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
@@ -1156,12 +657,7 @@ where
             );
             transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
 
-            let public_values =
-              circuit
-                .public_values()
-                .map_err(|e| SpartanError::SynthesisError {
-                  reason: format!("Small circuit does not provide public IO: {e}"),
-                })?;
+            let public_values = &cached_step_public_values[i];
             let public_values_field = public_values
               .iter()
               .copied()
@@ -1174,6 +670,7 @@ where
               &pk.S_step_small,
               &field_pk.ck,
               circuit,
+              Some(public_values.as_slice()),
               &mut transcript,
             )
           })
@@ -1203,6 +700,7 @@ where
           &pk.S_core_small,
           &field_pk.ck,
           core_circuit,
+          Some(public_values_core.as_slice()),
           &mut transcript,
         )
       },
@@ -1245,7 +743,7 @@ where
 
     let (_nifs_span, nifs_t) = start_span!("NIFS");
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) =
-      NeutronNovaNIFS::<E>::prove_accumulator_with_l0::<i64, bool, bool>(
+      NeutronNovaNIFS::<E>::prove_accumulator_with_l0::<SV, W, W>(
         &field_pk.S_step,
         &field_pk.ck,
         step_instances_regular,
@@ -1280,11 +778,11 @@ where
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
       let (_core_span, core_t) = start_span!("compute_small_core_polys");
       let z = build_z_small(&core_witness.W, &core_instance.public_values);
-      let (Az, Bz, Cz) = pk.S_core_small.multiply_vec_bool_i64(&z)?;
-      let to_field = |values: Vec<i64>| {
+      let (Az, Bz, Cz) = pk.S_core_small.multiply_vec_small::<W, SV>(&z)?;
+      let to_field = |values: Vec<SV>| {
         values
           .into_iter()
-          .map(<E::Scalar as SmallValueField<i64>>::small_to_field)
+          .map(<E::Scalar as SmallValueField<SV>>::small_to_field)
           .collect::<Vec<_>>()
       };
       info!(elapsed_ms = %core_t.elapsed().as_millis(), "compute_small_core_polys");
@@ -1364,8 +862,8 @@ where
     let (z_core_vec, z_core_lo, z_core_hi) = {
       let mut v = vec![E::Scalar::ZERO; num_vars * 2];
       let w_len = core_witness.W.len();
-      for (dst, bit) in v[..w_len].iter_mut().zip(core_witness.W.iter()) {
-        *dst = <bool as R1CSValue<E>>::to_scalar(*bit);
+      for (dst, value) in v[..w_len].iter_mut().zip(core_witness.W.iter()) {
+        *dst = R1CSValue::<E>::to_scalar(*value);
       }
       v[w_len] = E::Scalar::ONE;
       let x_len = core_instance_regular.X.len();
@@ -1497,7 +995,7 @@ where
       .W
       .par_iter()
       .zip(core_witness.W.par_iter())
-      .map(|(w1, w2)| if *w2 { *w1 + c_eval } else { *w1 })
+      .map(|(w1, w2)| *w1 + c_eval * R1CSValue::<E>::to_scalar(*w2))
       .collect::<Vec<_>>();
     let comm_eval = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &[comm_eval_W_step, comm_eval_W_core],
@@ -1549,9 +1047,9 @@ impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  fn prove_neutronnova_small_value_sumcheck<SV, A, B>(
-    a_layers: &[A],
-    b_layers: &[B],
+  fn prove_neutronnova_small_value_sumcheck<SV, Layer>(
+    a_layers: &[Layer],
+    b_layers: &[Layer],
     preextended_ab: Option<(&[SV], &[SV])>,
     e_eq: &[E::Scalar],
     left: usize,
@@ -1577,8 +1075,7 @@ where
       + DelayedReduction<SV>
       + DelayedReduction<SV::Product>
       + DelayedReduction<E::Scalar>,
-    A: AsRef<[SV]> + Sync,
-    B: AsRef<[SV]> + Sync,
+    Layer: AsRef<[SV]> + Sync,
     SV: SmallValue,
   {
     let ell_b = rhos.len();
@@ -1703,7 +1200,7 @@ where
     );
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
-    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck::<SV, _, _>(
+    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck::<SV, _>(
       &a_small,
       &b_small,
       preextended_ab,
@@ -1745,169 +1242,6 @@ where
 
     info!(elapsed_ms = %nifs_total_t.elapsed().as_millis(), "nifs_prove");
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
-  }
-
-  fn continue_neutronnova_field_sumcheck(
-    a_layers: &mut Vec<Vec<E::Scalar>>,
-    b_layers: &mut Vec<Vec<E::Scalar>>,
-    c_layers: &mut Vec<Vec<E::Scalar>>,
-    e_eq: &[E::Scalar],
-    left: usize,
-    right: usize,
-    rhos: &[E::Scalar],
-    start_round: usize,
-    r_bs: &mut Vec<E::Scalar>,
-    t_cur: &mut E::Scalar,
-    acc_eq: &mut E::Scalar,
-    vc: &mut NeutronNovaVerifierCircuit<E>,
-    vc_state: &mut MultiRoundState<E>,
-    vc_shape: &SplitMultiRoundR1CSShape<E>,
-    vc_ck: &CommitmentKey<E>,
-    transcript: &mut E::TE,
-  ) -> Result<(), SpartanError>
-  where
-    E::Scalar: DelayedReduction<E::Scalar>,
-  {
-    let ell_b = rhos.len();
-    let mut m = a_layers.len();
-    if start_round >= ell_b {
-      return Ok(());
-    }
-
-    {
-      let pairs = m / 2;
-      let (e0, quad_coeff) = a_layers[..2 * pairs]
-        .par_chunks(2)
-        .zip(b_layers[..2 * pairs].par_chunks(2))
-        .zip(c_layers[..2 * pairs].par_chunks(2))
-        .enumerate()
-        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
-          let (e0, quad_coeff) = Self::prove_helper(
-            start_round,
-            (left, right),
-            e_eq,
-            &pair_a[0],
-            &pair_b[0],
-            &pair_c[0],
-            &pair_a[1],
-            &pair_b[1],
-          );
-          let w = suffix_weight_full::<E::Scalar>(start_round, ell_b, pair_idx, rhos);
-          (e0 * w, quad_coeff * w)
-        })
-        .reduce(
-          || (E::Scalar::ZERO, E::Scalar::ZERO),
-          |a, b| (a.0 + b.0, a.1 + b.1),
-        );
-
-      let r_b = finish_field_sumcheck_round::<E>(
-        start_round,
-        e0,
-        quad_coeff,
-        rhos,
-        r_bs,
-        t_cur,
-        acc_eq,
-        vc,
-        vc_state,
-        vc_shape,
-        vc_ck,
-        transcript,
-      )?;
-
-      if start_round + 1 == ell_b {
-        fold_final_abc_pairs::<E>(a_layers, b_layers, c_layers, pairs, r_b);
-        a_layers.truncate(pairs);
-        b_layers.truncate(pairs);
-        c_layers.truncate(pairs);
-        return Ok(());
-      }
-    }
-
-    let mut prev_r_b = *r_bs.last().ok_or(SpartanError::InvalidSumcheckProof)?;
-
-    for t in (start_round + 1)..ell_b {
-      let fold_pairs = m / 2;
-      let prove_pairs = fold_pairs / 2;
-      let mut e0_acc = E::Scalar::ZERO;
-      let mut quad_acc = E::Scalar::ZERO;
-
-      if prove_pairs > 0 {
-        let (a_head, _) = a_layers.split_at_mut(4 * prove_pairs);
-        let (b_head, _) = b_layers.split_at_mut(4 * prove_pairs);
-        let (c_head, _) = c_layers.split_at_mut(4 * prove_pairs);
-
-        let e_eq_ref = e_eq;
-        let rhos_ref = rhos;
-        let (e0_sum, qc_sum) = a_head
-          .par_chunks_mut(4)
-          .zip(b_head.par_chunks_mut(4))
-          .zip(c_head.par_chunks_mut(4))
-          .enumerate()
-          .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-            for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
-              {
-                let (lo, hi) = chunk.split_at_mut(1);
-                lo[0]
-                  .iter_mut()
-                  .zip(hi[0].iter())
-                  .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-              }
-              {
-                let (lo, hi) = chunk.split_at_mut(3);
-                lo[2]
-                  .iter_mut()
-                  .zip(hi[0].iter())
-                  .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-              }
-            }
-
-            let (e0, qc) = Self::prove_helper(
-              t,
-              (left, right),
-              e_eq_ref,
-              &a_chunk[0],
-              &b_chunk[0],
-              &c_chunk[0],
-              &a_chunk[2],
-              &b_chunk[2],
-            );
-            let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
-            (e0 * w, qc * w)
-          })
-          .reduce(
-            || (E::Scalar::ZERO, E::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1),
-          );
-        e0_acc += e0_sum;
-        quad_acc += qc_sum;
-
-        compact_folded_layers_abc::<E>(a_layers, b_layers, c_layers, prove_pairs);
-      }
-
-      for i in (2 * prove_pairs)..fold_pairs {
-        fold_abc_pair_into::<E>(a_layers, b_layers, c_layers, 2 * i, 2 * i + 1, i, prev_r_b);
-      }
-
-      a_layers.truncate(fold_pairs);
-      b_layers.truncate(fold_pairs);
-      c_layers.truncate(fold_pairs);
-      m = fold_pairs;
-
-      prev_r_b = finish_field_sumcheck_round::<E>(
-        t, e0_acc, quad_acc, rhos, r_bs, t_cur, acc_eq, vc, vc_state, vc_shape, vc_ck, transcript,
-      )?;
-    }
-
-    let final_pairs = m / 2;
-    if final_pairs > 0 {
-      fold_final_abc_pairs::<E>(a_layers, b_layers, c_layers, final_pairs, prev_r_b);
-    }
-    a_layers.truncate(final_pairs);
-    b_layers.truncate(final_pairs);
-    c_layers.truncate(final_pairs);
-
-    Ok(())
   }
 
   fn prove_accumulator_prefix_small<SV, X, W>(
@@ -1991,7 +1325,7 @@ where
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = l0);
     let (_polys, mut r_bs, mut T_cur, mut acc_eq) =
-      Self::prove_neutronnova_small_value_sumcheck::<SV, _, _>(
+      Self::prove_neutronnova_small_value_sumcheck::<SV, _>(
         &a_small, &b_small, None, &E_eq, left, right, &rhos, l0, vc, vc_state, vc_shape, vc_ck,
         transcript,
       )?;
@@ -2058,24 +1392,173 @@ where
     info!(elapsed_ms = %fold_prefix_t.elapsed().as_millis(), "nifs_prefix_fold");
 
     let (_suffix_span, suffix_t) = start_span!("nifs_suffix_rounds", rounds = ell_b - l0);
-    Self::continue_neutronnova_field_sumcheck(
-      &mut a_layers,
-      &mut b_layers,
-      &mut c_layers,
-      &E_eq,
-      left,
-      right,
-      &rhos,
-      l0,
-      &mut r_bs,
-      &mut T_cur,
-      &mut acc_eq,
-      vc,
-      vc_state,
-      vc_shape,
-      vc_ck,
-      transcript,
-    )?;
+    if l0 < ell_b {
+      let mut m = a_layers.len();
+      let mut finished_suffix = false;
+
+      {
+        let pairs = m / 2;
+        let (e0, quad_coeff) = a_layers[..2 * pairs]
+          .par_chunks(2)
+          .zip(b_layers[..2 * pairs].par_chunks(2))
+          .zip(c_layers[..2 * pairs].par_chunks(2))
+          .enumerate()
+          .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+            let (e0, quad_coeff) = Self::prove_helper(
+              l0,
+              (left, right),
+              &E_eq,
+              &pair_a[0],
+              &pair_b[0],
+              &pair_c[0],
+              &pair_a[1],
+              &pair_b[1],
+            );
+            let w = suffix_weight_full::<E::Scalar>(l0, ell_b, pair_idx, &rhos);
+            (e0 * w, quad_coeff * w)
+          })
+          .reduce(
+            || (E::Scalar::ZERO, E::Scalar::ZERO),
+            |a, b| (a.0 + b.0, a.1 + b.1),
+          );
+
+        let r_b = finish_field_sumcheck_round::<E>(
+          l0,
+          e0,
+          quad_coeff,
+          &rhos,
+          &mut r_bs,
+          &mut T_cur,
+          &mut acc_eq,
+          vc,
+          vc_state,
+          vc_shape,
+          vc_ck,
+          transcript,
+        )?;
+
+        if l0 + 1 == ell_b {
+          fold_final_abc_pairs::<E>(&mut a_layers, &mut b_layers, &mut c_layers, pairs, r_b);
+          a_layers.truncate(pairs);
+          b_layers.truncate(pairs);
+          c_layers.truncate(pairs);
+          finished_suffix = true;
+        }
+      }
+
+      if !finished_suffix {
+        let mut prev_r_b = *r_bs.last().ok_or(SpartanError::InvalidSumcheckProof)?;
+
+        for t in (l0 + 1)..ell_b {
+          let fold_pairs = m / 2;
+          let prove_pairs = fold_pairs / 2;
+          let mut e0_acc = E::Scalar::ZERO;
+          let mut quad_acc = E::Scalar::ZERO;
+
+          if prove_pairs > 0 {
+            let (a_head, _) = a_layers.split_at_mut(4 * prove_pairs);
+            let (b_head, _) = b_layers.split_at_mut(4 * prove_pairs);
+            let (c_head, _) = c_layers.split_at_mut(4 * prove_pairs);
+
+            let (e0_sum, qc_sum) = a_head
+              .par_chunks_mut(4)
+              .zip(b_head.par_chunks_mut(4))
+              .zip(c_head.par_chunks_mut(4))
+              .enumerate()
+              .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
+                for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
+                  {
+                    let (lo, hi) = chunk.split_at_mut(1);
+                    lo[0]
+                      .iter_mut()
+                      .zip(hi[0].iter())
+                      .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  }
+                  {
+                    let (lo, hi) = chunk.split_at_mut(3);
+                    lo[2]
+                      .iter_mut()
+                      .zip(hi[0].iter())
+                      .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  }
+                }
+
+                let (e0, qc) = Self::prove_helper(
+                  t,
+                  (left, right),
+                  &E_eq,
+                  &a_chunk[0],
+                  &b_chunk[0],
+                  &c_chunk[0],
+                  &a_chunk[2],
+                  &b_chunk[2],
+                );
+                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, &rhos);
+                (e0 * w, qc * w)
+              })
+              .reduce(
+                || (E::Scalar::ZERO, E::Scalar::ZERO),
+                |a, b| (a.0 + b.0, a.1 + b.1),
+              );
+            e0_acc += e0_sum;
+            quad_acc += qc_sum;
+
+            compact_folded_layers_abc::<E>(
+              &mut a_layers,
+              &mut b_layers,
+              &mut c_layers,
+              prove_pairs,
+            );
+          }
+
+          for i in (2 * prove_pairs)..fold_pairs {
+            fold_abc_pair_into::<E>(
+              &mut a_layers,
+              &mut b_layers,
+              &mut c_layers,
+              2 * i,
+              2 * i + 1,
+              i,
+              prev_r_b,
+            );
+          }
+
+          a_layers.truncate(fold_pairs);
+          b_layers.truncate(fold_pairs);
+          c_layers.truncate(fold_pairs);
+          m = fold_pairs;
+
+          prev_r_b = finish_field_sumcheck_round::<E>(
+            t,
+            e0_acc,
+            quad_acc,
+            &rhos,
+            &mut r_bs,
+            &mut T_cur,
+            &mut acc_eq,
+            vc,
+            vc_state,
+            vc_shape,
+            vc_ck,
+            transcript,
+          )?;
+        }
+
+        let final_pairs = m / 2;
+        if final_pairs > 0 {
+          fold_final_abc_pairs::<E>(
+            &mut a_layers,
+            &mut b_layers,
+            &mut c_layers,
+            final_pairs,
+            prev_r_b,
+          );
+        }
+        a_layers.truncate(final_pairs);
+        b_layers.truncate(final_pairs);
+        c_layers.truncate(final_pairs);
+      }
+    }
     info!(
       elapsed_ms = %suffix_t.elapsed().as_millis(),
       rounds = ell_b - l0,
@@ -2538,12 +2021,14 @@ where
   vc.eq_rho_at_rb = acc_eq;
   SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
 
+  let weights = weights_from_r::<E::Scalar>(r_bs, Us.len());
+
   let (_fold_span, fold_t) = start_span!("fold_witnesses");
-  let folded_W = R1CSWitness::<E, W>::fold_multiple_into_field(r_bs, Ws)?;
+  let folded_W = R1CSWitness::<E, W>::fold_multiple_into_field_with_weights(&weights, Ws)?;
   info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_witnesses");
 
   let (_fold_span, fold_t) = start_span!("fold_instances");
-  let folded_U = R1CSInstance::<E, X>::fold_multiple_into_field(r_bs, Us)?;
+  let folded_U = R1CSInstance::<E, X>::fold_multiple_into_field_with_weights(&weights, Us)?;
   info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
 
   Ok((folded_W, folded_U))
