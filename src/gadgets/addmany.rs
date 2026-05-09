@@ -19,7 +19,7 @@ use crate::{
 };
 use bellpepper_core::SynthesisError;
 
-/// 16-bit limbed addition for i32/i8 path.
+/// 16-bit limbed addition for i8 witness / i32 coefficient path.
 ///
 /// Splits each 32-bit value into two 16-bit limbs and adds them separately.
 /// This keeps the maximum coefficient at 2^18, which fits in i32.
@@ -29,9 +29,13 @@ use bellpepper_core::SynthesisError;
 ///
 /// Constraint 2 (high limb):
 ///   Σ(operand_hi) + carry = result_hi + overflow × 2^16
-pub(crate) fn limbed<M>(cs: &mut M, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError>
+pub(crate) fn limbed<W, M>(
+  cs: &mut M,
+  operands: &[SmallUInt32],
+) -> Result<SmallUInt32, SynthesisError>
 where
-  M: SmallMultiEq<i32>,
+  W: Copy + From<bool>,
+  M: SmallMultiEq<W, i32>,
 {
   // For N operands, each 16-bit limb sum can be up to N * (2^16 - 1)
   // For 10 operands: 10 * 65535 = 655350, needs 20 bits
@@ -142,66 +146,6 @@ where
 
   // Enforce: hi_operands_lc = hi_result_lc
   cs.enforce_equal(&hi_operands_lc, &hi_result_lc);
-
-  Ok(SmallUInt32::from_bits_le(&bits))
-}
-
-/// Witness-only version of `limbed` for `SmallConstraintSystem<i8>`.
-///
-/// Allocates the same set of variables as `limbed` (so witness indices match the shape)
-/// but uses i8 values. `enforce_equal` calls are no-ops in the witness gen backend.
-pub(crate) fn limbed_witness<M>(
-  cs: &mut M,
-  operands: &[SmallUInt32],
-) -> Result<SmallUInt32, SynthesisError>
-where
-  M: SmallMultiEq<i8>,
-{
-  let num_carry_bits =
-    64 - ((operands.len() as u64) * (u16::MAX as u64)).leading_zeros() as usize - 16;
-  let num_carry_bits = num_carry_bits.max(1);
-
-  let lo_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-    op.get_value().map(|v| acc + ((v as u64) & 0xFFFF))
-  });
-  let hi_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-    op.get_value().map(|v| acc + (((v as u64) >> 16) & 0xFFFF))
-  });
-  let hi_sum_with_carry: Option<u64> = hi_sum.and_then(|h| lo_sum.map(|l| h + (l >> 16)));
-
-  let mut bits = [const { SmallBoolean::Constant(false) }; 32];
-
-  for (i, slot) in bits.iter_mut().enumerate().take(16) {
-    let bit = SmallBit::alloc(
-      &mut cs.namespace(|| format!("lo{i}")),
-      lo_sum.map(|v| (v >> i) & 1 == 1),
-    )?;
-    *slot = SmallBoolean::Is(bit);
-  }
-  for i in 0..num_carry_bits {
-    SmallBit::alloc(
-      &mut cs.namespace(|| format!("c{i}")),
-      lo_sum.map(|v| (v >> (16 + i)) & 1 == 1),
-    )?;
-  }
-
-  // No enforce_equal for lo limb (no-op in witness gen)
-
-  for i in 0..16 {
-    let bit = SmallBit::alloc(
-      &mut cs.namespace(|| format!("hi{i}")),
-      hi_sum_with_carry.map(|v| (v >> i) & 1 == 1),
-    )?;
-    bits[16 + i] = SmallBoolean::Is(bit);
-  }
-  for i in 0..num_carry_bits {
-    SmallBit::alloc(
-      &mut cs.namespace(|| format!("o{i}")),
-      hi_sum_with_carry.map(|v| (v >> (16 + i)) & 1 == 1),
-    )?;
-  }
-
-  // No enforce_equal for hi limb (no-op in witness gen)
 
   Ok(SmallUInt32::from_bits_le(&bits))
 }

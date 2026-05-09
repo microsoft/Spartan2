@@ -77,19 +77,19 @@ where
     _: &[AllocatedNum<E::Scalar>],
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     let mut small_cs = SmallToBellpepperCS::<E::Scalar, CS>::new(cs);
-    let mut current_bits = alloc_preimage_small_bits::<i32, _>(&mut small_cs, &self.input)?;
+    let mut current_bits = alloc_preimage_small_bits::<i8, _>(&mut small_cs, &self.input)?;
 
     {
-      let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
+      let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
       for chain_idx in 0..self.chain_length {
         let prefix = format!("c{}_", chain_idx);
-        current_bits = small_sha256_int_with_prefix::<i32, _>(&mut eq, &current_bits, &prefix)?;
+        current_bits = small_sha256_int_with_prefix::<i8, _>(&mut eq, &current_bits, &prefix)?;
       }
     }
 
     assert_small_bits_match_bytes(&current_bits, &self.expected_output());
 
-    expose_small_hash_bits_as_public::<i32, _>(&mut small_cs, &current_bits)?;
+    expose_small_hash_bits_as_public::<i8, _>(&mut small_cs, &current_bits)?;
 
     Ok(vec![])
   }
@@ -112,13 +112,13 @@ where
 impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for SmallSha256ChainCircuit<Scalar> {
   fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
     let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(cs);
-    let mut current_bits = alloc_preimage_small_bits::<i32, _>(&mut small_cs, &self.input)?;
+    let mut current_bits = alloc_preimage_small_bits::<i8, _>(&mut small_cs, &self.input)?;
 
     {
-      let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
+      let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
       for chain_idx in 0..self.chain_length {
         let prefix = format!("c{}_", chain_idx);
-        current_bits = small_sha256_int_with_prefix::<i32, _>(&mut eq, &current_bits, &prefix)?;
+        current_bits = small_sha256_int_with_prefix::<i8, _>(&mut eq, &current_bits, &prefix)?;
       }
     }
 

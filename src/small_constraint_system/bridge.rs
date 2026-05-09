@@ -4,12 +4,13 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! Bridge: run `SmallConstraintSystem<i32>` circuits inside a bellpepper `ConstraintSystem<Scalar>`.
+//! Bridge: run `SmallConstraintSystem<W, C>` circuits inside a bellpepper
+//! `ConstraintSystem<Scalar>`.
 //!
 //! `SmallToBellpepperCS` wraps a bellpepper `ConstraintSystem<Scalar>` and implements
-//! `SmallConstraintSystem<i32>`. This lets us use `small_sha256_int` (which produces
-//! i32-coefficient constraints) inside the existing `SpartanCircuit<E>::precommitted`
-//! method, ensuring the field-path shape matches the integer-path shape exactly.
+//! `SmallConstraintSystem<W, C>`. This lets us use `small_sha256_int` with bit witnesses
+//! and i32 coefficients inside the existing `SpartanCircuit<E>::precommitted` method,
+//! ensuring the field-path shape matches the integer-path shape exactly.
 
 use std::marker::PhantomData;
 
@@ -18,9 +19,9 @@ use ff::PrimeField;
 
 use crate::small_constraint_system::{SmallCoeff, SmallConstraintSystem, SmallLinearCombination};
 
-/// Wraps a bellpepper `ConstraintSystem<Scalar>` to implement `SmallConstraintSystem<i32>`.
+/// Wraps a bellpepper `ConstraintSystem<Scalar>` to implement `SmallConstraintSystem<W, C>`.
 ///
-/// Variables are allocated as `Scalar::from(val as u64)` (i32 → field).
+/// Variables are allocated using `W::to_field`.
 /// Constraints are recorded as proper bellpepper constraints with `Scalar` coefficients.
 pub struct SmallToBellpepperCS<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> {
   pub(crate) cs: &'a mut CS,
@@ -36,11 +37,11 @@ impl<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallToBellpepperCS<'
     }
   }
 
-  /// Convert a `SmallLinearCombination<i32>` to a bellpepper `LinearCombination<Scalar>`.
-  fn to_lc(lc: &SmallLinearCombination<i32>) -> LinearCombination<Scalar> {
+  /// Convert a `SmallLinearCombination<C>` to a bellpepper `LinearCombination<Scalar>`.
+  fn to_lc<C: SmallCoeff>(lc: &SmallLinearCombination<C>) -> LinearCombination<Scalar> {
     let mut result = LinearCombination::zero();
     for (var, coeff) in &lc.terms {
-      if *coeff == 0 {
+      if *coeff == C::default() {
         continue;
       }
       result = result + (coeff.to_field::<Scalar>(), *var);
@@ -49,8 +50,8 @@ impl<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallToBellpepperCS<'
   }
 }
 
-impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32>
-  for SmallToBellpepperCS<'_, Scalar, CS>
+impl<W: SmallCoeff, C: SmallCoeff, Scalar: PrimeField, CS: ConstraintSystem<Scalar>>
+  SmallConstraintSystem<W, C> for SmallToBellpepperCS<'_, Scalar, CS>
 {
   type Root = Self;
 
@@ -58,7 +59,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<i32, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.cs.alloc(annotation, || {
       let val = f()?;
@@ -70,7 +71,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<i32, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.cs.alloc_input(annotation, || {
       let val = f()?;
@@ -81,9 +82,9 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   fn enforce<A, AR>(
     &mut self,
     annotation: A,
-    a: SmallLinearCombination<i32>,
-    b: SmallLinearCombination<i32>,
-    c: SmallLinearCombination<i32>,
+    a: SmallLinearCombination<C>,
+    b: SmallLinearCombination<C>,
+    c: SmallLinearCombination<C>,
   ) where
     A: FnOnce() -> AR,
     AR: Into<String>,
@@ -111,7 +112,8 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   }
 }
 
-/// A bellpepper `ConstraintSystem<Scalar>` wrapper that also implements `SmallConstraintSystem<i32>`.
+/// A bellpepper `ConstraintSystem<Scalar>` wrapper that also implements
+/// `SmallConstraintSystem<W, C>`.
 ///
 /// This allows the field-path circuit (`SpartanCircuit<E>`) to use the same
 /// `small_sha256_int` gadget as the integer-path circuit (`SmallSpartanCircuit`),

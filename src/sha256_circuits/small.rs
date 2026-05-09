@@ -12,7 +12,7 @@ use ff::{PrimeField, PrimeFieldBits};
 use std::marker::PhantomData;
 
 use crate::{
-  gadgets::{NoBatchEq, SmallBoolean, small_boolean::NegOne, small_sha256_int},
+  gadgets::{NoBatchEq, SmallBoolean, small_sha256_int},
   small_constraint_system::{SmallConstraintSystem, SmallLinearCombination, SmallToBellpepperCS},
   traits::{
     Engine,
@@ -65,9 +65,9 @@ where
   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
     // Use SmallToBellpepperCS so the field and integer paths produce the SAME shape.
     let mut small_cs = SmallToBellpepperCS::<E::Scalar, CS>::new(cs);
-    let preimage_bits = alloc_preimage_small_bits::<i32, _>(&mut small_cs, &self.preimage)?;
-    let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &preimage_bits)?;
+    let preimage_bits = alloc_preimage_small_bits::<i8, _>(&mut small_cs, &self.preimage)?;
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
+    let hash_bits = small_sha256_int::<i8, _>(&mut eq, &preimage_bits)?;
     drop(eq);
 
     // Verify against native SHA-256 (debug only)
@@ -83,7 +83,7 @@ where
       }
     }
 
-    expose_small_hash_bits_as_public::<i32, _>(&mut small_cs, &hash_bits)?;
+    expose_small_hash_bits_as_public::<i8, _>(&mut small_cs, &hash_bits)?;
 
     Ok(vec![])
   }
@@ -106,13 +106,13 @@ where
 // ── SmallSpartanCircuit impls ─────────────────────────────────────────────
 
 /// Helper: allocate preimage bits as SmallBoolean variables.
-pub(crate) fn alloc_preimage_small_bits<V, CS>(
+pub(crate) fn alloc_preimage_small_bits<W, CS>(
   cs: &mut CS,
   preimage: &[u8],
 ) -> Result<Vec<SmallBoolean>, SynthesisError>
 where
-  V: Copy + From<bool> + crate::gadgets::small_boolean::NegOne,
-  CS: SmallConstraintSystem<V>,
+  W: Copy + From<bool>,
+  CS: SmallConstraintSystem<W, i32>,
 {
   let mut bits = Vec::with_capacity(preimage.len() * 8);
   for (byte_idx, &byte) in preimage.iter().enumerate() {
@@ -130,13 +130,13 @@ where
 
 /// Expose SHA-256 digest bits as public inputs and bind each input to the
 /// corresponding computed bit.
-pub(crate) fn expose_small_hash_bits_as_public<V, CS>(
+pub(crate) fn expose_small_hash_bits_as_public<W, CS>(
   cs: &mut CS,
   hash_bits: &[SmallBoolean],
 ) -> Result<(), SynthesisError>
 where
-  V: Copy + From<bool> + NegOne,
-  CS: SmallConstraintSystem<V>,
+  W: Copy + From<bool>,
+  CS: SmallConstraintSystem<W, i32>,
 {
   for (i, bit) in hash_bits.iter().enumerate() {
     let public = cs.alloc_input(
@@ -144,18 +144,18 @@ where
       || {
         bit
           .get_value()
-          .map(V::from)
+          .map(W::from)
           .ok_or(SynthesisError::AssignmentMissing)
       },
     )?;
 
-    let mut diff = bit.lc::<V>();
-    diff.add_term(public, V::neg(V::from(true)));
+    let mut diff = bit.lc::<i32>();
+    diff.add_term(public, -1i32);
 
     cs.enforce(
       || format!("hash_bit_public_binding_{i}"),
       diff,
-      SmallLinearCombination::one(V::from(true)),
+      SmallLinearCombination::one(1i32),
       SmallLinearCombination::zero(),
     );
   }
@@ -163,66 +163,11 @@ where
   Ok(())
 }
 
-/// SHA-256 circuit: SmallSpartanCircuit<E, i32> — for shape extraction.
+/// SHA-256 circuit for the small-value compiler.
 ///
-/// Uses `SmallShapeCS` (i32 coefficients). The whole circuit is in `precommitted`
-/// since SHA-256 has no shared variables.
-impl<E: Engine> SmallSpartanCircuit<E, i32> for SmallSha256Circuit<E::Scalar>
-where
-  E::Scalar: PrimeFieldBits,
-{
-  fn public_values(&self) -> Result<Vec<i32>, SynthesisError> {
-    use crate::sha256_circuits::hash_to_public_scalars;
-    let bits: Vec<E::Scalar> = hash_to_public_scalars(&self.preimage);
-    Ok(
-      bits
-        .iter()
-        .map(|b| if b.is_zero().into() { 0i32 } else { 1i32 })
-        .collect(),
-    )
-  }
-
-  fn shared<CS: SmallConstraintSystem<i32>>(
-    &self,
-    _cs: &mut CS,
-  ) -> Result<Vec<bellpepper_core::Variable>, SynthesisError> {
-    Ok(vec![])
-  }
-
-  fn precommitted<CS: SmallConstraintSystem<i32>>(
-    &self,
-    cs: &mut CS,
-    _shared: &[bellpepper_core::Variable],
-  ) -> Result<Vec<bellpepper_core::Variable>, SynthesisError> {
-    let preimage_bits = alloc_preimage_small_bits(cs, &self.preimage)?;
-    let mut eq = NoBatchEq::<i32, _>::new(cs);
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &preimage_bits)?;
-    drop(eq);
-
-    expose_small_hash_bits_as_public::<i32, _>(cs, &hash_bits)?;
-
-    Ok(vec![])
-  }
-
-  fn num_challenges(&self) -> usize {
-    0
-  }
-
-  fn synthesize<CS: SmallConstraintSystem<i32>>(
-    &self,
-    _cs: &mut CS,
-    _shared: &[bellpepper_core::Variable],
-    _precommitted: &[bellpepper_core::Variable],
-    _challenges: Option<&[E::Scalar]>,
-  ) -> Result<(), SynthesisError> {
-    Ok(())
-  }
-}
-
-/// SHA-256 circuit: SmallSpartanCircuit<E, i8> — for witness generation.
-///
-/// Uses `SmallSatisfyingAssignment<i8>`. All enforce calls are no-ops.
-impl<E: Engine> SmallSpartanCircuit<E, i8> for SmallSha256Circuit<E::Scalar>
+/// Uses i8 bit witnesses and i32 constraint coefficients. Shape and witness
+/// generation run this same implementation against different backends.
+impl<E: Engine> SmallSpartanCircuit<E, i8, i32> for SmallSha256Circuit<E::Scalar>
 where
   E::Scalar: PrimeFieldBits,
 {
@@ -237,22 +182,20 @@ where
     )
   }
 
-  fn shared<CS: SmallConstraintSystem<i8>>(
+  fn shared<CS: SmallConstraintSystem<i8, i32>>(
     &self,
     _cs: &mut CS,
   ) -> Result<Vec<bellpepper_core::Variable>, SynthesisError> {
     Ok(vec![])
   }
 
-  fn precommitted<CS: SmallConstraintSystem<i8>>(
+  fn precommitted<CS: SmallConstraintSystem<i8, i32>>(
     &self,
     cs: &mut CS,
     _shared: &[bellpepper_core::Variable],
   ) -> Result<Vec<bellpepper_core::Variable>, SynthesisError> {
-    // Run SHA-256 gadget with i8 value type — allocates same vars as i32 shape path
-    // but enforce is a no-op, so only witness values are recorded.
     let preimage_bits = alloc_preimage_small_bits(cs, &self.preimage)?;
-    let mut eq = NoBatchEq::<i8, _>::new(cs);
+    let mut eq = NoBatchEq::<i8, i32, _>::new(cs);
     let hash_bits = small_sha256_int::<i8, _>(&mut eq, &preimage_bits)?;
     drop(eq);
 
@@ -265,7 +208,7 @@ where
     0
   }
 
-  fn synthesize<CS: SmallConstraintSystem<i8>>(
+  fn synthesize<CS: SmallConstraintSystem<i8, i32>>(
     &self,
     _cs: &mut CS,
     _shared: &[bellpepper_core::Variable],
@@ -279,9 +222,9 @@ where
 impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for SmallSha256Circuit<Scalar> {
   fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
     let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(cs);
-    let preimage_bits = alloc_preimage_small_bits::<i32, _>(&mut small_cs, &self.preimage)?;
-    let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
-    let _ = small_sha256_int::<i32, _>(&mut eq, &preimage_bits)?;
+    let preimage_bits = alloc_preimage_small_bits::<i8, _>(&mut small_cs, &self.preimage)?;
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
+    let _ = small_sha256_int::<i8, _>(&mut eq, &preimage_bits)?;
     Ok(())
   }
 }
@@ -405,19 +348,18 @@ mod tests {
 
     let mut shape_cs = SmallShapeCS::<i32>::new();
     let shared =
-      <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i32>>::shared(
+      <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8, i32>>::shared(
         &circuit,
         &mut shape_cs,
       )
       .unwrap();
-    let precommitted =
-      <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i32>>::precommitted(
-        &circuit,
-        &mut shape_cs,
-        &shared,
-      )
-      .unwrap();
-    <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i32>>::synthesize(
+    let precommitted = <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<
+      E,
+      i8,
+      i32,
+    >>::precommitted(&circuit, &mut shape_cs, &shared)
+    .unwrap();
+    <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8, i32>>::synthesize(
       &circuit,
       &mut shape_cs,
       &shared,
@@ -428,19 +370,19 @@ mod tests {
     let (a, b, c) = shape_cs.to_matrices();
 
     let mut witness_cs = SmallSatisfyingAssignment::<i8>::new();
-    let shared = <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8>>::shared(
-      &circuit,
-      &mut witness_cs,
-    )
-    .unwrap();
-    let precommitted =
-      <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8>>::precommitted(
+    let shared =
+      <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8, i32>>::shared(
         &circuit,
         &mut witness_cs,
-        &shared,
       )
       .unwrap();
-    <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8>>::synthesize(
+    let precommitted = <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<
+      E,
+      i8,
+      i32,
+    >>::precommitted(&circuit, &mut witness_cs, &shared)
+    .unwrap();
+    <SmallSha256Circuit<<E as Engine>::Scalar> as SmallSpartanCircuit<E, i8, i32>>::synthesize(
       &circuit,
       &mut witness_cs,
       &shared,
@@ -570,5 +512,20 @@ mod tests {
       assert_eq!(zeroes.b, other.b);
       assert_eq!(zeroes.c, other.c);
     }
+  }
+
+  #[test]
+  fn small_compiler_same_shape_allows_different_i8_witnesses() {
+    let left = small_compiler_sha256(&[0x11u8; 64]);
+    let right = small_compiler_sha256(&[0x22u8; 64]);
+
+    assert!(left.is_satisfied);
+    assert!(right.is_satisfied);
+    assert_eq!(left.a, right.a);
+    assert_eq!(left.b, right.b);
+    assert_eq!(left.c, right.c);
+    assert_ne!(left.z, right.z);
+    assert!(left.z.iter().all(|value| matches!(*value, 0 | 1)));
+    assert!(right.z.iter().all(|value| matches!(*value, 0 | 1)));
   }
 }

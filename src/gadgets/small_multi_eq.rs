@@ -35,9 +35,9 @@ use bellpepper_core::SynthesisError;
 ///
 /// This trait extends `SmallConstraintSystem` with methods for enforcing equality
 /// constraints and multi-operand addition.
-pub trait SmallMultiEq<V>: SmallConstraintSystem<V> {
+pub trait SmallMultiEq<W, C>: SmallConstraintSystem<W, C> {
   /// Enforce that `lhs` equals `rhs`.
-  fn enforce_equal(&mut self, lhs: &SmallLinearCombination<V>, rhs: &SmallLinearCombination<V>);
+  fn enforce_equal(&mut self, lhs: &SmallLinearCombination<C>, rhs: &SmallLinearCombination<C>);
 
   /// Add multiple SmallUInt32 values together using limbed addition.
   fn addmany(&mut self, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError>;
@@ -51,14 +51,14 @@ pub trait SmallMultiEq<V>: SmallConstraintSystem<V> {
 ///
 /// Each call to `enforce_equal` immediately creates a constraint. Uses limbed
 /// addition (max coefficient 2^18, fits i32) for multi-operand addition.
-pub struct NoBatchEq<'a, V, CS: SmallConstraintSystem<V>> {
+pub struct NoBatchEq<'a, W, C, CS: SmallConstraintSystem<W, C>> {
   pub(crate) cs: &'a mut CS,
   ops: usize,
   addmany_count: usize,
-  _marker: std::marker::PhantomData<V>,
+  _marker: std::marker::PhantomData<(W, C)>,
 }
 
-impl<'a, V, CS: SmallConstraintSystem<V>> NoBatchEq<'a, V, CS> {
+impl<'a, W, C, CS: SmallConstraintSystem<W, C>> NoBatchEq<'a, W, C, CS> {
   /// Create a new NoBatchEq wrapper around a constraint system.
   pub fn new(cs: &'a mut CS) -> Self {
     NoBatchEq {
@@ -70,39 +70,12 @@ impl<'a, V, CS: SmallConstraintSystem<V>> NoBatchEq<'a, V, CS> {
   }
 }
 
-/// SmallMultiEq<i8> for witness generation path (enforce is no-op).
+/// Direct equality for the small-value path with i32 coefficients.
 ///
-/// Allocates the same variables as the i32 shape path so witness indices match.
-impl<CS: SmallConstraintSystem<i8>> SmallMultiEq<i8> for NoBatchEq<'_, i8, CS> {
-  fn enforce_equal(
-    &mut self,
-    _lhs: &SmallLinearCombination<i8>,
-    _rhs: &SmallLinearCombination<i8>,
-  ) {
-    // Witness generation: enforce is a no-op
-  }
-
-  fn addmany(&mut self, operands: &[SmallUInt32]) -> Result<SmallUInt32, SynthesisError> {
-    assert!(operands.len() >= 2);
-    assert!(operands.len() <= 10);
-
-    if let Some(sum) = try_constant_sum(operands) {
-      return Ok(SmallUInt32::constant(sum));
-    }
-
-    let count = self.addmany_count;
-    self.addmany_count += 1;
-    self.cs.push_namespace(|| format!("add{count}"));
-
-    // Use limbed_witness: allocates same vars as limbed but no constraints
-    let result = addmany::limbed_witness(self, operands);
-
-    self.cs.pop_namespace();
-    result
-  }
-}
-
-impl<CS: SmallConstraintSystem<i32>> SmallMultiEq<i32> for NoBatchEq<'_, i32, CS> {
+/// Shape backends record these constraints; witness backends accept the i32 LCs and no-op.
+impl<W: Copy + From<bool>, CS: SmallConstraintSystem<W, i32>> SmallMultiEq<W, i32>
+  for NoBatchEq<'_, W, i32, CS>
+{
   fn enforce_equal(
     &mut self,
     lhs: &SmallLinearCombination<i32>,
@@ -135,14 +108,16 @@ impl<CS: SmallConstraintSystem<i32>> SmallMultiEq<i32> for NoBatchEq<'_, i32, CS
     self.addmany_count += 1;
     self.cs.push_namespace(|| format!("add{count}"));
 
-    let result = addmany::limbed(self, operands);
+    let result = addmany::limbed::<W, _>(self, operands);
 
     self.cs.pop_namespace();
     result
   }
 }
 
-impl<V: Copy, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for NoBatchEq<'_, V, CS> {
+impl<W: Copy, C, CS: SmallConstraintSystem<W, C>> SmallConstraintSystem<W, C>
+  for NoBatchEq<'_, W, C, CS>
+{
   type Root = CS::Root;
 
   fn alloc<A, AR, F>(
@@ -153,7 +128,7 @@ impl<V: Copy, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for NoBatch
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.cs.alloc(annotation, f)
   }
@@ -166,7 +141,7 @@ impl<V: Copy, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for NoBatch
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.cs.alloc_input(annotation, f)
   }
@@ -174,9 +149,9 @@ impl<V: Copy, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for NoBatch
   fn enforce<A, AR>(
     &mut self,
     annotation: A,
-    a: SmallLinearCombination<V>,
-    b: SmallLinearCombination<V>,
-    c: SmallLinearCombination<V>,
+    a: SmallLinearCombination<C>,
+    b: SmallLinearCombination<C>,
+    c: SmallLinearCombination<C>,
   ) where
     A: FnOnce() -> AR,
     AR: Into<String>,
@@ -200,7 +175,7 @@ impl<V: Copy, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for NoBatch
     self.cs.get_root()
   }
 
-  fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, V, Self::Root>
+  fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, W, C, Self::Root>
   where
     NR: Into<String>,
     N: FnOnce() -> NR,
@@ -430,13 +405,13 @@ mod tests {
 
   #[test]
   fn test_no_batch_eq_basic() {
-    let mut cs = SmallShapeCS::new();
+    let mut cs = SmallShapeCS::<i32>::new();
 
-    let a = cs.alloc(|| "a", || Ok(0i32)).unwrap();
-    let b = cs.alloc(|| "b", || Ok(0i32)).unwrap();
+    let a = cs.alloc(|| "a", || Ok(0i8)).unwrap();
+    let b = cs.alloc(|| "b", || Ok(0i8)).unwrap();
 
     {
-      let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+      let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
       let lhs = SmallLinearCombination::from_variable(a, 1i32);
       let rhs = SmallLinearCombination::from_variable(b, 1i32);
       eq.enforce_equal(&lhs, &rhs);
@@ -450,13 +425,13 @@ mod tests {
 
   #[test]
   fn test_no_batch_eq_addmany() {
-    let mut cs = SmallShapeCS::new();
+    let mut cs = SmallShapeCS::<i32>::new();
 
     let a = SmallUInt32::constant(100);
     let b = SmallUInt32::constant(200);
     let c = SmallUInt32::constant(300);
 
-    let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
     let result = eq.addmany(&[a, b, c]).unwrap();
     assert_eq!(result.get_value(), Some(600));
   }

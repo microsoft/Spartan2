@@ -6,7 +6,7 @@
 
 //! SmallUInt32: 32-bit unsigned integer gadget for small-value sumcheck.
 //!
-//! Uses `SmallBoolean` and `SmallConstraintSystem<V>` instead of bellpepper types.
+//! Uses `SmallBoolean` and `SmallConstraintSystem<W, C>` instead of bellpepper types.
 //! All bit witnesses are 0 or 1 (i8), all coefficients are i32.
 //!
 //! # SHA256 Operations
@@ -86,10 +86,11 @@ impl SmallUInt32 {
   }
 
   /// Allocate a `SmallUInt32` in the constraint system.
-  pub fn alloc<V, CS>(mut cs: CS, value: Option<u32>) -> Result<Self, SynthesisError>
+  pub fn alloc<W, C, CS>(mut cs: CS, value: Option<u32>) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<W, C>,
   {
     let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, slot) in bits.iter_mut().enumerate() {
@@ -129,10 +130,11 @@ impl SmallUInt32 {
   }
 
   /// XOR with another `SmallUInt32`.
-  pub fn xor<V, CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
+  pub fn xor<W, C, CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne + Double,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<W, C>,
   {
     let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, (a, b))) in bits
@@ -150,10 +152,16 @@ impl SmallUInt32 {
   }
 
   /// SHA-256 CH function: (a AND b) XOR ((NOT a) AND c)
-  pub fn sha256_ch<V, CS>(mut cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
+  pub fn sha256_ch<W, C, CS>(
+    mut cs: CS,
+    a: &Self,
+    b: &Self,
+    c: &Self,
+  ) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<W, C>,
   {
     let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, ((a_bit, b_bit), c_bit))) in bits
@@ -176,10 +184,16 @@ impl SmallUInt32 {
   ///
   /// Optimized identity: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
   /// This uses 2 AND + 2 XOR per bit instead of 3 AND + 2 XOR.
-  pub fn sha256_maj<V, CS>(mut cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
+  pub fn sha256_maj<W, C, CS>(
+    mut cs: CS,
+    a: &Self,
+    b: &Self,
+    c: &Self,
+  ) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne + Double,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<W, C>,
   {
     let mut bits = [const { SmallBoolean::Constant(false) }; 32];
     for (i, (slot, ((a_bit, b_bit), c_bit))) in bits

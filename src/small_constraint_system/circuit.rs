@@ -13,24 +13,25 @@ use crate::{small_constraint_system::SmallConstraintSystem, traits::Engine};
 /// A helper trait for circuits that use the pure-integer small-value path.
 ///
 /// Unlike `SpartanCircuit<E>`, this trait works over integer values without field
-/// arithmetic. `V` is the value type:
-/// - `V = i32` for shape extraction (`SmallShapeCS`) — records i32 constraint coefficients
-/// - `V = i8` for witness generation (`SmallSatisfyingAssignment<i8>`) — records i8 witnesses
+/// arithmetic. `W` is the witness value type and `C` is the constraint
+/// coefficient type:
+/// - `W = i8` for SHA-256 bit witnesses
+/// - `C = i32` for SHA-256 constraint and matrix coefficients
 ///
 /// All SHA-256 witnesses are bits (0/1), so `i8` is sufficient. Matrix coefficients
 /// (powers of 2 up to 2^18) fit in `i32`.
-pub trait SmallSpartanCircuit<E: Engine, V>: Send + Sync + Clone {
-  /// Returns the public values of the circuit as V (usually i8 bit-values).
-  fn public_values(&self) -> Result<Vec<V>, SynthesisError>;
+pub trait SmallSpartanCircuit<E: Engine, W, C>: Send + Sync + Clone {
+  /// Returns the public values of the circuit as W (usually i8 bit-values).
+  fn public_values(&self) -> Result<Vec<W>, SynthesisError>;
 
   /// Allocates shared variables in the constraint system.
-  fn shared<CS: SmallConstraintSystem<V>>(
+  fn shared<CS: SmallConstraintSystem<W, C>>(
     &self,
     cs: &mut CS,
   ) -> Result<Vec<Variable>, SynthesisError>;
 
   /// Allocates precommitted variables.
-  fn precommitted<CS: SmallConstraintSystem<V>>(
+  fn precommitted<CS: SmallConstraintSystem<W, C>>(
     &self,
     cs: &mut CS,
     shared: &[Variable],
@@ -42,7 +43,7 @@ pub trait SmallSpartanCircuit<E: Engine, V>: Send + Sync + Clone {
   /// Allocates remaining variables and constraints.
   ///
   /// `challenges` remain field-typed since they come from the transcript.
-  fn synthesize<CS: SmallConstraintSystem<V>>(
+  fn synthesize<CS: SmallConstraintSystem<W, C>>(
     &self,
     cs: &mut CS,
     shared: &[Variable],

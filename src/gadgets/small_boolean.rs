@@ -7,13 +7,13 @@
 //! # SmallBoolean
 //!
 //! Boolean gadgets for the pure-integer constraint system path.
-//! Mirrors bellpepper's `Boolean` but uses `SmallConstraintSystem<V>` and
-//! `SmallLinearCombination<V>` instead of field elements.
+//! Mirrors bellpepper's `Boolean` but uses `SmallConstraintSystem<W, C>` and
+//! `SmallLinearCombination<C>` instead of field elements.
 //!
 //! All allocated variables are bits (0 or 1), matching SHA-256's witness structure.
 //!
-//! The constraint system type parameter `V` is the witness value type (e.g. `i8`).
-//! Constraint coefficients are always `i32`.
+//! The constraint system type parameter `W` is the witness value type (e.g. `i8`);
+//! `C` is the coefficient type (e.g. `i32` for SHA-256).
 
 use bellpepper_core::{Index, SynthesisError, Variable};
 
@@ -31,48 +31,28 @@ pub struct SmallBit {
 impl SmallBit {
   /// Allocate a bit and enforce the boolean constraint: bit × (1 - bit) = 0.
   ///
-  /// The value type `V` must be able to represent `0` and `1` (i.e. `V: From<bool>`).
-  /// Constraints use `i32` coefficients via `SmallConstraintSystem<V>` where the
-  /// `enforce` call receives `SmallLinearCombination<V>` — for shape extraction `V = i32`,
-  /// for witness generation the enforce is a no-op.
-  pub fn alloc<V, CS>(cs: &mut CS, value: Option<bool>) -> Result<Self, SynthesisError>
+  /// The value type `W` must be able to represent `0` and `1`; constraints use
+  /// coefficient type `C`.
+  pub fn alloc<W, C, CS>(cs: &mut CS, value: Option<bool>) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<W, C>,
   {
     let var = cs.alloc(
       || "bit",
-      || value.map(V::from).ok_or(SynthesisError::AssignmentMissing),
+      || value.map(W::from).ok_or(SynthesisError::AssignmentMissing),
     )?;
 
     // Enforce: bit * (1 - bit) = 0
     // a = 1 * bit
     // b = 1 * ONE - 1 * bit  (i.e. 1 - bit)
     // c = 0
-    //
-    // For SmallShapeCS (V = i32): coeff ONE = 1i32, coeff bit = -1i32
-    // For SmallSatisfyingAssignment (V = i8): enforce is no-op
-    let lc_a = SmallLinearCombination::from_variable(var, V::from(true));
-    // b = ONE * 1 - var * 1: we pass neg coeff for var
-    // We need to encode "1 * ONE + (-1) * var", but V may not support negation generically.
-    // So we make this work for i8 (no-op) and i32 (need -1):
-    // Use a workaround: build b as one(1) and add_term with coeff that subtracts.
-    // Since V=i32 for shape extraction: V::from(false) = 0, V::from(true) = 1.
-    // We need -1 for i32. The caller ensures V supports it.
-    // For simplicity, enforce is called with the semantic: a × b = c, which
-    // SmallShapeCS records verbatim. The actual negation is embedded in the LC.
-    // We skip the boolean constraint here — callers know all alloc'd bits are boolean.
-    // The constraint is implicitly satisfied when witnesses are generated correctly.
-    let _ = lc_a; // suppress unused warning until we use it below
-
-    // Actually enforce the boolean constraint properly:
-    // We need lc_b = 1*ONE - 1*var, which requires V to support negation for the -1 coeff.
-    // Since we can't assume V: Neg generically, we provide a specialized helper.
     cs.enforce(
       || "bit_boolean",
-      SmallLinearCombination::from_variable(var, V::from(true)), // a = bit
-      boolean_not_lc(var, V::from(true)),                        // b = 1 - bit (needs -1 coeff)
-      SmallLinearCombination::zero(),                            // c = 0
+      SmallLinearCombination::from_variable(var, C::from(true)),
+      boolean_not_lc(var, C::from(true)),
+      SmallLinearCombination::zero(),
     );
 
     Ok(SmallBit {
@@ -92,7 +72,7 @@ impl SmallBit {
   }
 
   /// Build a linear combination representing this bit's value: `coeff * bit`.
-  pub fn lc<V: Copy>(&self, coeff: V) -> SmallLinearCombination<V> {
+  pub fn lc<C: Copy>(&self, coeff: C) -> SmallLinearCombination<C> {
     SmallLinearCombination::from_variable(self.variable, coeff)
   }
 }
@@ -101,7 +81,7 @@ impl SmallBit {
 
 /// Build a linear combination for (1 - bit) where `pos_coeff` is the +1 coefficient.
 ///
-/// This trait is implemented for i32 and i8 to provide -1 for the NOT term.
+/// This trait is implemented for coefficient types to provide -1 for the NOT term.
 pub trait NegOne: Sized + Copy {
   /// Returns the negative of `pos_coeff`.
   fn neg(pos_coeff: Self) -> Self;
@@ -119,20 +99,9 @@ impl NegOne for i8 {
   }
 }
 
-/// Only valid for use with witness-only (no-op enforce) constraint systems such as
-/// `SmallSatisfyingAssignment<bool>`.  The returned value is a dummy — it is never
-/// used to build an actual constraint.  Do not implement `NegOne for bool` for any
-/// CS where `enforce` has real semantics, as the incorrect coefficient would silently
-/// produce wrong constraints.
-impl NegOne for bool {
-  fn neg(_pos_coeff: bool) -> bool {
-    false
-  }
-}
-
-fn boolean_not_lc<V: Copy + NegOne>(var: Variable, pos_coeff: V) -> SmallLinearCombination<V> {
+fn boolean_not_lc<C: Copy + NegOne>(var: Variable, pos_coeff: C) -> SmallLinearCombination<C> {
   let mut lc = SmallLinearCombination::one(pos_coeff); // 1 * ONE
-  lc.add_term(var, V::neg(pos_coeff)); // + (-1) * var
+  lc.add_term(var, C::neg(pos_coeff)); // + (-1) * var
   lc
 }
 
@@ -180,22 +149,23 @@ impl SmallBoolean {
   /// - `Constant(true)` → 1 × ONE
   /// - `Is(bit)` → 1 × bit
   /// - `Not(bit)` → 1 × ONE - 1 × bit
-  pub fn lc<V: Copy + NegOne + From<bool>>(&self) -> SmallLinearCombination<V> {
+  pub fn lc<C: Copy + NegOne + From<bool>>(&self) -> SmallLinearCombination<C> {
     match self {
       SmallBoolean::Constant(false) => SmallLinearCombination::zero(),
-      SmallBoolean::Constant(true) => SmallLinearCombination::one(V::from(true)),
-      SmallBoolean::Is(bit) => SmallLinearCombination::from_variable(bit.variable, V::from(true)),
-      SmallBoolean::Not(bit) => boolean_not_lc(bit.variable, V::from(true)),
+      SmallBoolean::Constant(true) => SmallLinearCombination::one(C::from(true)),
+      SmallBoolean::Is(bit) => SmallLinearCombination::from_variable(bit.variable, C::from(true)),
+      SmallBoolean::Not(bit) => boolean_not_lc(bit.variable, C::from(true)),
     }
   }
 
   /// XOR two booleans.
   ///
   /// Constraint (bellpepper style): 2a * b = a + b - result
-  pub fn xor<V, CS>(cs: &mut CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
+  pub fn xor<W, C, CS>(cs: &mut CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne + Double,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<W, C>,
   {
     match (a, b) {
       (SmallBoolean::Constant(a_val), _) => {
@@ -219,20 +189,20 @@ impl SmallBoolean {
         // Enforce: 2a * b = a + b - result
         // lc_2a = 2 * a_var (for Is) or 2 * ONE - 2 * a_var (for Not)
         // We compute lc_2a by taking a.lc() and doubling each coefficient.
-        let a_lc: SmallLinearCombination<V> = a.lc();
-        let b_lc: SmallLinearCombination<V> = b.lc();
+        let a_lc: SmallLinearCombination<C> = a.lc();
+        let b_lc: SmallLinearCombination<C> = b.lc();
 
         // 2a: double the coefficients of a_lc
-        // For i32: 2 = V::from(true) + V::from(true), but V has no Add.
+        // For i32: 2 = C::from(true) + C::from(true), but C has no Add.
         // Instead use a specialized two() fn.
-        let lc_2a = double_lc::<V>(a_lc.clone());
+        let lc_2a = double_lc::<C>(a_lc.clone());
 
         // c = a + b - result
-        let mut lc_c: SmallLinearCombination<V> = a_lc;
+        let mut lc_c: SmallLinearCombination<C> = a_lc;
         for (var, coeff) in &b_lc.terms {
           lc_c.add_term(*var, *coeff);
         }
-        lc_c.add_term(result_bit.variable, V::neg(V::from(true))); // - result
+        lc_c.add_term(result_bit.variable, C::neg(C::from(true))); // - result
 
         cs.enforce(|| "xor", lc_2a, b_lc, lc_c);
         Ok(SmallBoolean::Is(result_bit))
@@ -243,10 +213,11 @@ impl SmallBoolean {
   /// AND two booleans.
   ///
   /// Constraint: a * b = result
-  pub fn and<V, CS>(cs: &mut CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
+  pub fn and<W, C, CS>(cs: &mut CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<W, C>,
   {
     match (a, b) {
       (SmallBoolean::Constant(false), _) | (_, SmallBoolean::Constant(false)) => {
@@ -257,9 +228,9 @@ impl SmallBoolean {
         let result_val = a.get_value().and_then(|av| b.get_value().map(|bv| av & bv));
         let result_bit = SmallBit::alloc(cs, result_val)?;
 
-        let lc_a: SmallLinearCombination<V> = a.lc();
-        let lc_b: SmallLinearCombination<V> = b.lc();
-        let lc_c = SmallLinearCombination::from_variable(result_bit.variable, V::from(true));
+        let lc_a: SmallLinearCombination<C> = a.lc();
+        let lc_b: SmallLinearCombination<C> = b.lc();
+        let lc_c = SmallLinearCombination::from_variable(result_bit.variable, C::from(true));
 
         cs.enforce(|| "and", lc_a, lc_b, lc_c);
         Ok(SmallBoolean::Is(result_bit))
@@ -270,10 +241,16 @@ impl SmallBoolean {
   /// SHA-256 CH function: (a AND b) XOR ((NOT a) AND c)
   ///
   /// Uses bellpepper's single-constraint form: (a - c) * b = result - c
-  pub fn sha256_ch<V, CS>(cs: &mut CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
+  pub fn sha256_ch<W, C, CS>(
+    cs: &mut CS,
+    a: &Self,
+    b: &Self,
+    c: &Self,
+  ) -> Result<Self, SynthesisError>
   where
-    V: Copy + From<bool> + NegOne,
-    CS: SmallConstraintSystem<V>,
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne,
+    CS: SmallConstraintSystem<W, C>,
   {
     let result_val = a.get_value().and_then(|av| {
       b.get_value()
@@ -288,21 +265,21 @@ impl SmallBoolean {
         let result_bit = SmallBit::alloc(cs, result_val)?;
 
         // ch(a,b,c) = a*(b-c) + c  =>  constraint: a * (b - c) = result - c
-        let a_lc: SmallLinearCombination<V> = a.lc();
-        let c_lc: SmallLinearCombination<V> = c.lc();
-        let b_lc: SmallLinearCombination<V> = b.lc();
+        let a_lc: SmallLinearCombination<C> = a.lc();
+        let c_lc: SmallLinearCombination<C> = c.lc();
+        let b_lc: SmallLinearCombination<C> = b.lc();
 
         // lc_b_minus_c = b - c
         let mut lc_b_minus_c = b_lc;
         for (var, coeff) in &c_lc.terms {
-          lc_b_minus_c.add_term(*var, V::neg(*coeff));
+          lc_b_minus_c.add_term(*var, C::neg(*coeff));
         }
 
         // lc_result_minus_c = result - c
         let mut lc_result_minus_c =
-          SmallLinearCombination::from_variable(result_bit.variable, V::from(true));
+          SmallLinearCombination::from_variable(result_bit.variable, C::from(true));
         for (var, coeff) in &c_lc.terms {
-          lc_result_minus_c.add_term(*var, V::neg(*coeff));
+          lc_result_minus_c.add_term(*var, C::neg(*coeff));
         }
 
         cs.enforce(|| "sha256_ch", a_lc, lc_b_minus_c, lc_result_minus_c);
@@ -346,18 +323,7 @@ impl Double for i8 {
   }
 }
 
-/// Only valid for use with witness-only (no-op enforce) constraint systems such as
-/// `SmallSatisfyingAssignment<bool>`.  The returned value is a dummy — it is never
-/// used to build an actual constraint.  Do not implement `Double for bool` for any
-/// CS where `enforce` has real semantics, as the incorrect coefficient would silently
-/// produce wrong constraints.
-impl Double for bool {
-  fn double(self) -> bool {
-    false
-  }
-}
-
-fn double_lc<V: Copy + Double>(lc: SmallLinearCombination<V>) -> SmallLinearCombination<V> {
+fn double_lc<C: Copy + Double>(lc: SmallLinearCombination<C>) -> SmallLinearCombination<C> {
   SmallLinearCombination {
     terms: lc
       .terms

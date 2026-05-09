@@ -6,7 +6,7 @@
 
 //! SHA-256 circuit using the pure-integer small-value constraint system.
 //!
-//! This module provides a SHA-256 implementation using `SmallConstraintSystem<V>`
+//! This module provides a SHA-256 implementation using `SmallConstraintSystem<W, i32>`
 //! and `SmallBoolean` gadgets. All witnesses are bits (0/1), all coefficients
 //! are i32 — no field elements created during circuit synthesis.
 //!
@@ -17,7 +17,7 @@
 //! use spartan2::small_constraint_system::SmallShapeCS;
 //!
 //! // Shape extraction (i32 coefficients)
-//! let mut cs = SmallShapeCS::new();
+//! let mut cs = SmallShapeCS::<i32>::new();
 //! let input_bits: Vec<SmallBoolean> = (0..512).map(|_| SmallBoolean::constant(false)).collect();
 //! let hash_bits = small_sha256(&mut cs, &input_bits)?;
 //!
@@ -28,7 +28,7 @@
 
 use super::{SmallMultiEq, SmallUInt32, small_multi_eq::NoBatchEq};
 use crate::{
-  gadgets::small_boolean::{Double, NegOne, SmallBit, SmallBoolean},
+  gadgets::small_boolean::{SmallBit, SmallBoolean},
   small_constraint_system::{SmallConstraintSystem, SmallLinearCombination, SmallToBellpepperCS},
 };
 use bellpepper_core::SynthesisError;
@@ -50,15 +50,15 @@ const IV: [u32; 8] = [
   0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// Trait alias for the value type bounds needed by SHA-256 gadgets.
-pub trait Sha256Value: Copy + From<bool> + NegOne + Double {}
-impl<T: Copy + From<bool> + NegOne + Double> Sha256Value for T {}
+/// Trait alias for the witness type bounds needed by SHA-256 gadgets.
+pub trait Sha256Witness: Copy + From<bool> {}
+impl<T: Copy + From<bool>> Sha256Witness for T {}
 
 /// Σ0(x) = ROTR^2(x) ⊕ ROTR^13(x) ⊕ ROTR^22(x)
-fn big_sigma_0<V, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
+fn big_sigma_0<W, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
 where
-  V: Sha256Value,
-  CS: SmallConstraintSystem<V>,
+  W: Sha256Witness,
+  CS: SmallConstraintSystem<W, i32>,
 {
   let r2 = x.rotr(2);
   let r13 = x.rotr(13);
@@ -68,10 +68,10 @@ where
 }
 
 /// Σ1(x) = ROTR^6(x) ⊕ ROTR^11(x) ⊕ ROTR^25(x)
-fn big_sigma_1<V, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
+fn big_sigma_1<W, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
 where
-  V: Sha256Value,
-  CS: SmallConstraintSystem<V>,
+  W: Sha256Witness,
+  CS: SmallConstraintSystem<W, i32>,
 {
   let r6 = x.rotr(6);
   let r11 = x.rotr(11);
@@ -81,10 +81,10 @@ where
 }
 
 /// σ0(x) = ROTR^7(x) ⊕ ROTR^18(x) ⊕ SHR^3(x)
-fn small_sigma_0<V, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
+fn small_sigma_0<W, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
 where
-  V: Sha256Value,
-  CS: SmallConstraintSystem<V>,
+  W: Sha256Witness,
+  CS: SmallConstraintSystem<W, i32>,
 {
   let r7 = x.rotr(7);
   let r18 = x.rotr(18);
@@ -94,10 +94,10 @@ where
 }
 
 /// σ1(x) = ROTR^17(x) ⊕ ROTR^19(x) ⊕ SHR^10(x)
-fn small_sigma_1<V, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
+fn small_sigma_1<W, CS>(mut cs: CS, x: &SmallUInt32) -> Result<SmallUInt32, SynthesisError>
 where
-  V: Sha256Value,
-  CS: SmallConstraintSystem<V>,
+  W: Sha256Witness,
+  CS: SmallConstraintSystem<W, i32>,
 {
   let r17 = x.rotr(17);
   let r19 = x.rotr(19);
@@ -107,7 +107,7 @@ where
 }
 
 /// SHA-256 compression function.
-fn sha256_compression<V, M>(
+fn sha256_compression<W, M>(
   cs: &mut M,
   h: &mut [SmallUInt32; 8],
   w: &[SmallUInt32; 16],
@@ -115,19 +115,19 @@ fn sha256_compression<V, M>(
   prefix: &str,
 ) -> Result<(), SynthesisError>
 where
-  V: Sha256Value,
-  M: SmallMultiEq<V>,
+  W: Sha256Witness,
+  M: SmallMultiEq<W, i32>,
 {
   // Message schedule: expand 16 words to 64 words
   let mut w_expanded: Vec<SmallUInt32> = w.to_vec();
   w_expanded.reserve(48);
 
   for i in 16..64 {
-    let s1 = small_sigma_1::<V, _>(
+    let s1 = small_sigma_1::<W, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_w{i}_s1")),
       &w_expanded[i - 2],
     )?;
-    let s0 = small_sigma_0::<V, _>(
+    let s0 = small_sigma_0::<W, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_w{i}_s0")),
       &w_expanded[i - 15],
     )?;
@@ -152,11 +152,11 @@ where
   );
 
   for i in 0..64 {
-    let sigma1 = big_sigma_1::<V, _>(
+    let sigma1 = big_sigma_1::<W, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_r{i}_sigma1")),
       &e,
     )?;
-    let ch = SmallUInt32::sha256_ch::<V, _>(
+    let ch = SmallUInt32::sha256_ch::<W, i32, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_r{i}_ch")),
       &e,
       &f,
@@ -165,11 +165,11 @@ where
     let k = SmallUInt32::constant(ROUND_CONSTANTS[i]);
     let t1 = cs.addmany(&[h_var.clone(), sigma1, ch, k, w_expanded[i].clone()])?;
 
-    let sigma0 = big_sigma_0::<V, _>(
+    let sigma0 = big_sigma_0::<W, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_r{i}_sigma0")),
       &a,
     )?;
-    let maj = SmallUInt32::sha256_maj::<V, _>(
+    let maj = SmallUInt32::sha256_maj::<W, i32, _>(
       cs.namespace(|| format!("{prefix}b{block_idx}_r{i}_maj")),
       &a,
       &b,
@@ -202,29 +202,29 @@ where
 ///
 /// Input bits are `SmallBoolean` values. Returns 256 output bits.
 ///
-/// # Shape extraction (V = i32)
-/// Pass a `SmallShapeCS` or `NoBatchEq<i32, SmallShapeCS>`.
+/// # Shape extraction
+/// Pass a `SmallShapeCS<i32>` or `NoBatchEq<W, i32, SmallShapeCS<i32>>`.
 /// All constraints use i32 coefficients.
-pub fn small_sha256_int<V, M>(
+pub fn small_sha256_int<W, M>(
   cs: &mut M,
   input: &[SmallBoolean],
 ) -> Result<Vec<SmallBoolean>, SynthesisError>
 where
-  V: Sha256Value,
-  M: SmallMultiEq<V>,
+  W: Sha256Witness,
+  M: SmallMultiEq<W, i32>,
 {
   small_sha256_int_with_prefix(cs, input, "")
 }
 
 /// Compute SHA-256 with a prefix for variable names (pure-integer path).
-pub fn small_sha256_int_with_prefix<V, M>(
+pub fn small_sha256_int_with_prefix<W, M>(
   cs: &mut M,
   input: &[SmallBoolean],
   prefix: &str,
 ) -> Result<Vec<SmallBoolean>, SynthesisError>
 where
-  V: Sha256Value,
-  M: SmallMultiEq<V>,
+  W: Sha256Witness,
+  M: SmallMultiEq<W, i32>,
 {
   let padded = sha256_padding(input);
 
@@ -246,7 +246,7 @@ where
       *w_item = SmallUInt32::from_bits_be(&word_bits);
     }
 
-    sha256_compression::<V, _>(cs, &mut h, &w, block_idx, prefix)?;
+    sha256_compression::<W, _>(cs, &mut h, &w, block_idx, prefix)?;
   }
 
   let mut output = Vec::with_capacity(256);
@@ -261,28 +261,28 @@ where
 ///
 /// `input_bits` are interpreted as 16 big-endian `u32` words, and
 /// `current_hash` is the 8-word SHA-256 chaining state.
-pub fn small_sha256_compression_function_int<V, M>(
+pub fn small_sha256_compression_function_int<W, M>(
   cs: &mut M,
   input_bits: &[SmallBoolean],
   current_hash: &[SmallUInt32],
 ) -> Result<Vec<SmallUInt32>, SynthesisError>
 where
-  V: Sha256Value,
-  M: SmallMultiEq<V>,
+  W: Sha256Witness,
+  M: SmallMultiEq<W, i32>,
 {
   small_sha256_compression_function_int_with_prefix(cs, input_bits, current_hash, "")
 }
 
 /// Run one SHA-256 compression block with the small-value gadget and name prefix.
-pub fn small_sha256_compression_function_int_with_prefix<V, M>(
+pub fn small_sha256_compression_function_int_with_prefix<W, M>(
   cs: &mut M,
   input_bits: &[SmallBoolean],
   current_hash: &[SmallUInt32],
   prefix: &str,
 ) -> Result<Vec<SmallUInt32>, SynthesisError>
 where
-  V: Sha256Value,
-  M: SmallMultiEq<V>,
+  W: Sha256Witness,
+  M: SmallMultiEq<W, i32>,
 {
   assert_eq!(input_bits.len(), 512);
   assert_eq!(current_hash.len(), 8);
@@ -297,7 +297,7 @@ where
     *w_item = SmallUInt32::from_bits_be(&word_bits);
   }
 
-  sha256_compression::<V, _>(cs, &mut h, &w, 0, prefix)?;
+  sha256_compression::<W, _>(cs, &mut h, &w, 0, prefix)?;
 
   Ok(h.to_vec())
 }
@@ -361,8 +361,8 @@ where
     .map(small_boolean_from_bellpepper)
     .collect::<Vec<_>>();
   let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(cs);
-  let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
-  let hash_bits = small_sha256_int_with_prefix::<i32, _>(&mut eq, &small_input, prefix)?;
+  let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
+  let hash_bits = small_sha256_int_with_prefix::<i8, _>(&mut eq, &small_input, prefix)?;
   drop(eq);
 
   small_booleans_to_allocated_booleans(&mut small_cs, &hash_bits)
@@ -396,8 +396,8 @@ where
     .map(small_boolean_from_bellpepper)
     .collect::<Vec<_>>();
   let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(&mut cs);
-  let mut eq = NoBatchEq::<i32, _>::new(&mut small_cs);
-  small_sha256_compression_function_int::<i32, _>(&mut eq, &small_input, current_hash)
+  let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
+  small_sha256_compression_function_int::<i8, _>(&mut eq, &small_input, current_hash)
 }
 
 fn small_boolean_from_bellpepper(bit: &bellpepper_core::boolean::Boolean) -> SmallBoolean {
@@ -420,7 +420,7 @@ fn small_booleans_to_allocated_booleans<Scalar, CS>(
 ) -> Result<Vec<bellpepper_core::boolean::Boolean>, SynthesisError>
 where
   Scalar: ff::PrimeField,
-  CS: bellpepper_core::ConstraintSystem<Scalar> + SmallConstraintSystem<i32>,
+  CS: bellpepper_core::ConstraintSystem<Scalar> + SmallConstraintSystem<i8, i32>,
 {
   bits
     .iter()
@@ -436,7 +436,7 @@ where
       for (var, coeff) in allocated_small.lc::<i32>().terms {
         diff.add_term(var, -coeff);
       }
-      SmallConstraintSystem::<i32>::enforce(
+      SmallConstraintSystem::<i8, i32>::enforce(
         cs,
         || format!("output_bit_{i}_binding"),
         diff,
@@ -489,20 +489,20 @@ mod tests {
 
   #[test]
   fn test_small_sha256_shape_empty() {
-    let mut cs = SmallShapeCS::new();
-    let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+    let mut cs = SmallShapeCS::<i32>::new();
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
 
     // Empty input: all-constant computation, shape records 0 constraints
     let input: Vec<SmallBoolean> = vec![];
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &input).unwrap();
+    let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input).unwrap();
     assert_eq!(hash_bits.len(), 256);
   }
 
   #[test]
   fn test_small_sha256_shape_nonempty() {
     use crate::gadgets::small_boolean::SmallBit;
-    let mut cs = SmallShapeCS::new();
-    let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+    let mut cs = SmallShapeCS::<i32>::new();
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
 
     // 8 allocated bit inputs → should produce constraints
     let input: Vec<SmallBoolean> = (0..8)
@@ -512,7 +512,7 @@ mod tests {
         )
       })
       .collect();
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &input).unwrap();
+    let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input).unwrap();
     assert_eq!(hash_bits.len(), 256);
     drop(eq);
     assert!(cs.num_constraints() > 0);
@@ -522,11 +522,11 @@ mod tests {
   fn test_small_sha256_correctness_empty() {
     use sha2::{Digest, Sha256};
 
-    let mut cs = SmallShapeCS::new();
-    let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+    let mut cs = SmallShapeCS::<i32>::new();
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
 
     let input: Vec<SmallBoolean> = vec![];
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &input).unwrap();
+    let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input).unwrap();
     let hash_bytes = small_bits_to_bytes(&hash_bits);
     let expected = Sha256::digest(b"");
 
@@ -537,11 +537,11 @@ mod tests {
   fn test_small_sha256_correctness_abc() {
     use sha2::{Digest, Sha256};
 
-    let mut cs = SmallShapeCS::new();
-    let mut eq = NoBatchEq::<i32, _>::new(&mut cs);
+    let mut cs = SmallShapeCS::<i32>::new();
+    let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
 
     let input = bytes_to_small_bits(b"abc");
-    let hash_bits = small_sha256_int::<i32, _>(&mut eq, &input).unwrap();
+    let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input).unwrap();
     let hash_bytes = small_bits_to_bytes(&hash_bits);
     let expected = Sha256::digest(b"abc");
 

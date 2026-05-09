@@ -6,8 +6,8 @@
 
 //! # SmallConstraintSystem
 //!
-//! A constraint system trait that operates over small integer types (i8, i32)
-//! instead of field elements. This enables the pure-integer proving path where:
+//! A constraint system trait that separates small witness values from small
+//! constraint coefficients. This enables the pure-integer proving path where:
 //! - Shape extraction uses `SmallShapeCS<i32>` → `SparseMatrix<i32>`
 //! - Witness generation uses `SmallSatisfyingAssignment<i8>` → `Vec<i8>`
 //! - No field elements are created until the inner sumcheck boundary
@@ -116,72 +116,72 @@ impl SmallCoeff for i32 {
 /// A linear combination over small integer coefficients.
 /// Replaces bellpepper's `LinearCombination<Scalar>` for the integer path.
 #[derive(Clone, Debug)]
-pub struct SmallLinearCombination<V> {
-  pub(crate) terms: Vec<(Variable, V)>,
+pub struct SmallLinearCombination<C> {
+  pub(crate) terms: Vec<(Variable, C)>,
 }
 
-impl<V: Copy> SmallLinearCombination<V> {
+impl<C: Copy> SmallLinearCombination<C> {
   /// Empty linear combination (zero).
   pub fn zero() -> Self {
     SmallLinearCombination { terms: vec![] }
   }
 
   /// LC = coeff × ONE.
-  pub fn one(coeff: V) -> Self {
+  pub fn one(coeff: C) -> Self {
     SmallLinearCombination {
       terms: vec![(Variable::new_unchecked(Index::Input(0)), coeff)],
     }
   }
 
   /// LC = coeff × var.
-  pub fn from_variable(var: Variable, coeff: V) -> Self {
+  pub fn from_variable(var: Variable, coeff: C) -> Self {
     SmallLinearCombination {
       terms: vec![(var, coeff)],
     }
   }
 
   /// Add a term: LC += coeff × var.
-  pub fn add_term(&mut self, var: Variable, coeff: V) {
+  pub fn add_term(&mut self, var: Variable, coeff: C) {
     self.terms.push((var, coeff));
   }
 
   /// Subtract a term: LC -= coeff × var (coeff must already be negated).
-  pub fn sub_term(&mut self, var: Variable, neg_coeff: V) {
+  pub fn sub_term(&mut self, var: Variable, neg_coeff: C) {
     self.terms.push((var, neg_coeff));
   }
 }
 
 // ── SmallConstraintSystem ──────────────────────────────────────────────────
 
-/// A constraint system over small integer values.
+/// A constraint system over small integer witnesses and coefficients.
 ///
 /// Mirrors bellpepper's `ConstraintSystem<Scalar>` but without any field arithmetic.
 /// Used for the pure-integer proving path.
-pub trait SmallConstraintSystem<V>: Sized {
+pub trait SmallConstraintSystem<W, C>: Sized {
   /// The root constraint system type (for namespace delegation).
-  type Root: SmallConstraintSystem<V>;
+  type Root: SmallConstraintSystem<W, C>;
 
   /// Allocate an auxiliary variable.
   fn alloc<A, AR, F>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>;
+    F: FnOnce() -> Result<W, SynthesisError>;
 
   /// Allocate an input variable.
   fn alloc_input<A, AR, F>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>;
+    F: FnOnce() -> Result<W, SynthesisError>;
 
   /// Enforce a constraint: a(x) × b(x) = c(x).
   fn enforce<A, AR>(
     &mut self,
     annotation: A,
-    a: SmallLinearCombination<V>,
-    b: SmallLinearCombination<V>,
-    c: SmallLinearCombination<V>,
+    a: SmallLinearCombination<C>,
+    b: SmallLinearCombination<C>,
+    c: SmallLinearCombination<C>,
   ) where
     A: FnOnce() -> AR,
     AR: Into<String>;
@@ -199,7 +199,7 @@ pub trait SmallConstraintSystem<V>: Sized {
   fn get_root(&mut self) -> &mut Self::Root;
 
   /// Enter a named namespace (auto-pops on drop).
-  fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, V, Self::Root>
+  fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, W, C, Self::Root>
   where
     NR: Into<String>,
     N: FnOnce() -> NR,
@@ -215,19 +215,21 @@ pub trait SmallConstraintSystem<V>: Sized {
 // ── SmallNamespace ─────────────────────────────────────────────────────────
 
 /// A scoped namespace within a SmallConstraintSystem.
-pub struct SmallNamespace<'a, V, CS: SmallConstraintSystem<V>> {
+pub struct SmallNamespace<'a, W, C, CS: SmallConstraintSystem<W, C>> {
   pub(crate) inner: &'a mut CS,
-  pub(crate) _marker: PhantomData<V>,
+  pub(crate) _marker: PhantomData<(W, C)>,
 }
 
-impl<V, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for SmallNamespace<'_, V, CS> {
+impl<W, C, CS: SmallConstraintSystem<W, C>> SmallConstraintSystem<W, C>
+  for SmallNamespace<'_, W, C, CS>
+{
   type Root = CS::Root;
 
   fn alloc<A, AR, F>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.inner.alloc(annotation, f)
   }
@@ -236,7 +238,7 @@ impl<V, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for SmallNamespac
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     self.inner.alloc_input(annotation, f)
   }
@@ -244,9 +246,9 @@ impl<V, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for SmallNamespac
   fn enforce<A, AR>(
     &mut self,
     annotation: A,
-    a: SmallLinearCombination<V>,
-    b: SmallLinearCombination<V>,
-    c: SmallLinearCombination<V>,
+    a: SmallLinearCombination<C>,
+    b: SmallLinearCombination<C>,
+    c: SmallLinearCombination<C>,
   ) where
     A: FnOnce() -> AR,
     AR: Into<String>,
@@ -271,7 +273,7 @@ impl<V, CS: SmallConstraintSystem<V>> SmallConstraintSystem<V> for SmallNamespac
   }
 }
 
-impl<V, CS: SmallConstraintSystem<V>> Drop for SmallNamespace<'_, V, CS> {
+impl<W, C, CS: SmallConstraintSystem<W, C>> Drop for SmallNamespace<'_, W, C, CS> {
   fn drop(&mut self) {
     self.inner.pop_namespace();
   }
@@ -289,7 +291,7 @@ pub struct SmallSatisfyingAssignment<V> {
   pub(crate) aux_assignment: Vec<V>,
 }
 
-impl<V: Copy + From<bool>> SmallSatisfyingAssignment<V> {
+impl<V: From<bool>> SmallSatisfyingAssignment<V> {
   /// Create a new satisfying assignment with no variables.
   pub fn new() -> Self {
     SmallSatisfyingAssignment {
@@ -300,14 +302,14 @@ impl<V: Copy + From<bool>> SmallSatisfyingAssignment<V> {
   }
 }
 
-impl<V: Copy + Default> SmallConstraintSystem<V> for SmallSatisfyingAssignment<V> {
+impl<W, C> SmallConstraintSystem<W, C> for SmallSatisfyingAssignment<W> {
   type Root = Self;
 
   fn alloc<A, AR, F>(&mut self, _annotation: A, f: F) -> Result<Variable, SynthesisError>
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     let val = f()?;
     self.aux_assignment.push(val);
@@ -320,7 +322,7 @@ impl<V: Copy + Default> SmallConstraintSystem<V> for SmallSatisfyingAssignment<V
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<V, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     let val = f()?;
     self.input_assignment.push(val);
@@ -332,9 +334,9 @@ impl<V: Copy + Default> SmallConstraintSystem<V> for SmallSatisfyingAssignment<V
   fn enforce<A, AR>(
     &mut self,
     _annotation: A,
-    _a: SmallLinearCombination<V>,
-    _b: SmallLinearCombination<V>,
-    _c: SmallLinearCombination<V>,
+    _a: SmallLinearCombination<C>,
+    _b: SmallLinearCombination<C>,
+    _c: SmallLinearCombination<C>,
   ) where
     A: FnOnce() -> AR,
     AR: Into<String>,
@@ -497,14 +499,14 @@ impl<C: SmallCoeff> SmallShapeCS<C> {
   }
 }
 
-impl<C: SmallCoeff> SmallConstraintSystem<C> for SmallShapeCS<C> {
+impl<W, C: SmallCoeff> SmallConstraintSystem<W, C> for SmallShapeCS<C> {
   type Root = Self;
 
   fn alloc<A, AR, F>(&mut self, _annotation: A, _f: F) -> Result<Variable, SynthesisError>
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<C, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     let idx = self.num_aux;
     self.num_aux += 1;
@@ -515,7 +517,7 @@ impl<C: SmallCoeff> SmallConstraintSystem<C> for SmallShapeCS<C> {
   where
     A: FnOnce() -> AR,
     AR: Into<String>,
-    F: FnOnce() -> Result<C, SynthesisError>,
+    F: FnOnce() -> Result<W, SynthesisError>,
   {
     let idx = self.num_inputs;
     self.num_inputs += 1;
@@ -551,8 +553,12 @@ impl<C: SmallCoeff> SmallConstraintSystem<C> for SmallShapeCS<C> {
 
 #[cfg(test)]
 mod tests {
-  use super::SmallCoeff;
+  use super::{
+    SmallCoeff, SmallConstraintSystem, SmallLinearCombination, SmallSatisfyingAssignment,
+    SmallShapeCS, SmallToBellpepperCS,
+  };
   use crate::{provider::Bn254Engine, traits::Engine};
+  use bellpepper_core::test_cs::TestConstraintSystem;
   use ff::Field;
 
   type Scalar = <Bn254Engine as Engine>::Scalar;
@@ -594,5 +600,50 @@ mod tests {
     assert_eq!((-3i8).mul_field(&x), -Scalar::from(27u64));
     assert_eq!(5i32.mul_field(&x), Scalar::from(45u64));
     assert_eq!((-5i32).mul_field(&x), -Scalar::from(45u64));
+  }
+
+  fn synthesize_split_api<CS: SmallConstraintSystem<i8, i32>>(cs: &mut CS) {
+    let bit = cs.alloc(|| "bit", || Ok(1i8)).unwrap();
+    cs.enforce(
+      || "bit_is_one",
+      SmallLinearCombination::from_variable(bit, 1i32),
+      SmallLinearCombination::one(1i32),
+      SmallLinearCombination::one(1i32),
+    );
+  }
+
+  #[test]
+  fn test_small_shape_accepts_i8_witnesses_and_i32_coefficients() {
+    let mut cs = SmallShapeCS::<i32>::new();
+    synthesize_split_api(&mut cs);
+
+    assert_eq!(cs.num_vars(), 1);
+    assert_eq!(cs.num_inputs(), 1);
+    assert_eq!(cs.num_constraints(), 1);
+
+    let (a, b, c) = cs.to_matrices();
+    assert_eq!(a.data, vec![1i32]);
+    assert_eq!(b.data, vec![1i32]);
+    assert_eq!(c.data, vec![1i32]);
+  }
+
+  #[test]
+  fn test_small_satisfying_assignment_accepts_i32_linear_combinations() {
+    let mut cs = SmallSatisfyingAssignment::<i8>::new();
+    synthesize_split_api(&mut cs);
+
+    assert_eq!(cs.aux_assignment, vec![1i8]);
+    assert_eq!(cs.input_assignment, vec![1i8]);
+  }
+
+  #[test]
+  fn test_small_to_bellpepper_accepts_i8_witnesses_and_i32_coefficients() {
+    let mut inner = TestConstraintSystem::<Scalar>::new();
+    {
+      let mut cs = SmallToBellpepperCS::<Scalar, _>::new(&mut inner);
+      synthesize_split_api(&mut cs);
+    }
+
+    assert!(inner.is_satisfied());
   }
 }
