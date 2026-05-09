@@ -10,9 +10,12 @@
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
 use ff::PrimeField;
+use num_traits::{Bounded, One, Signed, Zero};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ops::{Div, Mul};
 
+use crate::big_num::{DelayedReduction, ExtensionBound, SmallValueField, WideMul};
 use crate::errors::SpartanError;
 
 /// Threshold below which we use sequential (non-rayon) iteration.
@@ -518,6 +521,60 @@ impl<F: PrimeField> SparseMatrix<F> {
     }
   }
 
+  /// Multiply by a dense small-value vector and return extension-safe small values.
+  ///
+  /// This is used by the full-small NeutronNova accumulator path. It accumulates
+  /// `field coefficient × small vector entry` with delayed reduction, reduces the
+  /// row result to a field element, then enforces the Lagrange-extension bound.
+  pub fn multiply_vec_small<const D: usize, SV>(
+    &self,
+    z: &[SV],
+    lb: usize,
+  ) -> Result<Vec<SV>, SpartanError>
+  where
+    F: SmallValueField<SV> + DelayedReduction<SV> + Sync,
+    SV: WideMul + Bounded + Copy + Send + Sync + Into<SV::Product>,
+    SV::Product:
+      Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  {
+    if self.cols != z.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SparseMatrix multiply_vec_small: Expected {} elements in vector, got {}",
+          self.cols,
+          z.len()
+        ),
+      });
+    }
+
+    let bound = ExtensionBound::<SV, D>::new(lb);
+    let num_rows = self.indptr.len() - 1;
+
+    let compute_row = |row: usize| -> Result<SV, SpartanError> {
+      let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
+      let ptrs = [self.indptr[row], self.indptr[row + 1]];
+      for (val, col_idx) in self.get_row_unchecked(&ptrs) {
+        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, val, &z[*col_idx]);
+      }
+      let field_result = <F as DelayedReduction<SV>>::reduce(&acc);
+      bound
+        .try_to_small(&field_result)
+        .ok_or_else(|| SpartanError::SmallValueOverflow {
+          value: format!("0x{}", hex::encode(field_result.to_repr().as_ref())),
+          context: format!(
+            "SparseMatrix::multiply_vec_small row {} exceeds extension bound for D={}, lb={}",
+            row, D, lb
+          ),
+        })
+    };
+
+    if num_rows <= PARALLEL_THRESHOLD {
+      (0..num_rows).map(compute_row).collect()
+    } else {
+      (0..num_rows).into_par_iter().map(compute_row).collect()
+    }
+  }
+
   /// returns a custom iterator
   pub fn iter(&self) -> Iter<'_, F> {
     let mut row = 0;
@@ -631,6 +688,50 @@ mod tests {
     );
     assert_eq!(sparse_matrix.indices, vec![1, 2, 0]);
     assert_eq!(sparse_matrix.indptr, vec![0, 1, 2, 3]);
+  }
+
+  #[test]
+  fn test_multiply_vec_small_matches_field_matvec() {
+    use crate::big_num::SmallValueField;
+
+    let matrix = SparseMatrix::<Fr>::new(
+      &[
+        (0, 0, Fr::from(2u64)),
+        (0, 1, -Fr::from(1u64)),
+        (1, 1, Fr::from(5u64)),
+        (1, 2, Fr::from(3u64)),
+        (2, 0, -Fr::from(4u64)),
+        (2, 2, Fr::from(7u64)),
+      ],
+      3,
+      3,
+    );
+    let z_small = vec![3i64, -2, 4];
+    let z_field = z_small
+      .iter()
+      .copied()
+      .map(<Fr as SmallValueField<i64>>::small_to_field)
+      .collect::<Vec<_>>();
+
+    let expected = matrix.multiply_vec(&z_field).unwrap();
+    let got = matrix.multiply_vec_small::<2, i64>(&z_small, 2).unwrap();
+    let expected_small = expected
+      .iter()
+      .map(<Fr as SmallValueField<i64>>::try_field_to_small)
+      .collect::<Option<Vec<_>>>()
+      .unwrap();
+
+    assert_eq!(got, expected_small);
+  }
+
+  #[test]
+  fn test_multiply_vec_small_overflow_fails_hard() {
+    let matrix = SparseMatrix::<Fr>::new(&[(0, 0, Fr::from(1u64))], 1, 1);
+    let err = matrix
+      .multiply_vec_small::<2, i64>(&[i64::MAX], 2)
+      .unwrap_err();
+
+    assert!(matches!(err, SpartanError::SmallValueOverflow { .. }));
   }
 
   #[test]

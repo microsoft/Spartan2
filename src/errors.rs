@@ -107,4 +107,18 @@ pub enum SpartanError {
     /// The maximum size that can be handled
     max: usize,
   },
+  /// returned when a field element cannot be converted to a small integer
+  #[error("SmallValueOverflow: {context}; value={value}")]
+  SmallValueOverflow {
+    /// The value that could not be converted
+    value: String,
+    /// Context about where the overflow occurred
+    context: String,
+  },
+  /// returned when l0 (small-value rounds) is zero
+  #[error("SmallValueRoundsZero: {context}")]
+  SmallValueRoundsZero {
+    /// Context about where the error occurred
+    context: String,
+  },
 }

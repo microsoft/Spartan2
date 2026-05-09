@@ -57,8 +57,11 @@ impl_traits!(
 // Pallas scalar = Fq, Vesta scalar = Fp
 crate::impl_field_reduction_constants!(pallas::Scalar);
 crate::impl_montgomery_limbs!(pallas::Scalar);
+crate::impl_barrett_reduction_constants!(pallas::Scalar);
+
 crate::impl_field_reduction_constants!(vesta::Scalar);
 crate::impl_montgomery_limbs!(vesta::Scalar);
+crate::impl_barrett_reduction_constants!(vesta::Scalar);
 
 #[cfg(test)]
 mod tests {
@@ -105,10 +108,31 @@ mod tests {
 
 #[cfg(test)]
 mod big_num_tests {
+  // Pallas tests
   crate::test_field_reduction_constants!(pallas_frc, crate::provider::pasta::pallas::Scalar);
   crate::test_montgomery!(pallas_mont, crate::provider::pasta::pallas::Scalar);
   crate::test_delayed_reduction!(pallas_dr, crate::provider::pasta::pallas::Scalar);
+  crate::test_barrett_reduction_constants!(pallas_brc, crate::provider::pasta::pallas::Scalar);
+  crate::test_barrett_reduction!(
+    pallas_br,
+    crate::provider::pasta::pallas::Scalar,
+    crate::big_num::barrett::barrett_reduce_6::<crate::provider::pasta::pallas::Scalar>
+  );
+  crate::test_barrett_reduction_7!(pallas_br7, crate::provider::pasta::pallas::Scalar);
+  crate::test_delayed_reduction_small!(pallas_dr_small, crate::provider::pasta::pallas::Scalar);
+  crate::test_small_value_field!(pallas_svf, crate::provider::pasta::pallas::Scalar);
+
+  // Vesta tests
   crate::test_field_reduction_constants!(vesta_frc, crate::provider::pasta::vesta::Scalar);
   crate::test_montgomery!(vesta_mont, crate::provider::pasta::vesta::Scalar);
   crate::test_delayed_reduction!(vesta_dr, crate::provider::pasta::vesta::Scalar);
+  crate::test_barrett_reduction_constants!(vesta_brc, crate::provider::pasta::vesta::Scalar);
+  crate::test_barrett_reduction!(
+    vesta_br,
+    crate::provider::pasta::vesta::Scalar,
+    crate::big_num::barrett::barrett_reduce_6::<crate::provider::pasta::vesta::Scalar>
+  );
+  crate::test_barrett_reduction_7!(vesta_br7, crate::provider::pasta::vesta::Scalar);
+  crate::test_delayed_reduction_small!(vesta_dr_small, crate::provider::pasta::vesta::Scalar);
+  crate::test_small_value_field!(vesta_svf, crate::provider::pasta::vesta::Scalar);
 }
