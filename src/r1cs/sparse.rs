@@ -385,9 +385,9 @@ impl<F: PrimeField> FilteredSpmv<F> {
 /// CSR format sparse matrix, We follow the names used by scipy.
 /// Detailed explanation here: https://stackoverflow.com/questions/52299420/scipy-csr-matrix-understand-indptr
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SparseMatrix<F: PrimeField> {
+pub struct SparseMatrix<C> {
   /// all non-zero values in the matrix
-  pub data: Vec<F>,
+  pub data: Vec<C>,
   /// column indices
   pub indices: Vec<usize>,
   /// row information
@@ -396,29 +396,7 @@ pub struct SparseMatrix<F: PrimeField> {
   pub cols: usize,
 }
 
-impl<F: PrimeField> SparseMatrix<F> {
-  /// Write raw bytes for digest computation (much faster than bincode Serialize).
-  pub fn write_digest_bytes<W: std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
-    // Write lengths and cols as fixed-size le bytes
-    w.write_all(&(self.data.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.indices.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.indptr.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.cols as u64).to_le_bytes())?;
-    // Write field elements as raw repr bytes
-    for d in &self.data {
-      w.write_all(d.to_repr().as_ref())?;
-    }
-    // Write indices as raw bytes
-    for idx in &self.indices {
-      w.write_all(&(*idx as u64).to_le_bytes())?;
-    }
-    // Write indptr as raw bytes
-    for ptr in &self.indptr {
-      w.write_all(&(*ptr as u64).to_le_bytes())?;
-    }
-    Ok(())
-  }
-
+impl<C> SparseMatrix<C> {
   /// 0x0 empty matrix
   pub fn empty() -> Self {
     SparseMatrix {
@@ -429,10 +407,21 @@ impl<F: PrimeField> SparseMatrix<F> {
     }
   }
 
-  /// Construct from the COO representation; Vec<usize(row), usize(col), F>.
+  /// Retrieves the data for row slice [i..j] from `ptrs`.
+  /// We assume that `ptrs` is indexed from `indptrs` and do not check if the
+  /// returned slice is actually a valid row.
+  pub fn get_row_unchecked(&self, ptrs: &[usize; 2]) -> impl Iterator<Item = (&C, &usize)> {
+    self.data[ptrs[0]..ptrs[1]]
+      .iter()
+      .zip(&self.indices[ptrs[0]..ptrs[1]])
+  }
+}
+
+impl<C: Copy> SparseMatrix<C> {
+  /// Construct from the COO representation; Vec<usize(row), usize(col), C>.
   /// We assume that the rows are sorted during construction.
   #[cfg(test)]
-  pub fn new(matrix: &[(usize, usize, F)], rows: usize, cols: usize) -> Self {
+  pub fn new(matrix: &[(usize, usize, C)], rows: usize, cols: usize) -> Self {
     let mut new_matrix = vec![vec![]; rows];
     for (row, col, val) in matrix {
       new_matrix[*row].push((*col, *val));
@@ -463,13 +452,47 @@ impl<F: PrimeField> SparseMatrix<F> {
     }
   }
 
-  /// Retrieves the data for row slice [i..j] from `ptrs`.
-  /// We assume that `ptrs` is indexed from `indptrs` and do not check if the
-  /// returned slice is actually a valid row.
-  pub fn get_row_unchecked(&self, ptrs: &[usize; 2]) -> impl Iterator<Item = (&F, &usize)> {
-    self.data[ptrs[0]..ptrs[1]]
-      .iter()
-      .zip(&self.indices[ptrs[0]..ptrs[1]])
+  /// returns a custom iterator
+  pub fn iter(&self) -> Iter<'_, C> {
+    let mut row = 0;
+    while row + 1 < self.indptr.len() && self.indptr[row + 1] == 0 {
+      row += 1;
+    }
+    let nnz = if self.indptr.is_empty() {
+      0
+    } else {
+      self.indptr[self.indptr.len() - 1]
+    };
+    Iter {
+      matrix: self,
+      row,
+      i: 0,
+      nnz,
+    }
+  }
+}
+
+impl<F: PrimeField> SparseMatrix<F> {
+  /// Write raw bytes for digest computation (much faster than bincode Serialize).
+  pub fn write_digest_bytes<W: std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+    // Write lengths and cols as fixed-size le bytes
+    w.write_all(&(self.data.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.indices.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.indptr.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.cols as u64).to_le_bytes())?;
+    // Write field elements as raw repr bytes
+    for d in &self.data {
+      w.write_all(d.to_repr().as_ref())?;
+    }
+    // Write indices as raw bytes
+    for idx in &self.indices {
+      w.write_all(&(*idx as u64).to_le_bytes())?;
+    }
+    // Write indptr as raw bytes
+    for ptr in &self.indptr {
+      w.write_all(&(*ptr as u64).to_le_bytes())?;
+    }
+    Ok(())
   }
 
   /// Multiply by a dense vector; uses rayon/gpu.
@@ -574,37 +597,18 @@ impl<F: PrimeField> SparseMatrix<F> {
       (0..num_rows).into_par_iter().map(compute_row).collect()
     }
   }
-
-  /// returns a custom iterator
-  pub fn iter(&self) -> Iter<'_, F> {
-    let mut row = 0;
-    while row + 1 < self.indptr.len() && self.indptr[row + 1] == 0 {
-      row += 1;
-    }
-    let nnz = if self.indptr.is_empty() {
-      0
-    } else {
-      self.indptr[self.indptr.len() - 1]
-    };
-    Iter {
-      matrix: self,
-      row,
-      i: 0,
-      nnz,
-    }
-  }
 }
 
 /// Iterator for sparse matrix
-pub struct Iter<'a, F: PrimeField> {
-  matrix: &'a SparseMatrix<F>,
+pub struct Iter<'a, C> {
+  matrix: &'a SparseMatrix<C>,
   row: usize,
   i: usize,
   nnz: usize,
 }
 
-impl<'a, F: PrimeField> Iterator for Iter<'a, F> {
-  type Item = (usize, usize, F);
+impl<C: Copy> Iterator for Iter<'_, C> {
+  type Item = (usize, usize, C);
 
   fn next(&mut self) -> Option<Self::Item> {
     // are we at the end?
@@ -688,6 +692,24 @@ mod tests {
     );
     assert_eq!(sparse_matrix.indices, vec![1, 2, 0]);
     assert_eq!(sparse_matrix.indptr, vec![0, 1, 2, 3]);
+  }
+
+  #[test]
+  fn test_i32_matrix_creation_iter_and_row_access() {
+    let matrix_data = vec![(0, 1, 2i32), (0, 3, -5), (2, 0, 7)];
+    let sparse_matrix = SparseMatrix::new(&matrix_data, 3, 4);
+
+    assert_eq!(sparse_matrix.data, vec![2, -5, 7]);
+    assert_eq!(sparse_matrix.indices, vec![1, 3, 0]);
+    assert_eq!(sparse_matrix.indptr, vec![0, 2, 2, 3]);
+    assert_eq!(sparse_matrix.cols, 4);
+
+    let row_zero = sparse_matrix
+      .get_row_unchecked(&[sparse_matrix.indptr[0], sparse_matrix.indptr[1]])
+      .map(|(val, col)| (*col, *val))
+      .collect::<Vec<_>>();
+    assert_eq!(row_zero, vec![(1, 2), (3, -5)]);
+    assert_eq!(sparse_matrix.iter().collect::<Vec<_>>(), matrix_data);
   }
 
   #[test]

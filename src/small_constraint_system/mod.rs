@@ -20,28 +20,10 @@ use std::{
   ops::{Add, AddAssign, Neg, Sub},
 };
 
+pub use crate::r1cs::SparseMatrix;
 pub use bridge::SmallToBellpepperCS;
 
 use bellpepper_core::{Index, SynthesisError, Variable};
-
-// ── SmallSparseMatrix ──────────────────────────────────────────────────────
-
-/// CSR sparse matrix over small integer coefficients.
-///
-/// This is intentionally separate from the field-oriented Spartan R1CS matrix
-/// type in this branch, whose generic parameter is still constrained to field
-/// elements.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SmallSparseMatrix<C> {
-  /// Non-zero coefficients in row-major CSR order.
-  pub data: Vec<C>,
-  /// Column index for each coefficient in `data`.
-  pub indices: Vec<usize>,
-  /// Row pointer offsets into `data` and `indices`.
-  pub indptr: Vec<usize>,
-  /// Number of columns in the matrix.
-  pub cols: usize,
-}
 
 // ── SmallCoeff ───────────────────────────────────────────────────────────
 
@@ -63,6 +45,9 @@ pub trait SmallCoeff:
   + PartialEq
   + PartialOrd
 {
+  /// Convert this small coefficient into a prime field element.
+  fn to_field<F: ff::PrimeField>(self) -> F;
+
   /// Multiply a field element by this coefficient (optimized dispatch).
   /// Implementations should fast-path ±1 and use Barrett/limb tricks for larger values.
   fn mul_field<F: ff::PrimeField>(self, x: &F) -> F;
@@ -76,16 +61,19 @@ pub trait SmallCoeff:
 
 impl SmallCoeff for i8 {
   #[inline(always)]
+  fn to_field<F: ff::PrimeField>(self) -> F {
+    let value = F::from(self.unsigned_abs() as u64);
+    if self < 0 { -value } else { value }
+  }
+
+  #[inline(always)]
   fn mul_field<F: ff::PrimeField>(self, x: &F) -> F {
     match self {
       0 => F::ZERO,
       1 => *x,
       -1 => -*x,
       2 => *x + *x,
-      _ => {
-        let result = *x * F::from(self.unsigned_abs() as u64);
-        if self > 0 { result } else { -result }
-      }
+      _ => *x * self.to_field::<F>(),
     }
   }
 
@@ -102,9 +90,14 @@ impl SmallCoeff for i8 {
 
 impl SmallCoeff for i32 {
   #[inline(always)]
+  fn to_field<F: ff::PrimeField>(self) -> F {
+    let value = F::from(self.unsigned_abs() as u64);
+    if self < 0 { -value } else { value }
+  }
+
+  #[inline(always)]
   fn mul_field<F: ff::PrimeField>(self, x: &F) -> F {
-    let result = *x * F::from(self.unsigned_abs() as u64);
-    if self > 0 { result } else { -result }
+    *x * self.to_field::<F>()
   }
 
   #[inline(always)]
@@ -420,13 +413,7 @@ impl<C: SmallCoeff> SmallShapeCS<C> {
   /// - aux[0..num_aux]: columns 0..num_aux
   /// - input[0..num_inputs]: columns num_aux..num_aux+num_inputs
   ///   (input[0] = ONE = column num_aux)
-  pub fn to_matrices(
-    &self,
-  ) -> (
-    SmallSparseMatrix<C>,
-    SmallSparseMatrix<C>,
-    SmallSparseMatrix<C>,
-  ) {
+  pub fn to_matrices(&self) -> (SparseMatrix<C>, SparseMatrix<C>, SparseMatrix<C>) {
     let num_cols = self.num_aux + self.num_inputs;
     let _num_rows = self.constraints.len();
 
@@ -494,7 +481,7 @@ impl<C: SmallCoeff> SmallShapeCS<C> {
         indptr.push(data.len());
       }
 
-      SmallSparseMatrix {
+      SparseMatrix {
         data,
         indices,
         indptr,
@@ -559,5 +546,53 @@ impl<C: SmallCoeff> SmallConstraintSystem<C> for SmallShapeCS<C> {
 
   fn get_root(&mut self) -> &mut Self::Root {
     self
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::SmallCoeff;
+  use crate::{provider::Bn254Engine, traits::Engine};
+  use ff::Field;
+
+  type Scalar = <Bn254Engine as Engine>::Scalar;
+
+  #[test]
+  fn test_i8_small_coeff_to_field() {
+    assert_eq!(0i8.to_field::<Scalar>(), Scalar::ZERO);
+    assert_eq!(1i8.to_field::<Scalar>(), Scalar::ONE);
+    assert_eq!((-1i8).to_field::<Scalar>(), -Scalar::ONE);
+    assert_eq!(7i8.to_field::<Scalar>(), Scalar::from(7u64));
+    assert_eq!((-7i8).to_field::<Scalar>(), -Scalar::from(7u64));
+    assert_eq!(
+      i8::MIN.to_field::<Scalar>(),
+      -Scalar::from(i8::MIN.unsigned_abs() as u64)
+    );
+  }
+
+  #[test]
+  fn test_i32_small_coeff_to_field() {
+    assert_eq!(0i32.to_field::<Scalar>(), Scalar::ZERO);
+    assert_eq!(1i32.to_field::<Scalar>(), Scalar::ONE);
+    assert_eq!((-1i32).to_field::<Scalar>(), -Scalar::ONE);
+    assert_eq!(123_456i32.to_field::<Scalar>(), Scalar::from(123_456u64));
+    assert_eq!(
+      (-123_456i32).to_field::<Scalar>(),
+      -Scalar::from(123_456u64)
+    );
+    assert_eq!(
+      i32::MIN.to_field::<Scalar>(),
+      -Scalar::from(i32::MIN.unsigned_abs() as u64)
+    );
+  }
+
+  #[test]
+  fn test_small_coeff_mul_field_uses_signed_conversion() {
+    let x = Scalar::from(9u64);
+
+    assert_eq!(3i8.mul_field(&x), Scalar::from(27u64));
+    assert_eq!((-3i8).mul_field(&x), -Scalar::from(27u64));
+    assert_eq!(5i32.mul_field(&x), Scalar::from(45u64));
+    assert_eq!((-5i32).mul_field(&x), -Scalar::from(45u64));
   }
 }

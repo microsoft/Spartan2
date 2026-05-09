@@ -27,7 +27,7 @@ mod folds;
 mod sparse;
 pub(crate) use sparse::FilteredSpmv;
 pub(crate) use sparse::PrecomputedSparseMatrix;
-pub(crate) use sparse::SparseMatrix;
+pub use sparse::SparseMatrix;
 
 /// Fused evaluation of three sparse matrices at (T_x, T_y).
 /// Processes all three matrices per row to improve T_y cache reuse.

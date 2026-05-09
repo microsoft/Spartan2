@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use bellpepper_core::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 use ff::PrimeField;
 
-use crate::small_constraint_system::{SmallConstraintSystem, SmallLinearCombination};
+use crate::small_constraint_system::{SmallCoeff, SmallConstraintSystem, SmallLinearCombination};
 
 /// Wraps a bellpepper `ConstraintSystem<Scalar>` to implement `SmallConstraintSystem<i32>`.
 ///
@@ -43,13 +43,7 @@ impl<'a, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallToBellpepperCS<'
       if *coeff == 0 {
         continue;
       }
-      let scalar = if *coeff > 0 {
-        Scalar::from(*coeff as u64)
-      } else {
-        // Negative coefficient: use -Scalar::from(|coeff|)
-        -Scalar::from((-*coeff) as u64)
-      };
-      result = result + (scalar, *var);
+      result = result + (coeff.to_field::<Scalar>(), *var);
     }
     result
   }
@@ -68,11 +62,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   {
     self.cs.alloc(annotation, || {
       let val = f()?;
-      Ok(if val >= 0 {
-        Scalar::from(val as u64)
-      } else {
-        -Scalar::from((-val) as u64)
-      })
+      Ok(val.to_field())
     })
   }
 
@@ -84,11 +74,7 @@ impl<Scalar: PrimeField, CS: ConstraintSystem<Scalar>> SmallConstraintSystem<i32
   {
     self.cs.alloc_input(annotation, || {
       let val = f()?;
-      Ok(if val >= 0 {
-        Scalar::from(val as u64)
-      } else {
-        -Scalar::from((-val) as u64)
-      })
+      Ok(val.to_field())
     })
   }
 

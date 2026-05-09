@@ -297,7 +297,7 @@ mod tests {
   use crate::{
     provider::Bn254Engine,
     small_constraint_system::{
-      SmallSatisfyingAssignment, SmallShapeCS, SmallSparseMatrix, circuit::SmallSpartanCircuit,
+      SmallSatisfyingAssignment, SmallShapeCS, SparseMatrix, circuit::SmallSpartanCircuit,
     },
     traits::Engine,
   };
@@ -321,9 +321,9 @@ mod tests {
     num_aux: usize,
     num_inputs: usize,
     num_constraints: usize,
-    a: SmallSparseMatrix<i32>,
-    b: SmallSparseMatrix<i32>,
-    c: SmallSparseMatrix<i32>,
+    a: SparseMatrix<i32>,
+    b: SparseMatrix<i32>,
+    c: SparseMatrix<i32>,
   }
 
   fn bytes_to_bits_be(bytes: &[u8]) -> Vec<bool> {
@@ -372,7 +372,7 @@ mod tests {
     }
   }
 
-  fn mat_vec(matrix: &SmallSparseMatrix<i32>, z: &[i8]) -> Vec<i128> {
+  fn mat_vec(matrix: &SparseMatrix<i32>, z: &[i8]) -> Vec<i128> {
     matrix
       .indptr
       .windows(2)
@@ -385,9 +385,9 @@ mod tests {
   }
 
   fn small_r1cs_is_satisfied(
-    a: &SmallSparseMatrix<i32>,
-    b: &SmallSparseMatrix<i32>,
-    c: &SmallSparseMatrix<i32>,
+    a: &SparseMatrix<i32>,
+    b: &SparseMatrix<i32>,
+    c: &SparseMatrix<i32>,
     z: &[i8],
   ) -> bool {
     let az = mat_vec(a, z);
