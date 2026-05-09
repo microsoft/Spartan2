@@ -8,7 +8,7 @@
 //!
 //! A constraint system trait that operates over small integer types (i8, i32)
 //! instead of field elements. This enables the pure-integer proving path where:
-//! - Shape extraction uses `SmallShapeCS` → `SparseMatrix<i32>`
+//! - Shape extraction uses `SmallShapeCS<i32>` → `SparseMatrix<i32>`
 //! - Witness generation uses `SmallSatisfyingAssignment<i8>` → `Vec<i8>`
 //! - No field elements are created until the inner sumcheck boundary
 
@@ -362,10 +362,10 @@ impl<V: Copy + Default> SmallConstraintSystem<V> for SmallSatisfyingAssignment<V
 /// and builds `SparseMatrix<C>` directly.
 ///
 /// The type parameter `C` controls the coefficient type:
-/// - `C = i32`: SHA-256 path (default, max ~2^18 for NoBatchEq)
+/// - `C = i32`: SHA-256 path (max ~2^18 for NoBatchEq)
 /// - `C = i8`: Keccak path (coefficients in {-1, 0, 1, 2})
 #[derive(Debug)]
-pub struct SmallShapeCS<C: SmallCoeff = i32> {
+pub struct SmallShapeCS<C: SmallCoeff> {
   pub(crate) constraints: Vec<(
     SmallLinearCombination<C>,
     SmallLinearCombination<C>,
