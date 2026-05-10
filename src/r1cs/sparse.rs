@@ -681,7 +681,7 @@ mod tests {
     let sparse_matrix = SparseMatrix::<i32>::new(&matrix_data, 2, 3);
     let vector = vec![true, false, true];
 
-    let result = sparse_matrix.multiply_vec::<bool, i64>(&vector).unwrap();
+    let result = sparse_matrix.multiply_vec::<bool, i32>(&vector).unwrap();
 
     assert_eq!(result, vec![7, 11]);
   }

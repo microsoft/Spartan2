@@ -1630,20 +1630,7 @@ where
   }
 
   /// Sets up NeutronNova with native small-value step/core circuits.
-  pub fn setup_small<C1, C2>(
-    step_circuit: &C1,
-    core_circuit: &C2,
-    num_steps: usize,
-  ) -> Result<(NeutronNovaSmallProverKey<E, i32>, NeutronNovaVerifierKey<E>), SpartanError>
-  where
-    C1: SmallSpartanCircuit<E, bool, i32>,
-    C2: SmallSpartanCircuit<E, bool, i32>,
-  {
-    Self::setup_small_typed::<bool, i32, C1, C2>(step_circuit, core_circuit, num_steps)
-  }
-
-  /// Sets up NeutronNova with typed native small-value step/core circuits.
-  pub fn setup_small_typed<W, Coeff, C1, C2>(
+  pub fn setup_small<W, Coeff, C1, C2>(
     step_circuit: &C1,
     core_circuit: &C2,
     num_steps: usize,
@@ -3212,14 +3199,15 @@ mod tests {
     let num_circuits = 3;
     let proto = TinySmallBoolCircuit::<E>::new(false);
     let core = TinySmallBoolCircuit::<E>::new(false);
-    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup_small(&proto, &core, num_circuits).unwrap();
+    let (pk, vk) =
+      NeutronNovaZkSNARK::<E>::setup_small::<bool, i32, _, _>(&proto, &core, num_circuits).unwrap();
     let circuits = (0..num_circuits)
       .map(|i| TinySmallBoolCircuit::<E>::new(i % 2 == 1))
       .collect::<Vec<_>>();
     let ell_b = num_circuits.next_power_of_two().log_2();
 
     for l0 in [1, ell_b] {
-      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64, bool>::prep_prove_small(
+      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i32, bool>::prep_prove_small(
         &pk, &circuits, &core, l0,
       )
       .unwrap();
@@ -3236,8 +3224,7 @@ mod tests {
     let proto = TinySmallBoolCircuit::<E>::new(false);
     let core = TinySmallBoolCircuit::<E>::new(false);
     let (pk, vk) =
-      NeutronNovaZkSNARK::<E>::setup_small_typed::<i8, i32, _, _>(&proto, &core, num_circuits)
-        .unwrap();
+      NeutronNovaZkSNARK::<E>::setup_small::<i8, i32, _, _>(&proto, &core, num_circuits).unwrap();
     let circuits = (0..num_circuits)
       .map(|i| TinySmallBoolCircuit::<E>::new(i % 2 == 1))
       .collect::<Vec<_>>();

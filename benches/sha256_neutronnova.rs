@@ -10,16 +10,22 @@
 //!
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
-//! Emit one-shot stage timing CSV with `NEUTRONNOVA_STAGE_TRACE=1`.
+//! Emit one-shot stage timing CSV with `NEUTRONNOVA_STAGE_TRACE=1` (use
+//! `TRACE_L0=0,s,3,4` to select FullField, SmallValue, and accumulator l0s).
 //!
-//! The bench measures two prover variants against their *natural* circuits:
-//! - `BaselineMode` runs the standard NeutronNova prover on a SHA-256 circuit
-//!   built from `bellpepper::gadgets::sha256::sha256_compression_function`
-//!   (full-field `UInt32`s).
-//! - `AccumulatorMode { l0 }` runs the small-value accumulator prover on a
-//!   SHA-256 circuit built directly on `SmallConstraintSystem<bool, i32>`.
+//! Three modes ship in the sweep:
+//! - `FullField` — bellpepper UInt32 SHA-256 through the standard NeutronNova
+//!   prover with the small-witness optimizations *disabled*
+//!   (`is_small = false`). The literal "no smallness exploited anywhere" cell.
+//! - `SmallValue` — same circuit, same prover, but with `is_small = true`.
+//!   Exposes the gain from the standard prover's small-witness commit/matvec
+//!   optimizations on a witness whose values fit in machine words.
+//! - `SmallAccumulator { l0 }` — small-value SHA-256 built directly on
+//!   `SmallConstraintSystem<bool, i32>`, run through the small-accumulator
+//!   prover in `src/small_neutronnova_zk.rs`.
 //!
-//! The accumulator path intentionally avoids the Bellpepper bridge.
+//! `FullField → SmallValue` isolates the standard-prover small-witness path;
+//! `SmallValue → SmallAccumulator` isolates the additional accumulator gain.
 
 use rayon::ThreadPool;
 #[cfg(feature = "jem")]
@@ -38,7 +44,7 @@ use criterion::{
   BatchSize, BenchmarkGroup, Criterion, Throughput, black_box, criterion_group,
   measurement::WallTime,
 };
-use ff::{Field, PrimeField};
+use ff::Field;
 use spartan2::{
   errors::SpartanError,
   gadgets::{
@@ -83,14 +89,13 @@ const SHA256_IV: [u32; 8] = [
   0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// Hard ceiling on `l0` for SHA-256 + `SV = i64`.
+/// Conservative hard ceiling on `l0` for SHA-256 + `SV = i32`.
 ///
-/// `vec_to_small_for_extension::<_, i64, 2>(&Az, l0)` requires
-/// `|Az[i]| ≤ 2^62 / 3^l0`. SHA-256 row sums reach ~`2^53.7` empirically
-/// (matrix coefficients up to `2^21`, witness up to `2^32`). At `l0 = 5`
-/// the bound is `~2^54.1` — ~1.3× margin; `l0 = 6` fails with
-/// `SmallValueOverflow`. Lifting this requires switching `SV` to a wider
-/// type or shrinking coefficients in the small SHA-256 compression path.
+/// The accumulator prep path evaluates `Az/Bz/Cz` via the generic matvec with
+/// `i32 * bool -> i32`, so SHA-256 row values stay in native `i32` and products
+/// later widen as `i32 * i32 -> i64`. The extension bound for `SV = i32` at
+/// `l0 = 5` is still comfortably above the observed compression row sums; keep
+/// this cap conservative unless the row-bound test and stage trace are refreshed.
 const MAX_L0: usize = 5;
 
 /// Accumulator `l0` values to compare in the benchmark sweep.
@@ -101,51 +106,16 @@ const MAX_L0: usize = 5;
 const BENCH_L0_VALUES: &[usize] = &[3, 4];
 
 // ---------------------------------------------------------------------------
-// Sha256Gadget: the compression-function plug-in point.
-// ---------------------------------------------------------------------------
-
-/// Picks which SHA-256 compression gadget the circuit uses.
-///
-/// Each impl owns the entire compression call, including the IV element type
-/// (`UInt32` vs `SmallUInt32`), so the generic circuit body never names those
-/// types directly.
-trait Sha256Gadget<Scalar: PrimeField>: 'static + Clone + Debug + Send + Sync {
-  fn run<CS: ConstraintSystem<Scalar>>(
-    cs: CS,
-    input_bits: &[Boolean],
-  ) -> Result<(), SynthesisError>;
-}
-
-/// Full-field SHA-256 (bellpepper's `sha256_compression_function` + `UInt32`).
-#[derive(Clone, Copy, Debug, Default)]
-struct FullFieldSha256;
-
-impl<S: PrimeField> Sha256Gadget<S> for FullFieldSha256 {
-  fn run<CS: ConstraintSystem<S>>(
-    mut cs: CS,
-    input_bits: &[Boolean],
-  ) -> Result<(), SynthesisError> {
-    let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
-    let _ = sha256_compression_function(
-      cs.namespace(|| "sha256 compression"),
-      input_bits,
-      &current_hash,
-    )?;
-    Ok(())
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Circuits: one shape, parameterized over the gadget.
+// Standard-prover circuits: bellpepper UInt32 SHA-256.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct Sha256StepCircuit<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> {
+struct Sha256StepCircuit<Eng: Engine> {
   block: [u8; BLOCK_BYTES],
-  _p: PhantomData<(Eng, G)>,
+  _p: PhantomData<Eng>,
 }
 
-impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> Sha256StepCircuit<Eng, G> {
+impl<Eng: Engine> Sha256StepCircuit<Eng> {
   fn new(block: [u8; BLOCK_BYTES]) -> Self {
     Self {
       block,
@@ -154,7 +124,7 @@ impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> Sha256StepCircuit<Eng, G> {
   }
 }
 
-impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256StepCircuit<Eng, G> {
+impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
     Ok(vec![Eng::Scalar::ZERO])
   }
@@ -182,7 +152,12 @@ impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256St
       .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(input_bits.len(), 512);
 
-    G::run(cs.namespace(|| "compress"), &input_bits)?;
+    let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
+    let _ = sha256_compression_function(
+      cs.namespace(|| "sha256 compression"),
+      &input_bits,
+      &current_hash,
+    )?;
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
@@ -206,15 +181,15 @@ impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256St
 }
 
 #[derive(Clone, Debug)]
-struct Sha256CoreCircuit<Eng: Engine, G: Sha256Gadget<Eng::Scalar>>(PhantomData<(Eng, G)>);
+struct Sha256CoreCircuit<Eng: Engine>(PhantomData<Eng>);
 
-impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> Sha256CoreCircuit<Eng, G> {
+impl<Eng: Engine> Sha256CoreCircuit<Eng> {
   fn new() -> Self {
     Self(PhantomData)
   }
 }
 
-impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256CoreCircuit<Eng, G> {
+impl<Eng: Engine> SpartanCircuit<Eng> for Sha256CoreCircuit<Eng> {
   fn public_values(&self) -> Result<Vec<Eng::Scalar>, SynthesisError> {
     Ok(vec![Eng::Scalar::ZERO])
   }
@@ -238,7 +213,12 @@ impl<Eng: Engine, G: Sha256Gadget<Eng::Scalar>> SpartanCircuit<Eng> for Sha256Co
       })
       .collect::<Result<Vec<_>, _>>()?;
 
-    G::run(cs.namespace(|| "core compress"), &input_bits)?;
+    let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
+    let _ = sha256_compression_function(
+      cs.namespace(|| "core sha256 compression"),
+      &input_bits,
+      &current_hash,
+    )?;
 
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
@@ -439,17 +419,36 @@ trait BenchMode: Send + Sync {
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError>;
 }
 
+/// Standard NeutronNova prover with the bellpepper UInt32 SHA-256 circuit.
+///
+/// `is_small` selects between the field-element prover path (`false` →
+/// `FullField`) and the small-witness optimized path (`true` → `SmallValue`).
+/// Same circuit, same prover key, same setup — only the flag passed to
+/// `prep_prove`/`prove` differs.
 #[derive(Clone, Copy, Debug)]
-struct BaselineMode;
+struct StandardMode {
+  is_small: bool,
+  label: &'static str,
+}
 
-impl BenchMode for BaselineMode {
+const FULL_FIELD: StandardMode = StandardMode {
+  is_small: false,
+  label: "full-field",
+};
+
+const SMALL_VALUE: StandardMode = StandardMode {
+  is_small: true,
+  label: "small-value",
+};
+
+impl BenchMode for StandardMode {
   type ProverKey = NeutronNovaProverKey<E>;
-  type StepCircuit = Sha256StepCircuit<E, FullFieldSha256>;
-  type CoreCircuit = Sha256CoreCircuit<E, FullFieldSha256>;
+  type StepCircuit = Sha256StepCircuit<E>;
+  type CoreCircuit = Sha256CoreCircuit<E>;
   type Prep = NeutronNovaPrepZkSNARK<E>;
 
   fn label(&self) -> String {
-    "baseline".to_string()
+    self.label.to_string()
   }
 
   fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit {
@@ -472,7 +471,7 @@ impl BenchMode for BaselineMode {
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
-    NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true)
+    NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, self.is_small)
   }
 
   fn prove(
@@ -482,33 +481,33 @@ impl BenchMode for BaselineMode {
     core: &Self::CoreCircuit,
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
-    NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true)
+    NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, self.is_small)
   }
 }
 
 #[derive(Clone, Copy, Debug)]
-struct AccumulatorMode {
+struct SmallAccumulator {
   l0: usize,
 }
 
-impl AccumulatorMode {
+impl SmallAccumulator {
   fn check_l0(&self) {
     assert!(
       (1..=MAX_L0).contains(&self.l0),
-      "AccumulatorMode l0={} out of range 1..={MAX_L0}; see MAX_L0 docs for the bound math",
+      "SmallAccumulator l0={} out of range 1..={MAX_L0}; see MAX_L0 docs for the bound math",
       self.l0,
     );
   }
 }
 
-impl BenchMode for AccumulatorMode {
+impl BenchMode for SmallAccumulator {
   type ProverKey = NeutronNovaSmallProverKey<E, i32>;
   type StepCircuit = SmallSha256StepCircuit<E>;
   type CoreCircuit = SmallSha256CoreCircuit<E>;
-  type Prep = NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64, bool>;
+  type Prep = NeutronNovaSmallAccumulatorPrepZkSNARK<E, i32, bool>;
 
   fn label(&self) -> String {
-    format!("l0-{}", self.l0)
+    format!("small-accum/l0-{}", self.l0)
   }
 
   fn make_step_circuit(block: [u8; BLOCK_BYTES]) -> Self::StepCircuit {
@@ -532,7 +531,7 @@ impl BenchMode for AccumulatorMode {
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
     self.check_l0();
-    NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64, bool>::prep_prove_small(
+    NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i32, bool>::prep_prove_small(
       pk, steps, core, self.l0,
     )
   }
@@ -783,6 +782,44 @@ fn parse_trace_values(name: &str, default: &[usize]) -> Vec<usize> {
     .unwrap_or_else(|| default.to_vec())
 }
 
+/// One trace selector parsed from `TRACE_L0`.
+///
+/// `0` selects `FullField`, the literal `s` selects `SmallValue`, and a
+/// positive integer selects `SmallAccumulator { l0: n }`.
+#[derive(Clone, Copy, Debug)]
+enum TraceMode {
+  FullField,
+  SmallValue,
+  Accumulator(usize),
+}
+
+fn parse_trace_modes(default: &[TraceMode]) -> Vec<TraceMode> {
+  let Some(raw) = std::env::var("TRACE_L0").ok() else {
+    return default.to_vec();
+  };
+  let parsed: Vec<TraceMode> = raw
+    .split(',')
+    .map(str::trim)
+    .filter(|item| !item.is_empty())
+    .map(|item| match item {
+      "0" => TraceMode::FullField,
+      "s" => TraceMode::SmallValue,
+      _ => match item.parse::<usize>() {
+        Ok(0) => TraceMode::FullField,
+        Ok(n) => TraceMode::Accumulator(n),
+        Err(_) => panic!(
+          "TRACE_L0 entry must be `0` (full-field), `s` (small-value), or a positive integer (small-accum l0); got {item:?}"
+        ),
+      },
+    })
+    .collect();
+  if parsed.is_empty() {
+    default.to_vec()
+  } else {
+    parsed
+  }
+}
+
 fn trace_context(
   mode: &str,
   byte_size: usize,
@@ -896,23 +933,34 @@ fn run_stage_trace() {
     .expect("failed to install NeutronNova stage trace subscriber");
 
   let byte_sizes = parse_trace_values("TRACE_BYTES", &[1024, 2048]);
-  let l0_values = parse_trace_values("TRACE_L0", &[0, 3, 4]);
+  let trace_modes = parse_trace_modes(&[
+    TraceMode::FullField,
+    TraceMode::SmallValue,
+    TraceMode::Accumulator(3),
+    TraceMode::Accumulator(4),
+  ]);
   let thread_counts = parse_trace_values("TRACE_THREADS", &[1, 2, 4, 8]);
 
   for byte_size in byte_sizes {
     let num_steps = num_steps_for_size(byte_size);
     let ell_b = ell_b_for_steps(num_steps);
-    for &l0 in &l0_values {
+    for &mode in &trace_modes {
       for &threads in &thread_counts {
-        if l0 == 0 {
-          run_stage_trace_case(&trace, BaselineMode, byte_size, l0, threads);
-        } else {
-          assert!(
-            l0 <= ell_b && l0 <= MAX_L0,
-            "TRACE_L0 value {l0} is invalid for {byte_size} bytes; expected 1..={}",
-            ell_b.min(MAX_L0),
-          );
-          run_stage_trace_case(&trace, AccumulatorMode { l0 }, byte_size, l0, threads);
+        match mode {
+          TraceMode::FullField => {
+            run_stage_trace_case(&trace, FULL_FIELD, byte_size, 0, threads);
+          }
+          TraceMode::SmallValue => {
+            run_stage_trace_case(&trace, SMALL_VALUE, byte_size, 0, threads);
+          }
+          TraceMode::Accumulator(l0) => {
+            assert!(
+              l0 <= ell_b && l0 <= MAX_L0,
+              "TRACE_L0 value {l0} is invalid for {byte_size} bytes; expected 1..={}",
+              ell_b.min(MAX_L0),
+            );
+            run_stage_trace_case(&trace, SmallAccumulator { l0 }, byte_size, l0, threads);
+          }
         }
       }
     }
@@ -1038,9 +1086,10 @@ fn neutronnova_benches(c: &mut Criterion) {
   if std::env::var_os("NEUTRONNOVA_PROOF_SIZES").is_some() {
     for &size in SIZES {
       let num_steps = num_steps_for_size(size);
-      print_proof_size(&BaselineMode, size, num_steps);
+      print_proof_size(&FULL_FIELD, size, num_steps);
+      print_proof_size(&SMALL_VALUE, size, num_steps);
       for l0 in accumulator_l0_values(num_steps) {
-        print_proof_size(&AccumulatorMode { l0 }, size, num_steps);
+        print_proof_size(&SmallAccumulator { l0 }, size, num_steps);
       }
     }
   }
@@ -1064,23 +1113,31 @@ fn neutronnova_benches(c: &mut Criterion) {
         .build()
         .expect("failed to build rayon pool");
 
-      // setup is per-circuit-shape, but baseline and accumulator share the
-      // same setup signature; report under "setup" label without per-mode
-      // duplication. We use the baseline circuit because it's the most
-      // expensive shape (full-field SHA-256).
-      g.bench_function(format!("setup/{size}/t{nthreads}"), |b| {
+      // FullField and SmallValue share the same setup (same circuit shape,
+      // same prover key); the accumulator setup is distinct.
+      g.bench_function(format!("setup/standard/{size}/t{nthreads}"), |b| {
         b.iter(|| {
           pool.install(|| {
-            let _ = BaselineMode::setup_keypair(num_steps);
+            let _ = <StandardMode as BenchMode>::setup_keypair(num_steps);
+          });
+        });
+      });
+      g.bench_function(format!("setup/small-accum/{size}/t{nthreads}"), |b| {
+        b.iter(|| {
+          pool.install(|| {
+            let _ = <SmallAccumulator as BenchMode>::setup_keypair(num_steps);
           });
         });
       });
 
-      register_mode_benches(&mut g, &pool, BaselineMode, num_steps, size, nthreads);
-      register_verify_bench(&mut g, &pool, BaselineMode, num_steps, size, nthreads);
+      register_mode_benches(&mut g, &pool, FULL_FIELD, num_steps, size, nthreads);
+      register_verify_bench(&mut g, &pool, FULL_FIELD, num_steps, size, nthreads);
+
+      register_mode_benches(&mut g, &pool, SMALL_VALUE, num_steps, size, nthreads);
+      register_verify_bench(&mut g, &pool, SMALL_VALUE, num_steps, size, nthreads);
 
       for &l0 in &valid_l0s {
-        let mode = AccumulatorMode { l0 };
+        let mode = SmallAccumulator { l0 };
         register_mode_benches(&mut g, &pool, mode, num_steps, size, nthreads);
         if Some(l0) == verify_max_l0 {
           register_verify_bench(&mut g, &pool, mode, num_steps, size, nthreads);

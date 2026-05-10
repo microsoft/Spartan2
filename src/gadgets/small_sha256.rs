@@ -325,7 +325,10 @@ fn sha256_padding(input: &[SmallBoolean]) -> Vec<SmallBoolean> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{gadgets::NoBatchEq, small_constraint_system::SmallShapeCS};
+  use crate::{
+    gadgets::{NoBatchEq, SmallBit},
+    small_constraint_system::{SmallSatisfyingAssignment, SmallShapeCS},
+  };
 
   /// Convert bytes to SmallBoolean bits (big-endian per byte).
   fn bytes_to_small_bits(bytes: &[u8]) -> Vec<SmallBoolean> {
@@ -412,5 +415,109 @@ mod tests {
     let expected = Sha256::digest(b"abc");
 
     assert_eq!(&hash_bytes[..], &expected[..]);
+  }
+
+  fn compression_shape_and_bool_witness(
+    block: &[u8; 64],
+  ) -> (
+    crate::r1cs::SparseMatrix<i32>,
+    crate::r1cs::SparseMatrix<i32>,
+    crate::r1cs::SparseMatrix<i32>,
+    Vec<bool>,
+  ) {
+    let current_hash = IV
+      .iter()
+      .map(|&v| SmallUInt32::constant(v))
+      .collect::<Vec<_>>();
+
+    let mut shape_cs = SmallShapeCS::<i32>::new();
+    {
+      let mut eq = NoBatchEq::<bool, i32, _>::new(&mut shape_cs);
+      let input_bits = block
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
+        .enumerate()
+        .map(|(i, bit)| {
+          SmallBit::alloc(
+            &mut eq.namespace(|| format!("shape block bit {i}")),
+            Some(bit),
+          )
+          .map(SmallBoolean::Is)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+      let _ = small_sha256_compression_function_int::<bool, _>(&mut eq, &input_bits, &current_hash)
+        .unwrap();
+    }
+    let (a, b, c) = shape_cs.to_matrices();
+
+    let mut witness_cs = SmallSatisfyingAssignment::<bool>::new();
+    {
+      let mut eq = NoBatchEq::<bool, i32, _>::new(&mut witness_cs);
+      let input_bits = block
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1u8 == 1u8))
+        .enumerate()
+        .map(|(i, bit)| {
+          SmallBit::alloc(
+            &mut eq.namespace(|| format!("witness block bit {i}")),
+            Some(bit),
+          )
+          .map(SmallBoolean::Is)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+      let _ = small_sha256_compression_function_int::<bool, _>(&mut eq, &input_bits, &current_hash)
+        .unwrap();
+    }
+
+    let z = witness_cs
+      .aux_assignment
+      .iter()
+      .chain(witness_cs.input_assignment.iter())
+      .copied()
+      .collect::<Vec<_>>();
+
+    (a, b, c, z)
+  }
+
+  fn manual_bool_row_sums(matrix: &crate::r1cs::SparseMatrix<i32>, z: &[bool]) -> Vec<i64> {
+    matrix
+      .indptr
+      .windows(2)
+      .map(|ptrs| {
+        matrix.data[ptrs[0]..ptrs[1]]
+          .iter()
+          .zip(&matrix.indices[ptrs[0]..ptrs[1]])
+          .filter_map(|(coeff, col)| z[*col].then_some(i64::from(*coeff)))
+          .sum::<i64>()
+      })
+      .collect()
+  }
+
+  fn assert_bool_rows_match_reference(
+    name: &str,
+    matrix: &crate::r1cs::SparseMatrix<i32>,
+    z: &[bool],
+  ) {
+    let rows = matrix.multiply_vec::<bool, i32>(z).unwrap();
+    let reference = manual_bool_row_sums(matrix, z);
+
+    for (idx, (row_value, reference_value)) in rows.iter().zip(reference.iter()).enumerate() {
+      assert!(
+        *reference_value <= i64::from(i32::MAX) && *reference_value >= i64::from(i32::MIN),
+        "{name} row {idx} does not fit i32: {reference_value}"
+      );
+      assert_eq!(i64::from(*row_value), *reference_value, "{name} row {idx}");
+    }
+  }
+
+  #[test]
+  fn test_small_sha256_compression_bool_matvec_rows_fit_i32() {
+    let (a, b, c, z) = compression_shape_and_bool_witness(&[0x5au8; 64]);
+
+    assert_bool_rows_match_reference("A", &a, &z);
+    assert_bool_rows_match_reference("B", &b, &z);
+    assert_bool_rows_match_reference("C", &c, &z);
   }
 }

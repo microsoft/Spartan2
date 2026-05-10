@@ -242,12 +242,17 @@ where
   W: SmallWitnessValue<E>,
   C: SmallSpartanCircuit<E, W, Coeff>,
 {
+  let (_synth_span, synth_t) = start_span!("small_precommitted_witness_synthesize");
   let precommitted =
     circuit
       .precommitted(&mut ps.cs, &ps.shared)
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to allocate small precommitted variables: {e}"),
       })?;
+  info!(
+    elapsed_ms = %synth_t.elapsed().as_millis(),
+    "small_precommitted_witness_synthesize"
+  );
 
   if ps.cs.aux_assignment[S.num_shared_unpadded..].len() < S.num_precommitted_unpadded {
     return Err(SpartanError::SynthesisError {
@@ -259,6 +264,7 @@ where
       [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
   );
 
+  let (_commit_span, commit_t) = start_span!("commit_small_witness_precommitted");
   let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
     let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
     let comm_W_precommitted = W::commit_witness(
@@ -270,6 +276,10 @@ where
   } else {
     (None, None)
   };
+  info!(
+    elapsed_ms = %commit_t.elapsed().as_millis(),
+    "commit_small_witness_precommitted"
+  );
 
   ps.comm_W_precommitted = comm_W_precommitted;
   ps.r_W_precommitted = r_W_precommitted;

@@ -8,7 +8,7 @@
 //!
 //! This trait enables products whose output type is intentionally different
 //! from Rust's built-in `Mul` output, such as `i64 × i64 → i128` or
-//! `i32 × bool → i64`.
+//! `i32 × i32 → i64`.
 
 #![allow(dead_code)]
 
@@ -35,12 +35,12 @@ impl WideMul for i32 {
 }
 
 impl WideMul<bool> for i32 {
-  type Output = i64;
+  type Output = i32;
 
   #[inline(always)]
-  fn wide_mul(self, rhs: bool) -> i64 {
+  fn wide_mul(self, rhs: bool) -> i32 {
     let mask = -i32::from(u8::from(rhs));
-    i64::from(self & mask)
+    self & mask
   }
 }
 
@@ -104,10 +104,10 @@ mod tests {
 
   #[test]
   fn test_wide_mul_i32_bool_branchless_mask_semantics() {
-    assert_eq!(42i32.wide_mul(true), 42i64);
-    assert_eq!(42i32.wide_mul(false), 0i64);
-    assert_eq!((-42i32).wide_mul(true), -42i64);
-    assert_eq!((-42i32).wide_mul(false), 0i64);
+    assert_eq!(42i32.wide_mul(true), 42i32);
+    assert_eq!(42i32.wide_mul(false), 0i32);
+    assert_eq!((-42i32).wide_mul(true), -42i32);
+    assert_eq!((-42i32).wide_mul(false), 0i32);
   }
 
   #[test]
