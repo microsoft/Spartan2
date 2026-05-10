@@ -219,6 +219,59 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     sum
   }
 
+  #[inline(always)]
+  fn compute_row_batched(&self, row: usize, vectors: &[&[F]], out: &mut [Vec<F>], out_row: usize) {
+    let (start, end) = self.range_unit_pos(row);
+    for idx in start..end {
+      let col = self.unit_pos_cols[idx] as usize;
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += vector[col];
+      }
+    }
+
+    let (start, end) = self.range_unit_neg(row);
+    for idx in start..end {
+      let col = self.unit_neg_cols[idx] as usize;
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] -= vector[col];
+      }
+    }
+
+    let (start, end) = self.range_small(row);
+    for idx in start..end {
+      let col = self.small_cols[idx] as usize;
+      let coeff = self.small_coeffs[idx];
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += Self::small_mul(coeff, vector[col]);
+      }
+    }
+
+    let (start, end) = self.range_general(row);
+    for idx in start..end {
+      let col = self.general_cols[idx] as usize;
+      let val = self.general_vals[idx];
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += val * vector[col];
+      }
+    }
+  }
+
+  fn multiply_vec_batched_rows(
+    &self,
+    vectors: &[&[F]],
+    row_start: usize,
+    row_end: usize,
+  ) -> Vec<Vec<F>> {
+    let rows = row_end - row_start;
+    let mut local = (0..vectors.len())
+      .map(|_| vec![F::ZERO; rows])
+      .collect::<Vec<_>>();
+    for (out_row, row) in (row_start..row_end).enumerate() {
+      self.compute_row_batched(row, vectors, &mut local, out_row);
+    }
+    local
+  }
+
   /// Fast SpMV using precomputed coefficient classification.
   pub fn multiply_vec(&self, vector: &[F]) -> Vec<F> {
     assert_eq!(self.num_cols, vector.len(), "invalid shape");
@@ -247,55 +300,35 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
 
     // For small numbers of vectors or small matrices, just call single-vector multiply
     const BATCH_SIZE: usize = 4;
-    if n_vecs <= 1 || self.num_rows <= 256 {
+    if n_vecs <= 1 || self.num_rows <= 256 || rayon::current_num_threads() <= 1 {
       return vectors.iter().map(|v| self.multiply_vec(v)).collect();
     }
 
     let mut results: Vec<Vec<F>> = (0..n_vecs).map(|_| vec![F::ZERO; self.num_rows]).collect();
+    let num_threads = rayon::current_num_threads();
+    let row_chunk = self.num_rows.div_ceil(num_threads);
+    let num_row_chunks = self.num_rows.div_ceil(row_chunk);
 
     // Process vectors in sub-batches to keep working set in L3 cache
     for batch_start in (0..n_vecs).step_by(BATCH_SIZE) {
       let batch_end = (batch_start + BATCH_SIZE).min(n_vecs);
-      let batch_len = batch_end - batch_start;
+      let vectors_batch = &vectors[batch_start..batch_end];
+      let row_chunks = (0..num_row_chunks)
+        .into_par_iter()
+        .map(|chunk_idx| {
+          let row_start = chunk_idx * row_chunk;
+          let row_end = (row_start + row_chunk).min(self.num_rows);
+          (
+            row_start,
+            self.multiply_vec_batched_rows(vectors_batch, row_start, row_end),
+          )
+        })
+        .collect::<Vec<_>>();
 
-      #[allow(clippy::needless_range_loop)]
-      for row in 0..self.num_rows {
-        // unit_pos: coefficient = +1
-        let (start, end) = self.range_unit_pos(row);
-        for idx in start..end {
-          let col = self.unit_pos_cols[idx] as usize;
-          for b in 0..batch_len {
-            results[batch_start + b][row] += vectors[batch_start + b][col];
-          }
-        }
-
-        // unit_neg: coefficient = -1
-        let (start, end) = self.range_unit_neg(row);
-        for idx in start..end {
-          let col = self.unit_neg_cols[idx] as usize;
-          for b in 0..batch_len {
-            results[batch_start + b][row] -= vectors[batch_start + b][col];
-          }
-        }
-
-        // small coefficients
-        let (start, end) = self.range_small(row);
-        for idx in start..end {
-          let col = self.small_cols[idx] as usize;
-          let coeff = self.small_coeffs[idx];
-          for b in 0..batch_len {
-            results[batch_start + b][row] += Self::small_mul(coeff, vectors[batch_start + b][col]);
-          }
-        }
-
-        // general: full field multiply
-        let (start, end) = self.range_general(row);
-        for idx in start..end {
-          let col = self.general_cols[idx] as usize;
-          let val = self.general_vals[idx];
-          for b in 0..batch_len {
-            results[batch_start + b][row] += val * vectors[batch_start + b][col];
-          }
+      for (row_start, local) in row_chunks {
+        for (b, values) in local.into_iter().enumerate() {
+          let row_end = row_start + values.len();
+          results[batch_start + b][row_start..row_end].copy_from_slice(&values);
         }
       }
     }
@@ -673,6 +706,45 @@ mod tests {
       result.unwrap(),
       vec![Fr::from(25), Fr::from(9), Fr::from(4)]
     );
+  }
+
+  #[test]
+  fn test_precomputed_batched_multiply_matches_repeated_multiply() {
+    let rows = 300;
+    let cols = 8;
+    let mut matrix_data = Vec::with_capacity(rows * 5);
+    for row in 0..rows {
+      matrix_data.push((row, 0, Fr::from(1)));
+      matrix_data.push((row, 1, -Fr::from(1)));
+      matrix_data.push((row, 2, Fr::from(3)));
+      matrix_data.push((row, 3, -Fr::from(5)));
+      matrix_data.push((row, 4, Fr::from(11)));
+    }
+    let sparse_matrix = SparseMatrix::<Fr>::new(&matrix_data, rows, cols);
+    let precomputed = PrecomputedSparseMatrix::from_sparse(&sparse_matrix);
+
+    let vectors = (0..7)
+      .map(|vector_idx| {
+        (0..cols)
+          .map(|col| Fr::from(((vector_idx + 1) * (col + 2)) as u64))
+          .collect::<Vec<_>>()
+      })
+      .collect::<Vec<_>>();
+    let vector_refs = vectors.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+      .num_threads(4)
+      .build()
+      .unwrap();
+    pool.install(|| {
+      assert_eq!(rayon::current_num_threads(), 4);
+      let expected = vector_refs
+        .iter()
+        .map(|vector| precomputed.multiply_vec(vector))
+        .collect::<Vec<_>>();
+      let batched = precomputed.multiply_vec_batched(&vector_refs);
+      assert_eq!(batched, expected);
+    });
   }
 
   #[test]

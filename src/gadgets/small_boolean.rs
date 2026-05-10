@@ -44,16 +44,18 @@ impl SmallBit {
       || value.map(W::from).ok_or(SynthesisError::AssignmentMissing),
     )?;
 
-    // Enforce: bit * (1 - bit) = 0
-    // a = 1 * bit
-    // b = 1 * ONE - 1 * bit  (i.e. 1 - bit)
-    // c = 0
-    cs.enforce(
-      || "bit_boolean",
-      SmallLinearCombination::from_variable(var, C::from(true)),
-      boolean_not_lc(var, C::from(true)),
-      SmallLinearCombination::zero(),
-    );
+    if !cs.is_witness_generator() {
+      // Enforce: bit * (1 - bit) = 0
+      // a = 1 * bit
+      // b = 1 * ONE - 1 * bit  (i.e. 1 - bit)
+      // c = 0
+      cs.enforce(
+        || "bit_boolean",
+        SmallLinearCombination::from_variable(var, C::from(true)),
+        boolean_not_lc(var, C::from(true)),
+        SmallLinearCombination::zero(),
+      );
+    }
 
     Ok(SmallBit {
       variable: var,
@@ -185,6 +187,9 @@ impl SmallBoolean {
       _ => {
         let result_val = a.get_value().and_then(|av| b.get_value().map(|bv| av ^ bv));
         let result_bit = SmallBit::alloc(cs, result_val)?;
+        if cs.is_witness_generator() {
+          return Ok(SmallBoolean::Is(result_bit));
+        }
 
         // Enforce: 2a * b = a + b - result
         // lc_2a = 2 * a_var (for Is) or 2 * ONE - 2 * a_var (for Not)
@@ -227,6 +232,9 @@ impl SmallBoolean {
       _ => {
         let result_val = a.get_value().and_then(|av| b.get_value().map(|bv| av & bv));
         let result_bit = SmallBit::alloc(cs, result_val)?;
+        if cs.is_witness_generator() {
+          return Ok(SmallBoolean::Is(result_bit));
+        }
 
         let lc_a: SmallLinearCombination<C> = a.lc();
         let lc_b: SmallLinearCombination<C> = b.lc();
@@ -263,6 +271,9 @@ impl SmallBoolean {
       }
       _ => {
         let result_bit = SmallBit::alloc(cs, result_val)?;
+        if cs.is_witness_generator() {
+          return Ok(SmallBoolean::Is(result_bit));
+        }
 
         // ch(a,b,c) = a*(b-c) + c  =>  constraint: a * (b - c) = result - c
         let a_lc: SmallLinearCombination<C> = a.lc();
@@ -315,6 +326,9 @@ impl SmallBoolean {
       _ => {
         let bc = SmallBoolean::and(cs.namespace(|| "bc").inner, b, c)?;
         let result_bit = SmallBit::alloc(cs, result_val)?;
+        if cs.is_witness_generator() {
+          return Ok(SmallBoolean::Is(result_bit));
+        }
 
         // maj(a,b,c) identity:
         //   (2bc - b - c) * a = bc - maj

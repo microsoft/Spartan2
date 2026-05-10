@@ -1480,6 +1480,10 @@ impl<E: Engine> SplitR1CSShape<E> {
     &self,
     zs: &[Vec<E::Scalar>],
   ) -> Result<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>, SpartanError> {
+    if zs.is_empty() {
+      return Ok(vec![]);
+    }
+
     let expected_len = self.num_public
       + self.num_challenges
       + 1

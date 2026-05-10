@@ -57,6 +57,42 @@ where
   let lo_sum = limb_sums.map(|(lo, _)| lo);
   let hi_sum_with_carry = limb_sums.map(|(lo, hi)| hi + (lo >> 16));
 
+  if cs.is_witness_generator() {
+    let mut bits = [const { SmallBoolean::Constant(false) }; 32];
+
+    for (i, slot) in bits.iter_mut().enumerate().take(16) {
+      let bit = SmallBit::alloc(
+        &mut cs.namespace(|| format!("lo{i}")),
+        lo_sum.map(|v| (v >> i) & 1 == 1),
+      )?;
+      *slot = SmallBoolean::Is(bit);
+    }
+
+    for i in 0..num_carry_bits {
+      let _ = SmallBit::alloc(
+        &mut cs.namespace(|| format!("c{i}")),
+        lo_sum.map(|v| (v >> (16 + i)) & 1 == 1),
+      )?;
+    }
+
+    for i in 0..16 {
+      let bit = SmallBit::alloc(
+        &mut cs.namespace(|| format!("hi{i}")),
+        hi_sum_with_carry.map(|v| (v >> i) & 1 == 1),
+      )?;
+      bits[16 + i] = SmallBoolean::Is(bit);
+    }
+
+    for i in 0..num_carry_bits {
+      let _ = SmallBit::alloc(
+        &mut cs.namespace(|| format!("o{i}")),
+        hi_sum_with_carry.map(|v| (v >> (16 + i)) & 1 == 1),
+      )?;
+    }
+
+    return Ok(SmallUInt32::from_bits_le(&bits));
+  }
+
   // === LOW LIMB CONSTRAINT ===
   // Sum of low 16 bits of each operand = low 16 bits of result + carry × 2^16
 

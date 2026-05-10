@@ -80,6 +80,11 @@ impl<W: Copy + From<bool>, CS: SmallConstraintSystem<W, i32>> SmallMultiEq<W, i3
     lhs: &SmallLinearCombination<i32>,
     rhs: &SmallLinearCombination<i32>,
   ) {
+    if self.cs.is_witness_generator() {
+      self.ops += 1;
+      return;
+    }
+
     let ops = self.ops;
     // Enforce: lhs - rhs = 0, expressed as (lhs - rhs) * ONE = 0
     let mut diff = lhs.clone();
@@ -172,6 +177,10 @@ impl<W: Copy, C, CS: SmallConstraintSystem<W, C>> SmallConstraintSystem<W, C>
 
   fn get_root(&mut self) -> &mut Self::Root {
     self.cs.get_root()
+  }
+
+  fn is_witness_generator(&self) -> bool {
+    self.cs.is_witness_generator()
   }
 
   fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, W, C, Self::Root>

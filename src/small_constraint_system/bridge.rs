@@ -110,6 +110,10 @@ impl<W: SmallCoeff, C: SmallCoeff, Scalar: PrimeField, CS: ConstraintSystem<Scal
   fn get_root(&mut self) -> &mut Self::Root {
     self
   }
+
+  fn is_witness_generator(&self) -> bool {
+    self.cs.is_witness_generator()
+  }
 }
 
 /// A bellpepper `ConstraintSystem<Scalar>` wrapper that also implements

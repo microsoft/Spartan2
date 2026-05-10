@@ -198,6 +198,14 @@ pub trait SmallConstraintSystem<W, C>: Sized {
   /// Get a mutable reference to the root constraint system.
   fn get_root(&mut self) -> &mut Self::Root;
 
+  /// Whether this backend is only producing witness assignments.
+  ///
+  /// Witness generators do not need to construct constraint linear
+  /// combinations because `enforce` is a no-op for them.
+  fn is_witness_generator(&self) -> bool {
+    false
+  }
+
   /// Enter a named namespace (auto-pops on drop).
   fn namespace<NR, N>(&mut self, name_fn: N) -> SmallNamespace<'_, W, C, Self::Root>
   where
@@ -270,6 +278,10 @@ impl<W, C, CS: SmallConstraintSystem<W, C>> SmallConstraintSystem<W, C>
 
   fn get_root(&mut self) -> &mut Self::Root {
     self.inner.get_root()
+  }
+
+  fn is_witness_generator(&self) -> bool {
+    self.inner.is_witness_generator()
   }
 }
 
@@ -355,6 +367,10 @@ impl<W, C> SmallConstraintSystem<W, C> for SmallSatisfyingAssignment<W> {
 
   fn get_root(&mut self) -> &mut Self::Root {
     self
+  }
+
+  fn is_witness_generator(&self) -> bool {
+    true
   }
 }
 

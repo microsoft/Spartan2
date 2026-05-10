@@ -305,6 +305,7 @@ where
   debug_assert_eq!(e_eq.len(), left + right, "E_eq length mismatch");
   debug_assert_eq!(a_layers[0].as_ref().len(), left * right);
 
+  let (_setup_span, setup_t) = start_span!("build_accumulators_neutronnova_setup");
   let base: usize = 3;
   let prefix_size = 1usize << l0;
   let suffix_groups = 1usize << (ell_b - l0);
@@ -343,8 +344,20 @@ where
   let betas_with_infty: Vec<usize> = (0..num_betas)
     .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)) % base == 0))
     .collect();
+  info!(
+    elapsed_ms = %setup_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    prefix_size,
+    suffix_groups,
+    ext_size,
+    outer_dim,
+    num_betas = betas_with_infty.len(),
+    "build_accumulators_neutronnova_setup"
+  );
 
   type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
+  let (_main_span, main_t) = start_span!("build_accumulators_neutronnova_main");
   let process_outer = |state: &mut State<F, SV>, x_outer: usize| {
     state.reset_partial_sums();
 
@@ -416,34 +429,43 @@ where
     }
   };
 
-  if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
+  let result = if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
     let mut state = State::<F, SV>::new(l0, num_betas, prefix_size, ext_size);
     for x_outer in 0..outer_dim {
       process_outer(&mut state, x_outer);
     }
-    return state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc));
-  }
+    state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  } else {
+    let fold_results: Vec<State<F, SV>> = (0..outer_dim)
+      .into_par_iter()
+      .fold(
+        || State::<F, SV>::new(l0, num_betas, prefix_size, ext_size),
+        |mut state: State<F, SV>, x_outer| {
+          process_outer(&mut state, x_outer);
+          state
+        },
+      )
+      .collect();
 
-  let fold_results: Vec<State<F, SV>> = (0..outer_dim)
-    .into_par_iter()
-    .fold(
-      || State::<F, SV>::new(l0, num_betas, prefix_size, ext_size),
-      |mut state: State<F, SV>, x_outer| {
-        process_outer(&mut state, x_outer);
-        state
-      },
-    )
-    .collect();
-
-  fold_results
-    .into_iter()
-    .reduce(|mut a, b| {
-      a.acc.merge(&b.acc);
-      a
-    })
-    .expect("outer_dim > 0 guarantees non-empty fold results")
-    .acc
-    .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+    fold_results
+      .into_iter()
+      .reduce(|mut a, b| {
+        a.acc.merge(&b.acc);
+        a
+      })
+      .expect("outer_dim > 0 guarantees non-empty fold results")
+      .acc
+      .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  };
+  info!(
+    elapsed_ms = %main_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    outer_dim,
+    suffix_groups,
+    "build_accumulators_neutronnova_main"
+  );
+  result
 }
 
 pub(crate) fn build_accumulators_neutronnova_preextended<F, SV>(

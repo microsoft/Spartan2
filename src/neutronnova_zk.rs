@@ -616,6 +616,7 @@ where
     let n = Us.len();
     let n_padded = Us.len().next_power_of_two();
     let ell_b = n_padded.log_2();
+    let (_prepare_span, prepare_t) = start_span!("nifs_prepare_inputs");
 
     info!(
       "NeutronNova NIFS prove for {} instances and padded to {} instances",
@@ -645,10 +646,18 @@ where
     for _ in 0..ell_b {
       rhos.push(transcript.squeeze(b"rho")?);
     }
+    info!(
+      elapsed_ms = %prepare_t.elapsed().as_millis(),
+      instances = n,
+      padded_instances = n_padded,
+      rounds = ell_b,
+      "nifs_prepare_inputs"
+    );
 
     // Build Az, Bz, Cz tables for each (possibly padded) instance
 
     // Split cached matvec: consume owned triples for cached instances, compute rest
+    let (_layers_span, layers_t) = start_span!("nifs_matrix_layers");
     let mut A_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
     let mut B_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
     let mut C_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
@@ -661,17 +670,26 @@ where
         C_layers.push(c);
       }
     }
-    // Compute matvec for any remaining (padded) instances
-    for i in n_cached..n_padded {
-      let w = &Ws[i].W;
-      let x = &Us[i].X;
-      let z = build_z::<E>(w, x);
-      let (a, b, c) = S.multiply_vec(&z)?;
-      A_layers.push(a);
-      B_layers.push(b);
-      C_layers.push(c);
+    // Compute matvec for any remaining (padded) instances.
+    let remaining_zs = (n_cached..n_padded)
+      .map(|i| build_z::<E>(&Ws[i].W, &Us[i].X))
+      .collect::<Vec<_>>();
+    if !remaining_zs.is_empty() {
+      for (a, b, c) in S.multiply_vec_batched(&remaining_zs)? {
+        A_layers.push(a);
+        B_layers.push(b);
+        C_layers.push(c);
+      }
     }
+    info!(
+      elapsed_ms = %layers_t.elapsed().as_millis(),
+      cached_instances = n_cached,
+      computed_instances = remaining_zs.len(),
+      "nifs_matrix_layers"
+    );
+
     // Build i64 layers for small-value NIFS optimization
+    let (_i64_span, i64_t) = start_span!("nifs_i64_layers");
     let n_i64_cached = cached_i64.as_ref().map_or(0, |c| c.len());
     let mut A_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
     let mut B_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
@@ -716,6 +734,13 @@ where
         C_i64_layers.push(c_i64);
       }
     }
+    info!(
+      elapsed_ms = %i64_t.elapsed().as_millis(),
+      enabled = has_i64,
+      cached_instances = n_i64_cached,
+      large_positions = large_positions.len(),
+      "nifs_i64_layers"
+    );
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
 
@@ -723,6 +748,7 @@ where
     // This lets us skip C in fold_abc_pair and prove_helper, computing
     // the C contribution to e0 as a weighted sum of these scalars instead.
     // Uses two-level structure: E[k] = e_left[j] * f[i] where k = i*left + j.
+    let (_c_vals_span, c_vals_t) = start_span!("nifs_c_values");
     let c_vals: Vec<E::Scalar> = if has_i64 {
       let e_left = &E_eq[..left];
       let f = &E_eq[left..];
@@ -772,12 +798,19 @@ where
     } else {
       vec![]
     };
+    info!(
+      elapsed_ms = %c_vals_t.elapsed().as_millis(),
+      enabled = has_i64,
+      "nifs_c_values"
+    );
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
     let mut T_cur = E::Scalar::ZERO; // the current target value, starts at 0
     let mut acc_eq = E::Scalar::ONE;
     let mut m = n_padded;
+    let (_rounds_span, rounds_t) =
+      start_span!("nifs_rounds", rounds = ell_b, i64_fast_path = has_i64);
 
     // Helper closure: build polynomial, process round, extract r_b
     // (factored out since it's identical for standalone and merged rounds)
@@ -1247,11 +1280,18 @@ where
         C_layers.truncate(final_pairs);
       }
     }
+    info!(
+      elapsed_ms = %rounds_t.elapsed().as_millis(),
+      rounds = ell_b,
+      i64_fast_path = has_i64,
+      "nifs_rounds"
+    );
 
     let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
 
     // Compute final Cz_step from original C_i64 layers using SmallAccumulator
     if has_i64 {
+      let (_final_c_span, final_c_t) = start_span!("nifs_final_c_layer");
       let total = left * right;
 
       // Parallel across k: for each k, accumulate across all b serially.
@@ -1285,6 +1325,10 @@ where
       }
 
       C_layers = vec![cz_step];
+      info!(
+        elapsed_ms = %final_c_t.elapsed().as_millis(),
+        "nifs_final_c_layer"
+      );
     }
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let acc_eq_inv: Option<E::Scalar> = acc_eq.invert().into();
@@ -1741,28 +1785,57 @@ where
       "generate_precommitted_witnesses",
       circuits = step_circuits.len() + 1
     );
-    let ps_step = (0..step_circuits.len())
+    let (_witness_span, witness_t) = start_span!("prep_witness_generation");
+    let (_step_synth_span, step_synth_t) = start_span!(
+      "prep_step_witness_synthesis",
+      circuits = step_circuits.len()
+    );
+    let mut ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
         let mut ps_i = ps.clone();
-        SatisfyingAssignment::precommitted_witness(
+        SatisfyingAssignment::synthesize_precommitted_witness(
           &mut ps_i,
           &pk.S_step,
-          &pk.ck,
           &step_circuits[i],
-          is_small,
         )?;
         Ok(ps_i)
       })
       .collect::<Result<Vec<_>, _>>()?;
+    info!(
+      elapsed_ms = %step_synth_t.elapsed().as_millis(),
+      circuits = step_circuits.len(),
+      "prep_step_witness_synthesis"
+    );
 
-    SatisfyingAssignment::precommitted_witness(
-      &mut ps,
-      &pk.S_core,
-      &pk.ck,
-      core_circuit,
-      is_small,
-    )?;
+    let (_core_synth_span, core_synth_t) = start_span!("prep_core_witness_synthesis");
+    SatisfyingAssignment::synthesize_precommitted_witness(&mut ps, &pk.S_core, core_circuit)?;
+    info!(
+      elapsed_ms = %core_synth_t.elapsed().as_millis(),
+      "prep_core_witness_synthesis"
+    );
+    info!(elapsed_ms = %witness_t.elapsed().as_millis(), "prep_witness_generation");
+
+    let (_commit_span, commit_t) = start_span!("prep_witness_commit");
+    let (_step_commit_span, step_commit_t) =
+      start_span!("prep_step_witness_commit", circuits = step_circuits.len());
+    ps_step.par_iter_mut().try_for_each(|ps_i| {
+      SatisfyingAssignment::commit_precommitted_witness(ps_i, &pk.S_step, &pk.ck, is_small)
+    })?;
+    info!(
+      elapsed_ms = %step_commit_t.elapsed().as_millis(),
+      circuits = step_circuits.len(),
+      "prep_step_witness_commit"
+    );
+
+    let (_core_commit_span, core_commit_t) = start_span!("prep_core_witness_commit");
+    SatisfyingAssignment::commit_precommitted_witness(&mut ps, &pk.S_core, &pk.ck, is_small)?;
+    info!(
+      elapsed_ms = %core_commit_t.elapsed().as_millis(),
+      "prep_core_witness_commit"
+    );
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "prep_witness_commit");
+
     info!(
       elapsed_ms = %precommit_t.elapsed().as_millis(),
       circuits = step_circuits.len() + 1,
@@ -1896,9 +1969,13 @@ where
     } else {
       None
     };
-    let (cached_step_i64, large_positions) = if let Some(matvec) = cached_step_matvec.as_ref() {
-      let (all_i64, large_positions) = Self::build_round0_i64_cache(matvec);
-      (Some(all_i64), large_positions)
+    let (cached_step_i64, large_positions) = if is_small {
+      if let Some(matvec) = cached_step_matvec.as_ref() {
+        let (all_i64, large_positions) = Self::build_round0_i64_cache(matvec);
+        (Some(all_i64), large_positions)
+      } else {
+        (None, Vec::new())
+      }
     } else {
       (None, Vec::new())
     };
@@ -1939,7 +2016,7 @@ where
     })?;
     info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
 
-    if !prep_snark.cached_step_public_values.is_empty() {
+    let validated_step_public_values = if !prep_snark.cached_step_public_values.is_empty() {
       if prep_snark.cached_step_public_values.len() != step_circuits.len() {
         return Err(SpartanError::InternalError {
           reason: format!(
@@ -1949,24 +2026,36 @@ where
           ),
         });
       }
-      for (i, circuit) in step_circuits.iter().enumerate() {
-        let current_pv = circuit
-          .public_values()
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Circuit does not provide public IO: {e}"),
-          })?;
-        if prep_snark.cached_step_public_values[i] != current_pv {
-          return Err(SpartanError::InternalError {
-            reason: format!("Step circuit {i} public values changed between prep_prove and prove"),
-          });
-        }
-      }
-    }
+      Some(
+        step_circuits
+          .par_iter()
+          .enumerate()
+          .map(|(i, circuit)| {
+            let current_pv = circuit
+              .public_values()
+              .map_err(|e| SpartanError::SynthesisError {
+                reason: format!("Circuit does not provide public IO: {e}"),
+              })?;
+            if prep_snark.cached_step_public_values[i] != current_pv {
+              return Err(SpartanError::InternalError {
+                reason: format!(
+                  "Step circuit {i} public values changed between prep_prove and prove"
+                ),
+              });
+            }
+            Ok(current_pv)
+          })
+          .collect::<Result<Vec<_>, _>>()?,
+      )
+    } else {
+      None
+    };
 
     let (_gen_span, gen_t) = start_span!(
       "generate_instances_witnesses",
       step_circuits = step_circuits.len()
     );
+    let validated_step_public_values = validated_step_public_values.as_ref();
     let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
@@ -1982,13 +2071,19 @@ where
             );
             transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
 
-            let public_values =
-              circuit
-                .public_values()
-                .map_err(|e| SpartanError::SynthesisError {
-                  reason: format!("Circuit does not provide public IO: {e}"),
-                })?;
-            transcript.absorb(b"public_values", &public_values.as_slice());
+            let public_values_owned;
+            let public_values = if let Some(values) = validated_step_public_values {
+              values[i].as_slice()
+            } else {
+              public_values_owned =
+                circuit
+                  .public_values()
+                  .map_err(|e| SpartanError::SynthesisError {
+                    reason: format!("Circuit does not provide public IO: {e}"),
+                  })?;
+              public_values_owned.as_slice()
+            };
+            transcript.absorb(b"public_values", &public_values);
 
             SatisfyingAssignment::r1cs_instance_and_witness(
               pre_state,

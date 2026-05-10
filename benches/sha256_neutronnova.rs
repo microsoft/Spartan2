@@ -73,6 +73,7 @@ use std::{
 use tracing::{
   Subscriber,
   field::{Field as TracingField, Visit},
+  info,
 };
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -141,6 +142,7 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
     cs: &mut CS,
     _: &[AllocatedNum<Eng::Scalar>],
   ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
+    let alloc_bits_t = Instant::now();
     let input_bits: Vec<Boolean> = self
       .block
       .iter()
@@ -151,16 +153,30 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256StepCircuit<Eng> {
       })
       .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(input_bits.len(), 512);
+    info!(
+      elapsed_ms = %alloc_bits_t.elapsed().as_millis(),
+      "bench_alloc_block_bits"
+    );
 
     let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
+    let compression_t = Instant::now();
     let _ = sha256_compression_function(
       cs.namespace(|| "sha256 compression"),
       &input_bits,
       &current_hash,
     )?;
+    info!(
+      elapsed_ms = %compression_t.elapsed().as_millis(),
+      "bench_sha256_compression"
+    );
 
+    let inputize_t = Instant::now();
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
+    info!(
+      elapsed_ms = %inputize_t.elapsed().as_millis(),
+      "bench_inputize_public_zero"
+    );
 
     Ok(vec![])
   }
@@ -206,22 +222,37 @@ impl<Eng: Engine> SpartanCircuit<Eng> for Sha256CoreCircuit<Eng> {
     cs: &mut CS,
     _: &[AllocatedNum<Eng::Scalar>],
   ) -> Result<Vec<AllocatedNum<Eng::Scalar>>, SynthesisError> {
+    let alloc_bits_t = Instant::now();
     let input_bits: Vec<Boolean> = (0..512)
       .map(|i| {
         AllocatedBit::alloc(cs.namespace(|| format!("core bit {i}")), Some(false))
           .map(Boolean::from)
       })
       .collect::<Result<Vec<_>, _>>()?;
+    info!(
+      elapsed_ms = %alloc_bits_t.elapsed().as_millis(),
+      "bench_alloc_block_bits"
+    );
 
     let current_hash: Vec<UInt32> = SHA256_IV.iter().map(|&v| UInt32::constant(v)).collect();
+    let compression_t = Instant::now();
     let _ = sha256_compression_function(
       cs.namespace(|| "core sha256 compression"),
       &input_bits,
       &current_hash,
     )?;
+    info!(
+      elapsed_ms = %compression_t.elapsed().as_millis(),
+      "bench_sha256_compression"
+    );
 
+    let inputize_t = Instant::now();
     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Eng::Scalar::ZERO))?;
     x.inputize(cs.namespace(|| "inputize x"))?;
+    info!(
+      elapsed_ms = %inputize_t.elapsed().as_millis(),
+      "bench_inputize_public_zero"
+    );
     Ok(vec![])
   }
 
@@ -282,14 +313,16 @@ fn inputize_small_zero<CS: SmallConstraintSystem<bool, i32>>(
 ) -> Result<(), SynthesisError> {
   let x = cs.alloc(|| "x", || Ok(false))?;
   let x_public = cs.alloc_input(|| "inputize x", || Ok(false))?;
-  let mut diff = SmallLinearCombination::from_variable(x, 1i32);
-  diff.add_term(x_public, -1i32);
-  cs.enforce(
-    || "x equals public input",
-    diff,
-    SmallLinearCombination::one(1i32),
-    SmallLinearCombination::zero(),
-  );
+  if !cs.is_witness_generator() {
+    let mut diff = SmallLinearCombination::from_variable(x, 1i32);
+    diff.add_term(x_public, -1i32);
+    cs.enforce(
+      || "x equals public input",
+      diff,
+      SmallLinearCombination::one(1i32),
+      SmallLinearCombination::zero(),
+    );
+  }
   Ok(())
 }
 
@@ -326,9 +359,26 @@ impl<Eng: Engine> SmallSpartanCircuit<Eng, bool, i32> for SmallSha256StepCircuit
     cs: &mut CS,
     _: &[Variable],
   ) -> Result<Vec<Variable>, SynthesisError> {
+    let alloc_bits_t = Instant::now();
     let input_bits = alloc_small_block_bits(cs, &self.block, "block")?;
+    info!(
+      elapsed_ms = %alloc_bits_t.elapsed().as_millis(),
+      "bench_small_alloc_block_bits"
+    );
+
+    let compression_t = Instant::now();
     run_small_sha256_compression(cs, &input_bits)?;
+    info!(
+      elapsed_ms = %compression_t.elapsed().as_millis(),
+      "bench_small_sha256_compression"
+    );
+
+    let inputize_t = Instant::now();
     inputize_small_zero(cs)?;
+    info!(
+      elapsed_ms = %inputize_t.elapsed().as_millis(),
+      "bench_small_inputize_public_zero"
+    );
     Ok(vec![])
   }
 
@@ -365,9 +415,26 @@ impl<Eng: Engine> SmallSpartanCircuit<Eng, bool, i32> for SmallSha256CoreCircuit
     _: &[Variable],
   ) -> Result<Vec<Variable>, SynthesisError> {
     let block = [0u8; BLOCK_BYTES];
+    let alloc_bits_t = Instant::now();
     let input_bits = alloc_small_block_bits(cs, &block, "core")?;
+    info!(
+      elapsed_ms = %alloc_bits_t.elapsed().as_millis(),
+      "bench_small_alloc_block_bits"
+    );
+
+    let compression_t = Instant::now();
     run_small_sha256_compression(cs, &input_bits)?;
+    info!(
+      elapsed_ms = %compression_t.elapsed().as_millis(),
+      "bench_small_sha256_compression"
+    );
+
+    let inputize_t = Instant::now();
     inputize_small_zero(cs)?;
+    info!(
+      elapsed_ms = %inputize_t.elapsed().as_millis(),
+      "bench_small_inputize_public_zero"
+    );
     Ok(vec![])
   }
 
@@ -431,6 +498,22 @@ struct StandardMode {
   label: &'static str,
 }
 
+impl StandardMode {
+  fn assert_wiring(self) {
+    match self.label {
+      "full-field" => assert!(
+        !self.is_small,
+        "FullField benchmark must call the standard prover with is_small=false",
+      ),
+      "small-value" => assert!(
+        self.is_small,
+        "SmallValue benchmark must call the standard prover with is_small=true",
+      ),
+      label => panic!("unexpected standard benchmark mode label {label}"),
+    }
+  }
+}
+
 const FULL_FIELD: StandardMode = StandardMode {
   is_small: false,
   label: "full-field",
@@ -471,6 +554,7 @@ impl BenchMode for StandardMode {
     steps: &[Self::StepCircuit],
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
+    self.assert_wiring();
     NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, self.is_small)
   }
 
@@ -481,6 +565,7 @@ impl BenchMode for StandardMode {
     core: &Self::CoreCircuit,
     prep: Self::Prep,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self::Prep), SpartanError> {
+    self.assert_wiring();
     NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, self.is_small)
   }
 }

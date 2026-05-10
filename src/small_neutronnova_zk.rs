@@ -231,10 +231,9 @@ where
   })
 }
 
-fn small_precommitted_witness<E, W, Coeff, C>(
+fn small_synthesize_precommitted_witness<E, W, Coeff, C>(
   ps: &mut SmallPrecommittedState<E, W>,
   S: &SplitR1CSShape<E, Coeff>,
-  ck: &CommitmentKey<E>,
   circuit: &C,
 ) -> Result<(), SpartanError>
 where
@@ -264,6 +263,19 @@ where
       [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
   );
 
+  ps.precommitted = precommitted;
+  Ok(())
+}
+
+fn small_commit_precommitted_witness<E, W, Coeff>(
+  ps: &mut SmallPrecommittedState<E, W>,
+  S: &SplitR1CSShape<E, Coeff>,
+  ck: &CommitmentKey<E>,
+) -> Result<(), SpartanError>
+where
+  E: Engine,
+  W: SmallWitnessValue<E>,
+{
   let (_commit_span, commit_t) = start_span!("commit_small_witness_precommitted");
   let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
     let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
@@ -283,7 +295,6 @@ where
 
   ps.comm_W_precommitted = comm_W_precommitted;
   ps.r_W_precommitted = r_W_precommitted;
-  ps.precommitted = precommitted;
   Ok(())
 }
 
@@ -571,16 +582,53 @@ where
       "generate_small_precommitted_witnesses",
       circuits = step_circuits.len() + 1
     );
-    let ps_step = (0..step_circuits.len())
+    let (_witness_span, witness_t) = start_span!("prep_witness_generation");
+    let (_step_synth_span, step_synth_t) = start_span!(
+      "prep_step_witness_synthesis",
+      circuits = step_circuits.len()
+    );
+    let mut ps_step = (0..step_circuits.len())
       .into_par_iter()
       .map(|i| {
         let mut ps_i = ps.clone();
-        small_precommitted_witness(&mut ps_i, &pk.S_step_small, &pk.field.ck, &step_circuits[i])?;
+        small_synthesize_precommitted_witness(&mut ps_i, &pk.S_step_small, &step_circuits[i])?;
         Ok(ps_i)
       })
       .collect::<Result<Vec<_>, _>>()?;
+    info!(
+      elapsed_ms = %step_synth_t.elapsed().as_millis(),
+      circuits = step_circuits.len(),
+      "prep_step_witness_synthesis"
+    );
 
-    small_precommitted_witness(&mut ps, &pk.S_core_small, &pk.field.ck, core_circuit)?;
+    let (_core_synth_span, core_synth_t) = start_span!("prep_core_witness_synthesis");
+    small_synthesize_precommitted_witness(&mut ps, &pk.S_core_small, core_circuit)?;
+    info!(
+      elapsed_ms = %core_synth_t.elapsed().as_millis(),
+      "prep_core_witness_synthesis"
+    );
+    info!(elapsed_ms = %witness_t.elapsed().as_millis(), "prep_witness_generation");
+
+    let (_commit_span, commit_t) = start_span!("prep_witness_commit");
+    let (_step_commit_span, step_commit_t) =
+      start_span!("prep_step_witness_commit", circuits = step_circuits.len());
+    ps_step.par_iter_mut().try_for_each(|ps_i| {
+      small_commit_precommitted_witness(ps_i, &pk.S_step_small, &pk.field.ck)
+    })?;
+    info!(
+      elapsed_ms = %step_commit_t.elapsed().as_millis(),
+      circuits = step_circuits.len(),
+      "prep_step_witness_commit"
+    );
+
+    let (_core_commit_span, core_commit_t) = start_span!("prep_core_witness_commit");
+    small_commit_precommitted_witness(&mut ps, &pk.S_core_small, &pk.field.ck)?;
+    info!(
+      elapsed_ms = %core_commit_t.elapsed().as_millis(),
+      "prep_core_witness_commit"
+    );
+    info!(elapsed_ms = %commit_t.elapsed().as_millis(), "prep_witness_commit");
+
     info!(
       elapsed_ms = %precommit_t.elapsed().as_millis(),
       circuits = step_circuits.len() + 1,
@@ -1051,7 +1099,6 @@ where
       &[blind_eval_W_step, blind_eval_W_core],
       &[E::Scalar::ONE, c_eval],
     )?;
-    let _eval = eval_W_step + c_eval * eval_W_core;
     info!(elapsed_ms = %fold_eval_t.elapsed().as_millis(), "fold_evaluation_claims");
 
     let (_eval_arg_span, eval_arg_t) = start_span!("prove_eval_arg");
