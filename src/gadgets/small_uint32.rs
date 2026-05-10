@@ -16,7 +16,7 @@
 //! | `xor()` | Delegates to SmallBoolean |
 //! | `rotr()` | No constraints - just reorders bits |
 //! | `shr()` | No constraints - inserts zero bits |
-//! | `sha256_ch/maj()` | Uses AND/XOR |
+//! | `sha256_ch/maj()` | Uses optimized SHA identities |
 
 use bellpepper_core::SynthesisError;
 
@@ -182,8 +182,7 @@ impl SmallUInt32 {
 
   /// SHA-256 MAJ function: (a AND b) XOR (a AND c) XOR (b AND c)
   ///
-  /// Optimized identity: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
-  /// This uses 2 AND + 2 XOR per bit instead of 3 AND + 2 XOR.
+  /// Uses the optimized bellpepper-style identity from `SmallBoolean`.
   pub fn sha256_maj<W, C, CS>(
     mut cs: CS,
     a: &Self,
@@ -201,12 +200,8 @@ impl SmallUInt32 {
       .zip(a.bits.iter().zip(b.bits.iter()).zip(c.bits.iter()))
       .enumerate()
     {
-      let mut bit_cs = cs.namespace(|| format!("b{i}"));
-      // Optimized: Maj(a,b,c) = (a & b) ^ (c & (a ^ b))
-      let t = SmallBoolean::xor(bit_cs.namespace(|| "xor_ab").inner, a_bit, b_bit)?;
-      let u = SmallBoolean::and(bit_cs.namespace(|| "and_c_t").inner, c_bit, &t)?;
-      let v = SmallBoolean::and(bit_cs.namespace(|| "and_ab").inner, a_bit, b_bit)?;
-      *slot = SmallBoolean::xor(bit_cs.namespace(|| "xor_vu").inner, &v, &u)?;
+      *slot =
+        SmallBoolean::sha256_maj(cs.namespace(|| format!("b{i}")).inner, a_bit, b_bit, c_bit)?;
     }
 
     Ok(SmallUInt32 {

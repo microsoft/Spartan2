@@ -44,18 +44,18 @@ where
     64 - ((operands.len() as u64) * (u16::MAX as u64)).leading_zeros() as usize - 16;
   let num_carry_bits = num_carry_bits.max(1); // At least 1 carry bit
 
-  // Compute low limb sum (for witness generation)
-  // IMPORTANT: Carry must be computed from the LOW LIMB SUM, not from the full result
-  let lo_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-    op.get_value().map(|v| acc + ((v as u64) & 0xFFFF))
+  // Compute limb sums in one witness pass.
+  // IMPORTANT: Carry must be computed from the LOW LIMB SUM, not from the full result.
+  let limb_sums: Option<(u64, u64)> = operands.iter().try_fold((0u64, 0u64), |(lo, hi), op| {
+    op.get_value().map(|v| {
+      (
+        lo + ((v as u64) & 0xFFFF),
+        hi + (((v as u64) >> 16) & 0xFFFF),
+      )
+    })
   });
-
-  // Compute high limb sum (for witness generation)
-  // hi_sum = Σ(operand_hi) + carry
-  let hi_sum: Option<u64> = operands.iter().try_fold(0u64, |acc, op| {
-    op.get_value().map(|v| acc + (((v as u64) >> 16) & 0xFFFF))
-  });
-  let hi_sum_with_carry: Option<u64> = hi_sum.and_then(|h| lo_sum.map(|l| h + (l >> 16)));
+  let lo_sum = limb_sums.map(|(lo, _)| lo);
+  let hi_sum_with_carry = limb_sums.map(|(lo, hi)| hi + (lo >> 16));
 
   // === LOW LIMB CONSTRAINT ===
   // Sum of low 16 bits of each operand = low 16 bits of result + carry × 2^16

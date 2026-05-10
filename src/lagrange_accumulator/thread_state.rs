@@ -12,7 +12,7 @@
 //! O(num_x_out) to O(num_threads).
 
 use super::accumulator::LagrangeAccumulators;
-use crate::big_num::{DelayedReduction, SmallValue, SmallValueEngine};
+use crate::big_num::{DelayedReduction, SmallValue, SmallValueEngine, WideMul};
 use num_traits::Zero;
 
 /// Thread-local scratch buffers for `build_accumulators_spartan`.
@@ -42,7 +42,7 @@ where
   /// Partial sums indexed by β, accumulated over the x_in loop.
   /// Uses unreduced wide-limb form for delayed modular reduction.
   /// Reset each x_out iteration.
-  pub partial_sums: Vec<<F as DelayedReduction<SV::Product>>::Accumulator>,
+  pub partial_sums: Vec<<F as DelayedReduction<<SV as WideMul>::Output>>::Accumulator>,
   /// Bucket accumulators for scatter phase.
   /// Uses unreduced F×F form (accumulator for field × field products).
   /// Accumulated across all x_out iterations, then merged.
@@ -71,7 +71,10 @@ where
 {
   pub fn new(l0: usize, num_betas: usize, prefix_size: usize, ext_size: usize) -> Self {
     Self {
-      partial_sums: vec![<F as DelayedReduction<SV::Product>>::Accumulator::zero(); num_betas],
+      partial_sums: vec![
+        <F as DelayedReduction<<SV as WideMul>::Output>>::Accumulator::zero();
+        num_betas
+      ],
       acc: LagrangeAccumulators::new(l0),
       az_prefix_boolean_evals: vec![SV::zero(); prefix_size],
       bz_prefix_boolean_evals: vec![SV::zero(); prefix_size],
@@ -88,7 +91,7 @@ where
   #[inline]
   pub fn reset_partial_sums(&mut self) {
     for sum in &mut self.partial_sums {
-      *sum = <F as DelayedReduction<SV::Product>>::Accumulator::zero();
+      *sum = <F as DelayedReduction<<SV as WideMul>::Output>>::Accumulator::zero();
     }
     self.beta_values.clear();
   }

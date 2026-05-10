@@ -13,24 +13,23 @@
 //! # Usage
 //!
 //! ```ignore
-//! use spartan2::gadgets::{small_sha256, SmallBoolean};
+//! use spartan2::gadgets::{small_sha256_int, NoBatchEq, SmallBoolean};
 //! use spartan2::small_constraint_system::SmallShapeCS;
 //!
 //! // Shape extraction (i32 coefficients)
 //! let mut cs = SmallShapeCS::<i32>::new();
+//! let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
 //! let input_bits: Vec<SmallBoolean> = (0..512).map(|_| SmallBoolean::constant(false)).collect();
-//! let hash_bits = small_sha256(&mut cs, &input_bits)?;
+//! let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input_bits)?;
 //!
 //! // Witness generation (i8 witnesses)
 //! let mut cs = SmallSatisfyingAssignment::<i8>::new();
-//! let hash_bits = small_sha256(&mut cs, &input_bits)?;
+//! let mut eq = NoBatchEq::<i8, i32, _>::new(&mut cs);
+//! let hash_bits = small_sha256_int::<i8, _>(&mut eq, &input_bits)?;
 //! ```
 
-use super::{SmallMultiEq, SmallUInt32, small_multi_eq::NoBatchEq};
-use crate::{
-  gadgets::small_boolean::{SmallBit, SmallBoolean},
-  small_constraint_system::{SmallConstraintSystem, SmallLinearCombination, SmallToBellpepperCS},
-};
+use super::{SmallMultiEq, SmallUInt32};
+use crate::{gadgets::small_boolean::SmallBoolean, small_constraint_system::SmallConstraintSystem};
 use bellpepper_core::SynthesisError;
 
 /// SHA-256 round constants K[0..63].
@@ -119,8 +118,8 @@ where
   M: SmallMultiEq<W, i32>,
 {
   // Message schedule: expand 16 words to 64 words
-  let mut w_expanded: Vec<SmallUInt32> = w.to_vec();
-  w_expanded.reserve(48);
+  let mut w_expanded: Vec<SmallUInt32> = Vec::with_capacity(64);
+  w_expanded.extend_from_slice(w);
 
   for i in 16..64 {
     let s1 = small_sigma_1::<W, _>(
@@ -239,10 +238,7 @@ where
 
     let mut w: [SmallUInt32; 16] = std::array::from_fn(|_| SmallUInt32::constant(0));
     for (i, w_item) in w.iter_mut().enumerate() {
-      let word_bits: [SmallBoolean; 32] = block_bits[i * 32..(i + 1) * 32]
-        .to_vec()
-        .try_into()
-        .unwrap();
+      let word_bits: [SmallBoolean; 32] = std::array::from_fn(|j| block_bits[i * 32 + j].clone());
       *w_item = SmallUInt32::from_bits_be(&word_bits);
     }
 
@@ -287,13 +283,10 @@ where
   assert_eq!(input_bits.len(), 512);
   assert_eq!(current_hash.len(), 8);
 
-  let mut h: [SmallUInt32; 8] = current_hash.to_vec().try_into().unwrap();
+  let mut h: [SmallUInt32; 8] = std::array::from_fn(|i| current_hash[i].clone());
   let mut w: [SmallUInt32; 16] = std::array::from_fn(|_| SmallUInt32::constant(0));
   for (i, w_item) in w.iter_mut().enumerate() {
-    let word_bits: [SmallBoolean; 32] = input_bits[i * 32..(i + 1) * 32]
-      .to_vec()
-      .try_into()
-      .unwrap();
+    let word_bits: [SmallBoolean; 32] = std::array::from_fn(|j| input_bits[i * 32 + j].clone());
     *w_item = SmallUInt32::from_bits_be(&word_bits);
   }
 
@@ -327,133 +320,6 @@ fn sha256_padding(input: &[SmallBoolean]) -> Vec<SmallBoolean> {
   }
 
   padded
-}
-
-// ── Bellpepper-compatible legacy API ──────────────────────────────────────
-
-/// Compute SHA-256 using bellpepper's Boolean and ConstraintSystem.
-///
-/// This preserves the bellpepper-facing API while routing synthesis through the
-/// bounded-coefficient small-value gadget.
-pub fn small_sha256<Scalar, CS>(
-  cs: &mut CS,
-  input: &[bellpepper_core::boolean::Boolean],
-) -> Result<Vec<bellpepper_core::boolean::Boolean>, SynthesisError>
-where
-  Scalar: ff::PrimeField,
-  CS: bellpepper_core::ConstraintSystem<Scalar>,
-{
-  small_sha256_with_prefix::<Scalar, CS>(cs, input, "")
-}
-
-/// Compute SHA-256 with prefix using the small-value gadget in a bellpepper CS.
-pub fn small_sha256_with_prefix<Scalar, CS>(
-  cs: &mut CS,
-  input: &[bellpepper_core::boolean::Boolean],
-  prefix: &str,
-) -> Result<Vec<bellpepper_core::boolean::Boolean>, SynthesisError>
-where
-  Scalar: ff::PrimeField,
-  CS: bellpepper_core::ConstraintSystem<Scalar>,
-{
-  let small_input = input
-    .iter()
-    .map(small_boolean_from_bellpepper)
-    .collect::<Vec<_>>();
-  let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(cs);
-  let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
-  let hash_bits = small_sha256_int_with_prefix::<i8, _>(&mut eq, &small_input, prefix)?;
-  drop(eq);
-
-  small_booleans_to_allocated_booleans(&mut small_cs, &hash_bits)
-}
-
-/// Compute SHA-256 using a custom bellpepper-based ConstraintSystem.
-pub fn small_sha256_with_small_multi_eq<Scalar, M>(
-  cs: &mut M,
-  input: &[bellpepper_core::boolean::Boolean],
-  prefix: &str,
-) -> Result<Vec<bellpepper_core::boolean::Boolean>, SynthesisError>
-where
-  Scalar: ff::PrimeField,
-  M: bellpepper_core::ConstraintSystem<Scalar>,
-{
-  small_sha256_with_prefix::<Scalar, M>(cs, input, prefix)
-}
-
-/// Run one SHA-256 compression block using the small-value gadget in a bellpepper CS.
-pub fn small_sha256_compression_function<Scalar, CS>(
-  mut cs: CS,
-  input_bits: &[bellpepper_core::boolean::Boolean],
-  current_hash: &[SmallUInt32],
-) -> Result<Vec<SmallUInt32>, SynthesisError>
-where
-  Scalar: ff::PrimeField,
-  CS: bellpepper_core::ConstraintSystem<Scalar>,
-{
-  let small_input = input_bits
-    .iter()
-    .map(small_boolean_from_bellpepper)
-    .collect::<Vec<_>>();
-  let mut small_cs = SmallToBellpepperCS::<Scalar, CS>::new(&mut cs);
-  let mut eq = NoBatchEq::<i8, i32, _>::new(&mut small_cs);
-  small_sha256_compression_function_int::<i8, _>(&mut eq, &small_input, current_hash)
-}
-
-fn small_boolean_from_bellpepper(bit: &bellpepper_core::boolean::Boolean) -> SmallBoolean {
-  match bit {
-    bellpepper_core::boolean::Boolean::Constant(value) => SmallBoolean::Constant(*value),
-    bellpepper_core::boolean::Boolean::Is(bit) => SmallBoolean::Is(SmallBit {
-      variable: bit.get_variable(),
-      value: bit.get_value(),
-    }),
-    bellpepper_core::boolean::Boolean::Not(bit) => SmallBoolean::Not(SmallBit {
-      variable: bit.get_variable(),
-      value: bit.get_value(),
-    }),
-  }
-}
-
-fn small_booleans_to_allocated_booleans<Scalar, CS>(
-  cs: &mut CS,
-  bits: &[SmallBoolean],
-) -> Result<Vec<bellpepper_core::boolean::Boolean>, SynthesisError>
-where
-  Scalar: ff::PrimeField,
-  CS: bellpepper_core::ConstraintSystem<Scalar> + SmallConstraintSystem<i8, i32>,
-{
-  bits
-    .iter()
-    .enumerate()
-    .map(|(i, bit)| {
-      let allocated = bellpepper_core::boolean::AllocatedBit::alloc(
-        bellpepper_core::ConstraintSystem::<Scalar>::namespace(cs, || format!("output_bit_{i}")),
-        bit.get_value(),
-      )?;
-
-      let allocated_small = SmallBoolean::Is(small_bit_from_allocated_bit(&allocated));
-      let mut diff = bit.lc::<i32>();
-      for (var, coeff) in allocated_small.lc::<i32>().terms {
-        diff.add_term(var, -coeff);
-      }
-      SmallConstraintSystem::<i8, i32>::enforce(
-        cs,
-        || format!("output_bit_{i}_binding"),
-        diff,
-        SmallLinearCombination::one(1),
-        SmallLinearCombination::zero(),
-      );
-
-      Ok(bellpepper_core::boolean::Boolean::from(allocated))
-    })
-    .collect()
-}
-
-fn small_bit_from_allocated_bit(bit: &bellpepper_core::boolean::AllocatedBit) -> SmallBit {
-  SmallBit {
-    variable: bit.get_variable(),
-    value: bit.get_value(),
-  }
 }
 
 #[cfg(test)]

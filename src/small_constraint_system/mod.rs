@@ -377,6 +377,89 @@ pub struct SmallShapeCS<C: SmallCoeff> {
   pub(crate) num_aux: usize,
 }
 
+struct SmallCsrBuilder<C: SmallCoeff> {
+  data: Vec<C>,
+  indices: Vec<usize>,
+  indptr: Vec<usize>,
+  cols: usize,
+}
+
+impl<C: SmallCoeff> SmallCsrBuilder<C> {
+  fn new(cols: usize, rows: usize) -> Self {
+    let mut indptr = Vec::with_capacity(rows + 1);
+    indptr.push(0);
+    Self {
+      data: Vec::new(),
+      indices: Vec::new(),
+      indptr,
+      cols,
+    }
+  }
+
+  fn push_row(&mut self, lc: &SmallLinearCombination<C>, num_aux: usize) {
+    let row_start = self.data.len();
+    for (var, coeff) in &lc.terms {
+      if *coeff == C::default() {
+        continue;
+      }
+      let col = match var.get_unchecked() {
+        Index::Aux(i) => i,
+        Index::Input(i) => num_aux + i,
+      };
+      self.data.push(*coeff);
+      self.indices.push(col);
+    }
+
+    self.sort_and_merge_row(row_start);
+    self.indptr.push(self.data.len());
+  }
+
+  fn sort_and_merge_row(&mut self, row_start: usize) {
+    let row_end = self.data.len();
+    let row_len = row_end - row_start;
+
+    for i in 1..row_len {
+      let mut j = row_start + i;
+      while j > row_start && self.indices[j - 1] > self.indices[j] {
+        self.indices.swap(j - 1, j);
+        self.data.swap(j - 1, j);
+        j -= 1;
+      }
+    }
+
+    if row_len > 1 {
+      let mut write = row_start;
+      for read in (row_start + 1)..row_end {
+        if self.indices[read] == self.indices[write] {
+          let val = self.data[read];
+          self.data[write] += val;
+        } else {
+          if self.data[write] != C::default() {
+            write += 1;
+          }
+          self.data[write] = self.data[read];
+          self.indices[write] = self.indices[read];
+        }
+      }
+
+      if self.data[write] != C::default() {
+        write += 1;
+      }
+      self.data.truncate(write);
+      self.indices.truncate(write);
+    }
+  }
+
+  fn finish(self) -> SparseMatrix<C> {
+    SparseMatrix {
+      data: self.data,
+      indices: self.indices,
+      indptr: self.indptr,
+      cols: self.cols,
+    }
+  }
+}
+
 impl<C: SmallCoeff> Default for SmallShapeCS<C> {
   fn default() -> Self {
     Self::new()
@@ -417,85 +500,18 @@ impl<C: SmallCoeff> SmallShapeCS<C> {
   ///   (input[0] = ONE = column num_aux)
   pub fn to_matrices(&self) -> (SparseMatrix<C>, SparseMatrix<C>, SparseMatrix<C>) {
     let num_cols = self.num_aux + self.num_inputs;
-    let _num_rows = self.constraints.len();
+    let rows = self.constraints.len();
+    let mut a = SmallCsrBuilder::new(num_cols, rows);
+    let mut b = SmallCsrBuilder::new(num_cols, rows);
+    let mut c = SmallCsrBuilder::new(num_cols, rows);
 
-    let lc_to_csr = |get_lc: &dyn Fn(
-      &(
-        SmallLinearCombination<C>,
-        SmallLinearCombination<C>,
-        SmallLinearCombination<C>,
-      ),
-    ) -> &SmallLinearCombination<C>| {
-      let mut data = vec![];
-      let mut indices = vec![];
-      let mut indptr = vec![0usize];
+    for (a_lc, b_lc, c_lc) in &self.constraints {
+      a.push_row(a_lc, self.num_aux);
+      b.push_row(b_lc, self.num_aux);
+      c.push_row(c_lc, self.num_aux);
+    }
 
-      for constraint in &self.constraints {
-        let lc = get_lc(constraint);
-        let row_start = data.len();
-        for (var, coeff) in &lc.terms {
-          if *coeff == C::default() {
-            continue;
-          }
-          let col = match var.get_unchecked() {
-            Index::Aux(i) => i,
-            Index::Input(i) => self.num_aux + i,
-          };
-          data.push(*coeff);
-          indices.push(col);
-        }
-        // Sort by column index for canonical CSR order
-        let row_end = data.len();
-        let row_slice_indices = &mut indices[row_start..row_end];
-        let row_slice_data = &mut data[row_start..row_end];
-        // Simple insertion sort (rows are small)
-        for i in 1..(row_end - row_start) {
-          let mut j = i;
-          while j > 0 && row_slice_indices[j - 1] > row_slice_indices[j] {
-            row_slice_indices.swap(j - 1, j);
-            row_slice_data.swap(j - 1, j);
-            j -= 1;
-          }
-        }
-        // Merge duplicate column entries (sum coefficients, drop zeros)
-        let row_len = row_end - row_start;
-        if row_len > 1 {
-          let mut write = row_start;
-          for read in (row_start + 1)..row_end {
-            if indices[read] == indices[write] {
-              let val = data[read];
-              data[write] += val;
-            } else {
-              if data[write] != C::default() {
-                write += 1;
-              }
-              data[write] = data[read];
-              indices[write] = indices[read];
-            }
-          }
-          // Keep last element if non-zero
-          if data[write] != C::default() {
-            write += 1;
-          }
-          data.truncate(write);
-          indices.truncate(write);
-        }
-        indptr.push(data.len());
-      }
-
-      SparseMatrix {
-        data,
-        indices,
-        indptr,
-        cols: num_cols,
-      }
-    };
-
-    let a = lc_to_csr(&|(a, _, _)| a);
-    let b = lc_to_csr(&|(_, b, _)| b);
-    let c = lc_to_csr(&|(_, _, c)| c);
-
-    (a, b, c)
+    (a.finish(), b.finish(), c.finish())
   }
 }
 

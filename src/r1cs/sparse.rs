@@ -10,12 +10,11 @@
 //! Specifically, we implement sparse matrix / dense vector multiplication
 //! to compute the `A z`, `B z`, and `C z` in Spartan.
 use ff::PrimeField;
-use num_traits::{Bounded, One, Signed, Zero};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::ops::{Div, Mul};
+use std::ops::AddAssign;
 
-use crate::big_num::{DelayedReduction, ExtensionBound, SmallValueField, WideMul};
+use crate::big_num::WideMul;
 use crate::errors::SpartanError;
 
 /// Threshold below which we use sequential (non-rayon) iteration.
@@ -470,6 +469,54 @@ impl<C: Copy> SparseMatrix<C> {
       nnz,
     }
   }
+
+  /// Multiply by a dense vector.
+  ///
+  /// # Errors
+  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't
+  /// match the matrix dimensions.
+  pub fn multiply_vec<W, Out>(&self, vector: &[W]) -> Result<Vec<Out>, SpartanError>
+  where
+    C: WideMul<W, Output = Out> + Sync,
+    W: Copy + Sync,
+    Out: Copy + Default + AddAssign + Send,
+  {
+    if self.cols != vector.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SparseMatrix multiply_vec: Expected {} elements in vector, got {}",
+          self.cols,
+          vector.len()
+        ),
+      });
+    }
+
+    Ok(self.multiply_vec_unchecked(vector))
+  }
+
+  /// Multiply by a dense vector without checking shape compatibility.
+  pub fn multiply_vec_unchecked<W, Out>(&self, vector: &[W]) -> Vec<Out>
+  where
+    C: WideMul<W, Output = Out> + Sync,
+    W: Copy + Sync,
+    Out: Copy + Default + AddAssign + Send,
+  {
+    let compute_row = |ptrs: &[usize]| {
+      let row_ptrs = [ptrs[0], ptrs[1]];
+      let mut sum = Out::default();
+      for (val, col_idx) in self.get_row_unchecked(&row_ptrs) {
+        sum += val.wide_mul(vector[*col_idx]);
+      }
+      sum
+    };
+
+    let num_rows = self.indptr.len() - 1;
+    if num_rows <= PARALLEL_THRESHOLD {
+      self.indptr.windows(2).map(compute_row).collect()
+    } else {
+      self.indptr.par_windows(2).map(compute_row).collect()
+    }
+  }
 }
 
 impl<F: PrimeField> SparseMatrix<F> {
@@ -493,109 +540,6 @@ impl<F: PrimeField> SparseMatrix<F> {
       w.write_all(&(*ptr as u64).to_le_bytes())?;
     }
     Ok(())
-  }
-
-  /// Multiply by a dense vector; uses rayon/gpu.
-  ///
-  /// # Errors
-  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't match the matrix dimensions.
-  pub fn multiply_vec(&self, vector: &[F]) -> Result<Vec<F>, SpartanError> {
-    if self.cols != vector.len() {
-      return Err(SpartanError::InvalidInputLength {
-        reason: format!(
-          "SparseMatrix multiply_vec: Expected {} elements in vector, got {}",
-          self.cols,
-          vector.len()
-        ),
-      });
-    }
-
-    Ok(self.multiply_vec_unchecked(vector))
-  }
-
-  /// Multiply by a dense vector; uses rayon/gpu.
-  /// This does not check that the shape of the matrix/vector are compatible.
-  pub fn multiply_vec_unchecked(&self, vector: &[F]) -> Vec<F> {
-    let num_rows = self.indptr.len() - 1;
-    if num_rows <= PARALLEL_THRESHOLD {
-      self
-        .indptr
-        .windows(2)
-        .map(|ptrs| {
-          let row_ptrs = [ptrs[0], ptrs[1]];
-          self
-            .get_row_unchecked(&row_ptrs)
-            .map(|(val, col_idx)| *val * vector[*col_idx])
-            .sum()
-        })
-        .collect()
-    } else {
-      self
-        .indptr
-        .par_windows(2)
-        .map(|ptrs| {
-          let row_ptrs = [ptrs[0], ptrs[1]];
-          self
-            .get_row_unchecked(&row_ptrs)
-            .map(|(val, col_idx)| *val * vector[*col_idx])
-            .sum()
-        })
-        .collect()
-    }
-  }
-
-  /// Multiply by a dense small-value vector and return extension-safe small values.
-  ///
-  /// This is used by the full-small NeutronNova accumulator path. It accumulates
-  /// `field coefficient × small vector entry` with delayed reduction, reduces the
-  /// row result to a field element, then enforces the Lagrange-extension bound.
-  pub fn multiply_vec_small<const D: usize, SV>(
-    &self,
-    z: &[SV],
-    lb: usize,
-  ) -> Result<Vec<SV>, SpartanError>
-  where
-    F: SmallValueField<SV> + DelayedReduction<SV> + Sync,
-    SV: WideMul + Bounded + Copy + Send + Sync + Into<SV::Product>,
-    SV::Product:
-      Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
-  {
-    if self.cols != z.len() {
-      return Err(SpartanError::InvalidInputLength {
-        reason: format!(
-          "SparseMatrix multiply_vec_small: Expected {} elements in vector, got {}",
-          self.cols,
-          z.len()
-        ),
-      });
-    }
-
-    let bound = ExtensionBound::<SV, D>::new(lb);
-    let num_rows = self.indptr.len() - 1;
-
-    let compute_row = |row: usize| -> Result<SV, SpartanError> {
-      let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
-      let ptrs = [self.indptr[row], self.indptr[row + 1]];
-      for (val, col_idx) in self.get_row_unchecked(&ptrs) {
-        <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, val, &z[*col_idx]);
-      }
-      let field_result = <F as DelayedReduction<SV>>::reduce(&acc);
-      bound
-        .try_to_small(&field_result)
-        .ok_or_else(|| SpartanError::SmallValueOverflow {
-          value: format!("0x{}", hex::encode(field_result.to_repr().as_ref())),
-          context: format!(
-            "SparseMatrix::multiply_vec_small row {} exceeds extension bound for D={}, lb={}",
-            row, D, lb
-          ),
-        })
-    };
-
-    if num_rows <= PARALLEL_THRESHOLD {
-      (0..num_rows).map(compute_row).collect()
-    } else {
-      (0..num_rows).into_par_iter().map(compute_row).collect()
-    }
   }
 }
 
@@ -713,50 +657,6 @@ mod tests {
   }
 
   #[test]
-  fn test_multiply_vec_small_matches_field_matvec() {
-    use crate::big_num::SmallValueField;
-
-    let matrix = SparseMatrix::<Fr>::new(
-      &[
-        (0, 0, Fr::from(2u64)),
-        (0, 1, -Fr::from(1u64)),
-        (1, 1, Fr::from(5u64)),
-        (1, 2, Fr::from(3u64)),
-        (2, 0, -Fr::from(4u64)),
-        (2, 2, Fr::from(7u64)),
-      ],
-      3,
-      3,
-    );
-    let z_small = vec![3i64, -2, 4];
-    let z_field = z_small
-      .iter()
-      .copied()
-      .map(<Fr as SmallValueField<i64>>::small_to_field)
-      .collect::<Vec<_>>();
-
-    let expected = matrix.multiply_vec(&z_field).unwrap();
-    let got = matrix.multiply_vec_small::<2, i64>(&z_small, 2).unwrap();
-    let expected_small = expected
-      .iter()
-      .map(<Fr as SmallValueField<i64>>::try_field_to_small)
-      .collect::<Option<Vec<_>>>()
-      .unwrap();
-
-    assert_eq!(got, expected_small);
-  }
-
-  #[test]
-  fn test_multiply_vec_small_overflow_fails_hard() {
-    let matrix = SparseMatrix::<Fr>::new(&[(0, 0, Fr::from(1u64))], 1, 1);
-    let err = matrix
-      .multiply_vec_small::<2, i64>(&[i64::MAX], 2)
-      .unwrap_err();
-
-    assert!(matches!(err, SpartanError::SmallValueOverflow { .. }));
-  }
-
-  #[test]
   fn test_matrix_vector_multiplication() {
     let matrix_data = vec![
       (0, 1, Fr::from(2)),
@@ -767,12 +667,34 @@ mod tests {
     let sparse_matrix = SparseMatrix::<Fr>::new(&matrix_data, 3, 3);
     let vector = vec![Fr::from(1), Fr::from(2), Fr::from(3)];
 
-    let result = sparse_matrix.multiply_vec(&vector);
+    let result = sparse_matrix.multiply_vec::<Fr, Fr>(&vector);
 
     assert_eq!(
       result.unwrap(),
       vec![Fr::from(25), Fr::from(9), Fr::from(4)]
     );
+  }
+
+  #[test]
+  fn test_i32_bool_matrix_vector_multiplication() {
+    let matrix_data = vec![(0, 0, 7i32), (0, 1, -3), (1, 1, 5), (1, 2, 11)];
+    let sparse_matrix = SparseMatrix::<i32>::new(&matrix_data, 2, 3);
+    let vector = vec![true, false, true];
+
+    let result = sparse_matrix.multiply_vec::<bool, i64>(&vector).unwrap();
+
+    assert_eq!(result, vec![7, 11]);
+  }
+
+  #[test]
+  fn test_i32_i8_matrix_vector_multiplication() {
+    let matrix_data = vec![(0, 0, 7i32), (0, 1, -3), (1, 1, 5), (1, 2, 11)];
+    let sparse_matrix = SparseMatrix::<i32>::new(&matrix_data, 2, 3);
+    let vector = vec![2i8, -4, 3];
+
+    let result = sparse_matrix.multiply_vec::<i8, i64>(&vector).unwrap();
+
+    assert_eq!(result, vec![26, 13]);
   }
 
   fn coo_strategy() -> BoxedStrategy<Vec<(usize, usize, FWrap<Fr>)>> {

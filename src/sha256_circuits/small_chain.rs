@@ -4,7 +4,7 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SHA-256 chain circuit using small_sha256 (small-value compatible).
+//! SHA-256 chain circuit using the small SHA-256 gadget.
 
 use super::{
   bytes_to_public_scalars,
@@ -15,13 +15,15 @@ use ff::{PrimeField, PrimeFieldBits};
 use sha2::{Digest, Sha256};
 use std::marker::PhantomData;
 
+#[cfg(debug_assertions)]
+use crate::gadgets::SmallBoolean;
 use crate::{
-  gadgets::{NoBatchEq, SmallBoolean, small_sha256_int_with_prefix},
+  gadgets::{NoBatchEq, small_sha256_int_with_prefix},
   small_constraint_system::SmallToBellpepperCS,
   traits::{Engine, circuit::SpartanCircuit},
 };
 
-/// SHA-256 chain circuit using small_sha256 (small-value compatible).
+/// SHA-256 chain circuit using the small SHA-256 gadget.
 ///
 /// Chains `chain_length` SHA-256 hashes starting from a 256-bit input.
 /// Hash[0] = SHA-256(input), Hash[i] = SHA-256(Hash[i-1])
@@ -87,7 +89,10 @@ where
       }
     }
 
-    assert_small_bits_match_bytes(&current_bits, &self.expected_output());
+    #[cfg(debug_assertions)]
+    {
+      assert_small_bits_match_bytes(&current_bits, &self.expected_output());
+    }
 
     expose_small_hash_bits_as_public::<i8, _>(&mut small_cs, &current_bits)?;
 
@@ -126,6 +131,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> Circuit<Scalar> for SmallSha256ChainCi
   }
 }
 
+#[cfg(debug_assertions)]
 fn assert_small_bits_match_bytes(bits: &[SmallBoolean], expected_bytes: &[u8]) {
   let expected_bits: Vec<bool> = expected_bytes
     .iter()

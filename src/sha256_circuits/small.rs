@@ -4,7 +4,7 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SHA-256 circuit using small_sha256 gadget (small-value compatible).
+//! SHA-256 circuit using the small SHA-256 gadget.
 
 use super::hash_to_public_scalars;
 use bellpepper_core::{Circuit, ConstraintSystem, SynthesisError, num::AllocatedNum};
@@ -23,7 +23,7 @@ use ff::Field;
 #[cfg(debug_assertions)]
 use sha2::{Digest, Sha256};
 
-/// SHA-256 circuit using small_sha256 gadget (small-value compatible).
+/// SHA-256 circuit using the small SHA-256 gadget.
 ///
 /// Uses `SmallMultiEq` to keep coefficients bounded for small-value sumcheck.
 #[derive(Debug, Clone)]
@@ -364,13 +364,10 @@ mod tests {
 
   fn mat_vec(matrix: &SparseMatrix<i32>, z: &[i8]) -> Vec<i128> {
     matrix
-      .indptr
-      .windows(2)
-      .map(|ptrs| {
-        (ptrs[0]..ptrs[1])
-          .map(|i| i128::from(matrix.data[i]) * i128::from(z[matrix.indices[i]]))
-          .sum()
-      })
+      .multiply_vec::<i8, i64>(z)
+      .expect("small SHA matrices should match witness length")
+      .into_iter()
+      .map(i128::from)
       .collect()
   }
 

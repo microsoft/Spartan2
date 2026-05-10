@@ -35,7 +35,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
-  small_constraint_system::SmallShapeCS,
+  small_constraint_system::{SmallCoeff, SmallShapeCS},
   sumcheck::SumcheckProof,
   traits::{
     Engine,
@@ -56,7 +56,7 @@ use tracing::{debug, info};
 mod small_neutronnova_zk;
 
 pub use small_neutronnova_zk::{
-  NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaSmallAccumulatorPrepZkSNARK,
+  NeutronNovaAccumulatorPrepZkSNARK, NeutronNovaSmallAccumulatorPrepZkSNARK, SmallWitnessValue,
 };
 
 type NeutronNovaNIFSOutput<E> = (
@@ -88,54 +88,6 @@ fn build_z<E: Engine>(w: &[E::Scalar], x: &[E::Scalar]) -> Vec<E::Scalar> {
   z.push(E::Scalar::ONE);
   z.extend_from_slice(x);
   z
-}
-
-#[allow(dead_code)]
-fn prepare_nifs_inputs<E: Engine>(
-  Us: &[R1CSInstance<E>],
-  Ws: &[R1CSWitness<E>],
-  transcript: &mut E::TE,
-) -> Result<
-  (
-    Vec<R1CSInstance<E>>,
-    Vec<R1CSWitness<E>>,
-    usize,
-    E::Scalar,
-    Vec<E::Scalar>,
-  ),
-  SpartanError,
->
-where
-  E::PCS: FoldingEngineTrait<E>,
-{
-  let n = Us.len();
-  let n_padded = n.next_power_of_two();
-  let ell_b = n_padded.log_2();
-
-  info!(
-    "NeutronNova NIFS prove for {} instances and padded to {} instances",
-    Us.len(),
-    n_padded
-  );
-
-  let mut Us = Us.to_vec();
-  let mut Ws = Ws.to_vec();
-  if Us.len() < n_padded {
-    Us.extend(vec![Us[0].clone(); n_padded - n]);
-    Ws.extend(vec![Ws[0].clone(); n_padded - n]);
-  }
-
-  for U in Us.iter() {
-    transcript.absorb(b"U", U);
-  }
-  transcript.absorb(b"T", &E::Scalar::ZERO);
-
-  let tau = transcript.squeeze(b"tau")?;
-  let rhos = (0..ell_b)
-    .map(|_| transcript.squeeze(b"rho"))
-    .collect::<Result<Vec<_>, _>>()?;
-
-  Ok((Us, Ws, ell_b, tau, rhos))
 }
 
 /// A type that holds the NeutronNova NIFS (Non-Interactive Folding Scheme)
@@ -369,7 +321,7 @@ where
 
     for i in 0..right {
       let base = i * left;
-      let mut inner_acc = SmallAccumulator::<E::Scalar>::default();
+      let mut inner_acc = SmallAccumulator::<E::Scalar, i128>::default();
 
       for j in 0..left {
         let k = base + j;
@@ -451,9 +403,9 @@ where
       let base = i * left;
 
       // Process e0 cross-product terms (Az_lo * Bz_lo)
-      let mut sa_e0_00 = SmallAccumulator::<E::Scalar>::default();
-      let mut sa_e0_01 = SmallAccumulator::<E::Scalar>::default();
-      let mut sa_e0_11 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_e0_00 = SmallAccumulator::<E::Scalar, i128>::default();
+      let mut sa_e0_01 = SmallAccumulator::<E::Scalar, i128>::default();
+      let mut sa_e0_11 = SmallAccumulator::<E::Scalar, i128>::default();
 
       for j in 0..left {
         let k = base + j;
@@ -487,9 +439,9 @@ where
       );
 
       // Process quad cross-product terms ((Az_hi-Az_lo) * (Bz_hi-Bz_lo))
-      let mut sa_q_00 = SmallAccumulator::<E::Scalar>::default();
-      let mut sa_q_01 = SmallAccumulator::<E::Scalar>::default();
-      let mut sa_q_11 = SmallAccumulator::<E::Scalar>::default();
+      let mut sa_q_00 = SmallAccumulator::<E::Scalar, i128>::default();
+      let mut sa_q_01 = SmallAccumulator::<E::Scalar, i128>::default();
+      let mut sa_q_11 = SmallAccumulator::<E::Scalar, i128>::default();
 
       for j in 0..left {
         let k = base + j;
@@ -784,7 +736,7 @@ where
           #[allow(clippy::needless_range_loop)]
           for i in 0..right {
             let base = i * left;
-            let mut inner = SmallAccumulator::<E::Scalar>::default();
+            let mut inner = SmallAccumulator::<E::Scalar, i128>::default();
             for j in 0..left {
               <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
                 &mut inner,
@@ -1296,16 +1248,17 @@ where
       }
     }
 
+    let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
+
     // Compute final Cz_step from original C_i64 layers using SmallAccumulator
     if has_i64 {
-      let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
       let total = left * right;
 
       // Parallel across k: for each k, accumulate across all b serially.
       let mut cz_step: Vec<E::Scalar> = (0..total)
         .into_par_iter()
         .map(|k| {
-          let mut sa = SmallAccumulator::<E::Scalar>::default();
+          let mut sa = SmallAccumulator::<E::Scalar, i128>::default();
           for b in 0..n_padded {
             <E::Scalar as DelayedReduction<i128>>::unreduced_multiply_accumulate(
               &mut sa,
@@ -1354,7 +1307,7 @@ where
     }
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
-    let mut folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
+    let mut folded_W = R1CSWitness::fold_multiple_with_weights(&final_weights, &Ws)?;
     if use_truncated_fold {
       let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
       folded_W.W.resize(full_dim, E::Scalar::ZERO);
@@ -1365,12 +1318,12 @@ where
     // compute rest rows from folded blind + h (field arithmetic instead of MSM).
     // Fall back to full fold when shared+precommitted=0.
     let (_fold_final_span, fold_final_t) = start_span!("fold_instances");
-    let w = weights_from_r::<E::Scalar>(&r_bs, Us.len());
+    debug_assert_eq!(final_weights.len(), Us.len());
     let d = Us[0].X.len();
 
     let mut X_acc = vec![E::Scalar::ZERO; d];
     for (i, Ui) in Us.iter().enumerate() {
-      let wi = w[i];
+      let wi = final_weights[i];
       for (j, Uij) in Ui.X.iter().enumerate() {
         X_acc[j] += wi * Uij;
       }
@@ -1381,13 +1334,13 @@ where
       let num_data_rows = (S.num_shared + S.num_precommitted).div_ceil(DEFAULT_COMMITMENT_WIDTH);
       <E::PCS as FoldingEngineTrait<E>>::fold_commitments_partial(
         &comms,
-        &w,
+        &final_weights,
         num_data_rows,
         &folded_W.r_W,
         ck,
       )?
     } else {
-      <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?
+      <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &final_weights)?
     };
     let folded_U = R1CSInstance::<E>::new_unchecked(comm_acc, X_acc)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
@@ -1536,9 +1489,11 @@ impl<E: Engine> NeutronNovaZkSNARK<E>
 where
   E::PCS: FoldingEngineTrait<E>,
 {
-  fn small_r1cs_shape<C: SmallSpartanCircuit<E, bool, i32>>(
-    circuit: &C,
-  ) -> Result<SplitR1CSShape<E, i32>, SpartanError> {
+  fn small_r1cs_shape<W, Coeff, C>(circuit: &C) -> Result<SplitR1CSShape<E, Coeff>, SpartanError>
+  where
+    Coeff: SmallCoeff,
+    C: SmallSpartanCircuit<E, W, Coeff>,
+  {
     let num_challenges = circuit.num_challenges();
     if num_challenges != 0 {
       return Err(SpartanError::InvalidInputLength {
@@ -1548,7 +1503,7 @@ where
       });
     }
 
-    let mut cs = SmallShapeCS::<i32>::new();
+    let mut cs = SmallShapeCS::<Coeff>::new();
     let shared = circuit
       .shared(&mut cs)
       .map_err(|e| SpartanError::SynthesisError {
@@ -1576,7 +1531,7 @@ where
     let num_cons = cs.num_constraints();
     let (A, B, C) = cs.to_matrices();
 
-    SplitR1CSShape::<E, i32>::new_int(
+    SplitR1CSShape::<E, Coeff>::new_small(
       num_cons,
       num_shared,
       num_precommitted,
@@ -1684,18 +1639,38 @@ where
     C1: SmallSpartanCircuit<E, bool, i32>,
     C2: SmallSpartanCircuit<E, bool, i32>,
   {
+    Self::setup_small_typed::<bool, i32, C1, C2>(step_circuit, core_circuit, num_steps)
+  }
+
+  /// Sets up NeutronNova with typed native small-value step/core circuits.
+  pub fn setup_small_typed<W, Coeff, C1, C2>(
+    step_circuit: &C1,
+    core_circuit: &C2,
+    num_steps: usize,
+  ) -> Result<
+    (
+      NeutronNovaSmallProverKey<E, Coeff>,
+      NeutronNovaVerifierKey<E>,
+    ),
+    SpartanError,
+  >
+  where
+    Coeff: SmallCoeff,
+    C1: SmallSpartanCircuit<E, W, Coeff>,
+    C2: SmallSpartanCircuit<E, W, Coeff>,
+  {
     let (_setup_span, setup_t) = start_span!("neutronnova_setup_small");
 
     let (_r1cs_span, r1cs_t) = start_span!("small_r1cs_shape_generation");
     debug!("Synthesizing small step circuit");
-    let mut S_step_small = Self::small_r1cs_shape(step_circuit)?;
+    let mut S_step_small = Self::small_r1cs_shape::<W, Coeff, C1>(step_circuit)?;
     debug!("Finished synthesizing small step circuit");
 
     debug!("Synthesizing small core circuit");
-    let mut S_core_small = Self::small_r1cs_shape(core_circuit)?;
+    let mut S_core_small = Self::small_r1cs_shape::<W, Coeff, C2>(core_circuit)?;
     debug!("Finished synthesizing small core circuit");
 
-    SplitR1CSShape::<E, i32>::equalize_int(&mut S_step_small, &mut S_core_small);
+    SplitR1CSShape::<E, Coeff>::equalize_small(&mut S_step_small, &mut S_core_small);
     let S_step = S_step_small.to_field_shape();
     let S_core = S_core_small.to_field_shape();
 
@@ -2846,6 +2821,61 @@ mod tests {
     }
   }
 
+  impl<E: Engine> SmallSpartanCircuit<E, i8, i32> for TinySmallBoolCircuit<E> {
+    fn public_values(&self) -> Result<Vec<i8>, SynthesisError> {
+      Ok(vec![0])
+    }
+
+    fn shared<CS: SmallConstraintSystem<i8, i32>>(
+      &self,
+      _: &mut CS,
+    ) -> Result<Vec<Variable>, SynthesisError> {
+      Ok(vec![])
+    }
+
+    fn precommitted<CS: SmallConstraintSystem<i8, i32>>(
+      &self,
+      cs: &mut CS,
+      _: &[Variable],
+    ) -> Result<Vec<Variable>, SynthesisError> {
+      let bit = SmallBit::alloc(cs, Some(self.bit))?;
+      let public = cs.alloc_input(|| "public zero", || Ok(0i8))?;
+      cs.enforce(
+        || "public is zero",
+        SmallLinearCombination::from_variable(public, 1i32),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      cs.enforce(
+        || "dummy zero 0",
+        SmallLinearCombination::zero(),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      cs.enforce(
+        || "dummy zero 1",
+        SmallLinearCombination::zero(),
+        SmallLinearCombination::one(1i32),
+        SmallLinearCombination::zero(),
+      );
+      Ok(vec![bit.get_variable()])
+    }
+
+    fn num_challenges(&self) -> usize {
+      0
+    }
+
+    fn synthesize<CS: SmallConstraintSystem<i8, i32>>(
+      &self,
+      _: &mut CS,
+      _: &[Variable],
+      _: &[Variable],
+      _: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
+      Ok(())
+    }
+  }
+
   impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E> {
     fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
       Ok(vec![E::Scalar::ZERO]) // Placeholder, we don't use public values in this example
@@ -3159,7 +3189,7 @@ mod tests {
   }
 
   #[test]
-  fn test_baseline_and_accumulator_routes_verify() {
+  fn test_baseline_route_verifies() {
     type E = T256HyraxEngine;
 
     let num_circuits = 3;
@@ -3169,55 +3199,9 @@ mod tests {
     let circuits = (0..num_circuits)
       .map(|i| TinyCubicCircuit::<E>::new((i + 2) as u64))
       .collect::<Vec<_>>();
-    let ell_b = num_circuits.next_power_of_two().log_2();
 
     let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &circuits, &core, true).unwrap();
     let (snark, _) = NeutronNovaZkSNARK::<E>::prove(&pk, &circuits, &core, prep, true).unwrap();
-    snark.verify(&vk, num_circuits).unwrap();
-
-    for l0 in [1, ell_b] {
-      let prep = NeutronNovaAccumulatorPrepZkSNARK::<
-        E,
-        i64,
-        <E as Engine>::Scalar,
-        PrecommittedState<E>,
-      >::prep_prove(&pk, &circuits, &core, l0)
-      .unwrap();
-      let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
-      snark.verify(&vk, num_circuits).unwrap();
-    }
-
-    let err = NeutronNovaAccumulatorPrepZkSNARK::<
-      E,
-      i64,
-      <E as Engine>::Scalar,
-      PrecommittedState<E>,
-    >::prep_prove(&pk, &circuits, &core, 0)
-    .map(|_| ())
-    .unwrap_err();
-    assert!(matches!(err, SpartanError::InvalidInputLength { .. }));
-  }
-
-  #[test]
-  fn test_accumulator_i32_tiny_circuit_verify() {
-    type E = T256HyraxEngine;
-
-    let num_circuits = 3;
-    let proto = TinyCubicCircuit::<E>::new(2);
-    let core = TinyCubicCircuit::<E>::new(1);
-    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&proto, &core, num_circuits).unwrap();
-    let circuits = (0..num_circuits)
-      .map(|i| TinyCubicCircuit::<E>::new((i + 2) as u64))
-      .collect::<Vec<_>>();
-
-    let prep = NeutronNovaAccumulatorPrepZkSNARK::<
-      E,
-      i32,
-      <E as Engine>::Scalar,
-      PrecommittedState<E>,
-    >::prep_prove(&pk, &circuits, &core, 1)
-    .unwrap();
-    let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
     snark.verify(&vk, num_circuits).unwrap();
   }
 
@@ -3235,7 +3219,7 @@ mod tests {
     let ell_b = num_circuits.next_power_of_two().log_2();
 
     for l0 in [1, ell_b] {
-      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64>::prep_prove_small(
+      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64, bool>::prep_prove_small(
         &pk, &circuits, &core, l0,
       )
       .unwrap();
@@ -3245,58 +3229,27 @@ mod tests {
   }
 
   #[test]
-  fn test_prefix_accumulator_cache_roundtrip() {
+  fn test_small_i8_accumulator_routes_verify_l0_cases() {
     type E = T256HyraxEngine;
 
-    let num_circuits = 17;
-    let proto = TinyCubicCircuit::<E>::new(2);
-    let core = TinyCubicCircuit::<E>::new(1);
-    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&proto, &core, num_circuits).unwrap();
+    let num_circuits = 3;
+    let proto = TinySmallBoolCircuit::<E>::new(false);
+    let core = TinySmallBoolCircuit::<E>::new(false);
+    let (pk, vk) =
+      NeutronNovaZkSNARK::<E>::setup_small_typed::<i8, i32, _, _>(&proto, &core, num_circuits)
+        .unwrap();
     let circuits = (0..num_circuits)
-      .map(|i| TinyCubicCircuit::<E>::new((i + 2) as u64))
+      .map(|i| TinySmallBoolCircuit::<E>::new(i % 2 == 1))
       .collect::<Vec<_>>();
+    let ell_b = num_circuits.next_power_of_two().log_2();
 
-    for l0 in [3usize, 4usize] {
-      let prep = NeutronNovaAccumulatorPrepZkSNARK::<
-        E,
-        i64,
-        <E as Engine>::Scalar,
-        PrecommittedState<E>,
-      >::prep_prove(&pk, &circuits, &core, l0)
+    for l0 in [1, ell_b] {
+      let prep = NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64, i8>::prep_prove_small(
+        &pk, &circuits, &core, l0,
+      )
       .unwrap();
-      assert_eq!(prep.l0(), l0);
-
-      let (snark, _) = prep.prove(&pk, &circuits, &core).unwrap();
+      let (snark, _) = prep.prove_small(&pk, &circuits, &core).unwrap();
       snark.verify(&vk, num_circuits).unwrap();
-    }
-  }
-
-  #[test]
-  fn test_accumulator_prefix_mle_inputs_error_on_large_row_sum() {
-    type E = T256HyraxEngine;
-
-    let num_circuits = 2;
-    let proto = TinyCubicCircuit::<E>::new(2);
-    let core = TinyCubicCircuit::<E>::new(1);
-    let (pk, _) = NeutronNovaZkSNARK::<E>::setup(&proto, &core, num_circuits).unwrap();
-    let circuits = vec![
-      TinyCubicCircuit::<E>::new(i32::MAX as u64),
-      TinyCubicCircuit::<E>::new(i32::MAX as u64),
-    ];
-
-    let err = NeutronNovaAccumulatorPrepZkSNARK::<
-      E,
-      i32,
-      <E as Engine>::Scalar,
-      PrecommittedState<E>,
-    >::prep_prove(&pk, &circuits, &core, 1)
-    .unwrap_err();
-
-    match err {
-      SpartanError::SmallValueOverflow { context, .. } => {
-        assert!(context.contains("accumulator prep"));
-      }
-      other => panic!("expected SmallValueOverflow, got {other:?}"),
     }
   }
 

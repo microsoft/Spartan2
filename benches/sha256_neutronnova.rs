@@ -10,6 +10,7 @@
 //!
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
+//! Emit one-shot stage timing CSV with `NEUTRONNOVA_STAGE_TRACE=1`.
 //!
 //! The bench measures two prover variants against their *natural* circuits:
 //! - `BaselineMode` runs the standard NeutronNova prover on a SHA-256 circuit
@@ -34,7 +35,7 @@ use bellpepper_core::{
   num::AllocatedNum,
 };
 use criterion::{
-  BatchSize, BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main,
+  BatchSize, BenchmarkGroup, Criterion, Throughput, black_box, criterion_group,
   measurement::WallTime,
 };
 use ff::{Field, PrimeField};
@@ -54,8 +55,20 @@ use spartan2::{
     circuit::{SmallSpartanCircuit, SpartanCircuit},
   },
 };
-use std::{fmt::Debug, marker::PhantomData, time::Duration};
-use tracing_subscriber::EnvFilter;
+use std::{
+  fmt::{self, Debug},
+  fs::File,
+  io::{self, Write},
+  marker::PhantomData,
+  path::PathBuf,
+  sync::{Arc, Mutex},
+  time::{Duration, Instant},
+};
+use tracing::{
+  Subscriber,
+  field::{Field as TracingField, Visit},
+};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 type E = T256HyraxEngine;
 
@@ -70,14 +83,14 @@ const SHA256_IV: [u32; 8] = [
   0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// Hard ceiling on `l0` for SHA-256 + `SV = i64` + `BatchingEq<21>`.
+/// Hard ceiling on `l0` for SHA-256 + `SV = i64`.
 ///
 /// `vec_to_small_for_extension::<_, i64, 2>(&Az, l0)` requires
 /// `|Az[i]| ≤ 2^62 / 3^l0`. SHA-256 row sums reach ~`2^53.7` empirically
 /// (matrix coefficients up to `2^21`, witness up to `2^32`). At `l0 = 5`
 /// the bound is `~2^54.1` — ~1.3× margin; `l0 = 6` fails with
 /// `SmallValueOverflow`. Lifting this requires switching `SV` to a wider
-/// type or shrinking `BatchingEq<K>` in `small_sha256_compression_function`.
+/// type or shrinking coefficients in the small SHA-256 compression path.
 const MAX_L0: usize = 5;
 
 /// Accumulator `l0` values to compare in the benchmark sweep.
@@ -492,7 +505,7 @@ impl BenchMode for AccumulatorMode {
   type ProverKey = NeutronNovaSmallProverKey<E, i32>;
   type StepCircuit = SmallSha256StepCircuit<E>;
   type CoreCircuit = SmallSha256CoreCircuit<E>;
-  type Prep = NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64>;
+  type Prep = NeutronNovaSmallAccumulatorPrepZkSNARK<E, i64, bool>;
 
   fn label(&self) -> String {
     format!("l0-{}", self.l0)
@@ -519,7 +532,9 @@ impl BenchMode for AccumulatorMode {
     core: &Self::CoreCircuit,
   ) -> Result<Self::Prep, SpartanError> {
     self.check_l0();
-    NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64>::prep_prove_small(pk, steps, core, self.l0)
+    NeutronNovaSmallAccumulatorPrepZkSNARK::<E, i64, bool>::prep_prove_small(
+      pk, steps, core, self.l0,
+    )
   }
 
   fn prove(
@@ -591,6 +606,319 @@ fn thread_counts() -> Vec<usize> {
       .filter(|&t| t <= max)
       .collect()
   }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot stage trace mode.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct TraceContext {
+  byte_size: usize,
+  num_steps: usize,
+  mode: String,
+  l0: usize,
+  threads: usize,
+  phase: String,
+}
+
+#[derive(Clone, Debug)]
+struct TraceRow {
+  byte_size: usize,
+  num_steps: usize,
+  mode: String,
+  l0: usize,
+  threads: usize,
+  phase: String,
+  stage: String,
+  elapsed_ms: u128,
+}
+
+#[derive(Clone, Default)]
+struct StageTrace {
+  rows: Arc<Mutex<Vec<TraceRow>>>,
+  context: Arc<Mutex<Option<TraceContext>>>,
+}
+
+impl StageTrace {
+  fn set_context(&self, context: TraceContext) {
+    *self.context.lock().expect("trace context lock poisoned") = Some(context);
+  }
+
+  fn clear_context(&self) {
+    *self.context.lock().expect("trace context lock poisoned") = None;
+  }
+
+  fn record_manual(&self, stage: &str, elapsed_ms: u128) {
+    let Some(context) = self
+      .context
+      .lock()
+      .expect("trace context lock poisoned")
+      .clone()
+    else {
+      return;
+    };
+    self.push_row(context, stage.to_string(), elapsed_ms);
+  }
+
+  fn push_row(&self, context: TraceContext, stage: String, elapsed_ms: u128) {
+    self
+      .rows
+      .lock()
+      .expect("trace rows lock poisoned")
+      .push(TraceRow {
+        byte_size: context.byte_size,
+        num_steps: context.num_steps,
+        mode: context.mode,
+        l0: context.l0,
+        threads: context.threads,
+        phase: context.phase,
+        stage,
+        elapsed_ms,
+      });
+  }
+
+  fn rows(&self) -> Vec<TraceRow> {
+    self.rows.lock().expect("trace rows lock poisoned").clone()
+  }
+}
+
+#[derive(Default)]
+struct TraceEventVisitor {
+  elapsed_ms: Option<u128>,
+  message: Option<String>,
+}
+
+impl TraceEventVisitor {
+  fn parse_elapsed(&mut self, raw: &str) {
+    if self.elapsed_ms.is_some() {
+      return;
+    }
+    let trimmed = raw.trim().trim_matches('"');
+    if let Ok(value) = trimmed.parse::<u128>() {
+      self.elapsed_ms = Some(value);
+    }
+  }
+
+  fn record_message(&mut self, raw: &str) {
+    let trimmed = raw.trim().trim_matches('"');
+    if !trimmed.is_empty() {
+      self.message = Some(trimmed.to_string());
+    }
+  }
+}
+
+impl Visit for TraceEventVisitor {
+  fn record_u64(&mut self, field: &TracingField, value: u64) {
+    if field.name() == "elapsed_ms" {
+      self.elapsed_ms = Some(u128::from(value));
+    }
+  }
+
+  fn record_i64(&mut self, field: &TracingField, value: i64) {
+    if field.name() == "elapsed_ms" && value >= 0 {
+      self.elapsed_ms = Some(value as u128);
+    }
+  }
+
+  fn record_str(&mut self, field: &TracingField, value: &str) {
+    match field.name() {
+      "elapsed_ms" => self.parse_elapsed(value),
+      "message" => self.record_message(value),
+      _ => {}
+    }
+  }
+
+  fn record_debug(&mut self, field: &TracingField, value: &dyn fmt::Debug) {
+    let raw = format!("{value:?}");
+    match field.name() {
+      "elapsed_ms" => self.parse_elapsed(&raw),
+      "message" => self.record_message(&raw),
+      _ => {}
+    }
+  }
+}
+
+impl<S> Layer<S> for StageTrace
+where
+  S: Subscriber,
+{
+  fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    let mut visitor = TraceEventVisitor::default();
+    event.record(&mut visitor);
+    let Some(elapsed_ms) = visitor.elapsed_ms else {
+      return;
+    };
+    let Some(context) = self
+      .context
+      .lock()
+      .expect("trace context lock poisoned")
+      .clone()
+    else {
+      return;
+    };
+    let stage = visitor
+      .message
+      .unwrap_or_else(|| event.metadata().name().to_string());
+    self.push_row(context, stage, elapsed_ms);
+  }
+}
+
+fn parse_trace_values(name: &str, default: &[usize]) -> Vec<usize> {
+  std::env::var(name)
+    .ok()
+    .map(|raw| {
+      raw
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+          item
+            .parse::<usize>()
+            .unwrap_or_else(|_| panic!("{name} must contain comma-separated integers, got {raw:?}"))
+        })
+        .collect::<Vec<_>>()
+    })
+    .filter(|values| !values.is_empty())
+    .unwrap_or_else(|| default.to_vec())
+}
+
+fn trace_context(
+  mode: &str,
+  byte_size: usize,
+  l0: usize,
+  threads: usize,
+  phase: &str,
+) -> TraceContext {
+  TraceContext {
+    byte_size,
+    num_steps: num_steps_for_size(byte_size),
+    mode: mode.to_string(),
+    l0,
+    threads,
+    phase: phase.to_string(),
+  }
+}
+
+fn run_stage_trace_case<M: BenchMode + Copy>(
+  trace: &StageTrace,
+  mode: M,
+  byte_size: usize,
+  l0: usize,
+  threads: usize,
+) {
+  assert!(
+    byte_size.is_multiple_of(BLOCK_BYTES),
+    "TRACE_BYTES value {byte_size} is not divisible by {BLOCK_BYTES}",
+  );
+  let num_steps = num_steps_for_size(byte_size);
+  let mode_label = mode.label();
+  let pool = rayon::ThreadPoolBuilder::new()
+    .num_threads(threads)
+    .build()
+    .expect("failed to build rayon pool");
+
+  trace.set_context(trace_context(&mode_label, byte_size, l0, threads, "setup"));
+  let setup_start = Instant::now();
+  let (pk, vk) = pool.install(|| M::setup_keypair(num_steps));
+  trace.record_manual("total", setup_start.elapsed().as_millis());
+
+  let (steps, core) = pool.install(|| build_inputs::<M>(num_steps));
+
+  trace.set_context(trace_context(&mode_label, byte_size, l0, threads, "prep"));
+  let prep_start = Instant::now();
+  let prep = pool
+    .install(|| mode.prep_prove(&pk, &steps, &core))
+    .unwrap();
+  trace.record_manual("total", prep_start.elapsed().as_millis());
+
+  trace.set_context(trace_context(&mode_label, byte_size, l0, threads, "prove"));
+  let prove_start = Instant::now();
+  let (proof, prep_back) = pool
+    .install(|| mode.prove(&pk, &steps, &core, prep))
+    .unwrap();
+  trace.record_manual("total", prove_start.elapsed().as_millis());
+
+  trace.set_context(trace_context(&mode_label, byte_size, l0, threads, "verify"));
+  let verify_start = Instant::now();
+  pool.install(|| proof.verify(&vk, num_steps).unwrap());
+  trace.record_manual("total", verify_start.elapsed().as_millis());
+
+  trace.clear_context();
+  black_box(proof);
+  black_box(prep_back);
+}
+
+fn write_csv_field<W: Write>(out: &mut W, value: &str) -> io::Result<()> {
+  if value
+    .chars()
+    .any(|ch| matches!(ch, ',' | '"' | '\n' | '\r'))
+  {
+    write!(out, "\"{}\"", value.replace('"', "\"\""))
+  } else {
+    write!(out, "{value}")
+  }
+}
+
+fn write_trace_csv<W: Write>(mut out: W, rows: &[TraceRow]) -> io::Result<()> {
+  writeln!(
+    out,
+    "bytes,num_steps,mode,l0,threads,phase,stage,elapsed_ms"
+  )?;
+  for row in rows {
+    write!(out, "{},{},", row.byte_size, row.num_steps)?;
+    write_csv_field(&mut out, &row.mode)?;
+    write!(out, ",{},{},", row.l0, row.threads)?;
+    write_csv_field(&mut out, &row.phase)?;
+    write!(out, ",")?;
+    write_csv_field(&mut out, &row.stage)?;
+    writeln!(out, ",{}", row.elapsed_ms)?;
+  }
+  Ok(())
+}
+
+fn write_stage_trace_output(rows: &[TraceRow]) -> io::Result<()> {
+  if let Some(path) = std::env::var_os("TRACE_OUTPUT") {
+    let mut file = File::create(PathBuf::from(path))?;
+    write_trace_csv(&mut file, rows)
+  } else {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_trace_csv(&mut out, rows)
+  }
+}
+
+fn run_stage_trace() {
+  let trace = StageTrace::default();
+  tracing_subscriber::registry()
+    .with(trace.clone())
+    .try_init()
+    .expect("failed to install NeutronNova stage trace subscriber");
+
+  let byte_sizes = parse_trace_values("TRACE_BYTES", &[1024, 2048]);
+  let l0_values = parse_trace_values("TRACE_L0", &[0, 3, 4]);
+  let thread_counts = parse_trace_values("TRACE_THREADS", &[1, 2, 4, 8]);
+
+  for byte_size in byte_sizes {
+    let num_steps = num_steps_for_size(byte_size);
+    let ell_b = ell_b_for_steps(num_steps);
+    for &l0 in &l0_values {
+      for &threads in &thread_counts {
+        if l0 == 0 {
+          run_stage_trace_case(&trace, BaselineMode, byte_size, l0, threads);
+        } else {
+          assert!(
+            l0 <= ell_b && l0 <= MAX_L0,
+            "TRACE_L0 value {l0} is invalid for {byte_size} bytes; expected 1..={}",
+            ell_b.min(MAX_L0),
+          );
+          run_stage_trace_case(&trace, AccumulatorMode { l0 }, byte_size, l0, threads);
+        }
+      }
+    }
+  }
+
+  write_stage_trace_output(&trace.rows()).expect("failed to write NeutronNova stage trace CSV");
 }
 
 // ---------------------------------------------------------------------------
@@ -765,4 +1093,12 @@ fn neutronnova_benches(c: &mut Criterion) {
 }
 
 criterion_group!(benches, neutronnova_benches);
-criterion_main!(benches);
+
+fn main() {
+  if std::env::var_os("NEUTRONNOVA_STAGE_TRACE").is_some() {
+    run_stage_trace();
+  } else {
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+  }
+}

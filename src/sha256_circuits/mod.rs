@@ -4,11 +4,11 @@
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! SHA-256 circuits using small_sha256 gadget (small-value compatible).
+//! SHA-256 circuits using the small SHA-256 gadget.
 //!
 //! This module provides reusable SHA-256 circuit implementations:
 //! - [`SmallSha256Circuit`]: Single SHA-256 hash (small-value compatible)
-//! - [`SmallSha256ChainCircuit`]: Chains multiple small_sha256 calls
+//! - [`SmallSha256ChainCircuit`]: Chains multiple small SHA-256 calls
 
 mod small;
 mod small_chain;
@@ -59,7 +59,7 @@ pub fn hash_to_public_scalars<F: PrimeField>(data: &[u8]) -> Vec<F> {
 /// Allocate preimage bytes as witness bits.
 ///
 /// If `big_endian` is true, bits are allocated in big-endian order per byte
-/// (required for small_sha256). If false, little-endian (bellpepper's convention).
+/// (required for the small SHA-256 gadget). If false, little-endian (bellpepper's convention).
 pub fn alloc_preimage_bits<Scalar, CS>(
   cs: &mut CS,
   preimage: &[u8],

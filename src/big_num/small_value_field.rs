@@ -45,36 +45,41 @@ impl SmallValue for i64 {}
 /// `vec_to_small_for_extension`, so higher-level generic code can stay phrased
 /// in terms of its small-value type instead of spelling concrete integer
 /// conversion details in each API.
-pub trait ExtensionSmallValue: SmallValue + Bounded + One + Into<Self::Product> {
+pub trait ExtensionSmallValue:
+  SmallValue + Bounded + One + Into<<Self as WideMul>::Output>
+{
   fn try_extension_small<F, const D: usize>(lb: usize, val: &F) -> Option<Self>
   where
     Self: Sized,
     F: SmallValueField<Self>;
 
-  /// Zero of the `Self::Product` accumulator type, exposed via a method so
-  /// callers don't need to spell `Self::Product: Zero` themselves.
-  fn product_zero() -> Self::Product;
+  /// Zero of the widened product accumulator type, exposed via a method so
+  /// callers don't need to spell the product `Zero` bound themselves.
+  fn product_zero() -> <Self as WideMul>::Output;
 
-  /// Accumulate `Self::wide_mul(a, b)` into `*acc`. Wraps the
-  /// `Self::Product: AddAssign` bound so callers don't have to declare it.
-  fn wide_mul_accumulate(acc: &mut Self::Product, a: Self, b: Self);
+  /// Accumulate `a.wide_mul(b)` into `*acc`. Wraps the product `AddAssign`
+  /// bound so callers don't have to declare it.
+  fn wide_mul_accumulate(acc: &mut <Self as WideMul>::Output, a: Self, b: Self);
 
-  /// Try to narrow a `Self::Product`-typed value back to `Self`, enforcing
+  /// Try to narrow a product-typed value back to `Self`, enforcing
   /// `|val| ≤ ExtensionBound::<Self, D>::new(lb).max_safe()`. Returns
   /// `None` if the bound is exceeded or the magnitude doesn't fit `Self`.
-  fn try_narrow_from_product<const D: usize>(val: Self::Product, lb: usize) -> Option<Self>;
+  fn try_narrow_from_product<const D: usize>(
+    val: <Self as WideMul>::Output,
+    lb: usize,
+  ) -> Option<Self>;
 }
 
 impl<SV> ExtensionSmallValue for SV
 where
-  SV: SmallValue + Bounded + One + Into<SV::Product>,
-  SV::Product: Copy
+  SV: SmallValue + Bounded + One + Into<<SV as WideMul>::Output>,
+  <SV as WideMul>::Output: Copy
     + Ord
     + Signed
     + Zero
     + AddAssign
-    + Div<Output = SV::Product>
-    + Mul<Output = SV::Product>
+    + Div<Output = <SV as WideMul>::Output>
+    + Mul<Output = <SV as WideMul>::Output>
     + One
     + From<i32>
     + TryInto<SV>
@@ -90,17 +95,20 @@ where
   }
 
   #[inline]
-  fn product_zero() -> Self::Product {
-    SV::Product::zero()
+  fn product_zero() -> <Self as WideMul>::Output {
+    <SV as WideMul>::Output::zero()
   }
 
   #[inline]
-  fn wide_mul_accumulate(acc: &mut Self::Product, a: Self, b: Self) {
-    *acc += SV::wide_mul(a, b);
+  fn wide_mul_accumulate(acc: &mut <Self as WideMul>::Output, a: Self, b: Self) {
+    *acc += a.wide_mul(b);
   }
 
   #[inline]
-  fn try_narrow_from_product<const D: usize>(val: SV::Product, lb: usize) -> Option<SV> {
+  fn try_narrow_from_product<const D: usize>(
+    val: <SV as WideMul>::Output,
+    lb: usize,
+  ) -> Option<SV> {
     let bound = ExtensionBound::<Self, D>::new(lb).max_safe();
     if val.abs() > bound {
       return None;
@@ -118,13 +126,13 @@ where
 /// Bundles all field requirements for small-value optimization:
 /// - `SmallValueField<SV>`: conversion between field and small values
 /// - `DelayedReduction<SV>`: accumulate field × small products
-/// - `DelayedReduction<SV::Product>`: accumulate field × wide products
+/// - `DelayedReduction<<SV as WideMul>::Output>`: accumulate field × wide products
 /// - `DelayedReduction<Self>`: accumulate field × field products
 pub trait SmallValueEngine<SV: SmallValue>:
   PrimeField
   + SmallValueField<SV>
   + DelayedReduction<SV>
-  + DelayedReduction<SV::Product>
+  + DelayedReduction<<SV as WideMul>::Output>
   + DelayedReduction<Self>
   + Send
   + Sync
@@ -138,7 +146,7 @@ where
   F: PrimeField
     + SmallValueField<SV>
     + DelayedReduction<SV>
-    + DelayedReduction<SV::Product>
+    + DelayedReduction<<SV as WideMul>::Output>
     + DelayedReduction<F>
     + Send
     + Sync,
@@ -394,18 +402,23 @@ where
 /// The extension can grow native magnitudes by at most `(D + 1)^lb`, so full-small
 /// accumulator mode only accepts values whose absolute value survives that growth.
 pub struct ExtensionBound<SV: WideMul, const D: usize> {
-  max_safe: SV::Product,
+  max_safe: <SV as WideMul>::Output,
 }
 
 impl<SV, const D: usize> ExtensionBound<SV, D>
 where
-  SV: WideMul + Bounded + Copy + Into<SV::Product>,
-  SV::Product:
-    Copy + Ord + Signed + Div<Output = SV::Product> + Mul<Output = SV::Product> + One + From<i32>,
+  SV: WideMul + Bounded + Copy + Into<<SV as WideMul>::Output>,
+  <SV as WideMul>::Output: Copy
+    + Ord
+    + Signed
+    + Div<Output = <SV as WideMul>::Output>
+    + Mul<Output = <SV as WideMul>::Output>
+    + One
+    + From<i32>,
 {
   pub fn new(lb: usize) -> Self {
-    let base: SV::Product = (D as i32 + 1).into();
-    let mut power = SV::Product::one();
+    let base: <SV as WideMul>::Output = (D as i32 + 1).into();
+    let mut power = <SV as WideMul>::Output::one();
     for _ in 0..lb {
       power = power * base;
     }
@@ -414,16 +427,16 @@ where
   }
 
   /// Raw bound value `(D + 1)^(-lb) · SV::MAX`, used by accumulators that
-  /// want to bound a `SV::Product`-typed row sum directly without first
+  /// want to bound a product-typed row sum directly without first
   /// narrowing to `SV`.
   #[inline]
-  pub fn max_safe(&self) -> SV::Product {
+  pub fn max_safe(&self) -> <SV as WideMul>::Output {
     self.max_safe
   }
 
   #[inline]
   pub fn is_safe(&self, small: SV) -> bool {
-    let abs_small: SV::Product = small.into();
+    let abs_small: <SV as WideMul>::Output = small.into();
     abs_small.abs() <= self.max_safe
   }
 

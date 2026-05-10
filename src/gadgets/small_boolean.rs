@@ -288,6 +288,63 @@ impl SmallBoolean {
     }
   }
 
+  /// SHA-256 MAJ function: (a AND b) XOR (a AND c) XOR (b AND c)
+  ///
+  /// Uses bellpepper's optimized form:
+  /// allocate `bc = b * c`, then enforce `(2bc - b - c) * a = bc - result`.
+  pub fn sha256_maj<W, C, CS>(
+    cs: &mut CS,
+    a: &Self,
+    b: &Self,
+    c: &Self,
+  ) -> Result<Self, SynthesisError>
+  where
+    W: Copy + From<bool>,
+    C: Copy + From<bool> + NegOne + Double,
+    CS: SmallConstraintSystem<W, C>,
+  {
+    let result_val = a.get_value().and_then(|av| {
+      b.get_value()
+        .and_then(|bv| c.get_value().map(|cv| (av & bv) ^ (av & cv) ^ (bv & cv)))
+    });
+
+    match (a, b, c) {
+      (SmallBoolean::Constant(av), SmallBoolean::Constant(bv), SmallBoolean::Constant(cv)) => {
+        Ok(SmallBoolean::constant((av & bv) ^ (av & cv) ^ (bv & cv)))
+      }
+      _ => {
+        let bc = SmallBoolean::and(cs.namespace(|| "bc").inner, b, c)?;
+        let result_bit = SmallBit::alloc(cs, result_val)?;
+
+        // maj(a,b,c) identity:
+        //   (2bc - b - c) * a = bc - maj
+        let a_lc: SmallLinearCombination<C> = a.lc();
+        let b_lc: SmallLinearCombination<C> = b.lc();
+        let c_lc: SmallLinearCombination<C> = c.lc();
+        let bc_lc: SmallLinearCombination<C> = bc.lc();
+
+        let mut lc_2bc_minus_b_minus_c = double_lc::<C>(bc_lc.clone());
+        for (var, coeff) in &b_lc.terms {
+          lc_2bc_minus_b_minus_c.add_term(*var, C::neg(*coeff));
+        }
+        for (var, coeff) in &c_lc.terms {
+          lc_2bc_minus_b_minus_c.add_term(*var, C::neg(*coeff));
+        }
+
+        let mut lc_bc_minus_result = bc_lc;
+        lc_bc_minus_result.add_term(result_bit.variable, C::neg(C::from(true)));
+
+        cs.enforce(
+          || "sha256_maj",
+          lc_2bc_minus_b_minus_c,
+          a_lc,
+          lc_bc_minus_result,
+        );
+        Ok(SmallBoolean::Is(result_bit))
+      }
+    }
+  }
+
   /// Get the variable if this is a variable (not a constant).
   pub fn get_variable(&self) -> Option<Variable> {
     match self {
@@ -338,4 +395,65 @@ fn double_lc<C: Copy + Double>(lc: SmallLinearCombination<C>) -> SmallLinearComb
 /// The ONE constant variable (input[0]).
 pub fn one() -> Variable {
   Variable::new_unchecked(Index::Input(0))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{
+    provider::Bn254Engine,
+    small_constraint_system::{SmallShapeCS, SmallToBellpepperCS},
+    traits::Engine,
+  };
+  use bellpepper_core::test_cs::TestConstraintSystem;
+
+  type Scalar = <Bn254Engine as Engine>::Scalar;
+
+  fn alloc_bit<CS: SmallConstraintSystem<i8, i32>>(
+    cs: &mut CS,
+    name: &'static str,
+    value: bool,
+  ) -> SmallBoolean {
+    SmallBoolean::Is(
+      SmallBit::alloc::<i8, i32, _>(&mut cs.namespace(|| name), Some(value)).unwrap(),
+    )
+  }
+
+  #[test]
+  fn test_sha256_maj_truth_table() {
+    for a_val in [false, true] {
+      for b_val in [false, true] {
+        for c_val in [false, true] {
+          let mut inner = TestConstraintSystem::<Scalar>::new();
+          let result = {
+            let mut cs = SmallToBellpepperCS::<Scalar, _>::new(&mut inner);
+            let a = alloc_bit(&mut cs, "a", a_val);
+            let b = alloc_bit(&mut cs, "b", b_val);
+            let c = alloc_bit(&mut cs, "c", c_val);
+            SmallBoolean::sha256_maj::<i8, i32, _>(&mut cs, &a, &b, &c).unwrap()
+          };
+
+          assert_eq!(
+            result.get_value(),
+            Some((a_val & b_val) ^ (a_val & c_val) ^ (b_val & c_val))
+          );
+          assert!(inner.is_satisfied());
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn test_sha256_maj_shape_uses_bc_plus_custom_constraint() {
+    let mut cs = SmallShapeCS::<i32>::new();
+    let a = alloc_bit(&mut cs, "a", true);
+    let b = alloc_bit(&mut cs, "b", false);
+    let c = alloc_bit(&mut cs, "c", true);
+    let before = cs.num_constraints();
+
+    let _ = SmallBoolean::sha256_maj::<i8, i32, _>(&mut cs, &a, &b, &c).unwrap();
+
+    // bc alloc boolean + bc relation + result alloc boolean + custom maj relation.
+    assert_eq!(cs.num_constraints() - before, 4);
+  }
 }

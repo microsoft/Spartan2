@@ -309,10 +309,9 @@ pub struct PrecommittedState<
   pub(crate) W: Vec<W>,
 }
 
-#[allow(dead_code)]
-/// Precommitted state for native binary small-value witness generation.
-pub type SmallPrecommittedState<E> =
-  PrecommittedState<E, bool, SmallSatisfyingAssignment<bool>, Variable>;
+/// Precommitted state for native small-value witness generation.
+pub type SmallPrecommittedState<E, W> =
+  PrecommittedState<E, W, SmallSatisfyingAssignment<W>, Variable>;
 
 impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   type PrecommittedState = PrecommittedState<E>;

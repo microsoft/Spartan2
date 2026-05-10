@@ -16,7 +16,7 @@ use crate::{
     r1cs::{MultiRoundSpartanWitness, SmallPrecommittedState},
     solver::SatisfyingAssignment,
   },
-  big_num::{DelayedReduction, ExtensionSmallValue, SmallValue, SmallValueField},
+  big_num::{DelayedReduction, ExtensionSmallValue, SmallValue, SmallValueField, WideMul},
   errors::SpartanError,
   lagrange_accumulator::{
     build_accumulators_neutronnova, build_accumulators_neutronnova_preextended,
@@ -31,8 +31,8 @@ use crate::{
     univariate::UniPoly,
   },
   r1cs::{
-    R1CSInstance, R1CSValue, R1CSWitness, SmallMatVecValue, SplitMultiRoundR1CSShape,
-    SplitR1CSInstance, SplitR1CSShape, weights_from_r,
+    R1CSInstance, R1CSValue, R1CSWitness, SplitMultiRoundR1CSShape, SplitR1CSInstance,
+    SplitR1CSShape, weights_from_r,
   },
   small_constraint_system::{SmallCoeff, SmallSatisfyingAssignment},
   small_sumcheck::{SmallValueSumCheck, build_univariate_round_polynomial, derive_t1},
@@ -50,7 +50,7 @@ use ff::Field;
 use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, marker::PhantomData};
+use std::{borrow::Cow, marker::PhantomData, ops::AddAssign};
 use tracing::info;
 
 /// Pre-processed state for the accumulator/l0 NIFS proving path.
@@ -448,9 +448,9 @@ where
     l0: usize,
   ) -> Result<SmallAbc<SV>, SpartanError>
   where
-    Coeff: SmallCoeff,
-    W: SmallMatVecValue<Coeff, SV>,
-    SV: std::ops::Add<Output = SV>,
+    Coeff: SmallCoeff + WideMul<W, Output = SV>,
+    W: Copy + Sync,
+    SV: Copy + Default + AddAssign + Send,
   {
     let num_instances = ps_step.len();
     if num_instances == 0 {
@@ -473,7 +473,7 @@ where
       .into_par_iter()
       .map(|idx| {
         let z = build_z_small(&ps_step[idx].W, &step_public_values[idx]);
-        pk.S_step_small.multiply_vec_small::<W, SV>(&z)
+        Self::multiply_small_shape(&pk.S_step_small, &z)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
@@ -501,6 +501,40 @@ where
     })
   }
 
+  fn multiply_small_shape<Coeff>(
+    S: &SplitR1CSShape<E, Coeff>,
+    z: &[W],
+  ) -> Result<(Vec<SV>, Vec<SV>, Vec<SV>), SpartanError>
+  where
+    Coeff: SmallCoeff + WideMul<W, Output = SV>,
+    W: Copy + Sync,
+    SV: Copy + Default + AddAssign + Send,
+  {
+    if z.len()
+      != S.num_public + S.num_challenges + 1 + S.num_shared + S.num_precommitted + S.num_rest
+    {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+
+    if rayon::current_num_threads() <= 1 {
+      let az = S.A.multiply_vec::<W, SV>(z)?;
+      let bz = S.B.multiply_vec::<W, SV>(z)?;
+      let cz = S.C.multiply_vec::<W, SV>(z)?;
+      Ok((az, bz, cz))
+    } else {
+      let (az, (bz, cz)) = rayon::join(
+        || S.A.multiply_vec::<W, SV>(z),
+        || {
+          rayon::join(
+            || S.B.multiply_vec::<W, SV>(z),
+            || S.C.multiply_vec::<W, SV>(z),
+          )
+        },
+      );
+      Ok((az?, bz?, cz?))
+    }
+  }
+
   /// Prepares the native small-value accumulator proving state.
   pub fn prep_prove_small<C1, C2, Coeff>(
     pk: &NeutronNovaSmallProverKey<E, Coeff>,
@@ -509,9 +543,9 @@ where
     l0: usize,
   ) -> Result<Self, SpartanError>
   where
-    Coeff: SmallCoeff,
-    W: SmallMatVecValue<Coeff, SV>,
-    SV: std::ops::Add<Output = SV>,
+    Coeff: SmallCoeff + WideMul<W, Output = SV>,
+    W: Copy + Sync,
+    SV: Copy + Default + AddAssign + Send,
     C1: SmallSpartanCircuit<E, W, Coeff>,
     C2: SmallSpartanCircuit<E, W, Coeff>,
   {
@@ -585,12 +619,14 @@ where
     core_circuit: &C2,
   ) -> Result<(NeutronNovaZkSNARK<E>, Self), SpartanError>
   where
-    Coeff: SmallCoeff,
-    W: SmallMatVecValue<Coeff, SV>,
-    SV: std::ops::Add<Output = SV>,
+    Coeff: SmallCoeff + WideMul<W, Output = SV>,
+    W: Copy + Sync,
+    SV: Copy + Default + AddAssign + Send,
     C1: SmallSpartanCircuit<E, W, Coeff>,
     C2: SmallSpartanCircuit<E, W, Coeff>,
-    E::Scalar: DelayedReduction<SV> + DelayedReduction<SV::Product> + DelayedReduction<E::Scalar>,
+    E::Scalar: DelayedReduction<SV>
+      + DelayedReduction<<SV as WideMul>::Output>
+      + DelayedReduction<E::Scalar>,
   {
     let mut prep_snark = self;
     let l0 = prep_snark.small_abc.l0;
@@ -778,7 +814,7 @@ where
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
       let (_core_span, core_t) = start_span!("compute_small_core_polys");
       let z = build_z_small(&core_witness.W, &core_instance.public_values);
-      let (Az, Bz, Cz) = pk.S_core_small.multiply_vec_small::<W, SV>(&z)?;
+      let (Az, Bz, Cz) = Self::multiply_small_shape(&pk.S_core_small, &z)?;
       let to_field = |values: Vec<SV>| {
         values
           .into_iter()
@@ -1073,7 +1109,7 @@ where
   where
     E::Scalar: SmallValueField<SV>
       + DelayedReduction<SV>
-      + DelayedReduction<SV::Product>
+      + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     Layer: AsRef<[SV]> + Sync,
     SV: SmallValue,
@@ -1151,7 +1187,7 @@ where
   where
     E::Scalar: SmallValueField<SV>
       + DelayedReduction<SV>
-      + DelayedReduction<SV::Product>
+      + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
@@ -1260,7 +1296,7 @@ where
   where
     E::Scalar: SmallValueField<SV>
       + DelayedReduction<SV>
-      + DelayedReduction<SV::Product>
+      + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
@@ -1600,7 +1636,7 @@ where
   where
     E::Scalar: SmallValueField<SV>
       + DelayedReduction<SV>
-      + DelayedReduction<SV::Product>
+      + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,

@@ -63,6 +63,24 @@ crate::impl_field_reduction_constants!(vesta::Scalar);
 crate::impl_montgomery_limbs!(vesta::Scalar);
 crate::impl_barrett_reduction_constants!(vesta::Scalar);
 
+impl crate::big_num::WideMul for pallas::Scalar {
+  type Output = Self;
+
+  #[inline(always)]
+  fn wide_mul(self, rhs: Self) -> Self {
+    self * rhs
+  }
+}
+
+impl crate::big_num::WideMul for vesta::Scalar {
+  type Output = Self;
+
+  #[inline(always)]
+  fn wide_mul(self, rhs: Self) -> Self {
+    self * rhs
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use crate::provider::{pasta::pallas, traits::DlogGroup};

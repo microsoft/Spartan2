@@ -11,6 +11,7 @@ use crate::{
   big_num::montgomery::MontgomeryLimbs,
   digest::SimpleDigestible,
   errors::SpartanError,
+  polys::eq::EqPolynomial,
   traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
@@ -197,8 +198,7 @@ fn eq01<F: Field>(bit: u8, r: &F) -> F {
   if bit == 0 { F::ONE - *r } else { *r }
 }
 
-#[inline]
-pub(crate) fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
+fn weights_from_r_slow<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
   let ell = r_bs.len();
   (0..n)
     .map(|i| {
@@ -211,6 +211,23 @@ pub(crate) fn weights_from_r<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
       wi
     })
     .collect()
+}
+
+#[inline]
+pub(crate) fn weights_from_r<F: PrimeField>(r_bs: &[F], n: usize) -> Vec<F> {
+  if n == 0 {
+    return Vec::new();
+  }
+
+  let Some(domain_len) = 1usize.checked_shl(r_bs.len() as u32) else {
+    return weights_from_r_slow(r_bs, n);
+  };
+  if n != domain_len {
+    return weights_from_r_slow(r_bs, n);
+  }
+
+  let r_bs_rev = r_bs.iter().rev().copied().collect::<Vec<_>>();
+  EqPolynomial::evals_from_points(&r_bs_rev)
 }
 
 /// A type that holds the shape of the R1CS matrices
@@ -248,11 +265,6 @@ pub struct R1CSInstance<E: Engine, X = <E as Engine>::Scalar> {
   pub(crate) comm_W: Commitment<E>,
   pub(crate) X: Vec<X>,
 }
-
-#[allow(dead_code)]
-pub type SmallR1CSWitness<E> = R1CSWitness<E, bool>;
-#[allow(dead_code)]
-pub type SmallR1CSInstance<E> = R1CSInstance<E, bool>;
 
 /// A type that holds a witness for a given Relaxed R1CS instance
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,10 +375,35 @@ mod tests_small_values {
   type E = T256HyraxEngine;
   type Scalar = <T256HyraxEngine as crate::traits::Engine>::Scalar;
 
+  fn weights_from_r_reference(r_bs: &[Scalar], n: usize) -> Vec<Scalar> {
+    let ell = r_bs.len();
+    (0..n)
+      .map(|i| {
+        let mut acc = Scalar::ONE;
+        for (k, r) in r_bs.iter().enumerate().take(ell) {
+          let bit = ((i >> k) & 1) as u8;
+          acc *= if bit == 0 { Scalar::ONE - *r } else { *r };
+        }
+        acc
+      })
+      .collect()
+  }
+
   fn empty_commitment() -> Commitment<E> {
     let (ck, _) = PCS::<E>::setup(b"test_empty_split", 0, DEFAULT_COMMITMENT_WIDTH);
     let blind = PCS::<E>::blind(&ck, 0);
     PCS::<E>::commit_zeros(&ck, 0, &blind).unwrap()
+  }
+
+  #[test]
+  fn weights_from_r_matches_little_endian_reference() {
+    let r = vec![Scalar::from(2u64), Scalar::from(5u64), Scalar::from(7u64)];
+    for n in 0..=8 {
+      assert_eq!(
+        weights_from_r::<Scalar>(&r, n),
+        weights_from_r_reference(&r, n)
+      );
+    }
   }
 
   #[test]
@@ -543,14 +580,19 @@ impl<E: Engine> R1CSShape<E> {
     }
 
     if rayon::current_num_threads() <= 1 {
-      let az = self.A.multiply_vec(z)?;
-      let bz = self.B.multiply_vec(z)?;
-      let cz = self.C.multiply_vec(z)?;
+      let az = self.A.multiply_vec::<E::Scalar, E::Scalar>(z)?;
+      let bz = self.B.multiply_vec::<E::Scalar, E::Scalar>(z)?;
+      let cz = self.C.multiply_vec::<E::Scalar, E::Scalar>(z)?;
       Ok((az, bz, cz))
     } else {
       let (Az, (Bz, Cz)) = rayon::join(
-        || self.A.multiply_vec(z),
-        || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
+        || self.A.multiply_vec::<E::Scalar, E::Scalar>(z),
+        || {
+          rayon::join(
+            || self.B.multiply_vec::<E::Scalar, E::Scalar>(z),
+            || self.C.multiply_vec::<E::Scalar, E::Scalar>(z),
+          )
+        },
       );
       Ok((Az?, Bz?, Cz?))
     }
@@ -704,20 +746,28 @@ impl<E: Engine> R1CSWitness<E> {
     E::PCS: FoldingEngineTrait<E>,
   {
     let n = Ws.len();
+    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    Self::fold_multiple_with_weights(&weights, Ws)
+  }
+
+  pub(crate) fn fold_multiple_with_weights(
+    weights: &[E::Scalar],
+    Ws: &[R1CSWitness<E>],
+  ) -> Result<R1CSWitness<E>, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    let n = Ws.len();
     if n == 0 {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple: empty witness list".into(),
       });
     }
-
-    let w = weights_from_r::<E::Scalar>(r_bs, n);
-
-    if w.len() != n {
+    if weights.len() != n {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple: weights length mismatch".into(),
       });
     }
-
     let dim = Ws[0].W.len();
 
     if !Ws.iter().all(|z| z.W.len() == dim) {
@@ -746,7 +796,7 @@ impl<E: Engine> R1CSWitness<E> {
           // Skip zero values and use addition for unit values.
           let zero = E::Scalar::ZERO;
           let one = E::Scalar::ONE;
-          for (i, &wi) in w.iter().enumerate() {
+          for (i, &wi) in weights.iter().enumerate() {
             let row_slice = &Ws[i].W[start..end];
             for (a, x) in acc_blk.iter_mut().zip(row_slice.iter()) {
               if *x == zero {
@@ -764,7 +814,7 @@ impl<E: Engine> R1CSWitness<E> {
           type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
           for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
             let mut acc = Acc::<E::Scalar>::default();
-            for (i, &wi) in w.iter().enumerate() {
+            for (i, &wi) in weights.iter().enumerate() {
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
                 &mut acc,
                 &wi,
@@ -778,7 +828,7 @@ impl<E: Engine> R1CSWitness<E> {
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
-      &w,
+      weights,
     )?;
 
     Ok(R1CSWitness::<E> {
@@ -802,13 +852,25 @@ where
     Ws: &[R1CSWitness<E, W>],
   ) -> Result<R1CSWitness<E>, SpartanError> {
     let n = Ws.len();
+    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    Self::fold_multiple_into_field_with_weights(&weights, Ws)
+  }
+
+  pub(crate) fn fold_multiple_into_field_with_weights(
+    weights: &[E::Scalar],
+    Ws: &[R1CSWitness<E, W>],
+  ) -> Result<R1CSWitness<E>, SpartanError> {
+    let n = Ws.len();
     if n == 0 {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_into_field: empty witness list".into(),
       });
     }
-
-    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    if weights.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_into_field: weights length mismatch".into(),
+      });
+    }
     let dim = Ws[0].W.len();
     if !Ws.iter().all(|w| w.W.len() == dim) {
       return Err(SpartanError::InvalidInputLength {
@@ -886,13 +948,34 @@ impl<E: Engine> R1CSInstance<E> {
     E::PCS: FoldingEngineTrait<E>,
   {
     let n = Us.len();
-    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    Self::fold_multiple_with_weights(&weights, Us)
+  }
+
+  pub(crate) fn fold_multiple_with_weights(
+    weights: &[E::Scalar],
+    Us: &[R1CSInstance<E>],
+  ) -> Result<R1CSInstance<E>, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+  {
+    let n = Us.len();
+    if n == 0 {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple: empty instance list".into(),
+      });
+    }
+    if weights.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple: weights length mismatch".into(),
+      });
+    }
     let d = Us[0].X.len();
 
     // X
     let mut X_acc = vec![E::Scalar::ZERO; d];
     for (i, Ui) in Us.iter().enumerate() {
-      let wi = w[i];
+      let wi = weights[i];
       for (j, Uij) in Ui.X.iter().enumerate() {
         X_acc[j] += wi * Uij;
       }
@@ -901,7 +984,7 @@ impl<E: Engine> R1CSInstance<E> {
     // commitment (group lin. comb)
     let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &Us.iter().map(|U| U.comm_W.clone()).collect::<Vec<_>>(),
-      &w,
+      weights,
     )?;
 
     Ok(R1CSInstance::<E> {
@@ -924,13 +1007,25 @@ where
     Us: &[R1CSInstance<E, X>],
   ) -> Result<R1CSInstance<E>, SpartanError> {
     let n = Us.len();
+    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    Self::fold_multiple_into_field_with_weights(&weights, Us)
+  }
+
+  pub(crate) fn fold_multiple_into_field_with_weights(
+    weights: &[E::Scalar],
+    Us: &[R1CSInstance<E, X>],
+  ) -> Result<R1CSInstance<E>, SpartanError> {
+    let n = Us.len();
     if n == 0 {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_into_field: empty instance list".into(),
       });
     }
-
-    let weights = weights_from_r::<E::Scalar>(r_bs, n);
+    if weights.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_into_field: weights length mismatch".into(),
+      });
+    }
     let dim = Us[0].X.len();
     if !Us.iter().all(|u| u.X.len() == dim) {
       return Err(SpartanError::InvalidInputLength {
@@ -1056,9 +1151,6 @@ pub struct SplitR1CSInstance<E: Engine, X = <E as Engine>::Scalar> {
   pub(crate) public_values: Vec<X>,
   pub(crate) challenges: Vec<E::Scalar>,
 }
-
-#[allow(dead_code)]
-pub type SmallSplitR1CSInstance<E> = SplitR1CSInstance<E, bool>;
 
 impl<E: Engine> SplitR1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
@@ -1653,19 +1745,22 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 }
 
-impl<E: Engine> SplitR1CSShape<E, i32> {
-  /// Create a split R1CS shape whose matrix coefficients are native i32 values.
-  pub fn new_int(
+impl<E: Engine, Coeff> SplitR1CSShape<E, Coeff>
+where
+  Coeff: crate::small_constraint_system::SmallCoeff,
+{
+  /// Create a split R1CS shape whose matrix coefficients are native small values.
+  pub fn new_small(
     num_cons: usize,
     num_shared: usize,
     num_precommitted: usize,
     num_rest: usize,
     num_public: usize,
     num_challenges: usize,
-    A: SparseMatrix<i32>,
-    B: SparseMatrix<i32>,
-    C: SparseMatrix<i32>,
-  ) -> Result<SplitR1CSShape<E, i32>, SpartanError> {
+    A: SparseMatrix<Coeff>,
+    B: SparseMatrix<Coeff>,
+    C: SparseMatrix<Coeff>,
+  ) -> Result<SplitR1CSShape<E, Coeff>, SpartanError> {
     let width = DEFAULT_COMMITMENT_WIDTH;
 
     let num_rows = num_cons;
@@ -1695,7 +1790,7 @@ impl<E: Engine> SplitR1CSShape<E, i32> {
     let num_vars_padded = num_shared_padded + num_precommitted_padded + num_rest_padded;
     let num_cons_padded = num_cons.next_power_of_two();
 
-    let apply_pad = |mut M: SparseMatrix<i32>| -> SparseMatrix<i32> {
+    let apply_pad = |mut M: SparseMatrix<Coeff>| -> SparseMatrix<Coeff> {
       M.indices.par_iter_mut().for_each(|c| {
         if *c >= num_shared && *c < num_shared + num_precommitted {
           *c += num_shared_padded - num_shared;
@@ -1739,7 +1834,7 @@ impl<E: Engine> SplitR1CSShape<E, i32> {
 
   /// Equalize two small-coefficient shapes using the same padding semantics as
   /// the field path.
-  pub fn equalize_int(S_A: &mut Self, S_B: &mut Self) {
+  pub fn equalize_small(S_A: &mut Self, S_B: &mut Self) {
     let orig_cons_a = S_A.num_cons;
     let orig_cons_b = S_B.num_cons;
 
@@ -1752,7 +1847,7 @@ impl<E: Engine> SplitR1CSShape<E, i32> {
     S_A.num_cons = num_cons_padded;
     S_B.num_cons = num_cons_padded;
 
-    let move_public_vars = |M: &mut SparseMatrix<i32>, num_cons: usize, num_vars: usize| {
+    let move_public_vars = |M: &mut SparseMatrix<Coeff>, num_cons: usize, num_vars: usize| {
       M.indices.par_iter_mut().for_each(|c| {
         if *c >= num_vars {
           *c += num_vars_padded - num_vars;
@@ -1778,12 +1873,12 @@ impl<E: Engine> SplitR1CSShape<E, i32> {
   }
 
   pub fn to_field_shape(&self) -> SplitR1CSShape<E> {
-    let convert = |M: &SparseMatrix<i32>| SparseMatrix {
+    let convert = |M: &SparseMatrix<Coeff>| SparseMatrix {
       data: M
         .data
         .iter()
         .copied()
-        .map(R1CSValue::<E>::to_scalar)
+        .map(Coeff::to_field::<E::Scalar>)
         .collect(),
       indices: M.indices.clone(),
       indptr: M.indptr.clone(),
@@ -1811,45 +1906,6 @@ impl<E: Engine> SplitR1CSShape<E, i32> {
       filtered_A: OnceCell::new(),
       filtered_B: OnceCell::new(),
       filtered_C: OnceCell::new(),
-    }
-  }
-
-  pub fn multiply_vec_bool_i64(
-    &self,
-    z: &[bool],
-  ) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>), SpartanError> {
-    if z.len()
-      != self.num_public
-        + self.num_challenges
-        + 1
-        + self.num_shared
-        + self.num_precommitted
-        + self.num_rest
-    {
-      return Err(SpartanError::InvalidWitnessLength);
-    }
-
-    let multiply = |M: &SparseMatrix<i32>| -> Vec<i64> {
-      M.indptr
-        .windows(2)
-        .map(|ptrs| {
-          let ptrs: &[usize; 2] = ptrs.try_into().unwrap();
-          M.get_row_unchecked(ptrs)
-            .filter(|(_, col)| z[**col])
-            .map(|(coeff, _)| i64::from(*coeff))
-            .sum()
-        })
-        .collect()
-    };
-
-    if rayon::current_num_threads() <= 1 {
-      Ok((multiply(&self.A), multiply(&self.B), multiply(&self.C)))
-    } else {
-      let (a, (b, c)) = rayon::join(
-        || multiply(&self.A),
-        || rayon::join(|| multiply(&self.B), || multiply(&self.C)),
-      );
-      Ok((a, b, c))
     }
   }
 }
@@ -2209,8 +2265,13 @@ impl<E: Engine> SplitMultiRoundR1CSShape<E> {
     }
 
     let (az, (bz, cz)) = rayon::join(
-      || self.A.multiply_vec(z),
-      || rayon::join(|| self.B.multiply_vec(z), || self.C.multiply_vec(z)),
+      || self.A.multiply_vec::<E::Scalar, E::Scalar>(z),
+      || {
+        rayon::join(
+          || self.B.multiply_vec::<E::Scalar, E::Scalar>(z),
+          || self.C.multiply_vec::<E::Scalar, E::Scalar>(z),
+        )
+      },
     );
 
     Ok((az?, bz?, cz?))

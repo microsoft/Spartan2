@@ -10,13 +10,16 @@
 //! - [`build_accumulators_spartan`]: Optimized builder for Spartan's cubic relation
 
 use super::{
-  accumulator::LagrangeAccumulators, csr::Csr, domain::LagrangeIndex,
+  accumulator::LagrangeAccumulators,
+  csr::Csr,
+  domain::LagrangeIndex,
   extension::{bit_rev_prefix_table, extend_to_lagrange_domain, gather_and_extend_prefix},
-  index::AccumulatorPrefixIndex, thread_state::SpartanThreadState,
+  index::AccumulatorPrefixIndex,
+  thread_state::SpartanThreadState,
 };
 use crate::start_span;
 use crate::{
-  big_num::{DelayedReduction, SmallValue, SmallValueEngine},
+  big_num::{DelayedReduction, SmallValue, SmallValueEngine, WideMul},
   polys::{
     eq::build_eq_pyramid, eq::compute_suffix_eq_pyramid, multilinear::MultilinearPolynomial,
   },
@@ -202,7 +205,7 @@ where
           // Only process betas with ∞ - binary betas contribute 0 for satisfying witnesses
           // Uses delayed modular reduction: accumulates into unreduced wide-limb form.
           for &beta_idx in &betas_with_infty {
-            let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+            let prod = az_ext[beta_idx].wide_mul(bz_ext[beta_idx]);
             F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], e_in_eval, &prod);
           }
         }
@@ -213,7 +216,8 @@ where
             continue;
           }
           // Reduce partial sum to field element
-          let val = <F as DelayedReduction<SV::Product>>::reduce(&state.partial_sums[beta_idx]);
+          let val =
+            <F as DelayedReduction<<SV as WideMul>::Output>>::reduce(&state.partial_sums[beta_idx]);
           if val == F::ZERO {
             continue;
           }
@@ -273,9 +277,9 @@ where
 ///   through the small-value accumulator path; the remaining `ell_b - l0`
 ///   suffix bits are summed with their Boolean equality weights from
 ///   `rhos[l0..]`.
-pub(crate) fn build_accumulators_neutronnova<F, SV, A, B>(
-  a_layers: &[A],
-  b_layers: &[B],
+pub(crate) fn build_accumulators_neutronnova<F, SV, Layer>(
+  a_layers: &[Layer],
+  b_layers: &[Layer],
   e_eq: &[F],
   left: usize,
   right: usize,
@@ -284,8 +288,7 @@ pub(crate) fn build_accumulators_neutronnova<F, SV, A, B>(
 ) -> LagrangeAccumulators<F, 2>
 where
   F: SmallValueEngine<SV>,
-  A: AsRef<[SV]> + Sync,
-  B: AsRef<[SV]> + Sync,
+  Layer: AsRef<[SV]> + Sync,
   SV: SmallValue + Add<Output = SV> + Sub<Output = SV>,
 {
   let n = a_layers.len();
@@ -378,7 +381,7 @@ where
         let weighted_inner = e_inner_val * suffix_weight;
 
         for &beta_idx in &betas_with_infty {
-          let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+          let prod = az_ext[beta_idx].wide_mul(bz_ext[beta_idx]);
           F::unreduced_multiply_accumulate(
             &mut state.partial_sums[beta_idx],
             &weighted_inner,
@@ -393,7 +396,7 @@ where
       if unreduced.is_zero() {
         continue;
       }
-      let val = <F as DelayedReduction<SV::Product>>::reduce(unreduced);
+      let val = <F as DelayedReduction<<SV as WideMul>::Output>>::reduce(unreduced);
       if val != F::ZERO {
         state.beta_values.push((beta_idx, val));
       }
@@ -531,7 +534,7 @@ where
       let bz_ext = &b_ext_by_constraint[start..end];
 
       for &beta_idx in &betas_with_infty {
-        let prod = SV::wide_mul(az_ext[beta_idx], bz_ext[beta_idx]);
+        let prod = az_ext[beta_idx].wide_mul(bz_ext[beta_idx]);
         F::unreduced_multiply_accumulate(&mut state.partial_sums[beta_idx], &e_inner_val, &prod);
       }
     }
@@ -541,7 +544,7 @@ where
       if unreduced.is_zero() {
         continue;
       }
-      let val = <F as DelayedReduction<SV::Product>>::reduce(unreduced);
+      let val = <F as DelayedReduction<<SV as WideMul>::Output>>::reduce(unreduced);
       if val != F::ZERO {
         state.beta_values.push((beta_idx, val));
       }

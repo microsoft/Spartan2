@@ -65,6 +65,24 @@ crate::impl_field_reduction_constants!(t256::Scalar);
 crate::impl_montgomery_limbs!(t256::Scalar);
 crate::impl_barrett_reduction_constants!(t256::Scalar);
 
+impl crate::big_num::WideMul for p256::Scalar {
+  type Output = Self;
+
+  #[inline(always)]
+  fn wide_mul(self, rhs: Self) -> Self {
+    self * rhs
+  }
+}
+
+impl crate::big_num::WideMul for t256::Scalar {
+  type Output = Self;
+
+  #[inline(always)]
+  fn wide_mul(self, rhs: Self) -> Self {
+    self * rhs
+  }
+}
+
 impl<G: Group> TranscriptReprTrait<G> for t256::Base {
   fn to_transcript_bytes(&self) -> Vec<u8> {
     self.to_bytes().into_iter().rev().collect()

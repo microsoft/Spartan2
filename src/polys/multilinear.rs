@@ -8,7 +8,7 @@
 //! - `MultilinearPolynomial`: Dense representation of multilinear polynomials, represented by evaluations over all possible binary inputs.
 //! - `SparsePolynomial`: Efficient representation of sparse multilinear polynomials, storing only non-zero evaluations.
 
-use crate::{big_num::SmallValueField, math::Math, polys::eq::EqPolynomial};
+use crate::{math::Math, polys::eq::EqPolynomial};
 use core::ops::Index;
 use ff::{Field, PrimeField};
 use rayon::prelude::*;
@@ -172,66 +172,6 @@ impl<T: Field> MultilinearPolynomial<T> {
 
     self.lo_eff = eff.min(n / 2);
     self.hi_eff = eff.saturating_sub(n / 2);
-  }
-
-  /// Binds the polynomial's top variables using the given scalars.
-  #[allow(dead_code)]
-  pub fn bind_with(poly: &[T], L: &[T], r_len: usize) -> Vec<T> {
-    assert_eq!(
-      poly.len(),
-      L.len() * r_len,
-      "poly length ({}) must equal L.len() * r_len ({} * {}) = {}",
-      poly.len(),
-      L.len(),
-      r_len,
-      L.len() * r_len
-    );
-
-    (0..r_len)
-      .into_par_iter()
-      .map(|i| {
-        let mut acc = T::ZERO;
-        for j in 0..L.len() {
-          // row-major: index = j * r_len + i
-          acc += L[j] * poly[j * r_len + i];
-        }
-        acc
-      })
-      .collect()
-  }
-}
-
-// ============================================================================
-// Small-value polynomial operations (MultilinearPolynomial<i32>)
-// ============================================================================
-
-#[allow(dead_code)]
-impl MultilinearPolynomial<i32> {
-  /// Get the number of variables.
-  pub fn num_vars(&self) -> usize {
-    self.Z.len().trailing_zeros() as usize
-  }
-
-  /// Convert to field-element polynomial.
-  pub fn to_field<F: SmallValueField<i32>>(&self) -> MultilinearPolynomial<F> {
-    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
-  }
-}
-
-// ============================================================================
-// Small-value polynomial operations (MultilinearPolynomial<i64>)
-// ============================================================================
-
-#[allow(dead_code)]
-impl MultilinearPolynomial<i64> {
-  /// Get the number of variables.
-  pub fn num_vars(&self) -> usize {
-    self.Z.len().trailing_zeros() as usize
-  }
-
-  /// Convert to field-element polynomial.
-  pub fn to_field<F: SmallValueField<i64>>(&self) -> MultilinearPolynomial<F> {
-    MultilinearPolynomial::new(self.Z.iter().map(|&s| F::small_to_field(s)).collect())
   }
 }
 

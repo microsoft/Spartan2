@@ -41,9 +41,8 @@ pub trait DelayedReduction<Value>: Sized {
   fn reduce(acc: &Self::Accumulator) -> Self;
 }
 
-/// Semantic alias for field × i128 delayed-reduction accumulators used in
-/// small-value sumcheck code.
-pub(crate) type SmallAccumulator<F> = <F as DelayedReduction<i128>>::Accumulator;
+/// Semantic alias for delayed-reduction accumulators used in small-value code.
+pub(crate) type SmallAccumulator<F, V> = <F as DelayedReduction<V>>::Accumulator;
 
 /// Accumulate field × small_value where small_value is a single u64 magnitude.
 ///
