@@ -19,9 +19,9 @@ use crate::{
   big_num::{DelayedReduction, ExtensionSmallValue, SmallValue, SmallValueField, WideMul},
   errors::SpartanError,
   lagrange_accumulator::{
-    build_accumulators_neutronnova, build_accumulators_neutronnova_from_prefix_workspace,
+    build_accumulators_neutronnova, build_accumulators_neutronnova_from_prefix_ext_workspace,
     build_accumulators_neutronnova_preextended,
-    extension::{bit_rev_prefix_table, gather_and_extend_prefix},
+    extension::{bit_rev_prefix_table, extend_to_lagrange_domain, gather_and_extend_prefix},
   },
   math::Math,
   nifs::NovaNIFS,
@@ -57,15 +57,19 @@ use tracing::info;
 /// Pre-processed state for the accumulator/l0 NIFS proving path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(
-  serialize = "PS: Serialize, W: Serialize, SmallAbc<SV>: Serialize, ExtendedPrefixMleEvals<SV>: Serialize",
-  deserialize = "PS: Deserialize<'de>, W: Deserialize<'de>, SmallAbc<SV>: Deserialize<'de>, ExtendedPrefixMleEvals<SV>: Deserialize<'de>"
+  serialize = "PS: Serialize, W: Serialize, SmallAbc<SV>: Serialize, ExtendedPrefixMleEvals<SV>: Serialize, PrefixWorkspace<SV>: Serialize",
+  deserialize = "PS: Deserialize<'de>, W: Deserialize<'de>, SmallAbc<SV>: Deserialize<'de>, ExtendedPrefixMleEvals<SV>: Deserialize<'de>, PrefixWorkspace<SV>: Deserialize<'de>"
 ))]
-pub struct NeutronNovaAccumulatorPrepZkSNARK<E: Engine, SV, W, PS> {
+pub struct NeutronNovaAccumulatorPrepZkSNARK<E: Engine, SV: WideMul, W, PS> {
   ps_step: Vec<PS>,
   ps_core: PS,
   small_abc: SmallAbc<SV>,
   extended_mle_evals: Option<ExtendedPrefixMleEvals<SV>>,
+  prefix_workspace: Option<PrefixWorkspace<SV>>,
   cached_step_public_values: Vec<Vec<W>>,
+  cached_core_public_values: Vec<W>,
+  #[serde(skip)]
+  cached_core_witness_field: Option<Vec<E::Scalar>>,
   #[serde(skip)]
   _p: PhantomData<E>,
 }
@@ -430,7 +434,7 @@ where
     })
 }
 
-impl<E: Engine, SV, W, PS> NeutronNovaAccumulatorPrepZkSNARK<E, SV, W, PS> {
+impl<E: Engine, SV: WideMul, W, PS> NeutronNovaAccumulatorPrepZkSNARK<E, SV, W, PS> {
   /// Returns the accumulator prefix length used by this prepared state.
   pub fn l0(&self) -> usize {
     self.small_abc.l0
@@ -442,6 +446,7 @@ where
   E::PCS: FoldingEngineTrait<E>,
   E::Scalar: SmallValueField<SV> + Sync,
   SV: ExtensionSmallValue,
+  <SV as WideMul>::Output: Copy + Zero + Send + Sync + Serialize + for<'de> Deserialize<'de>,
   W: SmallWitnessValue<E>,
 {
   fn validate_l0_small<Coeff>(
@@ -618,6 +623,15 @@ where
     } else {
       None
     };
+    let prefix_workspace = if l0 < ell_b {
+      Some(PrefixWorkspace::build(
+        &small_abc,
+        l0,
+        step_circuits.len().next_power_of_two(),
+      )?)
+    } else {
+      None
+    };
     info!(
       elapsed_ms = %cache_t.elapsed().as_millis(),
       instances = step_circuits.len(),
@@ -625,13 +639,34 @@ where
       "prep_small_accumulator_nifs_cache"
     );
 
+    let cached_core_public_values =
+      core_circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Small core circuit does not provide public IO: {e}"),
+        })?;
+    let cached_core_witness_field = if pk.S_core_small.num_rest_unpadded == 0 {
+      Some(
+        ps.W
+          .par_iter()
+          .copied()
+          .map(R1CSValue::<E>::to_scalar)
+          .collect::<Vec<_>>(),
+      )
+    } else {
+      None
+    };
+
     info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_small_accumulator_prep_prove");
     Ok(NeutronNovaAccumulatorPrepZkSNARK {
       ps_step,
       ps_core: ps,
       small_abc,
       extended_mle_evals,
+      prefix_workspace,
       cached_step_public_values,
+      cached_core_public_values,
+      cached_core_witness_field,
       _p: PhantomData,
     })
   }
@@ -697,12 +732,24 @@ where
         });
       }
     }
+    let current_core_public_values =
+      core_circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Small core circuit does not provide public IO: {e}"),
+        })?;
+    if prep_snark.cached_core_public_values != current_core_public_values {
+      return Err(SpartanError::InternalError {
+        reason: "Core circuit public values changed between prep_prove and prove".to_string(),
+      });
+    }
 
     let (_gen_span, gen_t) = start_span!(
       "generate_small_instances_witnesses",
       step_circuits = step_circuits.len()
     );
     let cached_step_public_values = &prep_snark.cached_step_public_values;
+    let cached_core_public_values = prep_snark.cached_core_public_values.clone();
     let (res_steps, res_core) = rayon::join(
       || {
         prep_snark
@@ -744,13 +791,7 @@ where
       || {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &field_pk.vk_digest);
-        let public_values_core =
-          core_circuit
-            .public_values()
-            .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Small core circuit does not provide public IO: {e}"),
-            })?;
-        let public_values_core_field = public_values_core
+        let public_values_core_field = cached_core_public_values
           .iter()
           .copied()
           .map(R1CSValue::<E>::to_scalar)
@@ -761,7 +802,7 @@ where
           &pk.S_core_small,
           &field_pk.ck,
           core_circuit,
-          Some(public_values_core.as_slice()),
+          Some(cached_core_public_values.as_slice()),
           &mut transcript,
         )
       },
@@ -810,6 +851,7 @@ where
         step_instances_regular,
         step_witnesses,
         &prep_snark.small_abc,
+        prep_snark.prefix_workspace.as_ref(),
         prep_snark.extended_mle_evals.as_ref(),
         &mut vc,
         &mut vc_state,
@@ -831,9 +873,9 @@ where
 
     let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
     let (mut poly_Az_step, mut poly_Bz_step, mut poly_Cz_step) = (
-      MultilinearPolynomial::new(Az_step),
-      MultilinearPolynomial::new(Bz_step),
-      MultilinearPolynomial::new(Cz_step),
+      multilinear_with_effective_halves(Az_step),
+      multilinear_with_effective_halves(Bz_step),
+      multilinear_with_effective_halves(Cz_step),
     );
 
     let (mut poly_Az_core, mut poly_Bz_core, mut poly_Cz_core) = {
@@ -848,9 +890,25 @@ where
       };
       info!(elapsed_ms = %core_t.elapsed().as_millis(), "compute_small_core_polys");
       (
-        MultilinearPolynomial::new(to_field(Az)),
-        MultilinearPolynomial::new(to_field(Bz)),
-        MultilinearPolynomial::new(to_field(Cz)),
+        multilinear_with_effective_halves(to_field(Az)),
+        multilinear_with_effective_halves(to_field(Bz)),
+        multilinear_with_effective_halves(to_field(Cz)),
+      )
+    };
+
+    let core_witness_field: Cow<'_, [E::Scalar]> = if let Some(cached_core_witness_field) =
+      prep_snark.cached_core_witness_field.as_ref()
+      && cached_core_witness_field.len() == core_witness.W.len()
+    {
+      Cow::Borrowed(cached_core_witness_field.as_slice())
+    } else {
+      Cow::Owned(
+        core_witness
+          .W
+          .par_iter()
+          .copied()
+          .map(R1CSValue::<E>::to_scalar)
+          .collect(),
       )
     };
 
@@ -938,10 +996,8 @@ where
     };
     let (z_core_vec, z_core_lo, z_core_hi) = {
       let mut v = vec![E::Scalar::ZERO; num_vars * 2];
-      let w_len = core_witness.W.len();
-      for (dst, value) in v[..w_len].iter_mut().zip(core_witness.W.iter()) {
-        *dst = R1CSValue::<E>::to_scalar(*value);
-      }
+      let w_len = core_witness_field.len();
+      v[..w_len].copy_from_slice(core_witness_field.as_ref());
       v[w_len] = E::Scalar::ONE;
       let x_len = core_instance_regular.X.len();
       v[w_len + 1..w_len + 1 + x_len].copy_from_slice(&core_instance_regular.X);
@@ -1071,8 +1127,8 @@ where
     let W = folded_W
       .W
       .par_iter()
-      .zip(core_witness.W.par_iter())
-      .map(|(w1, w2)| *w1 + c_eval * R1CSValue::<E>::to_scalar(*w2))
+      .zip(core_witness_field.par_iter())
+      .map(|(w1, w2)| *w1 + c_eval * *w2)
       .collect::<Vec<_>>();
     let comm_eval = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
       &[comm_eval_W_step, comm_eval_W_core],
@@ -1269,6 +1325,7 @@ where
       + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: SmallValue,
+    <SV as WideMul>::Output: Sync,
   {
     let l0 = prefix_workspace.l0;
     let ell_b = rhos.len();
@@ -1280,10 +1337,11 @@ where
     let mut acc_eq = E::Scalar::ONE;
 
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova_workspace");
-    let accumulators = build_accumulators_neutronnova_from_prefix_workspace(
-      &prefix_workspace.a,
-      &prefix_workspace.b,
+    let accumulators = build_accumulators_neutronnova_from_prefix_ext_workspace(
+      &prefix_workspace.ab_ext,
+      &prefix_workspace.beta_indices,
       prefix_workspace.num_constraints,
+      prefix_workspace.suffix_groups,
       e_eq,
       left,
       right,
@@ -1369,7 +1427,9 @@ where
     right: usize,
     e_eq: &[E::Scalar],
     rhos: &[E::Scalar],
+    carry_c_layers: bool,
   ) -> (
+    Vec<Vec<E::Scalar>>,
     Vec<Vec<E::Scalar>>,
     Vec<Vec<E::Scalar>>,
     Vec<E::Scalar>,
@@ -1378,7 +1438,7 @@ where
   )
   where
     E::Scalar: DelayedReduction<SV> + DelayedReduction<E::Scalar>,
-    SV: Send + Sync,
+    SV: WideMul + Send + Sync,
   {
     let pairs = prefix_workspace.suffix_groups / 2;
     debug_assert!(pairs > 0);
@@ -1389,7 +1449,7 @@ where
       .map(|pair_idx| {
         let lo = 2 * pair_idx;
         let hi = lo + 1;
-        let (a_lo, a_hi, b_lo, b_hi, c_lo, c_hi, e0, quad_coeff) =
+        let (a_lo, a_hi, b_lo, b_hi, c_lo_vec, c_hi_vec, c_lo, c_hi, e0, quad_coeff) =
           Self::fold_prefix_workspace_pair_and_first_suffix_round::<SV>(
             prefix_weights,
             prefix_workspace,
@@ -1398,6 +1458,7 @@ where
             left,
             right,
             e_eq,
+            carry_c_layers,
           );
         let w = suffix_weight_full::<E::Scalar>(l0, ell_b, pair_idx, rhos);
         (
@@ -1406,6 +1467,8 @@ where
           a_hi,
           b_lo,
           b_hi,
+          c_lo_vec,
+          c_hi_vec,
           c_lo,
           c_hi,
           e0 * w,
@@ -1416,23 +1479,28 @@ where
 
     let mut a_layers = vec![Vec::new(); prefix_workspace.suffix_groups];
     let mut b_layers = vec![Vec::new(); prefix_workspace.suffix_groups];
+    let mut c_layers = vec![Vec::new(); prefix_workspace.suffix_groups];
     let mut c_vals = vec![E::Scalar::ZERO; prefix_workspace.suffix_groups];
     let mut e0 = E::Scalar::ZERO;
     let mut quad_coeff = E::Scalar::ZERO;
-    for (pair_idx, a_lo, a_hi, b_lo, b_hi, c_lo, c_hi, pair_e0, pair_qc) in pair_results {
+    for (pair_idx, a_lo, a_hi, b_lo, b_hi, c_lo_vec, c_hi_vec, c_lo, c_hi, pair_e0, pair_qc) in
+      pair_results
+    {
       let lo = 2 * pair_idx;
       let hi = lo + 1;
       a_layers[lo] = a_lo;
       a_layers[hi] = a_hi;
       b_layers[lo] = b_lo;
       b_layers[hi] = b_hi;
+      c_layers[lo] = c_lo_vec;
+      c_layers[hi] = c_hi_vec;
       c_vals[lo] = c_lo;
       c_vals[hi] = c_hi;
       e0 += pair_e0;
       quad_coeff += pair_qc;
     }
 
-    (a_layers, b_layers, c_vals, e0, quad_coeff)
+    (a_layers, b_layers, c_layers, c_vals, e0, quad_coeff)
   }
 
   #[allow(clippy::type_complexity)]
@@ -1444,7 +1512,10 @@ where
     left: usize,
     right: usize,
     e_eq: &[E::Scalar],
+    carry_c_layers: bool,
   ) -> (
+    Vec<E::Scalar>,
+    Vec<E::Scalar>,
     Vec<E::Scalar>,
     Vec<E::Scalar>,
     Vec<E::Scalar>,
@@ -1456,7 +1527,7 @@ where
   )
   where
     E::Scalar: DelayedReduction<SV> + DelayedReduction<E::Scalar>,
-    SV: Send + Sync,
+    SV: WideMul + Send + Sync,
   {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
@@ -1466,105 +1537,74 @@ where
     let mut a_hi = vec![E::Scalar::ZERO; num_constraints];
     let mut b_lo = vec![E::Scalar::ZERO; num_constraints];
     let mut b_hi = vec![E::Scalar::ZERO; num_constraints];
+    let mut c_lo_vec = if carry_c_layers {
+      vec![E::Scalar::ZERO; num_constraints]
+    } else {
+      Vec::new()
+    };
+    let mut c_hi_vec = if carry_c_layers {
+      vec![E::Scalar::ZERO; num_constraints]
+    } else {
+      Vec::new()
+    };
 
     let e_left = &e_eq[..left];
     let e_right = &e_eq[left..];
-    let row_terms: Vec<_> = a_lo
-      .par_chunks_mut(left)
-      .zip(a_hi.par_chunks_mut(left))
-      .zip(b_lo.par_chunks_mut(left))
-      .zip(b_hi.par_chunks_mut(left))
-      .enumerate()
-      .map(|(i, (((a_lo_row, a_hi_row), b_lo_row), b_hi_row))| {
-        let base = i * left;
-        let mut inner_e0_ab = Acc::<E::Scalar>::default();
-        let mut inner_quad = Acc::<E::Scalar>::default();
-        let mut inner_c_lo = Acc::<E::Scalar>::default();
-        let mut inner_c_hi = Acc::<E::Scalar>::default();
-
-        for j in 0..left {
-          let k = base + j;
-          let a0 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.a,
-            lo_suffix,
-            k,
-            num_constraints,
-          );
-          let a1 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.a,
-            hi_suffix,
-            k,
-            num_constraints,
-          );
-          let b0 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.b,
-            lo_suffix,
-            k,
-            num_constraints,
-          );
-          let b1 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.b,
-            hi_suffix,
-            k,
-            num_constraints,
-          );
-          let c0 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.c,
-            lo_suffix,
-            k,
-            num_constraints,
-          );
-          let c1 = fold_prefix_workspace_value::<E::Scalar, SV>(
-            prefix_weights,
-            &prefix_workspace.c,
-            hi_suffix,
-            k,
-            num_constraints,
-          );
-
-          a_lo_row[j] = a0;
-          a_hi_row[j] = a1;
-          b_lo_row[j] = b0;
-          b_hi_row[j] = b1;
-
-          let inner_val = a0 * b0;
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_e0_ab,
-            &e_left[j],
-            &inner_val,
-          );
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_c_lo,
-            &e_left[j],
-            &c0,
-          );
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_c_hi,
-            &e_left[j],
-            &c1,
-          );
-          let quad_val = (a1 - a0) * (b1 - b0);
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_quad,
-            &e_left[j],
-            &quad_val,
-          );
-        }
-
-        (
-          i,
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0_ab),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_c_lo),
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_c_hi),
+    let row_terms: Vec<_> = if carry_c_layers {
+      a_lo
+        .par_chunks_mut(left)
+        .zip(a_hi.par_chunks_mut(left))
+        .zip(b_lo.par_chunks_mut(left))
+        .zip(b_hi.par_chunks_mut(left))
+        .zip(c_lo_vec.par_chunks_mut(left))
+        .zip(c_hi_vec.par_chunks_mut(left))
+        .enumerate()
+        .map(
+          |(i, (((((a_lo_row, a_hi_row), b_lo_row), b_hi_row), c_lo_row), c_hi_row))| {
+            Self::fold_prefix_workspace_constraint_row::<SV>(
+              prefix_weights,
+              prefix_workspace,
+              lo_suffix,
+              hi_suffix,
+              left,
+              num_constraints,
+              e_left,
+              i,
+              a_lo_row,
+              a_hi_row,
+              b_lo_row,
+              b_hi_row,
+              Some((c_lo_row, c_hi_row)),
+            )
+          },
         )
-      })
-      .collect();
+        .collect()
+    } else {
+      a_lo
+        .par_chunks_mut(left)
+        .zip(a_hi.par_chunks_mut(left))
+        .zip(b_lo.par_chunks_mut(left))
+        .zip(b_hi.par_chunks_mut(left))
+        .enumerate()
+        .map(|(i, (((a_lo_row, a_hi_row), b_lo_row), b_hi_row))| {
+          Self::fold_prefix_workspace_constraint_row::<SV>(
+            prefix_weights,
+            prefix_workspace,
+            lo_suffix,
+            hi_suffix,
+            left,
+            num_constraints,
+            e_left,
+            i,
+            a_lo_row,
+            a_hi_row,
+            b_lo_row,
+            b_hi_row,
+            None,
+          )
+        })
+        .collect()
+    };
 
     let mut acc_e0_ab = Acc::<E::Scalar>::default();
     let mut acc_quad = Acc::<E::Scalar>::default();
@@ -1602,10 +1642,93 @@ where
       a_hi,
       b_lo,
       b_hi,
+      c_lo_vec,
+      c_hi_vec,
       c_lo_val,
       c_hi_val,
       e0_ab - c_lo_val,
       <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn fold_prefix_workspace_constraint_row<SV>(
+    prefix_weights: &[E::Scalar],
+    prefix_workspace: &PrefixWorkspace<SV>,
+    lo_suffix: usize,
+    hi_suffix: usize,
+    left: usize,
+    num_constraints: usize,
+    e_left: &[E::Scalar],
+    row_idx: usize,
+    a_lo_row: &mut [E::Scalar],
+    a_hi_row: &mut [E::Scalar],
+    b_lo_row: &mut [E::Scalar],
+    b_hi_row: &mut [E::Scalar],
+    mut c_rows: Option<(&mut [E::Scalar], &mut [E::Scalar])>,
+  ) -> (usize, E::Scalar, E::Scalar, E::Scalar, E::Scalar)
+  where
+    E::Scalar: DelayedReduction<SV> + DelayedReduction<E::Scalar>,
+    SV: WideMul + Send + Sync,
+  {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
+    let base = row_idx * left;
+    let mut inner_e0_ab = Acc::<E::Scalar>::default();
+    let mut inner_quad = Acc::<E::Scalar>::default();
+    let mut inner_c_lo = Acc::<E::Scalar>::default();
+    let mut inner_c_hi = Acc::<E::Scalar>::default();
+
+    for j in 0..left {
+      let k = base + j;
+      let (a0, a1, b0, b1, c0, c1) = fold_prefix_workspace_pair_values::<E::Scalar, SV>(
+        prefix_weights,
+        prefix_workspace,
+        lo_suffix,
+        hi_suffix,
+        k,
+        num_constraints,
+      );
+
+      a_lo_row[j] = a0;
+      a_hi_row[j] = a1;
+      b_lo_row[j] = b0;
+      b_hi_row[j] = b1;
+      if let Some((c_lo_row, c_hi_row)) = c_rows.as_mut() {
+        c_lo_row[j] = c0;
+        c_hi_row[j] = c1;
+      }
+
+      let inner_val = a0 * b0;
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut inner_e0_ab,
+        &e_left[j],
+        &inner_val,
+      );
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut inner_c_lo,
+        &e_left[j],
+        &c0,
+      );
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut inner_c_hi,
+        &e_left[j],
+        &c1,
+      );
+      let quad_val = (a1 - a0) * (b1 - b0);
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut inner_quad,
+        &e_left[j],
+        &quad_val,
+      );
+    }
+
+    (
+      row_idx,
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0_ab),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_c_lo),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_c_hi),
     )
   }
 
@@ -1628,6 +1751,7 @@ where
       + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
+    <SV as WideMul>::Output: Copy + Zero + Send + Sync,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
     W: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
   {
@@ -1764,6 +1888,7 @@ where
     Us: &[R1CSInstance<E, X>],
     Ws: &[R1CSWitness<E, W>],
     small_abc: &SmallAbc<SV>,
+    cached_prefix_workspace: Option<&PrefixWorkspace<SV>>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut MultiRoundState<E>,
     vc_shape: &SplitMultiRoundR1CSShape<E>,
@@ -1777,6 +1902,7 @@ where
       + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
+    <SV as WideMul>::Output: Copy + Zero + Send + Sync,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
     W: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
   {
@@ -1804,20 +1930,39 @@ where
     let prefix_size = 1usize << l0;
     let (_workspace_span, workspace_t) =
       start_span!("nifs_prefix_workspace_build", instances = n_padded, l0);
-    let prefix_workspace = PrefixWorkspace::build(small_abc, l0, n_padded)?;
+    let built_prefix_workspace;
+    let prefix_workspace = match cached_prefix_workspace {
+      Some(prefix_workspace) => {
+        if prefix_workspace.l0 != l0
+          || prefix_workspace.prefix_size != prefix_size
+          || prefix_workspace.suffix_groups != n_padded / prefix_size
+          || prefix_workspace.num_constraints != S.num_cons
+        {
+          return Err(SpartanError::InvalidInputLength {
+            reason: "cached prefix workspace does not match accumulator prove shape".into(),
+          });
+        }
+        prefix_workspace
+      }
+      None => {
+        built_prefix_workspace = PrefixWorkspace::build(small_abc, l0, n_padded)?;
+        &built_prefix_workspace
+      }
+    };
     info!(
       elapsed_ms = %workspace_t.elapsed().as_millis(),
       instances = n_padded,
       l0,
       suffix_groups = prefix_workspace.suffix_groups,
       constraints = prefix_workspace.num_constraints,
+      cached = cached_prefix_workspace.is_some(),
       "nifs_prefix_workspace_build"
     );
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = l0);
     let (_polys, mut r_bs, mut T_cur, mut acc_eq, mut vc_commit_total) =
       Self::prove_neutronnova_small_value_sumcheck_prefix_workspace::<SV>(
-        &prefix_workspace,
+        prefix_workspace,
         &E_eq,
         left,
         right,
@@ -1836,18 +1981,20 @@ where
 
     let (_fold_prefix_span, fold_prefix_t) = start_span!("nifs_prefix_fold", rounds = l0);
     let prefix_weights = weights_from_r::<E::Scalar>(&r_bs, prefix_size);
+    let carry_c_layers = rayon::current_num_threads() <= 1;
     debug_assert_eq!(prefix_workspace.prefix_size, prefix_size);
     let (_fused_span, fused_t) = start_span!("nifs_prefix_fold_first_suffix_workspace");
-    let (mut a_layers, mut b_layers, mut c_vals, first_e0, first_quad_coeff) =
+    let (mut a_layers, mut b_layers, mut c_layers, mut c_vals, first_e0, first_quad_coeff) =
       Self::fold_prefix_workspace_and_first_suffix_round::<SV>(
         &prefix_weights,
-        &prefix_workspace,
+        prefix_workspace,
         l0,
         ell_b,
         left,
         right,
         &E_eq,
         &rhos,
+        carry_c_layers,
       );
     info!(
       elapsed_ms = %fused_t.elapsed().as_millis(),
@@ -1889,8 +2036,14 @@ where
 
         if l0 + 1 == ell_b {
           fold_final_ab_pairs::<E>(&mut a_layers, &mut b_layers, pairs, r_b);
+          if carry_c_layers {
+            fold_final_layer_pairs(&mut c_layers, pairs, r_b);
+          }
           a_layers.truncate(pairs);
           b_layers.truncate(pairs);
+          if carry_c_layers {
+            c_layers.truncate(pairs);
+          }
           finished_suffix = true;
         }
       }
@@ -1909,66 +2062,82 @@ where
             let (b_head, _) = b_layers.split_at_mut(4 * prove_pairs);
             let (c_head, _) = c_vals.split_at_mut(4 * prove_pairs);
 
-            let (e0_sum, qc_sum) = a_head
-              .par_chunks_mut(4)
-              .zip(b_head.par_chunks_mut(4))
-              .zip(c_head.par_chunks_mut(4))
-              .enumerate()
-              .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-                for chunk in [&mut *a_chunk, &mut *b_chunk] {
-                  {
-                    let (lo, hi) = chunk.split_at_mut(1);
-                    lo[0]
-                      .iter_mut()
-                      .zip(hi[0].iter())
-                      .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                  }
-                  {
-                    let (lo, hi) = chunk.split_at_mut(3);
-                    lo[2]
-                      .iter_mut()
-                      .zip(hi[0].iter())
-                      .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                  }
-                }
-
-                {
-                  let c0 = c_chunk[0];
-                  c_chunk[0] += prev_r_b * (c_chunk[1] - c0);
-                  let c2 = c_chunk[2];
-                  c_chunk[2] += prev_r_b * (c_chunk[3] - c2);
-                }
-
-                let (e0_ab, qc) = Self::compute_tensor_eq_ab_fold_extension_terms(
-                  (left, right),
-                  &E_eq,
-                  &a_chunk[0],
-                  &b_chunk[0],
-                  &a_chunk[2],
-                  &b_chunk[2],
-                );
-                let e0 = e0_ab - c_chunk[0];
-                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, &rhos);
-                (e0 * w, qc * w)
-              })
-              .reduce(
-                || (E::Scalar::ZERO, E::Scalar::ZERO),
-                |a, b| (a.0 + b.0, a.1 + b.1),
-              );
+            let (e0_sum, qc_sum) = if carry_c_layers {
+              let (c_layer_head, _) = c_layers.split_at_mut(4 * prove_pairs);
+              a_head
+                .par_chunks_mut(4)
+                .zip(b_head.par_chunks_mut(4))
+                .zip(c_layer_head.par_chunks_mut(4))
+                .zip(c_head.par_chunks_mut(4))
+                .enumerate()
+                .map(|(j, (((a_chunk, b_chunk), c_layer_chunk), c_chunk))| {
+                  fold_suffix_round_chunk::<E>(
+                    (left, right),
+                    &E_eq,
+                    t,
+                    ell_b,
+                    j,
+                    &rhos,
+                    prev_r_b,
+                    a_chunk,
+                    b_chunk,
+                    c_chunk,
+                    Some(c_layer_chunk),
+                  )
+                })
+                .reduce(
+                  || (E::Scalar::ZERO, E::Scalar::ZERO),
+                  |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+            } else {
+              a_head
+                .par_chunks_mut(4)
+                .zip(b_head.par_chunks_mut(4))
+                .zip(c_head.par_chunks_mut(4))
+                .enumerate()
+                .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
+                  fold_suffix_round_chunk::<E>(
+                    (left, right),
+                    &E_eq,
+                    t,
+                    ell_b,
+                    j,
+                    &rhos,
+                    prev_r_b,
+                    a_chunk,
+                    b_chunk,
+                    c_chunk,
+                    None,
+                  )
+                })
+                .reduce(
+                  || (E::Scalar::ZERO, E::Scalar::ZERO),
+                  |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+            };
             e0_acc += e0_sum;
             quad_acc += qc_sum;
 
             compact_folded_layers_ab::<E>(&mut a_layers, &mut b_layers, prove_pairs);
+            if carry_c_layers {
+              compact_folded_layers(&mut c_layers, prove_pairs);
+            }
             compact_folded_scalars::<E::Scalar>(&mut c_vals, prove_pairs);
           }
 
           for i in (2 * prove_pairs)..fold_pairs {
             fold_ab_pair_into::<E>(&mut a_layers, &mut b_layers, 2 * i, 2 * i + 1, i, prev_r_b);
+            if carry_c_layers {
+              fold_layer_pair_into(&mut c_layers, 2 * i, 2 * i + 1, i, prev_r_b);
+            }
             fold_scalar_pair_into(&mut c_vals, 2 * i, 2 * i + 1, i, prev_r_b);
           }
 
           a_layers.truncate(fold_pairs);
           b_layers.truncate(fold_pairs);
+          if carry_c_layers {
+            c_layers.truncate(fold_pairs);
+          }
           c_vals.truncate(fold_pairs);
           m = fold_pairs;
 
@@ -1993,9 +2162,15 @@ where
         let final_pairs = m / 2;
         if final_pairs > 0 {
           fold_final_ab_pairs::<E>(&mut a_layers, &mut b_layers, final_pairs, prev_r_b);
+          if carry_c_layers {
+            fold_final_layer_pairs(&mut c_layers, final_pairs, prev_r_b);
+          }
         }
         a_layers.truncate(final_pairs);
         b_layers.truncate(final_pairs);
+        if carry_c_layers {
+          c_layers.truncate(final_pairs);
+        }
       }
     }
     info!(
@@ -2016,14 +2191,20 @@ where
     let bz_folded = b_layers.pop().ok_or(SpartanError::InvalidInputLength {
       reason: "partial-l0 NIFS produced no folded B layer".into(),
     })?;
-    let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
     let (_final_c_span, final_c_t) = start_span!("nifs_final_c");
-    let cz_folded = fold_prefix_workspace_final_table::<E::Scalar, SV>(
-      &final_weights,
-      &prefix_workspace.c,
-      prefix_workspace.num_constraints,
-      prefix_workspace.prefix_size,
-    );
+    let cz_folded = if carry_c_layers {
+      c_layers.pop().ok_or(SpartanError::InvalidInputLength {
+        reason: "partial-l0 NIFS produced no folded C layer".into(),
+      })?
+    } else {
+      let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
+      fold_prefix_workspace_final_table::<E::Scalar, SV>(
+        &final_weights,
+        &prefix_workspace.c,
+        prefix_workspace.num_constraints,
+        prefix_workspace.prefix_size,
+      )
+    };
     info!(
       elapsed_ms = %final_c_t.elapsed().as_millis(),
       l0,
@@ -2069,6 +2250,7 @@ where
     Us: Vec<R1CSInstance<E, X>>,
     Ws: Vec<R1CSWitness<E, W>>,
     small_abc: &SmallAbc<SV>,
+    prefix_workspace: Option<&PrefixWorkspace<SV>>,
     extended_mle_evals: Option<&ExtendedPrefixMleEvals<SV>>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut MultiRoundState<E>,
@@ -2083,6 +2265,7 @@ where
       + DelayedReduction<<SV as WideMul>::Output>
       + DelayedReduction<E::Scalar>,
     SV: ExtensionSmallValue,
+    <SV as WideMul>::Output: Copy + Zero + Send + Sync,
     X: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
     W: R1CSValue<E> + Serialize + for<'de> Deserialize<'de>,
   {
@@ -2103,7 +2286,18 @@ where
 
     if l0 < ell_b {
       Self::prove_accumulator_prefix_small::<SV, X, W>(
-        S, ck, &Us, &Ws, small_abc, vc, vc_state, vc_shape, vc_ck, transcript, l0,
+        S,
+        ck,
+        &Us,
+        &Ws,
+        small_abc,
+        prefix_workspace,
+        vc,
+        vc_state,
+        vc_shape,
+        vc_ck,
+        transcript,
+        l0,
       )
     } else {
       match extended_mle_evals {
@@ -2174,20 +2368,48 @@ impl<SV> SmallAbc<SV> {
 /// This keeps prefix slices contiguous for both accumulator construction and
 /// prefix folding without moving transcript-independent partial-`l0` work into
 /// prep.
-#[derive(Clone, Debug)]
-struct PrefixWorkspace<SV> {
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(bound(
+  serialize = "SV: Serialize, <SV as WideMul>::Output: Serialize",
+  deserialize = "SV: Deserialize<'de>, <SV as WideMul>::Output: Deserialize<'de>"
+))]
+struct PrefixWorkspace<SV: WideMul> {
   l0: usize,
   prefix_size: usize,
+  ext_size: usize,
   suffix_groups: usize,
   num_constraints: usize,
+  beta_indices: Vec<usize>,
   a: Vec<SV>,
   b: Vec<SV>,
   c: Vec<SV>,
+  ab_ext: Vec<<SV as WideMul>::Output>,
+}
+
+impl<SV> std::fmt::Debug for PrefixWorkspace<SV>
+where
+  SV: WideMul + std::fmt::Debug,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PrefixWorkspace")
+      .field("l0", &self.l0)
+      .field("prefix_size", &self.prefix_size)
+      .field("ext_size", &self.ext_size)
+      .field("suffix_groups", &self.suffix_groups)
+      .field("num_constraints", &self.num_constraints)
+      .field("beta_indices_len", &self.beta_indices.len())
+      .field("a_len", &self.a.len())
+      .field("b_len", &self.b.len())
+      .field("c_len", &self.c.len())
+      .field("ab_ext_len", &self.ab_ext.len())
+      .finish()
+  }
 }
 
 impl<SV> PrefixWorkspace<SV>
 where
-  SV: Copy + Default + Send + Sync,
+  SV: SmallValue,
+  <SV as WideMul>::Output: Copy + Zero + Send + Sync,
 {
   fn build(mle_inputs: &SmallAbc<SV>, l0: usize, n_padded: usize) -> Result<Self, SpartanError> {
     if mle_inputs.num_instances == 0 {
@@ -2246,14 +2468,23 @@ where
       },
     );
 
+    let ext_size = 3usize.pow(l0 as u32);
+    let beta_indices = beta_indices_with_infty(l0);
+    let ext_table_len = suffix_groups * num_constraints * beta_indices.len();
+    let mut ab_ext = vec![<SV as WideMul>::Output::zero(); ext_table_len];
+    Self::extend_prefix_product_table(&a, &b, &mut ab_ext, prefix_size, ext_size, &beta_indices);
+
     Ok(Self {
       l0,
       prefix_size,
+      ext_size,
       suffix_groups,
       num_constraints,
+      beta_indices,
       a,
       b,
       c,
+      ab_ext,
     })
   }
 
@@ -2285,6 +2516,126 @@ where
         }
       });
   }
+
+  fn extend_prefix_product_table(
+    a_source: &[SV],
+    b_source: &[SV],
+    dest: &mut [<SV as WideMul>::Output],
+    prefix_size: usize,
+    ext_size: usize,
+    beta_indices: &[usize],
+  ) {
+    let bit_rev = bit_rev_prefix_table(prefix_size.log_2());
+    dest
+      .par_chunks_mut(beta_indices.len())
+      .zip(a_source.par_chunks(prefix_size))
+      .zip(b_source.par_chunks(prefix_size))
+      .for_each_init(
+        || {
+          (
+            vec![SV::default(); prefix_size],
+            vec![SV::default(); prefix_size],
+            vec![SV::default(); ext_size],
+            vec![SV::default(); ext_size],
+            vec![SV::default(); ext_size],
+            vec![SV::default(); ext_size],
+          )
+        },
+        |(a_prefix, b_prefix, a_ext, a_scratch, b_ext, b_scratch),
+         ((dest_chunk, a_source_chunk), b_source_chunk)| {
+          for (p, &rev) in bit_rev.iter().enumerate() {
+            a_prefix[p] = a_source_chunk[rev];
+            b_prefix[p] = b_source_chunk[rev];
+          }
+          let a_produced = extend_to_lagrange_domain::<SV, 2>(a_prefix, a_ext, a_scratch);
+          let b_produced = extend_to_lagrange_domain::<SV, 2>(b_prefix, b_ext, b_scratch);
+          debug_assert_eq!(a_produced, ext_size);
+          debug_assert_eq!(b_produced, ext_size);
+          for (slot, &beta_idx) in beta_indices.iter().enumerate() {
+            dest_chunk[slot] = a_ext[beta_idx].wide_mul(b_ext[beta_idx]);
+          }
+        },
+      );
+  }
+}
+
+fn beta_indices_with_infty(l0: usize) -> Vec<usize> {
+  let base = 3usize;
+  let ext_size = base.pow(l0 as u32);
+  (0..ext_size)
+    .filter(|&idx| (0..l0).any(|d| (idx / base.pow(d as u32)) % base == 0))
+    .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_suffix_round_chunk<E: Engine>(
+  dims: (usize, usize),
+  e_eq: &[E::Scalar],
+  round: usize,
+  ell_b: usize,
+  pair_idx: usize,
+  rhos: &[E::Scalar],
+  prev_r_b: E::Scalar,
+  a_chunk: &mut [Vec<E::Scalar>],
+  b_chunk: &mut [Vec<E::Scalar>],
+  c_chunk: &mut [E::Scalar],
+  c_layer_chunk: Option<&mut [Vec<E::Scalar>]>,
+) -> (E::Scalar, E::Scalar)
+where
+  E::PCS: FoldingEngineTrait<E>,
+{
+  for chunk in [&mut *a_chunk, &mut *b_chunk] {
+    {
+      let (lo, hi) = chunk.split_at_mut(1);
+      lo[0]
+        .iter_mut()
+        .zip(hi[0].iter())
+        .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+    }
+    {
+      let (lo, hi) = chunk.split_at_mut(3);
+      lo[2]
+        .iter_mut()
+        .zip(hi[0].iter())
+        .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+    }
+  }
+
+  if let Some(c_layer_chunk) = c_layer_chunk {
+    {
+      let (lo, hi) = c_layer_chunk.split_at_mut(1);
+      lo[0]
+        .iter_mut()
+        .zip(hi[0].iter())
+        .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+    }
+    {
+      let (lo, hi) = c_layer_chunk.split_at_mut(3);
+      lo[2]
+        .iter_mut()
+        .zip(hi[0].iter())
+        .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+    }
+  }
+
+  {
+    let c0 = c_chunk[0];
+    c_chunk[0] += prev_r_b * (c_chunk[1] - c0);
+    let c2 = c_chunk[2];
+    c_chunk[2] += prev_r_b * (c_chunk[3] - c2);
+  }
+
+  let (e0_ab, qc) = NeutronNovaNIFS::<E>::compute_tensor_eq_ab_fold_extension_terms(
+    dims,
+    e_eq,
+    &a_chunk[0],
+    &b_chunk[0],
+    &a_chunk[2],
+    &b_chunk[2],
+  );
+  let e0 = e0_ab - c_chunk[0];
+  let w = suffix_weight_full::<E::Scalar>(round, ell_b, pair_idx, rhos);
+  (e0 * w, qc * w)
 }
 
 /// `Az` and `Bz` evaluations extended from `{0,1}^l0` to `U_2^l0`.
@@ -2426,26 +2777,83 @@ where
     .collect()
 }
 
-fn fold_prefix_workspace_value<F, SV>(
+fn multilinear_with_effective_halves<F>(values: Vec<F>) -> MultilinearPolynomial<F>
+where
+  F: Field,
+{
+  let half = values.len() / 2;
+  let lo_eff = effective_nonzero_prefix(&values[..half]);
+  let hi_eff = effective_nonzero_prefix(&values[half..]);
+  MultilinearPolynomial::new_with_halves(values, lo_eff, hi_eff)
+}
+
+fn effective_nonzero_prefix<F>(values: &[F]) -> usize
+where
+  F: Field,
+{
+  values
+    .iter()
+    .rposition(|value| !bool::from(value.is_zero()))
+    .map_or(0, |idx| idx + 1)
+}
+
+fn fold_prefix_workspace_pair_values<F, SV>(
   weights: &[F],
-  table: &[SV],
-  suffix_idx: usize,
+  prefix_workspace: &PrefixWorkspace<SV>,
+  lo_suffix: usize,
+  hi_suffix: usize,
   constraint_idx: usize,
   num_constraints: usize,
-) -> F
+) -> (F, F, F, F, F, F)
 where
   F: Field + DelayedReduction<SV>,
+  SV: WideMul,
 {
   let prefix_size = weights.len();
   debug_assert!(prefix_size > 0);
   debug_assert!(num_constraints > 0);
-  let start = (suffix_idx * num_constraints + constraint_idx) * prefix_size;
-  let prefix = &table[start..start + prefix_size];
-  let mut acc = <F as DelayedReduction<SV>>::Accumulator::zero();
-  for (weight, value) in weights.iter().zip(prefix.iter()) {
-    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc, weight, value);
+  debug_assert_eq!(prefix_workspace.num_constraints, num_constraints);
+  debug_assert_eq!(prefix_workspace.prefix_size, prefix_size);
+
+  let lo_start = (lo_suffix * num_constraints + constraint_idx) * prefix_size;
+  let hi_start = (hi_suffix * num_constraints + constraint_idx) * prefix_size;
+  let a_lo = &prefix_workspace.a[lo_start..lo_start + prefix_size];
+  let a_hi = &prefix_workspace.a[hi_start..hi_start + prefix_size];
+  let b_lo = &prefix_workspace.b[lo_start..lo_start + prefix_size];
+  let b_hi = &prefix_workspace.b[hi_start..hi_start + prefix_size];
+  let c_lo = &prefix_workspace.c[lo_start..lo_start + prefix_size];
+  let c_hi = &prefix_workspace.c[hi_start..hi_start + prefix_size];
+
+  let mut acc_a_lo = <F as DelayedReduction<SV>>::Accumulator::zero();
+  let mut acc_a_hi = <F as DelayedReduction<SV>>::Accumulator::zero();
+  let mut acc_b_lo = <F as DelayedReduction<SV>>::Accumulator::zero();
+  let mut acc_b_hi = <F as DelayedReduction<SV>>::Accumulator::zero();
+  let mut acc_c_lo = <F as DelayedReduction<SV>>::Accumulator::zero();
+  let mut acc_c_hi = <F as DelayedReduction<SV>>::Accumulator::zero();
+  for ((((((weight, a0), a1), b0), b1), c0), c1) in weights
+    .iter()
+    .zip(a_lo.iter())
+    .zip(a_hi.iter())
+    .zip(b_lo.iter())
+    .zip(b_hi.iter())
+    .zip(c_lo.iter())
+    .zip(c_hi.iter())
+  {
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_a_lo, weight, a0);
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_a_hi, weight, a1);
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_b_lo, weight, b0);
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_b_hi, weight, b1);
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_c_lo, weight, c0);
+    <F as DelayedReduction<SV>>::unreduced_multiply_accumulate(&mut acc_c_hi, weight, c1);
   }
-  <F as DelayedReduction<SV>>::reduce(&acc)
+  (
+    <F as DelayedReduction<SV>>::reduce(&acc_a_lo),
+    <F as DelayedReduction<SV>>::reduce(&acc_a_hi),
+    <F as DelayedReduction<SV>>::reduce(&acc_b_lo),
+    <F as DelayedReduction<SV>>::reduce(&acc_b_hi),
+    <F as DelayedReduction<SV>>::reduce(&acc_c_lo),
+    <F as DelayedReduction<SV>>::reduce(&acc_c_hi),
+  )
 }
 
 #[cfg(test)]
@@ -2596,11 +3004,14 @@ fn compact_folded_layers_ab<E: Engine>(
   b_layers: &mut [Vec<E::Scalar>],
   prove_pairs: usize,
 ) {
+  compact_folded_layers(a_layers, prove_pairs);
+  compact_folded_layers(b_layers, prove_pairs);
+}
+
+fn compact_folded_layers<F>(layers: &mut [Vec<F>], prove_pairs: usize) {
   for j in 0..prove_pairs {
-    a_layers.swap(2 * j, 4 * j);
-    a_layers.swap(2 * j + 1, 4 * j + 2);
-    b_layers.swap(2 * j, 4 * j);
-    b_layers.swap(2 * j + 1, 4 * j + 2);
+    layers.swap(2 * j, 4 * j);
+    layers.swap(2 * j + 1, 4 * j + 2);
   }
 }
 
@@ -2628,22 +3039,33 @@ fn fold_final_ab_pairs<E: Engine>(
   pairs: usize,
   r: E::Scalar,
 ) {
-  a_layers[..2 * pairs]
-    .par_chunks_mut(2)
-    .zip(b_layers[..2 * pairs].par_chunks_mut(2))
-    .for_each(|(a_chunk, b_chunk)| {
-      for chunk in [&mut *a_chunk, &mut *b_chunk] {
-        let (lo, hi) = chunk.split_at_mut(1);
-        lo[0]
-          .iter_mut()
-          .zip(hi[0].iter())
-          .for_each(|(l, h)| *l += r * (*h - *l));
-      }
-    });
+  fold_final_layer_pairs(a_layers, pairs, r);
+  fold_final_layer_pairs(b_layers, pairs, r);
+}
+
+fn fold_final_layer_pairs<F>(layers: &mut [Vec<F>], pairs: usize, r: F)
+where
+  F: Field + Send + Sync,
+{
+  if pairs == 1 {
+    let (lo, hi) = layers.split_at_mut(1);
+    lo[0]
+      .par_iter_mut()
+      .zip(hi[0].par_iter())
+      .for_each(|(l, h)| *l += r * (*h - *l));
+    return;
+  }
+
+  layers[..2 * pairs].par_chunks_mut(2).for_each(|chunk| {
+    let (lo, hi) = chunk.split_at_mut(1);
+    lo[0]
+      .iter_mut()
+      .zip(hi[0].iter())
+      .for_each(|(l, h)| *l += r * (*h - *l));
+  });
 
   for i in 0..pairs {
-    a_layers.swap(i, 2 * i);
-    b_layers.swap(i, 2 * i);
+    layers.swap(i, 2 * i);
   }
 }
 

@@ -32,8 +32,8 @@ mod thread_state;
 pub(crate) use accumulator::LagrangeAccumulators;
 pub(crate) use accumulator_builder::{
   SPARTAN_T_DEGREE, build_accumulators_neutronnova,
-  build_accumulators_neutronnova_from_prefix_workspace, build_accumulators_neutronnova_preextended,
-  build_accumulators_spartan,
+  build_accumulators_neutronnova_from_prefix_ext_workspace,
+  build_accumulators_neutronnova_preextended, build_accumulators_spartan,
 };
 pub(crate) use basis::{
   LagrangeBasisFactory, LagrangeCoeff, LagrangeDomainEvals, ReducedLagrangeDomainEvals,

@@ -683,6 +683,214 @@ where
   result
 }
 
+/// Builds NeutronNova accumulators from preextended prefix workspace values.
+///
+/// This is the same accumulator construction as
+/// [`build_accumulators_neutronnova_from_prefix_workspace`], but the expensive
+/// boolean-to-`U_2` prefix extension has already happened in prep. The tables
+/// are laid out as `suffix_group -> constraint -> beta_values`, where
+/// `beta_indices` maps each stored slot back into the full `U_2^l0` domain.
+pub(crate) fn build_accumulators_neutronnova_from_prefix_ext_workspace<F, P>(
+  ab_ext_prefixes: &[P],
+  beta_indices: &[usize],
+  num_constraints: usize,
+  suffix_groups: usize,
+  e_eq: &[F],
+  left: usize,
+  right: usize,
+  rhos: &[F],
+  l0: usize,
+) -> LagrangeAccumulators<F, 2>
+where
+  F: PrimeField + DelayedReduction<P> + DelayedReduction<F>,
+  P: Sync,
+{
+  assert!(l0 > 0, "prefix workspace requires l0 > 0");
+  let ell_b = rhos.len();
+  assert!(
+    l0 <= ell_b,
+    "prefix workspace requires l0 <= ell_b. Got l0={}, ell_b={}",
+    l0,
+    ell_b
+  );
+  assert_eq!(
+    num_constraints,
+    left * right,
+    "prefix workspace constraint count must match tensor shape"
+  );
+  assert_eq!(
+    ab_ext_prefixes.len(),
+    suffix_groups * num_constraints * beta_indices.len(),
+    "preextended prefix workspace has unexpected length"
+  );
+  assert_eq!(
+    suffix_groups,
+    1usize << (ell_b - l0),
+    "prefix workspace suffix groups must match rhos/l0"
+  );
+  debug_assert_eq!(e_eq.len(), left + right, "E_eq length mismatch");
+
+  let (_setup_span, setup_t) = start_span!("build_accumulators_neutronnova_workspace_setup");
+  let base: usize = 3;
+  let num_betas = base.pow(l0 as u32);
+  let e_b = compute_suffix_eq_pyramid(rhos, l0);
+  let suffix_weights = weights_from_r(&rhos[l0..], suffix_groups);
+
+  let e_left = &e_eq[..left];
+  let e_right = &e_eq[left..];
+  let swap_loops = left > right;
+  let outer_dim = if swap_loops { left } else { right };
+  let (e_outer, e_inner) = if swap_loops {
+    (e_left, e_right)
+  } else {
+    (e_right, e_left)
+  };
+
+  let e_cache: Vec<Vec<F>> = e_b
+    .iter()
+    .map(|round_ey| {
+      e_outer
+        .iter()
+        .flat_map(|eo| round_ey.iter().map(|ey| *eo * *ey))
+        .collect()
+    })
+    .collect();
+  let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
+  let BetaPrefixCache {
+    cache: beta_prefix_cache,
+    num_betas: cached_num_betas,
+  } = build_beta_cache::<2>(l0);
+  debug_assert_eq!(cached_num_betas, num_betas);
+  info!(
+    elapsed_ms = %setup_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    suffix_groups,
+    outer_dim,
+    num_betas = beta_indices.len(),
+    "build_accumulators_neutronnova_workspace_setup"
+  );
+
+  struct ProductState<F2, P2>
+  where
+    F2: PrimeField + DelayedReduction<P2> + DelayedReduction<F2>,
+  {
+    partial_sums: Vec<<F2 as DelayedReduction<P2>>::Accumulator>,
+    acc: LagrangeAccumulators<<F2 as DelayedReduction<F2>>::Accumulator, 2>,
+    beta_values: Vec<(usize, F2)>,
+  }
+
+  impl<F2, P2> ProductState<F2, P2>
+  where
+    F2: PrimeField + DelayedReduction<P2> + DelayedReduction<F2>,
+  {
+    fn new(l0: usize, num_betas: usize) -> Self {
+      Self {
+        partial_sums: vec![<F2 as DelayedReduction<P2>>::Accumulator::zero(); num_betas],
+        acc: LagrangeAccumulators::new(l0),
+        beta_values: Vec::with_capacity(num_betas),
+      }
+    }
+
+    fn reset_partial_sums(&mut self) {
+      for sum in &mut self.partial_sums {
+        *sum = <F2 as DelayedReduction<P2>>::Accumulator::zero();
+      }
+      self.beta_values.clear();
+    }
+  }
+
+  let (_main_span, main_t) = start_span!("build_accumulators_neutronnova_workspace_main");
+  let beta_count = beta_indices.len();
+  let process_outer = |state: &mut ProductState<F, P>, x_outer: usize| {
+    state.reset_partial_sums();
+
+    for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
+      let idx = if swap_loops {
+        x_inner * left + x_outer
+      } else {
+        x_outer * left + x_inner
+      };
+
+      for (suffix_idx, &suffix_weight) in suffix_weights.iter().enumerate() {
+        let row_start = (suffix_idx * num_constraints + idx) * beta_count;
+        let ab_ext = &ab_ext_prefixes[row_start..row_start + beta_count];
+        let weighted_inner = e_inner_val * suffix_weight;
+
+        for (slot, &beta_idx) in beta_indices.iter().enumerate() {
+          <F as DelayedReduction<P>>::unreduced_multiply_accumulate(
+            &mut state.partial_sums[beta_idx],
+            &weighted_inner,
+            &ab_ext[slot],
+          );
+        }
+      }
+    }
+
+    for &beta_idx in beta_indices {
+      let unreduced = &state.partial_sums[beta_idx];
+      if unreduced.is_zero() {
+        continue;
+      }
+      let val = <F as DelayedReduction<P>>::reduce(unreduced);
+      if val != F::ZERO {
+        state.beta_values.push((beta_idx, val));
+      }
+    }
+
+    for &(beta_idx, ref val) in &state.beta_values {
+      for pref in &beta_prefix_cache[beta_idx] {
+        let round = pref.round_0 as usize;
+        let num_y = num_y_per_round[round];
+        let e_val = e_cache[round][x_outer * num_y + pref.y_idx as usize];
+        <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
+          &mut state.acc.rounds[round].data_mut()[pref.v_idx as usize][pref.u_idx as usize],
+          val,
+          &e_val,
+        );
+      }
+    }
+  };
+
+  let result = if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
+    let mut state = ProductState::<F, P>::new(l0, num_betas);
+    for x_outer in 0..outer_dim {
+      process_outer(&mut state, x_outer);
+    }
+    state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  } else {
+    let fold_results: Vec<ProductState<F, P>> = (0..outer_dim)
+      .into_par_iter()
+      .fold(
+        || ProductState::<F, P>::new(l0, num_betas),
+        |mut state: ProductState<F, P>, x_outer| {
+          process_outer(&mut state, x_outer);
+          state
+        },
+      )
+      .collect();
+
+    fold_results
+      .into_iter()
+      .reduce(|mut a, b| {
+        a.acc.merge(&b.acc);
+        a
+      })
+      .expect("outer_dim > 0 guarantees non-empty fold results")
+      .acc
+      .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  };
+  info!(
+    elapsed_ms = %main_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    outer_dim,
+    suffix_groups,
+    "build_accumulators_neutronnova_workspace_main"
+  );
+  result
+}
+
 pub(crate) fn build_accumulators_neutronnova_preextended<F, SV>(
   a_ext_by_constraint: &[SV],
   b_ext_by_constraint: &[SV],
