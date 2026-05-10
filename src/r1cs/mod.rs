@@ -215,6 +215,269 @@ fn weights_from_r_slow<F: Field>(r_bs: &[F], n: usize) -> Vec<F> {
     .collect()
 }
 
+const CSC_COL_CHUNK: usize = 7000;
+
+pub(crate) trait CscCoeff<F: PrimeField>: Copy + Send + Sync {
+  fn is_positive_unit(&self) -> bool;
+  fn mul_field_val(&self, x: &F) -> F;
+  fn single_entry_mul(&self, rx_val: F) -> F;
+}
+
+impl<F: PrimeField> CscCoeff<F> for F {
+  #[inline(always)]
+  fn is_positive_unit(&self) -> bool {
+    *self == F::ONE
+  }
+
+  #[inline(always)]
+  fn mul_field_val(&self, x: &F) -> F {
+    *x * *self
+  }
+
+  #[inline(always)]
+  fn single_entry_mul(&self, rx_val: F) -> F {
+    if *self == F::ONE {
+      rx_val
+    } else if *self == -F::ONE {
+      -rx_val
+    } else {
+      rx_val * *self
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ColumnRemapData<F> {
+  dense_to_col: Vec<u32>,
+  col_to_dense: Vec<u32>,
+  a_csc_col_ptr: Vec<usize>,
+  a_csc_row: Vec<u32>,
+  a_csc_data: Vec<F>,
+  a_csc_unit_end: Vec<usize>,
+  b_csc_col_ptr: Vec<usize>,
+  b_csc_row: Vec<u32>,
+  b_csc_data: Vec<F>,
+  b_csc_unit_end: Vec<usize>,
+  c_csc_col_ptr: Vec<usize>,
+  c_csc_row: Vec<u32>,
+  c_csc_data: Vec<F>,
+  c_csc_unit_end: Vec<usize>,
+  col_presence: Vec<u8>,
+}
+
+fn build_csc<F: PrimeField>(
+  matrix: &SparseMatrix<F>,
+  dense_col: &[u32],
+  num_rows: usize,
+  num_dense_cols: usize,
+  is_unit: impl Fn(&F) -> bool,
+) -> (Vec<usize>, Vec<u32>, Vec<F>, Vec<usize>) {
+  let mut col_count = vec![0usize; num_dense_cols];
+  for row in 0..num_rows {
+    for i in matrix.indptr[row]..matrix.indptr[row + 1] {
+      col_count[dense_col[i] as usize] += 1;
+    }
+  }
+
+  let mut col_ptr = Vec::with_capacity(num_dense_cols + 1);
+  col_ptr.push(0);
+  for count in col_count {
+    col_ptr.push(col_ptr.last().copied().unwrap() + count);
+  }
+
+  let total = col_ptr.last().copied().unwrap_or(0);
+  let mut row_indices = vec![0u32; total];
+  let mut values = vec![F::ZERO; total];
+  let mut write_pos = col_ptr[..num_dense_cols].to_vec();
+
+  for row in 0..num_rows {
+    for i in matrix.indptr[row]..matrix.indptr[row + 1] {
+      let c = dense_col[i] as usize;
+      let v = matrix.data[i];
+      if is_unit(&v) {
+        let pos = write_pos[c];
+        row_indices[pos] = row as u32;
+        values[pos] = v;
+        write_pos[c] = pos + 1;
+      }
+    }
+  }
+
+  let unit_ends = write_pos.clone();
+
+  for row in 0..num_rows {
+    for i in matrix.indptr[row]..matrix.indptr[row + 1] {
+      let c = dense_col[i] as usize;
+      let v = matrix.data[i];
+      if !is_unit(&v) {
+        let pos = write_pos[c];
+        row_indices[pos] = row as u32;
+        values[pos] = v;
+        write_pos[c] = pos + 1;
+      }
+    }
+  }
+
+  (col_ptr, row_indices, values, unit_ends)
+}
+
+fn build_column_remap_and_csc<F: PrimeField>(
+  a: &SparseMatrix<F>,
+  b: &SparseMatrix<F>,
+  c: &SparseMatrix<F>,
+  num_buf_cols: usize,
+  num_cons: usize,
+  is_unit: impl Fn(&F) -> bool + Copy,
+) -> ColumnRemapData<F> {
+  let mut touched = vec![false; num_buf_cols];
+  for &col in a
+    .indices
+    .iter()
+    .chain(b.indices.iter())
+    .chain(c.indices.iter())
+  {
+    if col < num_buf_cols {
+      touched[col] = true;
+    }
+  }
+
+  let mut dense_to_col = Vec::new();
+  let mut col_to_dense = vec![u32::MAX; num_buf_cols];
+  for (col, &is_touched) in touched.iter().enumerate() {
+    if is_touched {
+      col_to_dense[col] = dense_to_col.len() as u32;
+      dense_to_col.push(col as u32);
+    }
+  }
+
+  let a_dense_col = a
+    .indices
+    .iter()
+    .map(|&ci| col_to_dense[ci])
+    .collect::<Vec<_>>();
+  let b_dense_col = b
+    .indices
+    .iter()
+    .map(|&ci| col_to_dense[ci])
+    .collect::<Vec<_>>();
+  let c_dense_col = c
+    .indices
+    .iter()
+    .map(|&ci| col_to_dense[ci])
+    .collect::<Vec<_>>();
+
+  let num_dense = dense_to_col.len();
+  let (a_csc_col_ptr, a_csc_row, a_csc_data, a_csc_unit_end) =
+    build_csc(a, &a_dense_col, num_cons, num_dense, is_unit);
+  let (b_csc_col_ptr, b_csc_row, b_csc_data, b_csc_unit_end) =
+    build_csc(b, &b_dense_col, num_cons, num_dense, is_unit);
+  let (c_csc_col_ptr, c_csc_row, c_csc_data, c_csc_unit_end) =
+    build_csc(c, &c_dense_col, num_cons, num_dense, is_unit);
+
+  let col_presence = (0..num_dense)
+    .map(|ci| {
+      let a_bit = (a_csc_col_ptr[ci + 1] > a_csc_col_ptr[ci]) as u8;
+      let b_bit = (b_csc_col_ptr[ci + 1] > b_csc_col_ptr[ci]) as u8 * 2;
+      let c_bit = (c_csc_col_ptr[ci + 1] > c_csc_col_ptr[ci]) as u8 * 4;
+      a_bit | b_bit | c_bit
+    })
+    .collect();
+
+  ColumnRemapData {
+    dense_to_col,
+    col_to_dense,
+    a_csc_col_ptr,
+    a_csc_row,
+    a_csc_data,
+    a_csc_unit_end,
+    b_csc_col_ptr,
+    b_csc_row,
+    b_csc_data,
+    b_csc_unit_end,
+    c_csc_col_ptr,
+    c_csc_row,
+    c_csc_data,
+    c_csc_unit_end,
+    col_presence,
+  }
+}
+
+#[inline(always)]
+fn accumulate_column<F: PrimeField, V: CscCoeff<F>>(
+  rx_vals: &[F],
+  col_ptr: &[usize],
+  row_indices: &[u32],
+  values: &[V],
+  unit_ends: &[usize],
+  c: usize,
+) -> F {
+  let start = col_ptr[c];
+  let end = col_ptr[c + 1];
+
+  if start + 1 == end {
+    let rx_val = rx_vals[row_indices[start] as usize];
+    return values[start].single_entry_mul(rx_val);
+  }
+
+  let unit_end = unit_ends[c];
+  let mut acc = F::ZERO;
+  for j in start..unit_end {
+    let row = row_indices[j] as usize;
+    if values[j].is_positive_unit() {
+      acc += rx_vals[row];
+    } else {
+      acc -= rx_vals[row];
+    }
+  }
+  for j in unit_end..end {
+    acc += values[j].mul_field_val(&rx_vals[row_indices[j] as usize]);
+  }
+  acc
+}
+
+#[inline(always)]
+fn dispatch_abc_columns<F: PrimeField, V: CscCoeff<F>>(
+  chunk: &mut [F],
+  col_start: usize,
+  col_presence: &[u8],
+  r: F,
+  r2: F,
+  rx: &[F],
+  a: (&[usize], &[u32], &[V], &[usize]),
+  b: (&[usize], &[u32], &[V], &[usize]),
+  c: (&[usize], &[u32], &[V], &[usize]),
+) {
+  for (i, slot) in chunk.iter_mut().enumerate() {
+    let col = col_start + i;
+    macro_rules! acc_a {
+      () => {
+        accumulate_column(rx, a.0, a.1, a.2, a.3, col)
+      };
+    }
+    macro_rules! acc_b {
+      () => {
+        accumulate_column(rx, b.0, b.1, b.2, b.3, col)
+      };
+    }
+    macro_rules! acc_c {
+      () => {
+        accumulate_column(rx, c.0, c.1, c.2, c.3, col)
+      };
+    }
+
+    *slot = match col_presence[col] {
+      0 => F::ZERO,
+      1 => acc_a!(),
+      2 => r * acc_b!(),
+      3 => acc_a!() + r * acc_b!(),
+      4 => r2 * acc_c!(),
+      5 => acc_a!() + r2 * acc_c!(),
+      6 => r * acc_b!() + r2 * acc_c!(),
+      _ => acc_a!() + r * acc_b!() + r2 * acc_c!(),
+    };
+  }
+}
+
 #[inline]
 pub(crate) fn weights_from_r<F: PrimeField>(r_bs: &[F], n: usize) -> Vec<F> {
   if n == 0 {
@@ -1119,6 +1382,8 @@ pub struct SplitR1CSShape<E: Engine, Coeff = <E as Engine>::Scalar> {
   pub(crate) filtered_B: OnceCell<FilteredSpmv<E::Scalar>>,
   #[serde(skip, default = "OnceCell::new")]
   pub(crate) filtered_C: OnceCell<FilteredSpmv<E::Scalar>>,
+  #[serde(skip, default = "OnceCell::new")]
+  pub(crate) abc_csc: OnceCell<ColumnRemapData<E::Scalar>>,
 }
 
 impl<E: Engine> crate::digest::Digestible for SplitR1CSShape<E> {
@@ -1256,6 +1521,7 @@ impl<E: Engine> SplitR1CSShape<E> {
       filtered_A: OnceCell::new(),
       filtered_B: OnceCell::new(),
       filtered_C: OnceCell::new(),
+      abc_csc: OnceCell::new(),
     })
   }
 
@@ -1320,6 +1586,9 @@ impl<E: Engine> SplitR1CSShape<E> {
       move_public_vars(&mut S_B.B, orig_cons_b, num_vars);
       move_public_vars(&mut S_B.C, orig_cons_b, num_vars);
     }
+
+    S_A.abc_csc = OnceCell::new();
+    S_B.abc_csc = OnceCell::new();
   }
 
   pub fn to_regular_shape(&self) -> R1CSShape<E> {
@@ -1419,6 +1688,14 @@ impl<E: Engine> SplitR1CSShape<E> {
     self
       .filtered_C
       .get_or_init(|| self.precomp_C.get().unwrap().build_filtered(col_min, nr));
+  }
+
+  /// Eagerly build the CSC/remapped cache used by full-size sparse binding.
+  /// NeutronNova uses this full binding path during prove; warming it during
+  /// setup keeps shape-only work out of transcript-dependent phase timings.
+  pub fn precompute_full_binding(&self) {
+    let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
+    self.ensure_abc_csc(num_vars * 2);
   }
 
   pub fn multiply_vec(
@@ -1606,7 +1883,7 @@ impl<E: Engine> SplitR1CSShape<E> {
     r: &E::Scalar,
   ) -> (Vec<E::Scalar>, usize, usize) {
     let num_vars = self.num_shared + self.num_precommitted + self.num_rest;
-    let vec = self.bind_and_prepare_poly_ABC_inner(rx, r, num_vars * 2);
+    let vec = self.bind_and_prepare_poly_ABC_full_csc(rx, r, num_vars * 2);
     // Variable layout in z: [shared|precommitted|rest|u|X|zeros]
     // Sections start at padded boundaries: shared at 0, precommitted at num_shared,
     // rest at num_shared+num_precommitted. Only unpadded vars within each section
@@ -1620,6 +1897,109 @@ impl<E: Engine> SplitR1CSShape<E> {
     };
     let hi_eff = 1 + self.num_public + self.num_challenges; // u + public inputs + challenges
     (vec, lo_eff, hi_eff)
+  }
+
+  fn ensure_abc_csc(&self, out_len: usize) -> &ColumnRemapData<E::Scalar> {
+    self.abc_csc.get_or_init(|| {
+      build_column_remap_and_csc(
+        &self.A,
+        &self.B,
+        &self.C,
+        out_len,
+        self.num_cons_unpadded,
+        |v| *v == E::Scalar::ONE || *v == -E::Scalar::ONE,
+      )
+    })
+  }
+
+  fn bind_and_prepare_poly_ABC_full_csc(
+    &self,
+    rx: &[E::Scalar],
+    r: &E::Scalar,
+    out_len: usize,
+  ) -> Vec<E::Scalar> {
+    assert_eq!(rx.len(), self.num_cons);
+
+    let csc = self.ensure_abc_csc(out_len);
+    let num_dense = csc.dense_to_col.len();
+    if num_dense == 0 {
+      return vec![E::Scalar::ZERO; out_len];
+    }
+
+    let r2 = *r * *r;
+    let col_chunk = CSC_COL_CHUNK.min(num_dense);
+    let mut compact = vec![E::Scalar::ZERO; num_dense];
+
+    if rayon::current_num_threads() <= 1 {
+      for (chunk_idx, chunk) in compact.chunks_mut(col_chunk).enumerate() {
+        let col_start = chunk_idx * col_chunk;
+        dispatch_abc_columns(
+          chunk,
+          col_start,
+          &csc.col_presence,
+          *r,
+          r2,
+          rx,
+          (
+            &csc.a_csc_col_ptr,
+            &csc.a_csc_row,
+            &csc.a_csc_data,
+            &csc.a_csc_unit_end,
+          ),
+          (
+            &csc.b_csc_col_ptr,
+            &csc.b_csc_row,
+            &csc.b_csc_data,
+            &csc.b_csc_unit_end,
+          ),
+          (
+            &csc.c_csc_col_ptr,
+            &csc.c_csc_row,
+            &csc.c_csc_data,
+            &csc.c_csc_unit_end,
+          ),
+        );
+      }
+    } else {
+      compact
+        .par_chunks_mut(col_chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+          let col_start = chunk_idx * col_chunk;
+          dispatch_abc_columns(
+            chunk,
+            col_start,
+            &csc.col_presence,
+            *r,
+            r2,
+            rx,
+            (
+              &csc.a_csc_col_ptr,
+              &csc.a_csc_row,
+              &csc.a_csc_data,
+              &csc.a_csc_unit_end,
+            ),
+            (
+              &csc.b_csc_col_ptr,
+              &csc.b_csc_row,
+              &csc.b_csc_data,
+              &csc.b_csc_unit_end,
+            ),
+            (
+              &csc.c_csc_col_ptr,
+              &csc.c_csc_row,
+              &csc.c_csc_data,
+              &csc.c_csc_unit_end,
+            ),
+          );
+        });
+    }
+
+    let mut result = vec![E::Scalar::ZERO; out_len];
+    for (dense_idx, &orig_col) in csc.dense_to_col.iter().enumerate() {
+      result[orig_col as usize] = compact[dense_idx];
+    }
+    result
   }
 
   fn bind_and_prepare_poly_ABC_inner(
@@ -1751,6 +2131,135 @@ impl<E: Engine> SplitR1CSShape<E> {
   }
 }
 
+#[cfg(test)]
+mod tests_split_csc_binding {
+  use super::*;
+  use crate::provider::T256HyraxEngine;
+
+  type E = T256HyraxEngine;
+  type Scalar = <E as Engine>::Scalar;
+
+  fn scalar(v: u64) -> Scalar {
+    Scalar::from(v)
+  }
+
+  fn fixture_shape(
+    num_cons: usize,
+    num_shared: usize,
+    num_precommitted: usize,
+    num_rest: usize,
+    num_public: usize,
+    num_challenges: usize,
+  ) -> SplitR1CSShape<E> {
+    assert!(num_shared > 0);
+    assert!(num_precommitted > 0);
+    assert!(num_rest > 0);
+    assert!(num_public > 0);
+    assert!(num_challenges > 0);
+
+    let num_vars = num_shared + num_precommitted + num_rest;
+    let u_col = num_vars;
+    let public_col = num_vars + 1;
+    let challenge_col = num_vars + 1 + num_public;
+    let rows = num_cons;
+    let cols = num_vars + 1 + num_public + num_challenges;
+
+    let mut a_entries = Vec::new();
+    let mut b_entries = Vec::new();
+    let mut c_entries = Vec::new();
+
+    for row in 0..num_cons {
+      let shared_col = row % num_shared;
+      let precommitted_col = num_shared + (row % num_precommitted);
+      let rest_col = num_shared + num_precommitted + (row % num_rest);
+
+      a_entries.push((row, shared_col, Scalar::ONE));
+      a_entries.push((row, rest_col, scalar(3)));
+      a_entries.push((row, public_col, -Scalar::ONE));
+
+      b_entries.push((row, precommitted_col, Scalar::ONE));
+      b_entries.push((row, u_col, Scalar::ONE));
+
+      c_entries.push((row, shared_col, -Scalar::ONE));
+      c_entries.push((row, challenge_col, scalar(5)));
+    }
+
+    SplitR1CSShape::<E>::new(
+      num_cons,
+      num_shared,
+      num_precommitted,
+      num_rest,
+      num_public,
+      num_challenges,
+      SparseMatrix::new(&a_entries, rows, cols),
+      SparseMatrix::new(&b_entries, rows, cols),
+      SparseMatrix::new(&c_entries, rows, cols),
+    )
+    .unwrap()
+  }
+
+  fn rx_for(shape: &SplitR1CSShape<E>) -> Vec<Scalar> {
+    (0..shape.num_cons)
+      .map(|i| scalar((i as u64) + 2))
+      .collect()
+  }
+
+  fn assert_csc_matches_row_major(shape: &SplitR1CSShape<E>) {
+    let rx = rx_for(shape);
+    let r = scalar(11);
+    let num_vars = shape.num_shared + shape.num_precommitted + shape.num_rest;
+    let row_major = shape.bind_and_prepare_poly_ABC_inner(&rx, &r, num_vars * 2);
+    let (csc, lo_eff, hi_eff) = shape.bind_and_prepare_poly_ABC_full(&rx, &r);
+
+    assert_eq!(csc, row_major);
+    assert!(lo_eff <= num_vars);
+    assert_eq!(hi_eff, 1 + shape.num_public + shape.num_challenges);
+  }
+
+  #[test]
+  fn csc_binding_matches_row_major_for_split_shape() {
+    let shape = fixture_shape(4, 3, 2, 5, 2, 1);
+    assert_csc_matches_row_major(&shape);
+  }
+
+  #[test]
+  fn csc_binding_matches_row_major_with_padding_and_zero_columns() {
+    let shape = fixture_shape(3, 1, 1, 1, 1, 1);
+    let rx = rx_for(&shape);
+    let r = scalar(13);
+    let (csc, _, _) = shape.bind_and_prepare_poly_ABC_full(&rx, &r);
+    let num_vars = shape.num_shared + shape.num_precommitted + shape.num_rest;
+    let row_major = shape.bind_and_prepare_poly_ABC_inner(&rx, &r, num_vars * 2);
+    assert_eq!(csc, row_major);
+
+    let cache = shape.abc_csc.get().expect("CSC cache should be built");
+    let mut touched = vec![false; csc.len()];
+    for &col in &cache.dense_to_col {
+      touched[col as usize] = true;
+    }
+    assert!(touched.iter().any(|&is_touched| !is_touched));
+    for (value, is_touched) in csc.iter().zip(touched) {
+      if !is_touched {
+        assert_eq!(*value, Scalar::ZERO);
+      }
+    }
+  }
+
+  #[test]
+  fn csc_binding_matches_row_major_after_equalize() {
+    let mut a = fixture_shape(3, 2, 1, 2, 1, 1);
+    let mut b = fixture_shape(5, 4, 2, 3, 2, 1);
+
+    let _ = a.bind_and_prepare_poly_ABC_full(&rx_for(&a), &scalar(7));
+    let _ = b.bind_and_prepare_poly_ABC_full(&rx_for(&b), &scalar(7));
+
+    SplitR1CSShape::<E>::equalize(&mut a, &mut b);
+
+    assert_csc_matches_row_major(&a);
+    assert_csc_matches_row_major(&b);
+  }
+}
+
 impl<E: Engine, Coeff> SplitR1CSShape<E, Coeff>
 where
   Coeff: SmallCoeff,
@@ -1835,6 +2344,7 @@ where
       filtered_A: OnceCell::new(),
       filtered_B: OnceCell::new(),
       filtered_C: OnceCell::new(),
+      abc_csc: OnceCell::new(),
     })
   }
 
@@ -1912,6 +2422,7 @@ where
       filtered_A: OnceCell::new(),
       filtered_B: OnceCell::new(),
       filtered_C: OnceCell::new(),
+      abc_csc: OnceCell::new(),
     }
   }
 

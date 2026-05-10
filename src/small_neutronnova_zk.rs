@@ -51,7 +51,7 @@ use ff::Field;
 use num_traits::Zero;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, marker::PhantomData, ops::AddAssign};
+use std::{borrow::Cow, marker::PhantomData, ops::AddAssign, time::Duration};
 use tracing::info;
 
 /// Pre-processed state for the accumulator/l0 NIFS proving path.
@@ -1143,6 +1143,7 @@ where
       Vec<E::Scalar>,
       E::Scalar,
       E::Scalar,
+      Duration,
     ),
     SpartanError,
   >
@@ -1161,6 +1162,7 @@ where
     let mut r_bs = Vec::with_capacity(l0);
     let mut T_cur = E::Scalar::ZERO;
     let mut acc_eq = E::Scalar::ONE;
+    let num_constraints = a_layers.first().map_or(0, |layer| layer.as_ref().len());
 
     let (_acc_span, acc_t) = start_span!("build_accumulators_neutronnova");
     let accumulators = if let Some((a_ext, b_ext)) = preextended_ab
@@ -1170,12 +1172,29 @@ where
     } else {
       build_accumulators_neutronnova(a_layers, b_layers, e_eq, left, right, rhos, l0)
     };
+    let acc_elapsed = acc_t.elapsed();
     info!(
-      elapsed_ms = %acc_t.elapsed().as_millis(),
+      elapsed_ms = %acc_elapsed.as_millis(),
+      l0,
+      ell_b,
+      instances = a_layers.len(),
+      constraints = num_constraints,
+      threads = rayon::current_num_threads(),
       "build_accumulators_neutronnova"
+    );
+    info!(
+      elapsed_ms = %acc_elapsed.as_millis(),
+      l0,
+      ell_b,
+      instances = a_layers.len(),
+      constraints = num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_build_acc"
     );
 
     let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let (_first_l0_span, first_l0_t) = start_span!("nifs_first_l0_rounds", rounds = l0);
+    let mut vc_commit_total = Duration::default();
     for (i, rho_i) in rhos.iter().take(l0).enumerate() {
       let (_round_span, round_t) = start_span!("nifs_smallvalue_round", round = i);
       let t_all = small_value.eval_t_all_u(i);
@@ -1192,7 +1211,9 @@ where
       let (_vc_span, vc_t) = start_span!("vc_commit");
       let chals =
         SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, i, transcript)?;
-      info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
+      let vc_elapsed = vc_t.elapsed();
+      vc_commit_total += vc_elapsed;
+      info!(elapsed_ms = %vc_elapsed.as_millis(), round = i, "vc_commit");
       let r_i = chals[0];
 
       T_cur = poly.evaluate(&r_i);
@@ -1202,13 +1223,23 @@ where
       small_value.advance(&li, r_i);
 
       info!(
-        elapsed_ms = %round_t.elapsed().as_millis(),
-        round = i,
+      elapsed_ms = %round_t.elapsed().as_millis(),
+      round = i,
         "nifs_smallvalue_round"
       );
     }
+    info!(
+      elapsed_ms = %first_l0_t.elapsed().as_millis(),
+      rounds = l0,
+      l0,
+      ell_b,
+      instances = a_layers.len(),
+      constraints = num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_first_l0_rounds"
+    );
 
-    Ok((polys, r_bs, T_cur, acc_eq))
+    Ok((polys, r_bs, T_cur, acc_eq, vc_commit_total))
   }
 
   fn prove_neutronnova_small_value_sumcheck_prefix_workspace<SV>(
@@ -1228,6 +1259,7 @@ where
       Vec<E::Scalar>,
       E::Scalar,
       E::Scalar,
+      Duration,
     ),
     SpartanError,
   >
@@ -1258,12 +1290,29 @@ where
       rhos,
       l0,
     );
+    let acc_elapsed = acc_t.elapsed();
     info!(
-      elapsed_ms = %acc_t.elapsed().as_millis(),
+      elapsed_ms = %acc_elapsed.as_millis(),
+      l0,
+      ell_b,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
       "build_accumulators_neutronnova_workspace"
+    );
+    info!(
+      elapsed_ms = %acc_elapsed.as_millis(),
+      l0,
+      ell_b,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_build_acc"
     );
 
     let mut small_value = SmallValueSumCheck::<E::Scalar, 2>::from_accumulators(accumulators);
+    let (_first_l0_span, first_l0_t) = start_span!("nifs_first_l0_rounds", rounds = l0);
+    let mut vc_commit_total = Duration::default();
     for (i, rho_i) in rhos.iter().take(l0).enumerate() {
       let (_round_span, round_t) = start_span!("nifs_smallvalue_round", round = i);
       let t_all = small_value.eval_t_all_u(i);
@@ -1280,7 +1329,9 @@ where
       let (_vc_span, vc_t) = start_span!("vc_commit");
       let chals =
         SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, i, transcript)?;
-      info!(elapsed_ms = %vc_t.elapsed().as_millis(), "vc_commit");
+      let vc_elapsed = vc_t.elapsed();
+      vc_commit_total += vc_elapsed;
+      info!(elapsed_ms = %vc_elapsed.as_millis(), round = i, "vc_commit");
       let r_i = chals[0];
 
       T_cur = poly.evaluate(&r_i);
@@ -1290,13 +1341,23 @@ where
       small_value.advance(&li, r_i);
 
       info!(
-        elapsed_ms = %round_t.elapsed().as_millis(),
-        round = i,
+      elapsed_ms = %round_t.elapsed().as_millis(),
+      round = i,
         "nifs_smallvalue_round"
       );
     }
+    info!(
+      elapsed_ms = %first_l0_t.elapsed().as_millis(),
+      rounds = l0,
+      l0,
+      ell_b,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_first_l0_rounds"
+    );
 
-    Ok((polys, r_bs, T_cur, acc_eq))
+    Ok((polys, r_bs, T_cur, acc_eq, vc_commit_total))
   }
 
   fn fold_prefix_workspace_and_first_suffix_round<SV>(
@@ -1613,21 +1674,22 @@ where
     );
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = ell_b);
-    let (_polys, r_bs, T_cur, acc_eq) = Self::prove_neutronnova_small_value_sumcheck::<SV, _>(
-      &a_small,
-      &b_small,
-      preextended_ab,
-      &E_eq,
-      left,
-      right,
-      &rhos,
-      ell_b,
-      vc,
-      vc_state,
-      vc_shape,
-      vc_ck,
-      transcript,
-    )?;
+    let (_polys, r_bs, T_cur, acc_eq, mut vc_commit_total) =
+      Self::prove_neutronnova_small_value_sumcheck::<SV, _>(
+        &a_small,
+        &b_small,
+        preextended_ab,
+        &E_eq,
+        left,
+        right,
+        &rhos,
+        ell_b,
+        vc,
+        vc_state,
+        vc_shape,
+        vc_ck,
+        transcript,
+      )?;
     info!(
       elapsed_ms = %rounds_t.elapsed().as_millis(),
       rounds = ell_b,
@@ -1638,22 +1700,61 @@ where
     let r_bs_rev: Vec<_> = r_bs.iter().rev().copied().collect();
     let eq_evals = EqPolynomial::evals_from_points(&r_bs_rev);
 
-    let (az_folded, (bz_folded, cz_folded)) = rayon::join(
+    let (az_folded, (bz_folded, (cz_folded, final_c_elapsed))) = rayon::join(
       || fold_small_value_vectors(&eq_evals, &a_small),
       || {
         rayon::join(
           || fold_small_value_vectors(&eq_evals, &b_small),
-          || fold_small_value_vectors(&eq_evals, &c_small),
+          || {
+            let (_final_c_span, final_c_t) = start_span!("nifs_final_c");
+            let folded = fold_small_value_vectors(&eq_evals, &c_small);
+            (folded, final_c_t.elapsed())
+          },
         )
       },
     );
-    info!(elapsed_ms = %fold_t.elapsed().as_millis(), "nifs_eq_fold");
+    info!(
+      elapsed_ms = %final_c_elapsed.as_millis(),
+      l0 = ell_b,
+      ell_b,
+      instances = n_padded,
+      constraints = S.num_cons,
+      threads = rayon::current_num_threads(),
+      "nifs_final_c"
+    );
+    info!(
+      elapsed_ms = %fold_t.elapsed().as_millis(),
+      l0 = ell_b,
+      ell_b,
+      instances = n_padded,
+      constraints = S.num_cons,
+      threads = rayon::current_num_threads(),
+      "nifs_eq_fold"
+    );
 
-    let (folded_W, folded_U) = fold_and_update_vc_field::<E, X, W>(
+    let (folded_W, folded_U, final_vc_elapsed) = fold_and_update_vc_field::<E, X, W>(
       S, ck, &r_bs, T_cur, acc_eq, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck, transcript,
     )?;
+    vc_commit_total += final_vc_elapsed;
+    info!(
+      elapsed_ms = %vc_commit_total.as_millis(),
+      l0 = ell_b,
+      ell_b,
+      instances = n_padded,
+      constraints = S.num_cons,
+      threads = rayon::current_num_threads(),
+      "nifs_vc_commit_total"
+    );
 
-    info!(elapsed_ms = %nifs_total_t.elapsed().as_millis(), "nifs_prove");
+    info!(
+      elapsed_ms = %nifs_total_t.elapsed().as_millis(),
+      l0 = ell_b,
+      ell_b,
+      instances = n_padded,
+      constraints = S.num_cons,
+      threads = rayon::current_num_threads(),
+      "nifs_prove"
+    );
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }
 
@@ -1714,7 +1815,7 @@ where
     );
 
     let (_rounds_span, rounds_t) = start_span!("nifs_folding_rounds", rounds = l0);
-    let (_polys, mut r_bs, mut T_cur, mut acc_eq) =
+    let (_polys, mut r_bs, mut T_cur, mut acc_eq, mut vc_commit_total) =
       Self::prove_neutronnova_small_value_sumcheck_prefix_workspace::<SV>(
         &prefix_workspace,
         &E_eq,
@@ -1752,7 +1853,16 @@ where
       elapsed_ms = %fused_t.elapsed().as_millis(),
       "nifs_prefix_fold_first_suffix_workspace"
     );
-    info!(elapsed_ms = %fold_prefix_t.elapsed().as_millis(), "nifs_prefix_fold");
+    info!(
+      elapsed_ms = %fold_prefix_t.elapsed().as_millis(),
+      l0,
+      ell_b,
+      instances = n_padded,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_prefix_fold"
+    );
 
     let (_suffix_span, suffix_t) = start_span!("nifs_suffix_rounds", rounds = ell_b - l0);
     if l0 < ell_b {
@@ -1761,7 +1871,7 @@ where
 
       let pairs = m / 2;
       if pairs > 0 {
-        let r_b = finish_field_sumcheck_round::<E>(
+        let (r_b, vc_elapsed) = finish_field_sumcheck_round::<E>(
           l0,
           first_e0,
           first_quad_coeff,
@@ -1775,6 +1885,7 @@ where
           vc_ck,
           transcript,
         )?;
+        vc_commit_total += vc_elapsed;
 
         if l0 + 1 == ell_b {
           fold_final_ab_pairs::<E>(&mut a_layers, &mut b_layers, pairs, r_b);
@@ -1861,7 +1972,7 @@ where
           c_vals.truncate(fold_pairs);
           m = fold_pairs;
 
-          prev_r_b = finish_field_sumcheck_round::<E>(
+          let (next_r_b, vc_elapsed) = finish_field_sumcheck_round::<E>(
             t,
             e0_acc,
             quad_acc,
@@ -1875,6 +1986,8 @@ where
             vc_ck,
             transcript,
           )?;
+          vc_commit_total += vc_elapsed;
+          prev_r_b = next_r_b;
         }
 
         let final_pairs = m / 2;
@@ -1887,6 +2000,12 @@ where
     }
     info!(
       elapsed_ms = %suffix_t.elapsed().as_millis(),
+      l0,
+      ell_b,
+      instances = n_padded,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
       rounds = ell_b - l0,
       "nifs_suffix_rounds"
     );
@@ -1898,7 +2017,7 @@ where
       reason: "partial-l0 NIFS produced no folded B layer".into(),
     })?;
     let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
-    let (_final_c_span, final_c_t) = start_span!("nifs_final_c_layer");
+    let (_final_c_span, final_c_t) = start_span!("nifs_final_c");
     let cz_folded = fold_prefix_workspace_final_table::<E::Scalar, SV>(
       &final_weights,
       &prefix_workspace.c,
@@ -1907,14 +2026,40 @@ where
     );
     info!(
       elapsed_ms = %final_c_t.elapsed().as_millis(),
-      "nifs_final_c_layer"
+      l0,
+      ell_b,
+      instances = n_padded,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_final_c"
     );
 
-    let (folded_W, folded_U) = fold_and_update_vc_field::<E, X, W>(
+    let (folded_W, folded_U, final_vc_elapsed) = fold_and_update_vc_field::<E, X, W>(
       S, ck, &r_bs, T_cur, acc_eq, &Us, &Ws, ell_b, vc, vc_state, vc_shape, vc_ck, transcript,
     )?;
+    vc_commit_total += final_vc_elapsed;
+    info!(
+      elapsed_ms = %vc_commit_total.as_millis(),
+      l0,
+      ell_b,
+      instances = n_padded,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_vc_commit_total"
+    );
 
-    info!(elapsed_ms = %nifs_total_t.elapsed().as_millis(), "nifs_prove");
+    info!(
+      elapsed_ms = %nifs_total_t.elapsed().as_millis(),
+      l0,
+      ell_b,
+      instances = n_padded,
+      suffix_groups = prefix_workspace.suffix_groups,
+      constraints = prefix_workspace.num_constraints,
+      threads = rayon::current_num_threads(),
+      "nifs_prove"
+    );
     Ok((E_eq, az_folded, bz_folded, cz_folded, folded_W, folded_U))
   }
 
@@ -2551,7 +2696,7 @@ fn finish_field_sumcheck_round<E>(
   vc_shape: &SplitMultiRoundR1CSShape<E>,
   vc_ck: &CommitmentKey<E>,
   transcript: &mut E::TE,
-) -> Result<E::Scalar, SpartanError>
+) -> Result<(E::Scalar, Duration), SpartanError>
 where
   E: Engine,
 {
@@ -2573,14 +2718,21 @@ where
   let coeffs = &poly_t.coeffs;
   vc.nifs_polys[round] = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
 
+  let (_vc_span, vc_t) = start_span!("nifs_vc_commit_round", round = round);
   let chals =
     SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, round, transcript)?;
+  let vc_elapsed = vc_t.elapsed();
+  info!(
+    elapsed_ms = %vc_elapsed.as_millis(),
+    round,
+    "nifs_vc_commit_round"
+  );
   let r_b = chals[0];
   r_bs.push(r_b);
   *acc_eq *= (E::Scalar::ONE - r_b) * (E::Scalar::ONE - rho_t) + r_b * rho_t;
   *t_cur = poly_t.evaluate(&r_b);
 
-  Ok(r_b)
+  Ok((r_b, vc_elapsed))
 }
 
 fn fold_and_update_vc_field<E, X, W>(
@@ -2597,7 +2749,7 @@ fn fold_and_update_vc_field<E, X, W>(
   vc_shape: &SplitMultiRoundR1CSShape<E>,
   vc_ck: &CommitmentKey<E>,
   transcript: &mut E::TE,
-) -> Result<(R1CSWitness<E>, R1CSInstance<E>), SpartanError>
+) -> Result<(R1CSWitness<E>, R1CSInstance<E>, Duration), SpartanError>
 where
   E: Engine,
   E::PCS: FoldingEngineTrait<E>,
@@ -2611,8 +2763,16 @@ where
       .ok_or(SpartanError::DivisionByZero)?;
   vc.t_out_step = T_out;
   vc.eq_rho_at_rb = acc_eq;
+  let (_vc_span, vc_t) = start_span!("nifs_vc_commit_final", round = ell_b);
   SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+  let vc_elapsed = vc_t.elapsed();
+  info!(
+    elapsed_ms = %vc_elapsed.as_millis(),
+    round = ell_b,
+    "nifs_vc_commit_final"
+  );
 
+  let (_fold_wu_span, fold_wu_t) = start_span!("nifs_fold_wu");
   let weights = weights_from_r::<E::Scalar>(r_bs, Us.len());
 
   let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
@@ -2637,8 +2797,17 @@ where
     ck,
   )?;
   info!(elapsed_ms = %fold_t.elapsed().as_millis(), "fold_instances");
+  info!(
+    elapsed_ms = %fold_wu_t.elapsed().as_millis(),
+    instances = Us.len(),
+    witness_len = full_dim,
+    folded_witness_len = effective_len,
+    truncated = use_truncated_fold,
+    threads = rayon::current_num_threads(),
+    "nifs_fold_wu"
+  );
 
-  Ok((folded_W, folded_U))
+  Ok((folded_W, folded_U, vc_elapsed))
 }
 
 fn fold_native_witness_prefix_into_field_with_weights<E, W>(

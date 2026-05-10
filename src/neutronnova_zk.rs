@@ -1667,6 +1667,8 @@ where
     // Eagerly precompute sparse matrix data for the step and core circuits
     pk.S_step.precompute();
     pk.S_core.precompute();
+    pk.S_step.precompute_full_binding();
+    pk.S_core.precompute_full_binding();
     vk.S_step.precompute();
     vk.S_core.precompute();
     info!(elapsed_ms = %setup_t.elapsed().as_millis(), "neutronnova_setup");
@@ -1757,6 +1759,8 @@ where
 
     field.S_step.precompute();
     field.S_core.precompute();
+    field.S_step.precompute_full_binding();
+    field.S_core.precompute_full_binding();
     vk.S_step.precompute();
     vk.S_core.precompute();
 

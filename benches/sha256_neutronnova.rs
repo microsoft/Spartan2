@@ -11,7 +11,7 @@
 //! Run with: `RUSTFLAGS="-C target-cpu=native" cargo bench --bench sha256_neutronnova`
 //! Override thread counts with `BENCH_THREADS=1,4,8`.
 //! Emit one-shot stage timing CSV with `NEUTRONNOVA_STAGE_TRACE=1` (use
-//! `TRACE_L0=0,s,3,4` to select FullField, SmallValue, and accumulator l0s).
+//! `TRACE_L0=0,s,3,4,5` to select FullField, SmallValue, and accumulator l0s).
 //!
 //! Three modes ship in the sweep:
 //! - `FullField` — bellpepper UInt32 SHA-256 through the standard NeutronNova
@@ -79,11 +79,11 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 
 type E = T256HyraxEngine;
 
-/// Sizes in bytes to benchmark: 1/2/4/8 KB.
-const SIZES: &[usize] = &[1024, 2048, 4096, 8192];
-
 /// SHA-256 block size in bytes.
 const BLOCK_BYTES: usize = 64;
+
+/// Sizes in bytes to benchmark. Thirty-two SHA-256 blocks gives `ell_b = 5`.
+const SIZES: &[usize] = &[2048];
 
 /// Standard SHA-256 initial hash values (used by both gadgets).
 const SHA256_IV: [u32; 8] = [
@@ -101,10 +101,9 @@ const MAX_L0: usize = 5;
 
 /// Accumulator `l0` values to compare in the benchmark sweep.
 ///
-/// These are the useful SHA-256 operating points for the small accumulator:
-/// `l0 = 3` exercises the mixed prefix/suffix path and `l0 = 4` also covers
-/// the full-prefix case for the 1 KiB benchmark, where `ell_b = 4`.
-const BENCH_L0_VALUES: &[usize] = &[3, 4];
+/// These cover partial accumulator paths (`l0 = 3, 4`) and the full-batch
+/// accumulator path (`l0 = ell_b = 5`) for the configured size.
+const BENCH_L0_VALUES: &[usize] = &[3, 4, 5];
 
 // ---------------------------------------------------------------------------
 // Standard-prover circuits: bellpepper UInt32 SHA-256.
@@ -1017,12 +1016,13 @@ fn run_stage_trace() {
     .try_init()
     .expect("failed to install NeutronNova stage trace subscriber");
 
-  let byte_sizes = parse_trace_values("TRACE_BYTES", &[1024, 2048]);
+  let byte_sizes = parse_trace_values("TRACE_BYTES", SIZES);
   let trace_modes = parse_trace_modes(&[
     TraceMode::FullField,
     TraceMode::SmallValue,
     TraceMode::Accumulator(3),
     TraceMode::Accumulator(4),
+    TraceMode::Accumulator(5),
   ]);
   let thread_counts = parse_trace_values("TRACE_THREADS", &[1, 2, 4, 8]);
 
