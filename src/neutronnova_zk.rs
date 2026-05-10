@@ -2263,14 +2263,30 @@ where
 
     let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
     let evals_rx = EqPolynomial::evals_from_points(&r_x);
-    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
+    info!(
+      elapsed_ms = %eval_rx_t.elapsed().as_millis(),
+      num_rounds_x,
+      r_x_len = r_x.len(),
+      evals_rx_len = evals_rx.len(),
+      "compute_eval_rx"
+    );
 
     let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
     let (poly_ABC_step, step_lo_eff, step_hi_eff) =
       pk.S_step.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
     let (poly_ABC_core, core_lo_eff, core_hi_eff) =
       pk.S_core.bind_and_prepare_poly_ABC_full(&evals_rx, &r);
-    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
+    info!(
+      elapsed_ms = %sparse_t.elapsed().as_millis(),
+      evals_rx_len = evals_rx.len(),
+      step_poly_len = poly_ABC_step.len(),
+      core_poly_len = poly_ABC_core.len(),
+      step_lo_eff,
+      step_hi_eff,
+      core_lo_eff,
+      core_hi_eff,
+      "compute_eval_table_sparse"
+    );
     // inner sum-check
     let (_sc2_span, sc2_t) = start_span!("inner_sumcheck_batched");
 

@@ -7,11 +7,12 @@
 //! This module defines R1CS related types
 use crate::{
   Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey,
-  big_num::DelayedReduction,
   big_num::montgomery::MontgomeryLimbs,
+  big_num::{DelayedReduction, WideMul},
   digest::SimpleDigestible,
   errors::SpartanError,
   polys::eq::EqPolynomial,
+  small_constraint_system::SmallCoeff,
   traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
@@ -23,6 +24,7 @@ use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ops::AddAssign;
 
 mod folds;
 mod sparse;
@@ -1751,7 +1753,7 @@ impl<E: Engine> SplitR1CSShape<E> {
 
 impl<E: Engine, Coeff> SplitR1CSShape<E, Coeff>
 where
-  Coeff: crate::small_constraint_system::SmallCoeff,
+  Coeff: SmallCoeff,
 {
   /// Create a split R1CS shape whose matrix coefficients are native small values.
   pub fn new_small(
@@ -1910,6 +1912,46 @@ where
       filtered_A: OnceCell::new(),
       filtered_B: OnceCell::new(),
       filtered_C: OnceCell::new(),
+    }
+  }
+
+  /// Multiply a small-coefficient shape by a dense witness vector.
+  pub fn multiply_vec_small<W, Out>(
+    &self,
+    z: &[W],
+  ) -> Result<(Vec<Out>, Vec<Out>, Vec<Out>), SpartanError>
+  where
+    Coeff: WideMul<W, Output = Out>,
+    W: Copy + Sync,
+    Out: Copy + Default + AddAssign + Send,
+  {
+    if z.len()
+      != self.num_public
+        + self.num_challenges
+        + 1
+        + self.num_shared
+        + self.num_precommitted
+        + self.num_rest
+    {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+
+    if rayon::current_num_threads() <= 1 {
+      let az = self.A.multiply_vec::<W, Out>(z)?;
+      let bz = self.B.multiply_vec::<W, Out>(z)?;
+      let cz = self.C.multiply_vec::<W, Out>(z)?;
+      Ok((az, bz, cz))
+    } else {
+      let (az, (bz, cz)) = rayon::join(
+        || self.A.multiply_vec::<W, Out>(z),
+        || {
+          rayon::join(
+            || self.B.multiply_vec::<W, Out>(z),
+            || self.C.multiply_vec::<W, Out>(z),
+          )
+        },
+      );
+      Ok((az?, bz?, cz?))
     }
   }
 }

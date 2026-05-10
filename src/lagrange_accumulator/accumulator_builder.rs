@@ -468,6 +468,221 @@ where
   result
 }
 
+/// Builds NeutronNova accumulators from a prove-local transposed prefix workspace.
+///
+/// The workspace is laid out as:
+/// `suffix_group -> constraint -> prefix_values[0..2^l0]`, where prefix
+/// values are in the natural layer order used by `weights_from_r`. This path
+/// keeps the work in prove, but avoids repeatedly reading prefix values from
+/// instance-major rows while building accumulator tables.
+pub(crate) fn build_accumulators_neutronnova_from_prefix_workspace<F, SV>(
+  a_prefixes: &[SV],
+  b_prefixes: &[SV],
+  num_constraints: usize,
+  e_eq: &[F],
+  left: usize,
+  right: usize,
+  rhos: &[F],
+  l0: usize,
+) -> LagrangeAccumulators<F, 2>
+where
+  F: SmallValueEngine<SV>,
+  SV: SmallValue + Add<Output = SV> + Sub<Output = SV>,
+{
+  assert!(l0 > 0, "prefix workspace requires l0 > 0");
+  let ell_b = rhos.len();
+  assert!(
+    l0 <= ell_b,
+    "prefix workspace requires l0 <= ell_b. Got l0={}, ell_b={}",
+    l0,
+    ell_b
+  );
+  let prefix_size = 1usize << l0;
+  assert_eq!(
+    num_constraints,
+    left * right,
+    "prefix workspace constraint count must match tensor shape"
+  );
+  assert_eq!(
+    a_prefixes.len(),
+    b_prefixes.len(),
+    "prefix workspace A/B tables must have identical size"
+  );
+  assert_eq!(
+    a_prefixes.len() % (num_constraints * prefix_size),
+    0,
+    "prefix workspace must be laid out by suffix, constraint, prefix"
+  );
+
+  let suffix_groups = a_prefixes.len() / (num_constraints * prefix_size);
+  assert_eq!(
+    suffix_groups,
+    1usize << (ell_b - l0),
+    "prefix workspace suffix groups must match rhos/l0"
+  );
+  debug_assert_eq!(e_eq.len(), left + right, "E_eq length mismatch");
+
+  let (_setup_span, setup_t) = start_span!("build_accumulators_neutronnova_workspace_setup");
+  let base: usize = 3;
+  let ext_size = base.pow(l0 as u32);
+  let e_b = compute_suffix_eq_pyramid(rhos, l0);
+  let suffix_weights = weights_from_r(&rhos[l0..], suffix_groups);
+
+  let e_left = &e_eq[..left];
+  let e_right = &e_eq[left..];
+  let swap_loops = left > right;
+  let outer_dim = if swap_loops { left } else { right };
+  let (e_outer, e_inner) = if swap_loops {
+    (e_left, e_right)
+  } else {
+    (e_right, e_left)
+  };
+
+  let e_cache: Vec<Vec<F>> = e_b
+    .iter()
+    .map(|round_ey| {
+      e_outer
+        .iter()
+        .flat_map(|eo| round_ey.iter().map(|ey| *eo * *ey))
+        .collect()
+    })
+    .collect();
+  let num_y_per_round: Vec<usize> = e_b.iter().map(|ey| ey.len()).collect();
+
+  let bit_rev = bit_rev_prefix_table(l0);
+  let BetaPrefixCache {
+    cache: beta_prefix_cache,
+    num_betas,
+  } = build_beta_cache::<2>(l0);
+
+  let betas_with_infty: Vec<usize> = (0..num_betas)
+    .filter(|&i| (0..l0).any(|d| (i / base.pow(d as u32)) % base == 0))
+    .collect();
+  info!(
+    elapsed_ms = %setup_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    prefix_size,
+    suffix_groups,
+    ext_size,
+    outer_dim,
+    num_betas = betas_with_infty.len(),
+    "build_accumulators_neutronnova_workspace_setup"
+  );
+
+  type State<F2, SV2> = SpartanThreadState<F2, SV2, 2>;
+  let (_main_span, main_t) = start_span!("build_accumulators_neutronnova_workspace_main");
+  let process_outer = |state: &mut State<F, SV>, x_outer: usize| {
+    state.reset_partial_sums();
+
+    for (x_inner, &e_inner_val) in e_inner.iter().enumerate() {
+      let idx = if swap_loops {
+        x_inner * left + x_outer
+      } else {
+        x_outer * left + x_inner
+      };
+
+      for (suffix_idx, &suffix_weight) in suffix_weights.iter().enumerate() {
+        let base = (suffix_idx * num_constraints + idx) * prefix_size;
+        let a_prefix_natural = &a_prefixes[base..base + prefix_size];
+        let b_prefix_natural = &b_prefixes[base..base + prefix_size];
+        for (p, &rev) in bit_rev.iter().enumerate() {
+          state.az_prefix_boolean_evals[p] = a_prefix_natural[rev];
+          state.bz_prefix_boolean_evals[p] = b_prefix_natural[rev];
+        }
+
+        let az_size = extend_to_lagrange_domain::<SV, 2>(
+          &state.az_prefix_boolean_evals,
+          &mut state.az_extended_evals,
+          &mut state.az_extended_scratch,
+        );
+        let bz_size = extend_to_lagrange_domain::<SV, 2>(
+          &state.bz_prefix_boolean_evals,
+          &mut state.bz_extended_evals,
+          &mut state.bz_extended_scratch,
+        );
+        debug_assert_eq!(az_size, ext_size);
+        debug_assert_eq!(bz_size, ext_size);
+
+        let az_ext = &state.az_extended_evals[..az_size];
+        let bz_ext = &state.bz_extended_evals[..bz_size];
+        let weighted_inner = e_inner_val * suffix_weight;
+
+        for &beta_idx in &betas_with_infty {
+          let prod = az_ext[beta_idx].wide_mul(bz_ext[beta_idx]);
+          F::unreduced_multiply_accumulate(
+            &mut state.partial_sums[beta_idx],
+            &weighted_inner,
+            &prod,
+          );
+        }
+      }
+    }
+
+    for &beta_idx in &betas_with_infty {
+      let unreduced = &state.partial_sums[beta_idx];
+      if unreduced.is_zero() {
+        continue;
+      }
+      let val = <F as DelayedReduction<<SV as WideMul>::Output>>::reduce(unreduced);
+      if val != F::ZERO {
+        state.beta_values.push((beta_idx, val));
+      }
+    }
+
+    for &(beta_idx, ref val) in &state.beta_values {
+      for pref in &beta_prefix_cache[beta_idx] {
+        let round = pref.round_0 as usize;
+        let num_y = num_y_per_round[round];
+        let e_val = e_cache[round][x_outer * num_y + pref.y_idx as usize];
+        <F as DelayedReduction<F>>::unreduced_multiply_accumulate(
+          &mut state.acc.rounds[round].data_mut()[pref.v_idx as usize][pref.u_idx as usize],
+          val,
+          &e_val,
+        );
+      }
+    }
+  };
+
+  let result = if rayon::current_num_threads() <= 1 || outer_dim <= 32 {
+    let mut state = State::<F, SV>::new(l0, num_betas, prefix_size, ext_size);
+    for x_outer in 0..outer_dim {
+      process_outer(&mut state, x_outer);
+    }
+    state.acc.map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  } else {
+    let fold_results: Vec<State<F, SV>> = (0..outer_dim)
+      .into_par_iter()
+      .fold(
+        || State::<F, SV>::new(l0, num_betas, prefix_size, ext_size),
+        |mut state: State<F, SV>, x_outer| {
+          process_outer(&mut state, x_outer);
+          state
+        },
+      )
+      .collect();
+
+    fold_results
+      .into_iter()
+      .reduce(|mut a, b| {
+        a.acc.merge(&b.acc);
+        a
+      })
+      .expect("outer_dim > 0 guarantees non-empty fold results")
+      .acc
+      .map(|acc| <F as DelayedReduction<F>>::reduce(acc))
+  };
+  info!(
+    elapsed_ms = %main_t.elapsed().as_millis(),
+    l0,
+    ell_b,
+    outer_dim,
+    suffix_groups,
+    "build_accumulators_neutronnova_workspace_main"
+  );
+  result
+}
+
 pub(crate) fn build_accumulators_neutronnova_preextended<F, SV>(
   a_ext_by_constraint: &[SV],
   b_ext_by_constraint: &[SV],
@@ -776,6 +991,67 @@ mod tests {
     assert_eq!(generic.rounds.len(), preextended.rounds.len());
     for (generic_round, preextended_round) in generic.rounds.iter().zip(preextended.rounds.iter()) {
       assert_eq!(generic_round.data, preextended_round.data);
+    }
+  }
+
+  #[test]
+  fn test_prefix_workspace_neutronnova_builder_matches_generic_partial() {
+    let l0 = 2;
+    let n = 1usize << 3;
+    let prefix_size = 1usize << l0;
+    let suffix_groups = n / prefix_size;
+    let num_cons = 8;
+    let left = 4;
+    let right = 2;
+    let e_eq: Vec<Scalar> = (0..(left + right))
+      .map(|i| Scalar::from((i + 3) as u64))
+      .collect();
+    let rhos = vec![Scalar::from(7u64), Scalar::from(11u64), Scalar::from(13u64)];
+
+    let a_layers: Vec<Vec<i32>> = (0..n)
+      .map(|layer| {
+        (0..num_cons)
+          .map(|idx| ((layer as i32 * 11 + idx as i32 * 5) % 23) - 11)
+          .collect()
+      })
+      .collect();
+    let b_layers: Vec<Vec<i32>> = (0..n)
+      .map(|layer| {
+        (0..num_cons)
+          .map(|idx| ((layer as i32 * 17 + idx as i32 * 7) % 29) - 14)
+          .collect()
+      })
+      .collect();
+
+    let mut a_prefixes = vec![0i32; suffix_groups * num_cons * prefix_size];
+    let mut b_prefixes = vec![0i32; suffix_groups * num_cons * prefix_size];
+    for suffix_idx in 0..suffix_groups {
+      for constraint_idx in 0..num_cons {
+        for prefix_idx in 0..prefix_size {
+          let layer_idx = suffix_idx * prefix_size + prefix_idx;
+          let workspace_idx = (suffix_idx * num_cons + constraint_idx) * prefix_size + prefix_idx;
+          a_prefixes[workspace_idx] = a_layers[layer_idx][constraint_idx];
+          b_prefixes[workspace_idx] = b_layers[layer_idx][constraint_idx];
+        }
+      }
+    }
+
+    let generic =
+      build_accumulators_neutronnova(&a_layers, &b_layers, &e_eq, left, right, &rhos, l0);
+    let workspace = build_accumulators_neutronnova_from_prefix_workspace(
+      &a_prefixes,
+      &b_prefixes,
+      num_cons,
+      &e_eq,
+      left,
+      right,
+      &rhos,
+      l0,
+    );
+
+    assert_eq!(generic.rounds.len(), workspace.rounds.len());
+    for (generic_round, workspace_round) in generic.rounds.iter().zip(workspace.rounds.iter()) {
+      assert_eq!(generic_round.data, workspace_round.data);
     }
   }
 

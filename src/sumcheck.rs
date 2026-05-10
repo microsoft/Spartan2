@@ -259,7 +259,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `poly_D` - Fourth multilinear polynomial (subtracted term)
   ///
   /// # Returns
-  /// A tuple containing the evaluations at points 0, 2, and 3.
+  /// A tuple containing `p(0)`, the degree-3 leading coefficient, and `p(-1)`.
   #[inline(always)]
   fn compute_eval_points_cubic_with_additive_term(
     poly_A: &MultilinearPolynomial<E::Scalar>,
@@ -271,7 +271,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     let len = poly_B.Z.len() / 2;
 
-    let (acc_0, acc_2, acc_3) = (0..len)
+    let (acc_0, acc_leading, acc_neg1) = (0..len)
       .into_par_iter()
       .fold(
         || {
@@ -291,30 +291,33 @@ impl<E: Engine> SumcheckProof<E> {
           let d_low = &poly_D[i];
           let d_high = &poly_D[i + len];
 
-          // eval 0: a * (b * c - d)
+          // p(0): a_low * (b_low * c_low - d_low)
           let inner_0 = *b_low * *c_low - *d_low;
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
             &mut acc.0, a_low, &inner_0,
           );
 
-          // eval 2: bound values at point 2
-          let a_bound = *a_high + *a_high - *a_low;
-          let b_bound = *b_high + *b_high - *b_low;
-          let c_bound = *c_high + *c_high - *c_low;
-          let d_bound = *d_high + *d_high - *d_low;
-          let inner_2 = b_bound * c_bound - d_bound;
+          let da = *a_high - *a_low;
+          let db = *b_high - *b_low;
+          let dc = *c_high - *c_low;
+          let dd = *d_high - *d_low;
+
+          // Leading coefficient of a * (b * c - d). The a*d term is degree 2.
+          let inner_leading = db * dc;
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut acc.1, &a_bound, &inner_2,
+            &mut acc.1,
+            &da,
+            &inner_leading,
           );
 
-          // eval 3: bound values at point 3 (incremental)
-          let a_bound = a_bound + *a_high - *a_low;
-          let b_bound = b_bound + *b_high - *b_low;
-          let c_bound = c_bound + *c_high - *c_low;
-          let d_bound = d_bound + *d_high - *d_low;
-          let inner_3 = b_bound * c_bound - d_bound;
+          // p(-1): a_neg * (b_neg * c_neg - d_neg)
+          let a_neg = *a_low - da;
+          let b_neg = *b_low - db;
+          let c_neg = *c_low - dc;
+          let d_neg = *d_low - dd;
+          let inner_neg = b_neg * c_neg - d_neg;
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut acc.2, &a_bound, &inner_3,
+            &mut acc.2, &a_neg, &inner_neg,
           );
 
           acc
@@ -338,8 +341,8 @@ impl<E: Engine> SumcheckProof<E> {
 
     (
       <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_leading),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_neg1),
     )
   }
 
@@ -347,9 +350,9 @@ impl<E: Engine> SumcheckProof<E> {
   /// Computes evaluation points for a cubic polynomial with additive term.
   /// The outer polynomial is the power of tau, which is an outer product of two polynomials left and right.
   ///
-  /// This function computes three evaluation points (at 0, 2, and 3) for a univariate
-  /// polynomial that represents the sum over a hypercube edge in the sum-check protocol
-  /// for a cubic combination of three multilinear polynomials.
+  /// This function computes `p(0)`, the degree-3 leading coefficient, and `p(-1)` for
+  /// the univariate polynomial that represents the sum over a hypercube edge in the
+  /// sum-check protocol for `tau * (A * B - C)`.
   ///
   /// # Arguments
   /// * `pow_tau_left` - The left part of the power of tau
@@ -360,7 +363,7 @@ impl<E: Engine> SumcheckProof<E> {
   /// * `comb_func` - Function that combines evaluations of the four polynomials
   ///
   /// # Returns
-  /// A tuple containing the evaluations at points 0, 2, and 3.
+  /// A tuple containing `p(0)`, the degree-3 leading coefficient, and `p(-1)`.
   ///
   /// Uses two-level delayed reduction: inner loop accumulates in wide limbs,
   /// reduces once per outer iteration, outer loop accumulates reduced values
@@ -388,7 +391,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     let right = len / left;
 
-    let (acc_0, acc_2, acc_3) = (0..left)
+    let (acc_0, acc_leading, acc_neg1) = (0..left)
       .into_par_iter()
       .fold(
         || {
@@ -403,8 +406,8 @@ impl<E: Engine> SumcheckProof<E> {
 
           // Inner loop: accumulate in wide limbs
           let mut inner_0 = Acc::<E::Scalar>::default();
-          let mut inner_2 = Acc::<E::Scalar>::default();
-          let mut inner_3 = Acc::<E::Scalar>::default();
+          let mut inner_leading = Acc::<E::Scalar>::default();
+          let mut inner_neg1 = Acc::<E::Scalar>::default();
 
           for j in 0..right {
             let low = i + j * left;
@@ -419,7 +422,7 @@ impl<E: Engine> SumcheckProof<E> {
             let c_low = &poly_C[low];
             let c_high = &poly_C[high];
 
-            // eval 0: tau * (a * b - c)
+            // p(0): tau_low * (a_low * b_low - c_low)
             let prod_0 = *a_low * *b_low - *c_low;
             <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
               &mut inner_0,
@@ -427,35 +430,37 @@ impl<E: Engine> SumcheckProof<E> {
               &prod_0,
             );
 
-            // eval 2: bound_func is -A(low) + 2*A(high)
-            let tau_bound = *tau_high + *tau_high - *tau_low;
-            let a_bound = *a_high + *a_high - *a_low;
-            let b_bound = *b_high + *b_high - *b_low;
-            let c_bound = *c_high + *c_high - *c_low;
-            let prod_2 = a_bound * b_bound - c_bound;
+            let d_tau = *tau_high - *tau_low;
+            let da = *a_high - *a_low;
+            let db = *b_high - *b_low;
+            let dc = *c_high - *c_low;
+
+            // Leading coefficient of tau * (A * B - C). The tau*C term is degree 2.
+            let prod_leading = da * db;
             <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut inner_2,
-              &tau_bound,
-              &prod_2,
+              &mut inner_leading,
+              &d_tau,
+              &prod_leading,
             );
 
-            // eval 3: bound_func is -2A(low) + 3A(high); computed incrementally
-            let tau_bound = tau_bound + *tau_high - *tau_low;
-            let a_bound = a_bound + *a_high - *a_low;
-            let b_bound = b_bound + *b_high - *b_low;
-            let c_bound = c_bound + *c_high - *c_low;
-            let prod_3 = a_bound * b_bound - c_bound;
+            // p(-1): tau_neg * (a_neg * b_neg - c_neg)
+            let tau_neg = *tau_low - d_tau;
+            let a_neg = *a_low - da;
+            let b_neg = *b_low - db;
+            let c_neg = *c_low - dc;
+            let prod_neg = a_neg * b_neg - c_neg;
             <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut inner_3,
-              &tau_bound,
-              &prod_3,
+              &mut inner_neg1,
+              &tau_neg,
+              &prod_neg,
             );
           }
 
           // Reduce inner sums, accumulate into outer accumulators
           let inner_0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_0);
-          let inner_2_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_2);
-          let inner_3_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_3);
+          let inner_leading_red =
+            <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_leading);
+          let inner_neg1_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_neg1);
 
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
             &mut outer_acc.0,
@@ -465,12 +470,12 @@ impl<E: Engine> SumcheckProof<E> {
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
             &mut outer_acc.1,
             pow_left,
-            &inner_2_red,
+            &inner_leading_red,
           );
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
             &mut outer_acc.2,
             pow_left,
-            &inner_3_red,
+            &inner_neg1_red,
           );
 
           outer_acc
@@ -494,8 +499,8 @@ impl<E: Engine> SumcheckProof<E> {
 
     (
       <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_0),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_2),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_3),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_leading),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_neg1),
     )
   }
 
@@ -811,7 +816,7 @@ impl<E: Engine> SumcheckProof<E> {
 
     for i in 0..num_rounds {
       // step branch
-      let ((mut eval0_s, mut eval2_s, mut eval3_s), (mut eval0_c, mut eval2_c, mut eval3_c)) =
+      let ((mut p0_s, mut leading_s, mut p_neg1_s), (mut p0_c, mut leading_c, mut p_neg1_c)) =
         rayon::join(
           || {
             Self::compute_eval_points_cubic_with_additive_term_with_outer_pow(
@@ -833,15 +838,14 @@ impl<E: Engine> SumcheckProof<E> {
           },
         );
 
-      eval0_s *= base_tau;
-      eval2_s *= base_tau;
-      eval3_s *= base_tau;
-      eval0_c *= base_tau;
-      eval2_c *= base_tau;
-      eval3_c *= base_tau;
+      p0_s *= base_tau;
+      leading_s *= base_tau;
+      p_neg1_s *= base_tau;
+      p0_c *= base_tau;
+      leading_c *= base_tau;
+      p_neg1_c *= base_tau;
 
-      let evals_s = vec![eval0_s, claim_step - eval0_s, eval2_s, eval3_s];
-      let poly_s = UniPoly::from_evals(&evals_s)?;
+      let poly_s = UniPoly::from_deg3_p0_leading_neg1_claim(p0_s, leading_s, p_neg1_s, claim_step);
       let coeffs_step = [
         poly_s.coeffs[0],
         poly_s.coeffs[1],
@@ -849,8 +853,7 @@ impl<E: Engine> SumcheckProof<E> {
         poly_s.coeffs[3],
       ];
 
-      let evals_c = vec![eval0_c, claim_core - eval0_c, eval2_c, eval3_c];
-      let poly_c = UniPoly::from_evals(&evals_c)?;
+      let poly_c = UniPoly::from_deg3_p0_leading_neg1_claim(p0_c, leading_c, p_neg1_c, claim_core);
       let coeffs_core = [
         poly_c.coeffs[0],
         poly_c.coeffs[1],
