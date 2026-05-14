@@ -1,6 +1,6 @@
 [package]
 name = "spartan2"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Srinath Setty <srinath@microsoft.com>"]
 edition = "2024"
 description = "High-speed zkSNARKs without trusted setup"
@@ -40,10 +40,10 @@ tikv-jemallocator = { version = "0.6.0", optional = true }
 
 # Use halo2curves ASM on x86_64 by default; disable ASM on non-x86_64
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-halo2curves = { version = "0.9.0", features = ["std", "bits", "derive_serde", "asm"] }
+halo2curves = { version = "0.10.0", features = ["std", "bits", "derive_serde", "asm"] }
 
 [target.'cfg(not(target_arch = "x86_64"))'.dependencies]
-halo2curves = { version = "0.9.0", features = ["std", "bits", "derive_serde"] }
+halo2curves = { version = "0.10.0", features = ["std", "bits", "derive_serde"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 # see https://github.com/rust-random/rand/pull/948
@@ -72,6 +72,3 @@ harness = false
 [profile.release]
 debug = 1
 lto = "fat"
-
-[patch.crates-io]
-halo2curves = { git = "https://github.com/privacy-ethereum/halo2curves.git", rev = "02c235f0bb52800c28d9c3370400b5435dbe2220" }
