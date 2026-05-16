@@ -141,6 +141,20 @@ pub trait DlogGroupExt: DlogGroup {
     use_parallelism_internally: bool,
   ) -> Result<Self, SpartanError>;
 
+  /// A method to compute a multiexponentation with binary scalars.
+  fn vartime_multiscalar_mul_bool(
+    bits: &[bool],
+    bases: &[Self::AffineGroupElement],
+    use_parallelism_internally: bool,
+  ) -> Result<Self, SpartanError>;
+
+  /// A method to compute a multiexponentation with signed i8 scalars.
+  fn vartime_multiscalar_mul_signed_i8(
+    scalars: &[i8],
+    bases: &[Self::AffineGroupElement],
+    use_parallelism_internally: bool,
+  ) -> Result<Self, SpartanError>;
+
   /// A method to compute a batch of multiexponentations with small scalars
   fn batch_vartime_multiscalar_mul_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     scalars: &[Vec<T>],
@@ -339,6 +353,22 @@ macro_rules! impl_traits {
         use_parallelism_internally: bool,
       ) -> Result<Self, $crate::errors::SpartanError> {
         msm_small(scalars, bases, use_parallelism_internally)
+      }
+
+      fn vartime_multiscalar_mul_bool(
+        bits: &[bool],
+        bases: &[Self::AffineGroupElement],
+        use_parallelism_internally: bool,
+      ) -> Result<Self, $crate::errors::SpartanError> {
+        msm_bool(bits, bases, use_parallelism_internally)
+      }
+
+      fn vartime_multiscalar_mul_signed_i8(
+        scalars: &[i8],
+        bases: &[Self::AffineGroupElement],
+        use_parallelism_internally: bool,
+      ) -> Result<Self, $crate::errors::SpartanError> {
+        msm_signed_i8(scalars, bases, use_parallelism_internally)
       }
 
       fn vartime_multiscalar_mul_shared_weights(

@@ -39,6 +39,19 @@ impl<C: CurveAffine> Bucket<C> {
     }
   }
 
+  fn add_bucket(&mut self, other: Self) {
+    *self = match (*self, other) {
+      (bucket, Bucket::None) => bucket,
+      (Bucket::None, bucket) => bucket,
+      (Bucket::Affine(a), Bucket::Affine(b)) => {
+        Bucket::Projective(a.to_curve().add_mixed_vartime(&b))
+      }
+      (Bucket::Affine(a), Bucket::Projective(b)) => Bucket::Projective(b.add_mixed_vartime(&a)),
+      (Bucket::Projective(a), Bucket::Affine(b)) => Bucket::Projective(a.add_mixed_vartime(&b)),
+      (Bucket::Projective(a), Bucket::Projective(b)) => Bucket::Projective(a + b),
+    };
+  }
+
   fn add(self, other: C::Curve) -> C::Curve {
     match self {
       Bucket::None => other,
@@ -448,6 +461,139 @@ fn msm_binary<C: CurveAffine, T: Integer + Sync>(
   } else {
     process_chunk(scalars, bases)
   }
+}
+
+/// Multi-scalar multiplication for binary scalars without scalar conversion.
+pub fn msm_bool<C: CurveAffine>(
+  bits: &[bool],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> Result<C::Curve, SpartanError> {
+  if bits.len() != bases.len() {
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM Bool: bits and bases must have the same length".to_string(),
+    });
+  }
+
+  let num_threads = if use_parallelism_internally && bits.len() > 1024 {
+    current_num_threads()
+  } else {
+    1
+  };
+  let process_chunk = |bits: &[bool], bases: &[C]| {
+    bits
+      .iter()
+      .zip(bases.iter())
+      .filter_map(|(bit, base)| if *bit { Some(*base) } else { None })
+      .fold(C::Curve::identity(), |acc, base| {
+        acc.add_mixed_vartime(&base)
+      })
+  };
+
+  let result = if bits.len() > num_threads {
+    let chunk = bits.len().div_ceil(num_threads);
+    bits
+      .par_chunks(chunk)
+      .zip(bases.par_chunks(chunk))
+      .map(|(b, g)| process_chunk(b, g))
+      .reduce(C::Curve::identity, |a, b| a + b)
+  } else {
+    process_chunk(bits, bases)
+  };
+
+  Ok(result)
+}
+
+/// Multi-scalar multiplication for signed i8 scalars without field conversion.
+pub fn msm_signed_i8<C: CurveAffine>(
+  scalars: &[i8],
+  bases: &[C],
+  use_parallelism_internally: bool,
+) -> Result<C::Curve, SpartanError> {
+  if scalars.len() != bases.len() {
+    return Err(SpartanError::InvalidInputLength {
+      reason: "MSM signed i8: scalars and bases must have the same length".to_string(),
+    });
+  }
+
+  if scalars.is_empty() {
+    return Ok(C::Curve::identity());
+  }
+
+  let (max_pos, max_neg) = scalars.iter().fold((0u8, 0u8), |(max_pos, max_neg), &s| {
+    if s > 0 {
+      (max_pos.max(s.unsigned_abs()), max_neg)
+    } else if s < 0 {
+      (max_pos, max_neg.max(s.unsigned_abs()))
+    } else {
+      (max_pos, max_neg)
+    }
+  });
+
+  let pos_len = usize::from(max_pos) + 1;
+  let neg_len = usize::from(max_neg) + 1;
+
+  let process_chunk = |scalars: &[i8], bases: &[C]| {
+    let mut pos = vec![Bucket::<C>::None; pos_len];
+    let mut neg = vec![Bucket::<C>::None; neg_len];
+
+    for (&scalar, base) in scalars.iter().zip(bases.iter()) {
+      if scalar > 0 {
+        pos[usize::from(scalar.unsigned_abs())].add_assign(base);
+      } else if scalar < 0 {
+        neg[usize::from(scalar.unsigned_abs())].add_assign(base);
+      }
+    }
+
+    (pos, neg)
+  };
+
+  let merge_buckets = |mut a: (Vec<Bucket<C>>, Vec<Bucket<C>>),
+                       b: (Vec<Bucket<C>>, Vec<Bucket<C>>)| {
+    for (dst, src) in a.0.iter_mut().zip(b.0.into_iter()) {
+      dst.add_bucket(src);
+    }
+    for (dst, src) in a.1.iter_mut().zip(b.1.into_iter()) {
+      dst.add_bucket(src);
+    }
+    a
+  };
+
+  let num_threads = if use_parallelism_internally && scalars.len() > 1024 {
+    current_num_threads()
+  } else {
+    1
+  };
+  let (pos, neg) = if scalars.len() > num_threads {
+    let chunk = scalars.len().div_ceil(num_threads);
+    scalars
+      .par_chunks(chunk)
+      .zip(bases.par_chunks(chunk))
+      .map(|(s, b)| process_chunk(s, b))
+      .reduce(
+        || {
+          (
+            vec![Bucket::<C>::None; pos_len],
+            vec![Bucket::<C>::None; neg_len],
+          )
+        },
+        merge_buckets,
+      )
+  } else {
+    process_chunk(scalars, bases)
+  };
+
+  fn bucket_sum<C: CurveAffine>(buckets: &[Bucket<C>]) -> C::Curve {
+    let mut acc = C::Curve::identity();
+    let mut running_sum = C::Curve::identity();
+    for bucket in buckets.iter().skip(1).rev() {
+      running_sum = bucket.add_ref(running_sum);
+      acc += &running_sum;
+    }
+    acc
+  }
+
+  Ok(bucket_sum(&pos) - bucket_sum(&neg))
 }
 
 /// MSM optimized for up to 10-bit scalars
@@ -931,5 +1077,57 @@ mod tests {
   fn test_msm_ux() {
     test_msm_ux_with::<pallas::Scalar, pallas::Affine>();
     test_msm_ux_with::<vesta::Scalar, vesta::Affine>();
+  }
+
+  fn test_msm_bool_with<F: PrimeField, A: CurveAffine<ScalarExt = F>>() {
+    let bits = vec![
+      false, true, false, true, true, false, false, true, false, true, true, false, false, false,
+      true, true,
+    ];
+    let bases = (0..bits.len())
+      .map(|_| A::from(A::generator() * F::random(OsRng)))
+      .collect::<Vec<_>>();
+    let coeffs = bits
+      .iter()
+      .map(|bit| if *bit { F::ONE } else { F::ZERO })
+      .collect::<Vec<_>>();
+
+    let general = msm(&coeffs, &bases, true).unwrap();
+    let boolean = msm_bool(&bits, &bases, true).unwrap();
+
+    assert_eq!(general, boolean);
+  }
+
+  #[test]
+  fn test_msm_bool() {
+    test_msm_bool_with::<pallas::Scalar, pallas::Affine>();
+    test_msm_bool_with::<vesta::Scalar, vesta::Affine>();
+  }
+
+  fn test_msm_signed_i8_with<F: PrimeField, A: CurveAffine<ScalarExt = F>>() {
+    let signed = vec![
+      -128i8, -17, -8, -1, 0, 1, 2, 3, 8, 17, 64, 127, 0, -64, 5, -5,
+    ];
+    let bases = (0..signed.len())
+      .map(|_| A::from(A::generator() * F::random(OsRng)))
+      .collect::<Vec<_>>();
+    let coeffs = signed
+      .iter()
+      .map(|value| {
+        let scalar = F::from(u64::from(value.unsigned_abs()));
+        if *value < 0 { -scalar } else { scalar }
+      })
+      .collect::<Vec<_>>();
+
+    let general = msm(&coeffs, &bases, true).unwrap();
+    let small = msm_signed_i8(&signed, &bases, true).unwrap();
+
+    assert_eq!(general, small);
+  }
+
+  #[test]
+  fn test_msm_signed_i8() {
+    test_msm_signed_i8_with::<pallas::Scalar, pallas::Affine>();
+    test_msm_signed_i8_with::<vesta::Scalar, vesta::Affine>();
   }
 }

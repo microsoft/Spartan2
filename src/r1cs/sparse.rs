@@ -12,7 +12,9 @@
 use ff::PrimeField;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ops::AddAssign;
 
+use crate::big_num::WideMul;
 use crate::errors::SpartanError;
 
 /// Threshold below which we use sequential (non-rayon) iteration.
@@ -217,6 +219,59 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
     sum
   }
 
+  #[inline(always)]
+  fn compute_row_batched(&self, row: usize, vectors: &[&[F]], out: &mut [Vec<F>], out_row: usize) {
+    let (start, end) = self.range_unit_pos(row);
+    for idx in start..end {
+      let col = self.unit_pos_cols[idx] as usize;
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += vector[col];
+      }
+    }
+
+    let (start, end) = self.range_unit_neg(row);
+    for idx in start..end {
+      let col = self.unit_neg_cols[idx] as usize;
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] -= vector[col];
+      }
+    }
+
+    let (start, end) = self.range_small(row);
+    for idx in start..end {
+      let col = self.small_cols[idx] as usize;
+      let coeff = self.small_coeffs[idx];
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += Self::small_mul(coeff, vector[col]);
+      }
+    }
+
+    let (start, end) = self.range_general(row);
+    for idx in start..end {
+      let col = self.general_cols[idx] as usize;
+      let val = self.general_vals[idx];
+      for (b, vector) in vectors.iter().enumerate() {
+        out[b][out_row] += val * vector[col];
+      }
+    }
+  }
+
+  fn multiply_vec_batched_rows(
+    &self,
+    vectors: &[&[F]],
+    row_start: usize,
+    row_end: usize,
+  ) -> Vec<Vec<F>> {
+    let rows = row_end - row_start;
+    let mut local = (0..vectors.len())
+      .map(|_| vec![F::ZERO; rows])
+      .collect::<Vec<_>>();
+    for (out_row, row) in (row_start..row_end).enumerate() {
+      self.compute_row_batched(row, vectors, &mut local, out_row);
+    }
+    local
+  }
+
   /// Fast SpMV using precomputed coefficient classification.
   pub fn multiply_vec(&self, vector: &[F]) -> Vec<F> {
     assert_eq!(self.num_cols, vector.len(), "invalid shape");
@@ -245,55 +300,35 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
 
     // For small numbers of vectors or small matrices, just call single-vector multiply
     const BATCH_SIZE: usize = 4;
-    if n_vecs <= 1 || self.num_rows <= 256 {
+    if n_vecs <= 1 || self.num_rows <= 256 || rayon::current_num_threads() <= 1 {
       return vectors.iter().map(|v| self.multiply_vec(v)).collect();
     }
 
     let mut results: Vec<Vec<F>> = (0..n_vecs).map(|_| vec![F::ZERO; self.num_rows]).collect();
+    let num_threads = rayon::current_num_threads();
+    let row_chunk = self.num_rows.div_ceil(num_threads);
+    let num_row_chunks = self.num_rows.div_ceil(row_chunk);
 
     // Process vectors in sub-batches to keep working set in L3 cache
     for batch_start in (0..n_vecs).step_by(BATCH_SIZE) {
       let batch_end = (batch_start + BATCH_SIZE).min(n_vecs);
-      let batch_len = batch_end - batch_start;
+      let vectors_batch = &vectors[batch_start..batch_end];
+      let row_chunks = (0..num_row_chunks)
+        .into_par_iter()
+        .map(|chunk_idx| {
+          let row_start = chunk_idx * row_chunk;
+          let row_end = (row_start + row_chunk).min(self.num_rows);
+          (
+            row_start,
+            self.multiply_vec_batched_rows(vectors_batch, row_start, row_end),
+          )
+        })
+        .collect::<Vec<_>>();
 
-      #[allow(clippy::needless_range_loop)]
-      for row in 0..self.num_rows {
-        // unit_pos: coefficient = +1
-        let (start, end) = self.range_unit_pos(row);
-        for idx in start..end {
-          let col = self.unit_pos_cols[idx] as usize;
-          for b in 0..batch_len {
-            results[batch_start + b][row] += vectors[batch_start + b][col];
-          }
-        }
-
-        // unit_neg: coefficient = -1
-        let (start, end) = self.range_unit_neg(row);
-        for idx in start..end {
-          let col = self.unit_neg_cols[idx] as usize;
-          for b in 0..batch_len {
-            results[batch_start + b][row] -= vectors[batch_start + b][col];
-          }
-        }
-
-        // small coefficients
-        let (start, end) = self.range_small(row);
-        for idx in start..end {
-          let col = self.small_cols[idx] as usize;
-          let coeff = self.small_coeffs[idx];
-          for b in 0..batch_len {
-            results[batch_start + b][row] += Self::small_mul(coeff, vectors[batch_start + b][col]);
-          }
-        }
-
-        // general: full field multiply
-        let (start, end) = self.range_general(row);
-        for idx in start..end {
-          let col = self.general_cols[idx] as usize;
-          let val = self.general_vals[idx];
-          for b in 0..batch_len {
-            results[batch_start + b][row] += val * vectors[batch_start + b][col];
-          }
+      for (row_start, local) in row_chunks {
+        for (b, values) in local.into_iter().enumerate() {
+          let row_end = row_start + values.len();
+          results[batch_start + b][row_start..row_end].copy_from_slice(&values);
         }
       }
     }
@@ -382,9 +417,9 @@ impl<F: PrimeField> FilteredSpmv<F> {
 /// CSR format sparse matrix, We follow the names used by scipy.
 /// Detailed explanation here: https://stackoverflow.com/questions/52299420/scipy-csr-matrix-understand-indptr
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SparseMatrix<F: PrimeField> {
+pub struct SparseMatrix<C> {
   /// all non-zero values in the matrix
-  pub data: Vec<F>,
+  pub data: Vec<C>,
   /// column indices
   pub indices: Vec<usize>,
   /// row information
@@ -393,29 +428,7 @@ pub struct SparseMatrix<F: PrimeField> {
   pub cols: usize,
 }
 
-impl<F: PrimeField> SparseMatrix<F> {
-  /// Write raw bytes for digest computation (much faster than bincode Serialize).
-  pub fn write_digest_bytes<W: std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
-    // Write lengths and cols as fixed-size le bytes
-    w.write_all(&(self.data.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.indices.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.indptr.len() as u64).to_le_bytes())?;
-    w.write_all(&(self.cols as u64).to_le_bytes())?;
-    // Write field elements as raw repr bytes
-    for d in &self.data {
-      w.write_all(d.to_repr().as_ref())?;
-    }
-    // Write indices as raw bytes
-    for idx in &self.indices {
-      w.write_all(&(*idx as u64).to_le_bytes())?;
-    }
-    // Write indptr as raw bytes
-    for ptr in &self.indptr {
-      w.write_all(&(*ptr as u64).to_le_bytes())?;
-    }
-    Ok(())
-  }
-
+impl<C> SparseMatrix<C> {
   /// 0x0 empty matrix
   pub fn empty() -> Self {
     SparseMatrix {
@@ -426,10 +439,21 @@ impl<F: PrimeField> SparseMatrix<F> {
     }
   }
 
-  /// Construct from the COO representation; Vec<usize(row), usize(col), F>.
+  /// Retrieves the data for row slice [i..j] from `ptrs`.
+  /// We assume that `ptrs` is indexed from `indptrs` and do not check if the
+  /// returned slice is actually a valid row.
+  pub fn get_row_unchecked(&self, ptrs: &[usize; 2]) -> impl Iterator<Item = (&C, &usize)> {
+    self.data[ptrs[0]..ptrs[1]]
+      .iter()
+      .zip(&self.indices[ptrs[0]..ptrs[1]])
+  }
+}
+
+impl<C: Copy> SparseMatrix<C> {
+  /// Construct from the COO representation; Vec<usize(row), usize(col), C>.
   /// We assume that the rows are sorted during construction.
   #[cfg(test)]
-  pub fn new(matrix: &[(usize, usize, F)], rows: usize, cols: usize) -> Self {
+  pub fn new(matrix: &[(usize, usize, C)], rows: usize, cols: usize) -> Self {
     let mut new_matrix = vec![vec![]; rows];
     for (row, col, val) in matrix {
       new_matrix[*row].push((*col, *val));
@@ -460,66 +484,8 @@ impl<F: PrimeField> SparseMatrix<F> {
     }
   }
 
-  /// Retrieves the data for row slice [i..j] from `ptrs`.
-  /// We assume that `ptrs` is indexed from `indptrs` and do not check if the
-  /// returned slice is actually a valid row.
-  pub fn get_row_unchecked(&self, ptrs: &[usize; 2]) -> impl Iterator<Item = (&F, &usize)> {
-    self.data[ptrs[0]..ptrs[1]]
-      .iter()
-      .zip(&self.indices[ptrs[0]..ptrs[1]])
-  }
-
-  /// Multiply by a dense vector; uses rayon/gpu.
-  ///
-  /// # Errors
-  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't match the matrix dimensions.
-  pub fn multiply_vec(&self, vector: &[F]) -> Result<Vec<F>, SpartanError> {
-    if self.cols != vector.len() {
-      return Err(SpartanError::InvalidInputLength {
-        reason: format!(
-          "SparseMatrix multiply_vec: Expected {} elements in vector, got {}",
-          self.cols,
-          vector.len()
-        ),
-      });
-    }
-
-    Ok(self.multiply_vec_unchecked(vector))
-  }
-
-  /// Multiply by a dense vector; uses rayon/gpu.
-  /// This does not check that the shape of the matrix/vector are compatible.
-  pub fn multiply_vec_unchecked(&self, vector: &[F]) -> Vec<F> {
-    let num_rows = self.indptr.len() - 1;
-    if num_rows <= PARALLEL_THRESHOLD {
-      self
-        .indptr
-        .windows(2)
-        .map(|ptrs| {
-          let row_ptrs = [ptrs[0], ptrs[1]];
-          self
-            .get_row_unchecked(&row_ptrs)
-            .map(|(val, col_idx)| *val * vector[*col_idx])
-            .sum()
-        })
-        .collect()
-    } else {
-      self
-        .indptr
-        .par_windows(2)
-        .map(|ptrs| {
-          let row_ptrs = [ptrs[0], ptrs[1]];
-          self
-            .get_row_unchecked(&row_ptrs)
-            .map(|(val, col_idx)| *val * vector[*col_idx])
-            .sum()
-        })
-        .collect()
-    }
-  }
-
   /// returns a custom iterator
-  pub fn iter(&self) -> Iter<'_, F> {
+  pub fn iter(&self) -> Iter<'_, C> {
     let mut row = 0;
     while row + 1 < self.indptr.len() && self.indptr[row + 1] == 0 {
       row += 1;
@@ -536,18 +502,90 @@ impl<F: PrimeField> SparseMatrix<F> {
       nnz,
     }
   }
+
+  /// Multiply by a dense vector.
+  ///
+  /// # Errors
+  /// Returns `SpartanError::InvalidInputLength` if the vector length doesn't
+  /// match the matrix dimensions.
+  pub fn multiply_vec<W, Out>(&self, vector: &[W]) -> Result<Vec<Out>, SpartanError>
+  where
+    C: WideMul<W, Output = Out> + Sync,
+    W: Copy + Sync,
+    Out: Copy + Default + AddAssign + Send,
+  {
+    if self.cols != vector.len() {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "SparseMatrix multiply_vec: Expected {} elements in vector, got {}",
+          self.cols,
+          vector.len()
+        ),
+      });
+    }
+
+    Ok(self.multiply_vec_unchecked(vector))
+  }
+
+  /// Multiply by a dense vector without checking shape compatibility.
+  pub fn multiply_vec_unchecked<W, Out>(&self, vector: &[W]) -> Vec<Out>
+  where
+    C: WideMul<W, Output = Out> + Sync,
+    W: Copy + Sync,
+    Out: Copy + Default + AddAssign + Send,
+  {
+    let compute_row = |ptrs: &[usize]| {
+      let row_ptrs = [ptrs[0], ptrs[1]];
+      let mut sum = Out::default();
+      for (val, col_idx) in self.get_row_unchecked(&row_ptrs) {
+        sum += val.wide_mul(vector[*col_idx]);
+      }
+      sum
+    };
+
+    let num_rows = self.indptr.len() - 1;
+    if num_rows <= PARALLEL_THRESHOLD {
+      self.indptr.windows(2).map(compute_row).collect()
+    } else {
+      self.indptr.par_windows(2).map(compute_row).collect()
+    }
+  }
+}
+
+impl<F: PrimeField> SparseMatrix<F> {
+  /// Write raw bytes for digest computation (much faster than bincode Serialize).
+  pub fn write_digest_bytes<W: std::io::Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+    // Write lengths and cols as fixed-size le bytes
+    w.write_all(&(self.data.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.indices.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.indptr.len() as u64).to_le_bytes())?;
+    w.write_all(&(self.cols as u64).to_le_bytes())?;
+    // Write field elements as raw repr bytes
+    for d in &self.data {
+      w.write_all(d.to_repr().as_ref())?;
+    }
+    // Write indices as raw bytes
+    for idx in &self.indices {
+      w.write_all(&(*idx as u64).to_le_bytes())?;
+    }
+    // Write indptr as raw bytes
+    for ptr in &self.indptr {
+      w.write_all(&(*ptr as u64).to_le_bytes())?;
+    }
+    Ok(())
+  }
 }
 
 /// Iterator for sparse matrix
-pub struct Iter<'a, F: PrimeField> {
-  matrix: &'a SparseMatrix<F>,
+pub struct Iter<'a, C> {
+  matrix: &'a SparseMatrix<C>,
   row: usize,
   i: usize,
   nnz: usize,
 }
 
-impl<'a, F: PrimeField> Iterator for Iter<'a, F> {
-  type Item = (usize, usize, F);
+impl<C: Copy> Iterator for Iter<'_, C> {
+  type Item = (usize, usize, C);
 
   fn next(&mut self) -> Option<Self::Item> {
     // are we at the end?
@@ -634,6 +672,24 @@ mod tests {
   }
 
   #[test]
+  fn test_i32_matrix_creation_iter_and_row_access() {
+    let matrix_data = vec![(0, 1, 2i32), (0, 3, -5), (2, 0, 7)];
+    let sparse_matrix = SparseMatrix::new(&matrix_data, 3, 4);
+
+    assert_eq!(sparse_matrix.data, vec![2, -5, 7]);
+    assert_eq!(sparse_matrix.indices, vec![1, 3, 0]);
+    assert_eq!(sparse_matrix.indptr, vec![0, 2, 2, 3]);
+    assert_eq!(sparse_matrix.cols, 4);
+
+    let row_zero = sparse_matrix
+      .get_row_unchecked(&[sparse_matrix.indptr[0], sparse_matrix.indptr[1]])
+      .map(|(val, col)| (*col, *val))
+      .collect::<Vec<_>>();
+    assert_eq!(row_zero, vec![(1, 2), (3, -5)]);
+    assert_eq!(sparse_matrix.iter().collect::<Vec<_>>(), matrix_data);
+  }
+
+  #[test]
   fn test_matrix_vector_multiplication() {
     let matrix_data = vec![
       (0, 1, Fr::from(2)),
@@ -644,12 +700,73 @@ mod tests {
     let sparse_matrix = SparseMatrix::<Fr>::new(&matrix_data, 3, 3);
     let vector = vec![Fr::from(1), Fr::from(2), Fr::from(3)];
 
-    let result = sparse_matrix.multiply_vec(&vector);
+    let result = sparse_matrix.multiply_vec::<Fr, Fr>(&vector);
 
     assert_eq!(
       result.unwrap(),
       vec![Fr::from(25), Fr::from(9), Fr::from(4)]
     );
+  }
+
+  #[test]
+  fn test_precomputed_batched_multiply_matches_repeated_multiply() {
+    let rows = 300;
+    let cols = 8;
+    let mut matrix_data = Vec::with_capacity(rows * 5);
+    for row in 0..rows {
+      matrix_data.push((row, 0, Fr::from(1)));
+      matrix_data.push((row, 1, -Fr::from(1)));
+      matrix_data.push((row, 2, Fr::from(3)));
+      matrix_data.push((row, 3, -Fr::from(5)));
+      matrix_data.push((row, 4, Fr::from(11)));
+    }
+    let sparse_matrix = SparseMatrix::<Fr>::new(&matrix_data, rows, cols);
+    let precomputed = PrecomputedSparseMatrix::from_sparse(&sparse_matrix);
+
+    let vectors = (0..7)
+      .map(|vector_idx| {
+        (0..cols)
+          .map(|col| Fr::from(((vector_idx + 1) * (col + 2)) as u64))
+          .collect::<Vec<_>>()
+      })
+      .collect::<Vec<_>>();
+    let vector_refs = vectors.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+      .num_threads(4)
+      .build()
+      .unwrap();
+    pool.install(|| {
+      assert_eq!(rayon::current_num_threads(), 4);
+      let expected = vector_refs
+        .iter()
+        .map(|vector| precomputed.multiply_vec(vector))
+        .collect::<Vec<_>>();
+      let batched = precomputed.multiply_vec_batched(&vector_refs);
+      assert_eq!(batched, expected);
+    });
+  }
+
+  #[test]
+  fn test_i32_bool_matrix_vector_multiplication() {
+    let matrix_data = vec![(0, 0, 7i32), (0, 1, -3), (1, 1, 5), (1, 2, 11)];
+    let sparse_matrix = SparseMatrix::<i32>::new(&matrix_data, 2, 3);
+    let vector = vec![true, false, true];
+
+    let result = sparse_matrix.multiply_vec::<bool, i32>(&vector).unwrap();
+
+    assert_eq!(result, vec![7, 11]);
+  }
+
+  #[test]
+  fn test_i32_i8_matrix_vector_multiplication() {
+    let matrix_data = vec![(0, 0, 7i32), (0, 1, -3), (1, 1, 5), (1, 2, 11)];
+    let sparse_matrix = SparseMatrix::<i32>::new(&matrix_data, 2, 3);
+    let vector = vec![2i8, -4, 3];
+
+    let result = sparse_matrix.multiply_vec::<i8, i64>(&vector).unwrap();
+
+    assert_eq!(result, vec![26, 13]);
   }
 
   fn coo_strategy() -> BoxedStrategy<Vec<(usize, usize, FWrap<Fr>)>> {

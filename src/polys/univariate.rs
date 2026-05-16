@@ -31,7 +31,7 @@ pub struct UniPoly<Scalar: PrimeField> {
 ///
 /// The linear term coefficient is omitted to save space. For a polynomial $ax^2 + bx + c$,
 /// coefficients are stored as `vec![c, a]`. For $ax^3 + bx^2 + cx + d$, stored as `vec![d, c, a]`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompressedUniPoly<Scalar: PrimeField> {
   coeffs_except_linear_term: Vec<Scalar>,
 }
@@ -112,6 +112,25 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     let delta2 = evals[2] - evals[1].double() + evals[0];
     let b = delta2 * Scalar::TWO_INV - (a.double() + a);
     let c = evals[1] - d - b - a;
+    Self {
+      coeffs: vec![d, c, b, a],
+    }
+  }
+
+  /// Constructs a degree-3 polynomial from `p(0)`, the leading coefficient,
+  /// `p(-1)`, and `claim = p(0) + p(1)`.
+  #[inline]
+  pub fn from_deg3_p0_leading_neg1_claim(
+    p0: Scalar,
+    leading: Scalar,
+    p_neg1: Scalar,
+    claim: Scalar,
+  ) -> Self {
+    let two_inv = Scalar::TWO_INV;
+    let d = p0;
+    let a = leading;
+    let b = (claim + p_neg1 - d - d - d) * two_inv;
+    let c = (claim - a - a - d - p_neg1) * two_inv;
     Self {
       coeffs: vec![d, c, b, a],
     }
@@ -358,6 +377,22 @@ mod tests {
   fn test_from_evals_cubic() {
     test_from_evals_cubic_with::<pallas::Scalar>();
   }
+
+  #[test]
+  fn test_from_deg3_p0_leading_neg1_claim() {
+    type F = pallas::Scalar;
+    // polynomial is 5x^3 + 2x^2 + 3x + 7
+    let poly = UniPoly {
+      coeffs: vec![F::from(7), F::from(3), F::from(2), F::from(5)],
+    };
+    let p0 = poly.evaluate(&F::from(0));
+    let p1 = poly.evaluate(&F::from(1));
+    let p_neg1 = poly.evaluate(&-F::from(1));
+    let rebuilt = UniPoly::from_deg3_p0_leading_neg1_claim(p0, F::from(5), p_neg1, p0 + p1);
+
+    assert_eq!(rebuilt, poly);
+  }
+
   fn test_from_evals_quartic_with<F: PrimeField>() {
     // polynomial is x^4 + 2x^3 + 3x^2 + 4x + 5
     let e0 = F::from(5);

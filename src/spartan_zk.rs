@@ -609,7 +609,7 @@ where
     let z_buffer = poly_z.into_vec();
     drop(poly_ABC);
     // Compute final evaluations needed for the inner-final round
-    let U_regular = U.to_regular_instance()?;
+    let U_regular = U.to_regular_field_instance()?;
     let eval_X = {
       let X = vec![E::Scalar::ONE]
         .into_iter()
@@ -775,7 +775,7 @@ where
     let quotient = eval_A + r * eval_B + r * r * eval_C;
     info!(elapsed_ms = %matrix_eval_t.elapsed().as_millis(), "matrix_evaluations");
     // Recompute eval_X from original circuit public IO at r_y[1..]
-    let U_regular = self.U.to_regular_instance()?;
+    let U_regular = self.U.to_regular_field_instance()?;
 
     let eval_X = {
       let X = vec![E::Scalar::ONE]

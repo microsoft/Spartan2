@@ -31,6 +31,83 @@ use crate::big_num::delayed_reduction::DelayedReduction;
 use crate::big_num::montgomery::MontgomeryLimbs;
 use crate::provider::msm::{AffineGroupElement, FixedBaseMul, vartime_scalar_mul};
 
+const BOOL_WINDOW_BITS: usize = 6;
+
+#[derive(Clone, Debug)]
+struct BoolWindowTable<E: Engine>
+where
+  E::GE: DlogGroup,
+{
+  tables: Vec<Vec<E::GE>>,
+  lens: Vec<usize>,
+}
+
+impl<E: Engine> BoolWindowTable<E>
+where
+  E::GE: DlogGroupExt,
+{
+  fn new(bases: &[AffineGroupElement<E>]) -> Self {
+    let built = bases
+      .par_chunks(BOOL_WINDOW_BITS)
+      .map(|chunk| {
+        let len = chunk.len();
+        let table_len = 1usize << len;
+        let mut table = vec![E::GE::zero(); table_len];
+
+        for mask in 1..table_len {
+          let bit = mask.trailing_zeros() as usize;
+          let prev = mask & !(1usize << bit);
+          table[mask] = table[prev] + E::GE::group(&chunk[bit]);
+        }
+
+        (table, len)
+      })
+      .collect::<Vec<_>>();
+
+    let (tables, lens): (Vec<_>, Vec<_>) = built.into_iter().unzip();
+    Self { tables, lens }
+  }
+
+  fn msm_row(&self, bits: &[bool], use_parallelism_internally: bool) -> E::GE {
+    if bits.is_empty() {
+      return E::GE::zero();
+    }
+
+    let compute_window = |window_idx: usize, len: usize| {
+      let offset = window_idx * BOOL_WINDOW_BITS;
+      if offset >= bits.len() {
+        return E::GE::zero();
+      }
+
+      let end = (offset + len).min(bits.len());
+      let mut mask = 0usize;
+      for (j, bit) in bits[offset..end].iter().enumerate() {
+        if *bit {
+          mask |= 1usize << j;
+        }
+      }
+
+      self.tables[window_idx][mask]
+    };
+
+    if use_parallelism_internally && self.lens.len() > 1 {
+      self
+        .lens
+        .par_iter()
+        .enumerate()
+        .map(|(window_idx, &len)| compute_window(window_idx, len))
+        .reduce(E::GE::zero, |a, b| a + b)
+    } else {
+      self
+        .lens
+        .iter()
+        .enumerate()
+        .map(|(window_idx, &len)| compute_window(window_idx, len))
+        .fold(E::GE::zero(), |acc, point| acc + point)
+    }
+  }
+}
+
 /// Bind polynomial top variables using delayed reduction for Montgomery multiply.
 /// Avoids per-product REDC, reducing multiply cost by ~50%.
 /// The accumulator array (r_len * 72B) must fit in L2 cache.
@@ -70,6 +147,9 @@ where
   /// Enables fast per-row commits via table lookup instead of runtime MSM.
   #[serde(skip)]
   ck_tables: std::sync::OnceLock<Vec<FixedBaseMul<E>>>,
+  /// Precomputed subset-sum tables for binary witness commitments.
+  #[serde(skip)]
+  bool_tables: std::sync::OnceLock<BoolWindowTable<E>>,
 }
 
 impl<E: Engine> HyraxCommitmentKey<E>
@@ -93,6 +173,9 @@ where
           .collect()
       });
     }
+    self
+      .bool_tables
+      .get_or_init(|| BoolWindowTable::new(&self.ck));
   }
 }
 
@@ -171,6 +254,7 @@ where
       h,
       h_table: std::sync::OnceLock::new(),
       ck_tables: std::sync::OnceLock::new(),
+      bool_tables: std::sync::OnceLock::new(),
     };
 
     (ck, vk)
@@ -187,6 +271,7 @@ where
           .collect()
       });
     }
+    ck.bool_tables.get_or_init(|| BoolWindowTable::new(&ck.ck));
   }
 
   fn blind(ck: &Self::CommitmentKey, n: usize) -> Self::Blind {
@@ -296,6 +381,107 @@ where
           }
         };
         Ok(msm_result + h_table.mul(&r.blind[i]))
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(HyraxCommitment { comm })
+  }
+
+  fn commit_bool(
+    ck: &Self::CommitmentKey,
+    v: &[bool],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let n = v.len();
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
+    if r.blind.len() != num_rows {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "commit_bool: blind length {}, expected {}",
+          r.blind.len(),
+          num_rows
+        ),
+      });
+    }
+
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let bool_tables = ck.bool_tables.get_or_init(|| BoolWindowTable::new(&ck.ck));
+    let use_inner_parallelism = num_rows < rayon::current_num_threads();
+    let comm = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let lower = i * num_cols;
+        let upper = (lower + num_cols).min(n);
+        let bits = &v[lower..upper];
+        let blind = h_table.mul(&r.blind[i]);
+
+        if bits.iter().all(|bit| !*bit) {
+          return Ok(E::GE::zero() + blind);
+        }
+
+        let effective_len = bits
+          .iter()
+          .rposition(|bit| *bit)
+          .map(|pos| pos + 1)
+          .unwrap_or(bits.len());
+        let bits = &bits[..effective_len];
+        let msm_result = bool_tables.msm_row(bits, use_inner_parallelism);
+        Ok(msm_result + blind)
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(HyraxCommitment { comm })
+  }
+
+  fn commit_i8(
+    ck: &Self::CommitmentKey,
+    v: &[i8],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let n = v.len();
+    let num_cols = ck.num_cols;
+    let num_rows = div_ceil(n, num_cols);
+    if r.blind.len() != num_rows {
+      return Err(SpartanError::InvalidInputLength {
+        reason: format!(
+          "commit_i8: blind length {}, expected {}",
+          r.blind.len(),
+          num_rows
+        ),
+      });
+    }
+
+    let h_table = ck
+      .h_table
+      .get_or_init(|| FixedBaseMul::precompute(&ck.h, 8));
+    let use_inner_parallelism = num_rows < rayon::current_num_threads();
+    let comm = (0..num_rows)
+      .into_par_iter()
+      .map(|i| {
+        let lower = i * num_cols;
+        let upper = (lower + num_cols).min(n);
+        let scalars = &v[lower..upper];
+        let blind = h_table.mul(&r.blind[i]);
+
+        if scalars.iter().all(|scalar| *scalar == 0) {
+          return Ok(E::GE::zero() + blind);
+        }
+
+        let effective_len = scalars
+          .iter()
+          .rposition(|scalar| *scalar != 0)
+          .map(|pos| pos + 1)
+          .unwrap_or(scalars.len());
+        let scalars = &scalars[..effective_len];
+        let msm_result = E::GE::vartime_multiscalar_mul_signed_i8(
+          scalars,
+          &ck.ck[..scalars.len()],
+          use_inner_parallelism,
+        )?;
+        Ok(msm_result + blind)
       })
       .collect::<Result<Vec<_>, _>>()?;
 
@@ -871,5 +1057,109 @@ where
     }
 
     Ok(HyraxCommitment { comm })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::HyraxPCS;
+  use crate::{provider::T256HyraxEngine, traits::pcs::PCSEngineTrait};
+  use ff::Field;
+
+  type E = T256HyraxEngine;
+  type Scalar = <T256HyraxEngine as crate::traits::Engine>::Scalar;
+
+  #[test]
+  fn commit_bool_matches_field_commit() {
+    let width = 8;
+    for len in [0usize, 1, width - 1, width, width + 1, 2 * width + 3] {
+      let bits = (0..len)
+        .map(|i| i % 3 == 1 || i % 7 == 0)
+        .collect::<Vec<_>>();
+      let field = bits
+        .iter()
+        .map(|bit| if *bit { Scalar::ONE } else { Scalar::ZERO })
+        .collect::<Vec<_>>();
+      let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_bool", bits.len(), width);
+      let blind = HyraxPCS::<E>::blind(&ck, bits.len());
+
+      let comm_bool = HyraxPCS::<E>::commit_bool(&ck, &bits, &blind).unwrap();
+      let comm_field = HyraxPCS::<E>::commit(&ck, &field, &blind, true).unwrap();
+
+      assert_eq!(comm_bool, comm_field, "len={len}");
+    }
+  }
+
+  #[test]
+  fn commit_i8_matches_field_commit() {
+    let width = 8;
+    let pattern = [-128i8, -8, -1, 0, 1, 2, 8, 127, -64, 64, 5, -5];
+    for len in [0usize, 1, width - 1, width, width + 1, 2 * width + 3] {
+      let signed = (0..len)
+        .map(|i| pattern[i % pattern.len()])
+        .collect::<Vec<_>>();
+      let field = signed
+        .iter()
+        .map(|value| {
+          let scalar = Scalar::from(u64::from(value.unsigned_abs()));
+          if *value < 0 { -scalar } else { scalar }
+        })
+        .collect::<Vec<_>>();
+      let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_i8", signed.len(), width);
+      let blind = HyraxPCS::<E>::blind(&ck, signed.len());
+
+      let comm_i8 = HyraxPCS::<E>::commit_i8(&ck, &signed, &blind).unwrap();
+      let comm_field = HyraxPCS::<E>::commit(&ck, &field, &blind, false).unwrap();
+
+      assert_eq!(comm_i8, comm_field, "len={len}");
+    }
+  }
+
+  #[test]
+  fn commit_bool_zero_matches_commit_zeros() {
+    let width = 8;
+    let len = 2 * width + 3;
+    let bits = vec![false; len];
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_bool_zero", len, width);
+    let blind = HyraxPCS::<E>::blind(&ck, len);
+
+    let comm_bool = HyraxPCS::<E>::commit_bool(&ck, &bits, &blind).unwrap();
+    let comm_zero = HyraxPCS::<E>::commit_zeros(&ck, len, &blind).unwrap();
+
+    assert_eq!(comm_bool, comm_zero);
+  }
+
+  #[test]
+  fn commit_i8_zero_matches_commit_zeros() {
+    let width = 8;
+    let len = 2 * width + 3;
+    let signed = vec![0i8; len];
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_i8_zero", len, width);
+    let blind = HyraxPCS::<E>::blind(&ck, len);
+
+    let comm_i8 = HyraxPCS::<E>::commit_i8(&ck, &signed, &blind).unwrap();
+    let comm_zero = HyraxPCS::<E>::commit_zeros(&ck, len, &blind).unwrap();
+
+    assert_eq!(comm_i8, comm_zero);
+  }
+
+  #[test]
+  fn commit_bool_rejects_wrong_blind_length() {
+    let width = 8;
+    let bits = vec![true; width + 1];
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_bool_bad_blind", bits.len(), width);
+    let bad_blind = HyraxPCS::<E>::blind(&ck, width);
+
+    assert!(HyraxPCS::<E>::commit_bool(&ck, &bits, &bad_blind).is_err());
+  }
+
+  #[test]
+  fn commit_i8_rejects_wrong_blind_length() {
+    let width = 8;
+    let signed = vec![1i8; width + 1];
+    let (ck, _) = HyraxPCS::<E>::setup(b"test_commit_i8_bad_blind", signed.len(), width);
+    let bad_blind = HyraxPCS::<E>::blind(&ck, width);
+
+    assert!(HyraxPCS::<E>::commit_i8(&ck, &signed, &bad_blind).is_err());
   }
 }

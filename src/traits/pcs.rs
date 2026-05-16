@@ -68,6 +68,20 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     is_small: bool,
   ) -> Result<Self::Commitment, SpartanError>;
 
+  /// Commits to a binary vector without converting bits to field scalars.
+  fn commit_bool(
+    ck: &Self::CommitmentKey,
+    v: &[bool],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
+
+  /// Commits to a signed i8 vector without converting entries to field scalars.
+  fn commit_i8(
+    ck: &Self::CommitmentKey,
+    v: &[i8],
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError>;
+
   /// Commits to an all-zero vector of size `n` with the given blind.
   /// Default: creates a zero vector and calls `commit`. Implementations may override
   /// for efficiency (e.g., computing only the blind contribution per row).

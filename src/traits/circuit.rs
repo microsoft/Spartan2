@@ -52,6 +52,9 @@ pub trait SpartanCircuit<E: Engine>: Send + Sync + Clone {
   ) -> Result<(), SynthesisError>;
 }
 
+// SmallSpartanCircuit lives with the small-value compiler.
+pub use crate::small_constraint_system::circuit::SmallSpartanCircuit;
+
 /// A helper trait for defining a multi-round randomized circuit that Spartan proves.
 /// Unlike the standard SpartanCircuit, this trait allows the circuit to be processed in multiple rounds,
 /// where each round can allocate different constraints and witness variables based on the round index.

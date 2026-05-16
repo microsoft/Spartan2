@@ -34,12 +34,18 @@ mod macros;
 // public modules
 pub mod bellpepper;
 pub mod errors;
+pub mod gadgets;
 pub mod provider;
+pub mod small_constraint_system;
 pub mod traits;
 
 // internal modules
 mod big_num;
+#[allow(dead_code)] // TODO: remove once small-value sumcheck is integrated into spartan prover
+mod lagrange_accumulator;
 mod polys;
+#[allow(dead_code)] // TODO: remove once small-value sumcheck is integrated into spartan prover
+mod small_sumcheck;
 mod sumcheck;
 
 // public modules for proof systems
@@ -47,6 +53,10 @@ pub mod neutronnova_zk; // NeutronNova with zero-knowledge
 pub mod spartan; // Spartan without zero-knowledge
 pub mod spartan_relaxed; // Spartan for relaxed R1CS (non-ZK)
 pub mod spartan_zk; // Spartan with zero-knowledge
+
+/// SHA-256 circuits using the small-value compiler.
+#[allow(missing_docs)]
+pub mod sha256_circuits;
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {
